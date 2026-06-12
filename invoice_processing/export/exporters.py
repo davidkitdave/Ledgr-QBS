@@ -301,11 +301,6 @@ def validate_required_fields(
     n = len(rows)
     missing: list[str] = []
     for col in required:
-        # *DueDate is filled from invoice_date as an export fallback; validate the
-        # source field so a genuinely missing due_date is still flagged for review.
-        if col == "*DueDate" and inv.due_date is None:
-            missing.append(_field_label(col))
-            continue
         empty_lines = [i for i, row in enumerate(rows, start=1) if _is_empty(row.get(col, ""))]
         if not empty_lines:
             continue

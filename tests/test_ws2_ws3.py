@@ -223,11 +223,15 @@ class TestValidateRequiredFields:
         assert validate_required_fields(inv, XeroLedgerExporter(), "purchase") == []
         assert validate_required_fields(inv, QbsLedgerExporter(), "purchase") == []
 
-    def test_missing_due_date_flagged_for_xero(self):
-        """due_date is required for Xero; the export fallback must NOT hide it."""
+    def test_missing_due_date_not_flagged_for_xero(self):
+        """Founder rule: a missing due_date is filled from invoice_date on export,
+        so it must NOT be flagged for review (the fallback is intended, silent)."""
         inv = _two_line_invoice(due_date=None, account_codes=("500", "500"))
         missing = validate_required_fields(inv, XeroLedgerExporter(), "purchase")
-        assert "due_date" in missing
+        assert "due_date" not in missing
+        # the exported *DueDate cell falls back to invoice_date on every row
+        rows = XeroLedgerExporter().rows([inv], "purchase")
+        assert all(r["*DueDate"] and r["*DueDate"] == r["*InvoiceDate"] for r in rows)
 
     def test_missing_due_date_not_required_for_qbs(self):
         inv = _two_line_invoice(due_date=None, account_codes=("500", "500"))
@@ -247,9 +251,10 @@ class TestValidateRequiredFields:
         assert "invoice_number (line 1)" not in missing
 
     def test_combined_missing_fields(self):
+        # due_date missing is silent (invoice_date fallback); the genuine gap is the line account_code
         inv = _two_line_invoice(due_date=None, account_codes=("500", None))
         missing = validate_required_fields(inv, XeroLedgerExporter(), "purchase")
-        assert "due_date" in missing
+        assert "due_date" not in missing
         assert "account_code (line 2)" in missing
 
 
@@ -315,7 +320,8 @@ class TestPipelineFlagsMissingRequiredFields:
     def _bank_stub(self, path, **_kw):
         return None, "stub"
 
-    def test_missing_due_date_flags_doc_for_xero(self, tmp_path):
+    def test_missing_due_date_not_flagged_for_xero(self, tmp_path):
+        # Founder rule: missing due_date falls back to invoice_date on export -> NOT flagged.
         p = tmp_path / "inv.pdf"
         p.write_bytes(b"%PDF stub")
         doc = process_document(
@@ -327,14 +333,30 @@ class TestPipelineFlagsMissingRequiredFields:
             categorize_fn=_categorize_no_llm,
         )
         assert not doc.note.startswith("ERROR")
-        # Flagged, not dropped: row data is preserved.
         assert doc.normalized is not None
-        assert len(doc.normalized.lines) == 1
-        # Flagged for review.
+        assert doc.reconciled is True
+        assert "needs review" not in doc.note
+
+    def test_missing_required_field_flags_doc_for_xero(self, tmp_path):
+        # A genuinely missing Xero *required field (invoice_number) IS flagged - not dropped.
+        def _extract_no_invoice_number(path, **_kw) -> ExtractedInvoice:
+            ex = _extract_complete(path)
+            ex.invoice_number = None
+            return ex
+        p = tmp_path / "inv.pdf"
+        p.write_bytes(b"%PDF stub")
+        doc = process_document(
+            p, _xero_client(),
+            classify_fn=_classify_invoice,
+            direction_fn=_direction_purchase,
+            extract_fn=_extract_no_invoice_number,
+            bank_fn=self._bank_stub,
+            categorize_fn=_categorize_no_llm,
+        )
+        assert not doc.note.startswith("ERROR")
+        assert doc.normalized is not None          # flagged, not dropped
         assert doc.reconciled is False
-        assert doc.normalized.reconciled is False
         assert "needs review: missing" in doc.note
-        assert "due_date" in doc.note
 
     def test_complete_invoice_not_flagged(self, tmp_path):
         p = tmp_path / "inv.pdf"
@@ -453,10 +475,10 @@ class TestBatchFlaggedAndCleanBothWritten:
         clean_p.write_bytes(b"%PDF stub")
 
         def _extract_flagged(path, **_kw) -> ExtractedInvoice:
-            # Missing due_date → Xero required field → flagged
+            # Missing invoice_number → Xero *required field → flagged (missing due_date alone no longer flags)
             return ExtractedInvoice(
-                doc_type="invoice", invoice_number="INV-F",
-                invoice_date="2025-01-15", due_date=None,
+                doc_type="invoice", invoice_number=None,
+                invoice_date="2025-01-15", due_date="2025-02-15",
                 currency="SGD", issuer_name="Acme Supplier",
                 issuer_gst_regno="200012345A",
                 bill_to_name="Test Client Pte Ltd",
