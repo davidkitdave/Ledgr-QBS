@@ -70,6 +70,12 @@ class NormalizedInvoice:
 
     lines: list[InvoiceLine] = field(default_factory=list)
 
+    # Invoice-level (document) grand totals, carried from ExtractedInvoice in to_normalized.
+    # Authoritative source for the exporter's Total column; None falls back to Σ lines.
+    doc_subtotal: Optional[float] = None    # ex-GST grand total from the bill
+    doc_gst_total: Optional[float] = None   # GST grand total from the bill
+    doc_total: Optional[float] = None       # grand total (subtotal + gst) from the bill
+
     # The CLIENT's own GST registration status (from Client Setup TAX_REGISTERED).
     our_gst_registered: bool = True
 

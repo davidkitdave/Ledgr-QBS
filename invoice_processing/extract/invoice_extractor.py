@@ -35,8 +35,8 @@ class ExtractedLine(BaseModel):
 class ExtractedInvoice(BaseModel):
     doc_type: str = Field(description="invoice or receipt")
     invoice_number: Optional[str] = None
-    invoice_date: Optional[str] = Field(None, description="ISO date YYYY-MM-DD if determinable")
-    due_date: Optional[str] = None
+    invoice_date: Optional[str] = Field(None, description="ISO date YYYY-MM-DD — always return the document/issue date")
+    due_date: Optional[str] = Field(None, description="ISO date YYYY-MM-DD — always return the payment due date (derive from terms if not stated)")
     currency: Optional[str] = Field(None, description="ISO currency code, e.g. SGD/MYR/USD")
     issuer_name: Optional[str] = Field(None, description="Supplier/seller — who issued the document")
     issuer_gst_regno: Optional[str] = Field(None, description="Issuer GST registration no. / UEN if shown")
@@ -75,7 +75,10 @@ Per line:
 Document-level fields:
 - issuer_name = the supplier/seller (letterhead/"From"); bill_to_name = who it is addressed to.
 - issuer_gst_regno = the supplier's GST registration number / UEN if printed.
-- invoice_date in ISO YYYY-MM-DD if you can determine it; currency as ISO code.
+- invoice_date = the document/issue date, always returned in ISO YYYY-MM-DD; currency as ISO code.
+- due_date = the payment due date, always returned in ISO YYYY-MM-DD; if no explicit due date is
+  printed, derive it from the stated payment terms (e.g. 'Net 30' from the invoice date). Leave
+  null only when neither a due date nor terms are present.
 - Always also return invoice-level subtotal, gst_total, total (the grand totals from the bill),
   used for reconciliation.
 
@@ -191,6 +194,9 @@ def to_normalized(
         supplier=supplier,
         customer=customer,
         lines=lines,
+        doc_subtotal=ex.subtotal,
+        doc_gst_total=ex.gst_total,
+        doc_total=ex.total,
         our_gst_registered=our_gst_registered,
         reconciled=ok,
         reconcile_note=detail,
