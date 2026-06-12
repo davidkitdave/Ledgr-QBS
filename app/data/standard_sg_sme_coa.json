@@ -1,0 +1,154 @@
+[
+  {
+    "code": "4-1000",
+    "description": "Sales / Revenue",
+    "account_type": "Income",
+    "financial_statement": "Profit & Loss",
+    "nature": "Credit",
+    "keywords": "sales revenue income turnover fees billed invoiced"
+  },
+  {
+    "code": "4-2000",
+    "description": "Other Income",
+    "account_type": "Income",
+    "financial_statement": "Profit & Loss",
+    "nature": "Credit",
+    "keywords": "other income miscellaneous interest received grant"
+  },
+  {
+    "code": "5-1000",
+    "description": "Cost of Sales",
+    "account_type": "Direct Costs",
+    "financial_statement": "Profit & Loss",
+    "nature": "Debit",
+    "keywords": "cost of goods sold COGS purchases direct costs materials"
+  },
+  {
+    "code": "6-1000",
+    "description": "Salaries & Wages",
+    "account_type": "Expense",
+    "financial_statement": "Profit & Loss",
+    "nature": "Debit",
+    "keywords": "salary wages payroll staff remuneration compensation"
+  },
+  {
+    "code": "6-1100",
+    "description": "CPF Contributions",
+    "account_type": "Expense",
+    "financial_statement": "Profit & Loss",
+    "nature": "Debit",
+    "keywords": "CPF central provident fund employer contribution"
+  },
+  {
+    "code": "6-2000",
+    "description": "Rental",
+    "account_type": "Expense",
+    "financial_statement": "Profit & Loss",
+    "nature": "Debit",
+    "keywords": "rent rental office space lease premises tenancy"
+  },
+  {
+    "code": "6-2100",
+    "description": "Utilities",
+    "account_type": "Expense",
+    "financial_statement": "Profit & Loss",
+    "nature": "Debit",
+    "keywords": "utilities electricity water gas power SP services"
+  },
+  {
+    "code": "6-2200",
+    "description": "Telephone & Internet",
+    "account_type": "Expense",
+    "financial_statement": "Profit & Loss",
+    "nature": "Debit",
+    "keywords": "telephone phone internet mobile broadband Singtel Starhub M1 telco"
+  },
+  {
+    "code": "6-3000",
+    "description": "Professional Fees",
+    "account_type": "Expense",
+    "financial_statement": "Profit & Loss",
+    "nature": "Debit",
+    "keywords": "professional fees legal accounting audit consultancy advisory"
+  },
+  {
+    "code": "6-3100",
+    "description": "Bank Fees & Charges",
+    "account_type": "Expense",
+    "financial_statement": "Profit & Loss",
+    "nature": "Debit",
+    "keywords": "bank fees charges service fee DBS OCBC UOB bank charges transaction"
+  },
+  {
+    "code": "6-3200",
+    "description": "Insurance",
+    "account_type": "Expense",
+    "financial_statement": "Profit & Loss",
+    "nature": "Debit",
+    "keywords": "insurance premium business coverage liability workmen"
+  },
+  {
+    "code": "6-4000",
+    "description": "Advertising & Promotion",
+    "account_type": "Expense",
+    "financial_statement": "Profit & Loss",
+    "nature": "Debit",
+    "keywords": "advertising marketing promotion branding digital ads social media"
+  },
+  {
+    "code": "6-4100",
+    "description": "Travel & Transport",
+    "account_type": "Expense",
+    "financial_statement": "Profit & Loss",
+    "nature": "Debit",
+    "keywords": "travel transport grab taxi MRT bus airfare accommodation mileage"
+  },
+  {
+    "code": "6-4200",
+    "description": "Office Supplies",
+    "account_type": "Expense",
+    "financial_statement": "Profit & Loss",
+    "nature": "Debit",
+    "keywords": "office supplies stationery paper pens folders desk"
+  },
+  {
+    "code": "6-4300",
+    "description": "Printing & Stationery",
+    "account_type": "Expense",
+    "financial_statement": "Profit & Loss",
+    "nature": "Debit",
+    "keywords": "printing stationery photocopying printing services letterhead"
+  },
+  {
+    "code": "6-4400",
+    "description": "Repairs & Maintenance",
+    "account_type": "Expense",
+    "financial_statement": "Profit & Loss",
+    "nature": "Debit",
+    "keywords": "repairs maintenance servicing upkeep equipment aircon"
+  },
+  {
+    "code": "6-4500",
+    "description": "Subscriptions",
+    "account_type": "Expense",
+    "financial_statement": "Profit & Loss",
+    "nature": "Debit",
+    "keywords": "subscriptions SaaS software licence membership annual fee Adobe Microsoft"
+  },
+  {
+    "code": "6-9000",
+    "description": "Sundry Expenses",
+    "account_type": "Expense",
+    "financial_statement": "Profit & Loss",
+    "nature": "Debit",
+    "keywords": "sundry miscellaneous other expenses general petty cash"
+  },
+  {
+    "code": "2-1000",
+    "description": "GST Payable",
+    "account_type": "Liability",
+    "financial_statement": "Balance Sheet",
+    "nature": "Credit",
+    "keywords": "GST goods and services tax payable output tax IRAS"
+  }
+]
