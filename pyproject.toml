@@ -66,9 +66,5 @@ name = "default"
 url = "https://pypi.org/simple"
 default = true
 
-[tool.ruff]
-# extends the ruff rules established in the root .toml
-extend = "../../../pyproject.toml"
-
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]

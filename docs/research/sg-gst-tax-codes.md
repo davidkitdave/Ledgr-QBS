@@ -115,7 +115,7 @@ Source for the entire table: IRAS *List of International Services* extract (verb
 
 ### 3.3 The user's examples — why telco & freight invoices carry a separate 0% line
 
-**Telco (Singtel / Starhub).** A Singapore telco bill mixes:
+**Telco (e.g. Telco A / Telco B).** A Singapore telco bill mixes:
 - **Standard-rated (SR, 9%)** charges — local mobile/broadband subscription, local calls, equipment,
   domestic usage consumed in Singapore.
 - **Zero-rated (ZR, 0%)** charges — **international/IDD calls, international roaming, and
@@ -126,18 +126,17 @@ Because the two halves attract different GST treatment, the telco itemises them 
 **bookkeeping import must split them into two lines** — one `Standard-Rated Purchases` line carrying
 9% GST and one `Zero-Rated Purchases` line carrying $0 GST.
 
-**This is exactly what the on-disk sample shows.** `BillTemplate (3).csv`
-(`/Users/davidkitdave/Desktop/LocalTest/TestDoc/GST SR:ZR/`) is a Xero purchase import for the
-**Singtel** and **Starhub** bills, with two lines per bill:
+**This is exactly what the on-disk sample shows.** `BillTemplate (3).csv` is a Xero purchase import for
+**Telco B** and **Telco A** bills, with two lines per bill:
 
 ```
-Singtel,  ... Telephone charges (SR), 1, 1.07,   ..., Standard-Rated Purchases, 0.1,  ... SGD
-Singtel,  ... Telephone charges (ZR), 1, 2.28,   ..., Zero-Rated Purchases,     0,    ... SGD
-Starhub,  ... Telephone charges (SR), 1, 1164.42,..., Standard-Rated Purchases, 104.8,... SGD
-Starhub,  ... Telephone charges (ZR), 1, 58.93,  ..., Zero-Rated Purchases,     0,    ... SGD
+Telco B,  ... Telephone charges (SR), 1, 1.07,   ..., Standard-Rated Purchases, 0.1,  ... SGD
+Telco B,  ... Telephone charges (ZR), 1, 2.28,   ..., Zero-Rated Purchases,     0,    ... SGD
+Telco A,  ... Telephone charges (SR), 1, 1000.00,..., Standard-Rated Purchases, 90.00,... SGD
+Telco A,  ... Telephone charges (ZR), 1, 50.00,  ..., Zero-Rated Purchases,     0,    ... SGD
 ```
 
-Note the Starhub SR line: 1164.42 × 9% = 104.80 (confirms the 9% rate), while the ZR line's TaxAmount
+Note the Telco A SR line: 1000.00 × 9% = 90.00 (confirms the 9% rate), while the ZR line's TaxAmount
 is 0. The agent must reproduce this **one-row-per-tax-treatment** behaviour.
 
 **Freight / logistics.** A freight or forwarder invoice typically splits:
@@ -340,16 +339,16 @@ From the on-disk header templates (`/Users/davidkitdave/Desktop/LocalTest/header
 
 ---
 
-## 8. Worked example — mapping the Singtel/Starhub bills
+## 8. Worked example — mapping a telco bill (Telco A / Telco B pattern)
 
 Input (telco bill, GST-registered supplier, dated 2025 → 9%):
 
 | Charge | Net | Nature | §21(3)? | Tax code | Xero purchase TaxType | QBS code | GST |
 |---|---|---|---|---|---|---|---|
-| Local mobile/broadband subscription | 1164.42 | Consumed in SG | No | SR | `Standard-Rated Purchases` | `TX` | 104.80 (9%) |
-| IDD / international roaming | 58.93 | Telecom SG↔outside | §21(3)(q) | ZR | `Zero-Rated Purchases` | `ZR` | 0.00 |
+| Local mobile/broadband subscription | 1000.00 | Consumed in SG | No | SR | `Standard-Rated Purchases` | `TX` | 90.00 (9%) |
+| IDD / international roaming | 50.00 | Telecom SG↔outside | §21(3)(q) | ZR | `Zero-Rated Purchases` | `ZR` | 0.00 |
 
-This reproduces `BillTemplate (3).csv` exactly. **Two output lines from one bill.**
+This reproduces the BillTemplate CSV pattern exactly. **Two output lines from one bill.**
 
 ---
 
@@ -449,8 +448,8 @@ Flag a line as **low-confidence / needs review** when:
 - Xero PHP SDK — **TaxType enum (SG constants)**: https://github.com/calcinai/xero-php/blob/master/src/XeroPHP/Models/Accounting/TaxType.php
 
 ### On-disk evidence used
-- `/Users/davidkitdave/Desktop/LocalTest/TestDoc/GST SR:ZR/BillTemplate (3).csv` — Xero purchase import; Singtel + Starhub bills split into `Standard-Rated Purchases` (9%) and `Zero-Rated Purchases` (0%) lines.
-- `/Users/davidkitdave/Desktop/LocalTest/TestDoc/GST SR:ZR/BV-0002830 Starhub 8.20057598B bill 122025.pdf`, `BV-0002732 ...pdf` — source telco bills.
+- `BillTemplate (3).csv` (local test data, not committed) — Xero purchase import; telco bills split into `Standard-Rated Purchases` (9%) and `Zero-Rated Purchases` (0%) lines.
+- Source telco bill PDFs (local test data, not committed) — INV-0001, INV-0002 pattern.
 - `/Users/davidkitdave/Desktop/LocalTest/header template/Xero Template.xlsx` — Purchase & Sales sheets, both with `*TaxType` column.
 - `/Users/davidkitdave/Desktop/LocalTest/header template/AI-Account Template/Expenses Bill Import Template (1).csv` — `Tax Code` values `TX`, `NT`.
 - `/Users/davidkitdave/Desktop/LocalTest/header template/AI-Account Template/Sales Invoice Import Template (1).csv` — `Tax Code` value `SR`.

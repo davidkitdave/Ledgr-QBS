@@ -1,3 +1,0 @@
-Supplier,Bill Number,Bill Date,Description,Account # Expense Type,Quantity,Measurement,Currency Code,Original Currency (Unit Price),Exchange Rate,Tax Code,Unit Price (for info only),Amount (for info only),GST Amount (for info only),Inc-Tax Amount (for info only),Due Date (Optional),Item Code (Optional),Transaction Reference (Optional)
-Starhub,BV-0002830,01/12/2025,Telephone charges (SR),,1,,,1164.42,,TX,1164.42,1164.42,104.8,1269.22,,,
-Starhub,BV-0002830,01/12/2025,Telephone charges (ZR) - IDD/roaming,,1,,,58.93,,ZR,58.93,58.93,0,58.93,,,

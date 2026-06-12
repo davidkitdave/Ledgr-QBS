@@ -49,7 +49,7 @@ APPEND to the consolidated workbook (QBS Ledger or Xero, per client) → post in
   + **upload COA** (or start from a standard SG SME COA, replaceable later). Creates the channel↔client
   binding in our datastore.
 - **Daily use:** drop docs in the client channel → 👀 *"Processing 14 documents…"* → per-doc result
-  cards in a thread (`🧾 Purchase · Starhub · SGD 1,269.22 · SR+ZR · Telco 61010 · ✅/✏️`; low-confidence
+  cards in a thread (`🧾 Purchase · Telco A · SGD 1,090.00 · SR+ZR · Telco 61010 · ✅/✏️`; low-confidence
   → `⚠️ review`) → **one consolidated Excel** attached when the batch finishes (or `/ledgr export`).
 - **Corrections:** ✏️ on a card → fix account/tax → re-posted + **remembered** (Entity_Memory) for next time.
 - **Bank statements:** transaction-table Excel with running-balance reconciliation.
@@ -62,7 +62,7 @@ APPEND to the consolidated workbook (QBS Ledger or Xero, per client) → post in
 
 ## Build sequence (revised)
 1. **Doc-type classifier/router** — multimodal classify {purchase, sales, receipt, bank_statement, other};
-   test against real Cast Unity / MYDoc files (known types). *(the piece the agent most needs)*
+   test against real labelled files (known types). *(the piece the agent most needs)*
 2. **Per-type extraction** — purchase/sales (adapt existing pipeline) + receipt (photo) + bank statement (new).
 3. **Per-client datastore + COA onboarding** — Firestore schema; `/ledgr setup` + COA upload; channel↔client.
 4. **Categorisation + tax** — `resolve_account` + tax classifier (built) → fill account codes + tax codes.

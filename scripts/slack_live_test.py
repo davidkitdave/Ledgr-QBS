@@ -27,17 +27,13 @@ from slack_sdk import WebClient
 def main() -> int:
     token = os.getenv("SLACK_BOT_TOKEN")
     channel = os.getenv("LEDGR_TEST_CHANNEL")
-    pdf = os.getenv(
-        "LEDGR_TEST_PDF",
-        "/Users/davidkitdave/Desktop/LocalTest/TestDoc/GST SR:ZR/"
-        "BV-0002830 Starhub 8.20057598B bill 122025.pdf",
-    )
+    pdf = os.getenv("LEDGR_TEST_PDF", "")
     timeout_s = int(os.getenv("LEDGR_TEST_TIMEOUT", "150"))
 
-    if not token or not channel:
+    if not token or not channel or not pdf:
         print(
-            "Set SLACK_BOT_TOKEN (.env) and LEDGR_TEST_CHANNEL, and make sure the bot is "
-            "running:  uv run python -m app.socket_run"
+            "Set SLACK_BOT_TOKEN (.env), LEDGR_TEST_CHANNEL, and LEDGR_TEST_PDF (path to a "
+            "sample bill PDF), and make sure the bot is running:  uv run python -m app.socket_run"
         )
         return 2
 

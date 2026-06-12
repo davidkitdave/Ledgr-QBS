@@ -14,8 +14,8 @@ from invoice_processing.export.routing import DocRoute, route_document
 # --------------------------------------------------------------------------- #
 
 def _route(**kwargs) -> DocRoute:
-    """Thin wrapper with project-wide test defaults (fye_month=3, client_id='cast-unity')."""
-    defaults = dict(fye_month=3, client_id="cast-unity")
+    """Thin wrapper with project-wide test defaults (fye_month=3, client_id='test-client')."""
+    defaults = dict(fye_month=3, client_id="test-client")
     defaults.update(kwargs)
     return route_document(**defaults)
 
@@ -31,7 +31,7 @@ class TestPurchaseInvoice:
         assert r.bucket == "purchase"
         assert r.sheet == "Purchase"
         assert r.workbook == "Ledger_FY2025.xlsx"
-        assert r.archive_path == "cast-unity/FY2025/purchase/BV-1.pdf"
+        assert r.archive_path == "test-client/FY2025/purchase/BV-1.pdf"
 
 
 # --------------------------------------------------------------------------- #
@@ -46,7 +46,7 @@ class TestSalesInvoice:
         assert r.bucket == "sales"
         assert r.sheet == "Sales"
         assert r.workbook == "Ledger_FY2026.xlsx"
-        assert r.archive_path == "cast-unity/FY2026/sales/INV-999.pdf"
+        assert r.archive_path == "test-client/FY2026/sales/INV-999.pdf"
 
 
 # --------------------------------------------------------------------------- #
@@ -67,20 +67,20 @@ class TestReceipt:
 # --------------------------------------------------------------------------- #
 class TestBankStatement:
     def test_late_arriving_dec_doc_calendar_year(self):
-        # TC Studio: Dec-2024 statement processed later; fye_month=12 → FY2024
+        # Sample Co: Dec-2024 statement processed later; fye_month=12 → FY2024
         r = route_document(
             doc_type="bank_statement",
             direction=None,
             doc_date=date(2024, 12, 20),
             fye_month=12,
-            client_id="tc-studio",
+            client_id="sample-co",
             filename="bank-dec-2024.pdf",
         )
         assert r.fy == 2024
         assert r.bucket == "bank"
         assert r.sheet is None
         assert r.workbook == "BankStatement_FY2024.xlsx"
-        assert r.archive_path == "tc-studio/FY2024/bank/bank-dec-2024.pdf"
+        assert r.archive_path == "sample-co/FY2024/bank/bank-dec-2024.pdf"
 
     def test_bank_alias(self):
         # "bank" shorthand accepted as well

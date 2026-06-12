@@ -19,6 +19,11 @@ class Settings:
     gcp_project: Optional[str]
     location: Optional[str]
     gcs_bucket: Optional[str]        # GCS bucket for source + workbook archiving
+    # Multi-workspace OAuth (plan task #5.1) — installable distribution.
+    slack_client_id: Optional[str]
+    slack_client_secret: Optional[str]
+    slack_oauth_state_secret: Optional[str]
+    base_url: Optional[str]          # public https base for the OAuth redirect (e.g. Cloud Run URL)
 
 
 def get_settings() -> Settings:
@@ -32,6 +37,10 @@ def get_settings() -> Settings:
         ),
         location=os.environ.get("LOCATION"),
         gcs_bucket=os.environ.get("GCS_BUCKET", "ledgr-qbs-source-bucket"),
+        slack_client_id=os.environ.get("SLACK_CLIENT_ID"),
+        slack_client_secret=os.environ.get("SLACK_CLIENT_SECRET"),
+        slack_oauth_state_secret=os.environ.get("SLACK_OAUTH_STATE_SECRET"),
+        base_url=os.environ.get("SLACK_BASE_URL"),
     )
 
 
@@ -54,4 +63,23 @@ def missing_slack_socket() -> list[str]:
         missing.append("SLACK_BOT_TOKEN")
     if not s.slack_app_token:
         missing.append("SLACK_APP_TOKEN")
+    return missing
+
+
+def missing_slack_oauth() -> list[str]:
+    """Return names of env vars missing for multi-workspace OAuth (distribution).
+
+    OAuth needs the app's client credentials, the signing secret (to verify
+    inbound Slack requests), and a public base URL for the redirect.
+    """
+    s = get_settings()
+    missing: list[str] = []
+    if not s.slack_client_id:
+        missing.append("SLACK_CLIENT_ID")
+    if not s.slack_client_secret:
+        missing.append("SLACK_CLIENT_SECRET")
+    if not s.slack_signing_secret:
+        missing.append("SLACK_SIGNING_SECRET")
+    if not s.base_url:
+        missing.append("SLACK_BASE_URL")
     return missing

@@ -1,6 +1,6 @@
 """Accounting-ledger exporters — emit the client's `<Client> - Ledger_FY<year>.xlsx`
 workbook (sheets: Sys_Config, Purchase, Sales), matching the native formats observed in
-the Cast Unity client data.
+the client data.
 
 Two target formats, chosen by the client's `ACCOUNTING_SOFTWARE` setting:
 - **QBS Ledger** (`QbsLedgerExporter`): native QBS columns; no tax-code column (SR/ZR is

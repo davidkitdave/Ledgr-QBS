@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import csv
 import json
-import os
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------- #
@@ -54,7 +56,7 @@ def _row_to_dict(header_keys: list[Optional[str]], values: tuple) -> Optional[di
     Returns None if both code and description are empty (skip blank rows).
     """
     row: dict = {}
-    for key, val in zip(header_keys, values):
+    for key, val in zip(header_keys, values, strict=False):
         if key is None:
             continue
         row[key] = str(val).strip() if val is not None else ""
@@ -119,7 +121,7 @@ def coa_rows_from_file(path: str) -> list[dict]:
                     for acc in ctx.coa
                 ]
         except Exception:
-            pass
+            logger.warning("COA load_client_setup failed for %s; trying fallback", path, exc_info=True)
 
         # Fallback: read the first worksheet directly
         try:
@@ -132,6 +134,7 @@ def coa_rows_from_file(path: str) -> list[dict]:
                 wb.close()
             return _parse_sheet_rows(rows)
         except Exception:
+            logger.warning("COA xlsx fallback parse failed for %s", path, exc_info=True)
             return []
 
     elif ext == ".csv":
@@ -154,6 +157,7 @@ def coa_rows_from_file(path: str) -> list[dict]:
                         continue
                     results.append(row)
         except Exception:
+            logger.warning("COA csv parse failed for %s", path, exc_info=True)
             return []
         return results
 

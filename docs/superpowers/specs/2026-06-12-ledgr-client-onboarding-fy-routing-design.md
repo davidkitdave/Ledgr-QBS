@@ -77,7 +77,7 @@ def fy_for_date(d: date, fye_month: int) -> int:
 ```
 Examples (fye_month = 3 / March): `2025-03-15 → FY2025`; `2025-04-02 → FY2026`.
 Calendar-year client (fye_month = 12): `2025-06-01 → FY2025`; `2026-01-01 → FY2026`.
-Late-arriving prior-year documents route to their correct FY automatically (matches TC Studio's Dec-2024
+Late-arriving prior-year documents route to their correct FY automatically (e.g. a Dec-2024
 statement sitting in FY2025).
 
 ## 4. Routing — archive + workbook

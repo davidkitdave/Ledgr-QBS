@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import shutil
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable
 
 from invoice_processing.pipeline import BatchResult, process_batch
 
@@ -53,7 +53,7 @@ def process_shared_files(
                       prevent upload or posting the result card. When None, no archiving
                       occurs and behaviour is identical to the previous implementation.
     """
-    from app.blocks import needs_setup_blocks, result_card  # local import avoids circular
+    from app.blocks import needs_setup_blocks, processing_ack_blocks, result_card  # local import avoids circular
 
     # ------------------------------------------------------------------ #
     # 1. Resolve client profile
@@ -87,6 +87,18 @@ def process_shared_files(
         )
 
     # ------------------------------------------------------------------ #
+    # 2b. Immediate acknowledgment so the user sees the bot is working (UX).
+    #     A failed ack must never block processing.
+    # ------------------------------------------------------------------ #
+    try:
+        say_fn(
+            blocks=processing_ack_blocks(len(file_ids)),
+            text=f"Got it — processing {len(file_ids)} document(s)…",
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+    # ------------------------------------------------------------------ #
     # 3. Download files into a temp dir
     # ------------------------------------------------------------------ #
     tmp_dir = tempfile.mkdtemp(prefix="ledgr_")
@@ -106,6 +118,9 @@ def process_shared_files(
         # ------------------------------------------------------------------ #
         result: BatchResult = pipeline_fn(local_paths, client)
         all_errors = download_errors + result.errors
+        # Archive failures are tracked separately so a background-archive hiccup
+        # does not turn the user-facing result card amber (item 8).
+        archive_notes: list[str] = []
 
         # ------------------------------------------------------------------ #
         # 4b. Archive source documents (optional, defensive)
@@ -125,7 +140,7 @@ def process_shared_files(
                                 data,
                             )
                 except Exception as exc:  # noqa: BLE001
-                    all_errors.append(f"archive source {getattr(doc, 'path', '?')}: {exc}")
+                    archive_notes.append(f"archive source {getattr(doc, 'path', '?')}: {exc}")
 
         # ------------------------------------------------------------------ #
         # 5. Upload workbooks + archive workbooks (optional, defensive)
@@ -145,7 +160,7 @@ def process_shared_files(
                     if fy is not None:
                         archive.save_workbook(client.client_id, fy, filename, data)
                 except Exception as exc:  # noqa: BLE001
-                    all_errors.append(f"archive workbook {filename}: {exc}")
+                    archive_notes.append(f"archive workbook {filename}: {exc}")
 
         # ------------------------------------------------------------------ #
         # 6. Post result card
@@ -155,6 +170,8 @@ def process_shared_files(
         )
         coa_missing = client.status != "active"
 
+        # Card: real failures drive the warning header; archive hiccups are a
+        # muted context line only (item 8).
         say_fn(
             blocks=result_card(
                 n_files=len(file_ids),
@@ -162,16 +179,18 @@ def process_shared_files(
                 workbooks=uploaded,
                 errors=all_errors,
                 coa_missing=coa_missing,
+                archive_notes=archive_notes,
             ),
             text=f"Processed {n_processed}/{len(file_ids)} documents.",
         )
 
+        # Outcome keeps archive failures in ``errors`` for observability/back-compat.
         return ShareOutcome(
             channel_id=channel_id,
             n_files=len(file_ids),
             workbooks=uploaded,
             n_processed=n_processed,
-            errors=all_errors,
+            errors=all_errors + archive_notes,
             status="ok",
         )
 

@@ -30,7 +30,8 @@ from invoice_processing.extract.bank_statement_extractor import (
 # Ground-truth helpers
 # ---------------------------------------------------------------------------
 
-BASE_DIR = Path("/Users/davidkitdave/Desktop/LocalTest/TestDoc/Cast Unity")
+_bank_eval_dir = os.getenv("LEDGR_BANK_EVAL_DIR", "")
+BASE_DIR = Path(_bank_eval_dir) if _bank_eval_dir else Path(".")
 
 CLIENTS = [
     "AAAC GALLERY PRIVATELIMITED",
@@ -39,7 +40,7 @@ CLIENTS = [
     "DMTV Global Pte Ltd",
     "Envistore Pte. Ltd.",
     "Orange Perspective Consulting Pte. Ltd.",
-    "TC Studio Pte. Ltd.",
+    "Sample Co Pte Ltd",
     "Ur Doctors Pte. Ltd.",
 ]
 
@@ -328,4 +329,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    if not os.getenv("LEDGR_BANK_EVAL_DIR"):
+        print(
+            "Set LEDGR_BANK_EVAL_DIR to your local bank-statement folder before running.\n"
+            "Example: LEDGR_BANK_EVAL_DIR=/path/to/client-statements uv run python eval/bank_eval.py"
+        )
+        raise SystemExit(1)
     main()

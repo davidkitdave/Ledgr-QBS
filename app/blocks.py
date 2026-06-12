@@ -136,6 +136,24 @@ def onboarding_modal(prefill: dict | None = None) -> dict:
     }
 
 
+def processing_ack_blocks(n_files: int) -> list:
+    """Instant 'I got your file(s)' card posted the moment a document is dropped, so the
+    user can see the bot is working before the (~30s) pipeline finishes."""
+    plural = "s" if n_files != 1 else ""
+    return [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f":inbox_tray: *Got it* — processing *{n_files}* document{plural} now. "
+                    "This usually takes ~30s; I'll post the ledger here when it's done."
+                ),
+            },
+        }
+    ]
+
+
 def needs_setup_blocks() -> list:
     """Message posted when a file is shared to a channel that has no client profile."""
     return [
@@ -170,17 +188,23 @@ def result_card(
     workbooks: list[str],
     errors: list[str],
     coa_missing: bool = False,
+    archive_notes: list[str] | None = None,
 ) -> list:
     """Summary card posted after processing a batch of shared documents.
 
     Args:
-        n_files:      Total files received.
-        n_processed:  Docs processed without ERROR.
-        workbooks:    Filenames of workbooks uploaded.
-        errors:       Error strings (download / pipeline / upload).
-        coa_missing:  True when the client's status != "active" (no COA yet).
+        n_files:        Total files received.
+        n_processed:    Docs processed without ERROR.
+        workbooks:      Filenames of workbooks uploaded.
+        errors:         Real failures (download / pipeline / upload) — drive the
+                        warning header.
+        coa_missing:    True when the client's status != "active" (no COA yet).
+        archive_notes:  Background-archive hiccups. These DO NOT turn the header
+                        amber — the run still succeeded for the user — and are
+                        surfaced only as a muted context line.
     """
-    # Header line
+    archive_notes = archive_notes or []
+    # Header line — green unless a real processing/upload error occurred.
     status_emoji = ":white_check_mark:" if not errors else ":warning:"
     header_text = (
         f"{status_emoji} *Ledgr — Batch complete*\n"
@@ -224,6 +248,25 @@ def result_card(
                             ":information_source: No COA is set for this client — "
                             "account codes may be blank. Upload a COA file or tap "
                             "*Use standard SG SME COA* to activate full categorisation."
+                        ),
+                    }
+                ],
+            }
+        )
+
+    # Archive hiccups — muted context line only (does NOT affect the header).
+    if archive_notes:
+        n = len(archive_notes)
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": (
+                            f":file_cabinet: Your documents were processed and uploaded. "
+                            f"({n} background archive step{'s' if n != 1 else ''} "
+                            "didn't complete — your ledger is unaffected.)"
                         ),
                     }
                 ],

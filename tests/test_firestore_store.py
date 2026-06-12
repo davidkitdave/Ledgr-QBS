@@ -27,10 +27,16 @@ from invoice_processing.export.client_context import (
 # --------------------------------------------------------------------------- #
 
 class FakeSnapshot:
-    """Mimics a Firestore DocumentSnapshot."""
+    """Mimics a Firestore DocumentSnapshot.
 
-    def __init__(self, data: dict | None):
+    ``reference`` mirrors the real ``DocumentSnapshot.reference`` so production
+    code can stream-then-delete (``snap.reference.delete()``). It is only set on
+    snapshots produced by a subcollection ``.stream()``.
+    """
+
+    def __init__(self, data: dict | None, reference: "FakeSubDocRef | None" = None):
         self._data = data
+        self.reference = reference
 
     @property
     def exists(self) -> bool:
@@ -53,7 +59,11 @@ class FakeSubcollection:
         return cls({str(i): d for i, d in enumerate(docs)})
 
     def stream(self):
-        return [FakeSnapshot(d) for d in self._docs.values()]
+        # Snapshot over a copy of the keys so callers can delete during iteration.
+        return [
+            FakeSnapshot(self._docs[doc_id], reference=FakeSubDocRef(self._docs, doc_id))
+            for doc_id in list(self._docs.keys())
+        ]
 
     def document(self, doc_id: str) -> "FakeSubDocRef":
         return FakeSubDocRef(self._docs, doc_id)
@@ -180,8 +190,8 @@ COA_DOCS = [
 
 ENTITY_MEMORY_DOCS = [
     {
-        "name": "Singtel",
-        "reg_no": "199201624D",
+        "name": "Telco B",
+        "reg_no": "199200001Z",
         "mapping_code": "6-1000",
         "role": "Creditor",
         "tax_code": "TX",
@@ -283,8 +293,8 @@ class TestFirestoreClientStoreGet:
         ctx = self._store().get(CLIENT_ID)
         assert len(ctx.entity_memory) == 1
         em = ctx.entity_memory[0]
-        assert em.name == "Singtel"
-        assert em.reg_no == "199201624D"
+        assert em.name == "Telco B"
+        assert em.reg_no == "199200001Z"
         assert em.mapping_code == "6-1000"
         assert em.role == "Creditor"
         assert em.tax_code == "TX"
@@ -485,6 +495,30 @@ class TestFirestoreClientStoreWrite:
         ctx = store.get_by_channel(WRITE_PROFILE["channel_id"])
         assert ctx is not None
         assert ctx.client_id == WRITE_PROFILE["client_id"]
+
+    def test_save_coa_replaces_does_not_orphan(self):
+        # Item 7: a 2-row COA replacing a 5-row COA must yield exactly 2 docs,
+        # not leave higher-index docs (2,3,4) orphaned.
+        store = self._store()
+        store.save_profile(WRITE_PROFILE)
+
+        five = [
+            {"code": f"{i}-000", "description": f"Acct {i}", "account_type": "Asset",
+             "financial_statement": "BS", "nature": "Debit", "keywords": ""}
+            for i in range(5)
+        ]
+        store.save_coa("new-client-1", five)
+        assert len(store.get("new-client-1").coa) == 5
+
+        two = [
+            {"code": f"{i}-000", "description": f"Acct {i}", "account_type": "Asset",
+             "financial_statement": "BS", "nature": "Debit", "keywords": ""}
+            for i in range(2)
+        ]
+        store.save_coa("new-client-1", two)
+        ctx = store.get("new-client-1")
+        assert len(ctx.coa) == 2
+        assert {a.code for a in ctx.coa} == {"0-000", "1-000"}
 
 
 # --------------------------------------------------------------------------- #

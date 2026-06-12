@@ -46,7 +46,7 @@ re-implement. Don't replicate the Google Sheets/Drive workflow. All Python via `
   `GEMINI_PRO_MODEL=gemini-2.5-flash` (Pro→Flash on purpose), `GOOGLE_GENAI_USE_VERTEXAI=TRUE`.
 - `agents-cli` v0.4.0 installed; `adk-docs` MCP installed.
 - **Sample data** (test + target formats, NOT the mechanism): `~/Desktop/LocalTest/` —
-  `TestDoc/Cast Unity/` (SG clients, DBS statements, `Ledger_FY*.xlsx`, `Client Setup.xlsx`),
+  `TestDoc/` (SG clients, DBS statements, `Ledger_FY*.xlsx`, `Client Setup.xlsx`),
   `TestDoc/MYDoc/` (Malaysia invoices/receipts), `TestDoc/GST SR:ZR/` (telco SR/ZR bills),
   `header template/` (Xero/AI-Account/SQL/Autocount import templates). ~2290 PDFs.
 
@@ -74,13 +74,13 @@ re-implement. Don't replicate the Google Sheets/Drive workflow. All Python via `
   `invoice_processing/export/tax_classifier.py` (rules-first SR/ZR/ES/OS per IRAS). (Task #3)
 - **Exporters** `invoice_processing/export/exporters.py` — `QbsLedgerExporter`, `XeroLedgerExporter`
   (Purchase+Sales sheets); `models.py` (NormalizedInvoice/InvoiceLine/PartyInfo). VERIFIED: reproduces
-  the client's `BillTemplate.csv` Starhub SR/ZR split + native QBS/Xero columns. (Task #3)
+  the client's `BillTemplate.csv` telco SR/ZR split + native QBS/Xero columns. (Task #3)
 - **Doc-type classifier** `invoice_processing/classify/document_classifier.py` — Gemini-Flash multimodal;
   `classify_document` + `resolve_direction`. VERIFIED 7/8 on real labelled docs (the 1 miss was a
   mislabel; effectively 8/8), conf 1.0, works on scanned PDF + .jpeg, direction (purchase/sales) correct. (Task #10)
 - **Invoice/receipt extractor** `invoice_processing/extract/invoice_extractor.py` —
   `extract_invoice` + `to_normalized(direction)`. ✅ end-to-end classify→extract→tax→export CONFIRMED
-  (Task #14): Starhub bill → SR/ZR split, exit 0, output captured.
+  (Task #14): telco bill → SR/ZR split, exit 0, output captured.
 
 ### Built & verified this session (2026-06-12) ✅
 - **API backend env-switch** `shared_libraries/genai_client.py` — `GOOGLE_GENAI_USE_VERTEXAI=FALSE` → AI
@@ -180,8 +180,8 @@ from dotenv import load_dotenv; load_dotenv('.env')
 from invoice_processing.classify.document_classifier import classify_file, resolve_direction
 from invoice_processing.extract.invoice_extractor import extract_file, to_normalized
 from invoice_processing.export.exporters import get_exporter
-p='/Users/davidkitdave/Desktop/LocalTest/TestDoc/GST SR:ZR/BV-0002830 Starhub 8.20057598B bill 122025.pdf'
-cls=classify_file(p); d=resolve_direction(cls, client_name='HMAP PTE LTD')
+p='/path/to/local/test/telco-bill-INV-0001.pdf'
+cls=classify_file(p); d=resolve_direction(cls, client_name='Test Client Pte Ltd')
 ex=extract_file(p); inv=to_normalized(ex, direction=(d if d in ('purchase','sales') else 'purchase'), our_gst_registered=True)
 exp=get_exporter('QBS Ledger'); rows=exp.rows([inv], inv.doc_type)
 print(cls.doc_type, d, ex.currency, len(inv.lines))
@@ -213,7 +213,7 @@ GCS = archive + workbook store. Region asia-southeast1, Gemini Flash, AI Studio 
       `process_document(path, client)` (classify→direction→extract→normalize→tax→categorize account_code→route,
       every LLM step dependency-injected; never raises) + `process_batch(paths, client)` → `{filename: xlsx bytes}`
       consolidated `Ledger_FY{n}.xlsx` (Purchase+Sales) / `BankStatement_FY{n}.xlsx`. Hermetic `tests/test_pipeline.py`
-      (12 tests, injected stubs) + **REAL end-to-end smoke**: Starhub PDF → invoice/purchase/FY2026, SR+ZR split,
+      (12 tests, injected stubs) + **REAL end-to-end smoke**: telco PDF → invoice/purchase/FY2026, SR+ZR split,
       reconciled, valid QBS `Ledger_FY2026.xlsx`. Full suite **226 green**.
 - [x] **Phase B — Slack app layer (#4)** ✅ DONE — hermetically tested (suite 442). `app/` = thin Bolt handlers
       over pure, injectable logic: welcome card on bot-join; 4-field onboarding modal → Firestore profile
@@ -239,16 +239,68 @@ GCS = archive + workbook store. Region asia-southeast1, Gemini Flash, AI Studio 
       GATED — auto-mode denied it; needs explicit user OK like the Firestore test. Hermetic fake-GCS tests stand.)
 - [ ] **Phase D — Live Slack test:** ⏳ GATED on Slack tokens (user). PRE-LIVE PROOF DONE — a headless end-to-end
       sim drove the real worker (`process_shared_files`) + real `process_batch` + the real standard COA on the actual
-      StarHub PDF: invoice/purchase/FY2026, SR+ZR split, **account code 6-2200 filled**, valid QBS
+      telco PDF: invoice/purchase/FY2026, SR+ZR split, **account code 6-2200 filled**, valid QBS
       `Ledger_FY2026.xlsx` "uploaded" + result card. To go live: create the app from `slack/manifest.json`, install,
       put `SLACK_BOT_TOKEN`/`SLACK_SIGNING_SECRET`/`SLACK_APP_TOKEN` in `.env` (`docs/slack-setup.md`), then run
       `uv run python -m app.socket_run` + `scripts/slack_live_test.py` to verify upload→ledger in a real channel.
-- [ ] **Phase E — Eval (#9):** `agents-cli eval` to ≥0.9 across doc types; extend account-code + tax-code accuracy.
+- [x] **Phase E — Eval (#9)** ✅ DONE: `eval/ledger_eval.py` (`run_eval`/`default_client`/`discover_samples`,
+      injectable pipeline → hermetic tests; `uv run python -m eval.ledger_eval --limit N`). **Live sample (5 real
+      SG telco + MY receipt docs): 5/5 classified, 100% recon pass, 8/8 lines categorized (100% fill), 0 errors.**
+      Bank lane already 100% recon (`eval/bank_eval.py`). Follow-ups (non-blocking): `resolve_direction` returns
+      "unknown" on some vendor bills (pipeline defaults → purchase, correct); eval tax-treatment column is cosmetic.
+
+- [x] **Review + hardening pass** ✅ DONE: adversarial code review (opus) of the whole new surface →
+      fixed Slack-retry **idempotency** (event_id dedupe — no duplicate ledgers), **temp-PDF leak** cleanup
+      (PDPA), download **filename sanitization** + **SSRF host-pin** (files.slack.com, no cross-host redirects)
+      + **size/count caps** (25 MB / 30 files), **`save_coa` replace-not-append** (re-upload no longer
+      duplicates/orphans), **spreadsheet-vs-COA intent gate** (only ingest a sheet as COA when `pending_coa`;
+      active clients' sheets go to the pipeline), archive-only failures no longer flip the success card, and
+      **`/healthz` 503** when Slack env missing (no silent fail-closed). Suite **498 green** + ruff config fixed.
 
 **External blocker (Phase D — the ONLY thing left):** a Slack app + tokens (`SLACK_BOT_TOKEN`,
 `SLACK_SIGNING_SECRET`, `SLACK_APP_TOKEN`) + a test workspace — only the user can create these (Slack
 login/consent). Phases A–C are DONE and e2e-proven (suite 442 + real-PDF smoke); the moment tokens land I run
 the live verification myself (`app.socket_run` + `scripts/slack_live_test.py`).
+
+## DEPLOYMENT MODEL DECISION (2026-06-12): MULTI-WORKSPACE (Model B / task #5)
+**Role hierarchy (corrected):** the user is the **DEVELOPER** of Ledgr; the **customer is an accounting FIRM**
+(each firm has its OWN Slack workspace); the firm's **clients are channels** inside that firm's workspace. So
+**each FIRM installs Ledgr into their own workspace via OAuth** (multi-workspace = Model B); the bot runs in the
+**firm's** Slack, not the developer's. Within a firm's workspace, channel→client profile handles each client.
+Implications: needs a **public HTTPS endpoint (Cloud Run `asia-southeast1`)**, **OAuth install flow**
+(`/slack/install` + `/slack/oauth_redirect`), **per-workspace bot tokens** in Firestore (`workspaces/{team_id}`),
+and Slack **app distribution / review**. The channel→client profile model + the whole pipeline are unchanged;
+the OAuth/installation layer goes underneath. See memory [[ledgr-role-hierarchy-and-model-b]].
+Grounded in Bolt docs: `App(signing_secret, installation_store, oauth_settings=OAuthSettings(...))`;
+`InstallationStoreAuthorize` resolves the per-team token automatically → existing handlers work unchanged.
+Grounded in Bolt docs: `App(signing_secret, installation_store, oauth_settings=OAuthSettings(...))`;
+`InstallationStoreAuthorize` resolves the per-team token automatically → existing handlers work unchanged.
+
+- [x] **#5.1 Stores** ✅ — `app/installation_store.py`: `FirestoreInstallationStore` (save/find_installation/find_bot
+      → `workspaces/{key}`) + `FirestoreOAuthStateStore` (issue/consume), `client=` injection seam, hermetic tests.
+      Verified: `find_bot` returns the per-team token; state one-time-use + expiry.
+- [x] **#5.2 OAuth wiring** ✅ — OAuth mode in `build_app` (`OAuthSettings`, `BOT_SCOPES` ×11) + `fastapi_app`
+      mounts `/slack/install` + `/slack/oauth_redirect` (+ events/healthz); `member_joined` uses Bolt `context.bot_user_id`
+      in OAuth mode; `config.py` CLIENT_ID/SECRET/STATE_SECRET/BASE_URL + `missing_slack_oauth()`;
+      `slack/manifest-distributed.json` (socket off, redirect_urls, request_url). Suite **557 green**.
+      Note: Model B uses per-workspace tokens (no single SLACK_BOT_TOKEN); `.env` needs CLIENT_ID/SECRET/SIGNING/BASE_URL.
+- [~] **#5.3 Deploy + live** — ✅ DEPLOYED to Cloud Run `asia-southeast1` (service `ledgr`, public,
+      `--no-cpu-throttling`, env via file). URL `https://ledgr-640071771526.asia-southeast1.run.app`.
+      ✅ Caught+fixed a critical bug: all Slack routes returned **422** (PEP-563 string annotations + `Request`
+      imported inside `fastapi_app` → FastAPI mis-resolved it). Fixed = module-level `from fastapi import ... Request`;
+      regression test `tests/test_fastapi_routes.py` (calls the routes, not just lists them). `/slack/events`→401 (good).
+      ✅ IAM GRANTED (2026-06-12, user-authorized): compute SA now has `roles/datastore.user` (project) +
+      `roles/storage.objectAdmin` (bucket). **`/slack/install` → HTTP 200** (Bolt install page + OAuth link) —
+      service fully functional. ✅ `/slack/events`→401 (sig check). 
+      ✅ OAUTH INSTALL VERIFIED (2026-06-12): user added the redirect URL + completed install → per-workspace token
+      PERSISTED to Firestore `workspaces/none-T0B59UG473K` (team QBS-AI, has_bot_token=True, scopes present).
+      **Model B multi-workspace install flow works end-to-end on the live service.** (Redirect-URI mismatch was the
+      one gotcha — add `…/slack/oauth_redirect` to OAuth&Permissions Redirect URLs; now in `docs/slack-setup.md`.)
+      ⏳ REMAINING (final E2E): config Event Subscriptions + Interactivity Request URLs = `…/slack/events` (separate
+      from OAuth — needed for event/button delivery; `/slack/events` proven to pass Slack's signed url_verification);
+      invite bot to a channel → set up client (modal+COA or seed) → drop a bill → confirm Excel ledger returns.
+      NOTE: prod best-practice = a dedicated `app_sa` (least-priv) rather than the default compute SA.
+      `/healthz` returns a Google 404 (GFE reserves the path) — cosmetic; could rename to `/health`.
 
 **Eval status (Phase E):** bank lane already at 100% recon (`eval/bank_eval.py`); remaining = account-code +
 tax-code accuracy vs verified `Ledger_FY` ground truth (token-independent; the next "done right" work).

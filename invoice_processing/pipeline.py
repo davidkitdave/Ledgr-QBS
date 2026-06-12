@@ -339,7 +339,7 @@ def process_batch(
     bank_groups: dict[str, list[ExtractedBankStatement]] = {}
 
     for doc in docs:
-        if doc.note.startswith("ERROR") or doc.normalized is None and doc.bank is None:
+        if doc.note.startswith("ERROR") or (doc.normalized is None and doc.bank is None):
             continue
         wb_name = doc.route.workbook
         if doc.doc_type == "bank_statement" and doc.bank is not None:

@@ -145,13 +145,30 @@ class TestAppMain:
         import app.main  # noqa: F401 — side-effect import under test
         assert isinstance(app.main.app, FastAPI)
 
-    def test_healthz_returns_200(self):
+    def test_healthz_returns_200_when_configured(self, monkeypatch):
+        # healthz re-checks env at request time; with Slack HTTP vars set it is 200.
+        monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-tok")
+        monkeypatch.setenv("SLACK_SIGNING_SECRET", "sig")
         from fastapi.testclient import TestClient
         import app.main
         client = TestClient(app.main.app)
         resp = client.get("/healthz")
         assert resp.status_code == 200
         assert resp.json() == {"ok": True}
+
+    def test_healthz_returns_503_when_unconfigured(self, monkeypatch):
+        # Fail-LOUD: missing Slack HTTP vars → 503 with the missing list.
+        monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
+        monkeypatch.delenv("SLACK_SIGNING_SECRET", raising=False)
+        from fastapi.testclient import TestClient
+        import app.main
+        client = TestClient(app.main.app)
+        resp = client.get("/healthz")
+        assert resp.status_code == 503
+        body = resp.json()
+        assert body["ok"] is False
+        assert "SLACK_BOT_TOKEN" in body["missing"]
+        assert "SLACK_SIGNING_SECRET" in body["missing"]
 
 
 # ---------------------------------------------------------------------------

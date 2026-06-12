@@ -148,17 +148,18 @@ class TestProcessSharedFilesHappyPath:
         assert self.uploaded[0][2] == b"PK\x03\x04"
 
     def test_result_card_posted(self):
-        assert len(self.posted) == 1
+        # processing-ack card + result card
+        assert len(self.posted) == 2
 
     def test_result_card_has_blocks(self):
-        assert "blocks" in self.posted[0]
+        assert "blocks" in self.posted[-1]
 
     def test_result_card_blocks_is_list(self):
-        assert isinstance(self.posted[0]["blocks"], list)
+        assert isinstance(self.posted[-1]["blocks"], list)
 
     def test_result_card_no_coa_missing_note(self):
         # active client → no COA-missing context block
-        blocks = self.posted[0]["blocks"]
+        blocks = self.posted[-1]["blocks"]
         texts = [
             str(b) for b in blocks
         ]
@@ -199,12 +200,12 @@ class TestNoProfile:
 
     def test_needs_setup_posted(self):
         assert len(self.posted) == 1
-        blocks = self.posted[0].get("blocks", [])
+        blocks = self.posted[-1].get("blocks", [])
         assert isinstance(blocks, list)
         assert len(blocks) > 0
 
     def test_needs_setup_has_button(self):
-        blocks = self.posted[0]["blocks"]
+        blocks = self.posted[-1]["blocks"]
         action_block = next((b for b in blocks if b.get("type") == "actions"), None)
         assert action_block is not None
         button = action_block["elements"][0]
@@ -233,7 +234,7 @@ class TestCoaMissingNote:
         )
 
         assert posted, "Expected a result card to be posted"
-        blocks = posted[0]["blocks"]
+        blocks = posted[-1]["blocks"]
         context_texts = []
         for b in blocks:
             if b.get("type") == "context":
@@ -241,6 +242,78 @@ class TestCoaMissingNote:
                     context_texts.append(el.get("text", ""))
         combined = " ".join(context_texts)
         assert "No COA" in combined or "no COA" in combined or "COA" in combined
+
+
+# --------------------------------------------------------------------------- #
+# Test: archive-only failure keeps a green success header (item 8)
+# --------------------------------------------------------------------------- #
+
+class TestArchiveFailureStillSuccessHeader:
+
+    class _RaisingArchive:
+        def archive_source(self, *a, **kw):
+            raise RuntimeError("GCS down")
+
+        def save_workbook(self, *a, **kw):
+            raise RuntimeError("GCS down")
+
+        def get_workbook(self, *a, **kw):
+            return None
+
+        def list_workbooks(self, *a, **kw):
+            return []
+
+    def _run(self):
+        client = _make_client(status="active")
+        store = _make_store(client)
+        posted: list[dict] = []
+
+        # Real temp files so archive_source's read path is exercised.
+        tmp_files = []
+        for i in range(2):
+            fd, path = tempfile.mkstemp(suffix=f"_doc{i}.pdf")
+            os.close(fd)
+            tmp_files.append(path)
+        it = iter(tmp_files)
+
+        outcome = process_shared_files(
+            channel_id="C-TEST",
+            file_ids=["F001", "F002"],
+            store=store,
+            download_fn=lambda fid: next(it),
+            upload_fn=lambda *a, **kw: None,
+            say_fn=lambda **kw: posted.append(kw),
+            pipeline_fn=lambda paths, client: _make_batch_result(n_ok=2),
+            archive=self._RaisingArchive(),
+        )
+        for p in tmp_files:
+            try:
+                os.unlink(p)
+            except FileNotFoundError:
+                pass
+        return outcome, posted
+
+    def test_header_is_green_despite_archive_failure(self):
+        outcome, posted = self._run()
+        assert outcome.status == "ok"
+        # archive failures recorded in outcome.errors (observability)…
+        assert any("archive" in e for e in outcome.errors)
+        # …but the result card header stays green (no :warning:) and shows no
+        # :x: Errors block (archive is muted context only).
+        header = posted[-1]["blocks"][0]["text"]["text"]
+        assert ":white_check_mark:" in header
+        assert ":warning:" not in header
+        combined = str(posted[-1]["blocks"])
+        assert ":x: *Errors" not in combined
+
+    def test_archive_note_surfaced_as_muted_context(self):
+        _, posted = self._run()
+        context_texts = []
+        for b in posted[-1]["blocks"]:
+            if b.get("type") == "context":
+                for el in b.get("elements", []):
+                    context_texts.append(el.get("text", ""))
+        assert any("archive" in t.lower() for t in context_texts)
 
 
 # --------------------------------------------------------------------------- #
@@ -325,15 +398,167 @@ class TestHandleFileShareGuards:
         assert calls == []
 
     def test_valid_file_share_launches_worker(self):
+        from app import slack_app
         from app.slack_app import handle_file_share
-        calls: list = []
-        with patch("app.slack_app._executor") as mock_exec:
-            mock_exec.submit.side_effect = lambda fn, **kw: calls.append(kw)
+
+        submitted: list = []
+        share_calls: list = []
+        # Capture the submitted closure; run it inline (no real thread).
+        with patch.object(slack_app._executor, "submit",
+                          side_effect=lambda fn, *a, **kw: submitted.append((fn, a, kw))), \
+             patch.object(slack_app, "run_share",
+                          side_effect=lambda **kw: share_calls.append(kw)), \
+             patch.object(slack_app, "slack_download_file", return_value="/tmp/x.pdf"):
             event = {"channel": "C-TEST", "files": [{"id": "F1"}, {"id": "F2"}]}
             handle_file_share(event, client=MagicMock(), store=_make_store(_make_client()))
-        assert len(calls) == 1
-        assert calls[0]["channel_id"] == "C-TEST"
-        assert calls[0]["file_ids"] == ["F1", "F2"]
+            # exactly one background task submitted (the document task)
+            assert len(submitted) == 1
+            fn, args, kwargs = submitted[0]
+            fn(*args, **kwargs)  # run the closure → should call run_share
+
+        assert len(share_calls) == 1
+        assert share_calls[0]["channel_id"] == "C-TEST"
+        assert share_calls[0]["file_ids"] == ["F1", "F2"]
+
+
+# --------------------------------------------------------------------------- #
+# Test: idempotency — duplicate Slack retries dispatch the worker once (item 1)
+# --------------------------------------------------------------------------- #
+
+class TestHandleFileShareIdempotency:
+
+    def _envelope(self, event_id: str) -> dict:
+        return {
+            "event_id": event_id,
+            "event": {"channel": "C-TEST", "files": [{"id": "F1"}]},
+        }
+
+    def test_duplicate_event_id_dispatched_once(self):
+        from app import slack_app
+
+        submitted: list = []
+        # Fresh seen-set so prior tests don't pollute this one.
+        with patch.object(slack_app, "_seen_events", slack_app._SeenEvents()), \
+             patch.object(slack_app._executor, "submit",
+                          side_effect=lambda fn, *a, **kw: submitted.append(fn)):
+            store = _make_store(_make_client())  # active client
+            body = self._envelope("Ev-DUP-1")
+            slack_app.handle_file_share(body, client=MagicMock(), store=store)
+            slack_app.handle_file_share(body, client=MagicMock(), store=store)
+
+        # Two identical retries → exactly one background dispatch.
+        assert len(submitted) == 1
+
+    def test_distinct_event_ids_dispatch_each(self):
+        from app import slack_app
+
+        submitted: list = []
+        with patch.object(slack_app, "_seen_events", slack_app._SeenEvents()), \
+             patch.object(slack_app._executor, "submit",
+                          side_effect=lambda fn, *a, **kw: submitted.append(fn)):
+            store = _make_store(_make_client())
+            slack_app.handle_file_share(self._envelope("Ev-A"), client=MagicMock(), store=store)
+            slack_app.handle_file_share(self._envelope("Ev-B"), client=MagicMock(), store=store)
+
+        assert len(submitted) == 2
+
+    def test_message_changed_subtype_ignored(self):
+        from app import slack_app
+
+        submitted: list = []
+        with patch.object(slack_app, "_seen_events", slack_app._SeenEvents()), \
+             patch.object(slack_app._executor, "submit",
+                          side_effect=lambda fn, *a, **kw: submitted.append(fn)):
+            body = {
+                "event_id": "Ev-CHG",
+                "event": {"channel": "C-TEST", "subtype": "message_changed",
+                          "files": [{"id": "F1"}]},
+            }
+            slack_app.handle_file_share(body, client=MagicMock(), store=_make_store(_make_client()))
+
+        assert submitted == []
+
+
+# --------------------------------------------------------------------------- #
+# Test: each background task cleans its own temp dir (item 2)
+# --------------------------------------------------------------------------- #
+
+class TestHandleFileShareTempDirCleanup:
+
+    def test_doc_task_removes_its_tmp_dir(self):
+        from app import slack_app
+
+        observed: dict = {}
+
+        def _fake_run_share(*, download_fn, **kw):
+            # Trigger a download so the task's tmp dir is created/used,
+            # and capture the dir so we can assert it's gone after the task.
+            path = download_fn("F1")
+            observed["dir"] = os.path.dirname(path)
+
+        def _fake_download(client, file_id, dest_dir):
+            # Mimic slack_download_file writing into the per-task dir.
+            p = os.path.join(dest_dir, f"{file_id}_x.pdf")
+            with open(p, "wb") as fh:
+                fh.write(b"x")
+            return p
+
+        with patch.object(slack_app, "_seen_events", slack_app._SeenEvents()), \
+             patch.object(slack_app, "run_share", _fake_run_share), \
+             patch.object(slack_app, "slack_download_file", _fake_download), \
+             patch.object(slack_app._executor, "submit",
+                          side_effect=lambda fn, *a, **kw: fn(*a, **kw)):
+            event = {"channel": "C-TEST", "files": [{"id": "F1"}]}
+            slack_app.handle_file_share(event, client=MagicMock(),
+                                        store=_make_store(_make_client()))
+
+        assert "dir" in observed
+        # The per-task tmp dir must be removed in the task's finally block.
+        assert not os.path.exists(observed["dir"])
+
+
+# --------------------------------------------------------------------------- #
+# Test: spreadsheet routing depends on client status (item 6)
+# --------------------------------------------------------------------------- #
+
+class TestHandleFileShareSpreadsheetRouting:
+
+    def _run(self, status: str):
+        from app import slack_app
+
+        coa_calls: list = []
+        share_calls: list = []
+        client = MagicMock()
+        client.token = "xoxb-fake"
+        client.files_info.return_value = {
+            "file": {"url_private_download": "https://files.slack.com/f",
+                     "name": "data.xlsx"}
+        }
+        store = _make_store(_make_client(status=status))
+
+        with patch.object(slack_app, "_seen_events", slack_app._SeenEvents()), \
+             patch.object(slack_app, "run_coa_ingest",
+                          side_effect=lambda **kw: coa_calls.append(kw)), \
+             patch.object(slack_app, "run_share",
+                          side_effect=lambda **kw: share_calls.append(kw)), \
+             patch.object(slack_app, "slack_download_file", return_value="/tmp/data.xlsx"), \
+             patch.object(slack_app._executor, "submit",
+                          side_effect=lambda fn, *a, **kw: fn(*a, **kw)):
+            event = {"channel": "C-TEST",
+                     "files": [{"id": "F1", "filetype": "xlsx", "name": "data.xlsx"}]}
+            slack_app.handle_file_share(event, client=client, store=store)
+        return coa_calls, share_calls
+
+    def test_spreadsheet_pending_coa_routes_to_coa(self):
+        coa_calls, share_calls = self._run(status="pending_coa")
+        assert len(coa_calls) == 1
+        assert len(share_calls) == 0
+
+    def test_spreadsheet_active_routes_to_document_pipeline(self):
+        coa_calls, share_calls = self._run(status="active")
+        assert len(coa_calls) == 0
+        assert len(share_calls) == 1
+        assert share_calls[0]["file_ids"] == ["F1"]
 
 
 # --------------------------------------------------------------------------- #
@@ -388,3 +613,18 @@ class TestBlockBuilders:
         blocks = result_card(n_files=0, n_processed=0, workbooks=[], errors=[])
         assert isinstance(blocks, list)
         assert len(blocks) > 0
+
+    def test_result_card_archive_notes_keep_green_header(self):
+        # Item 8: archive_notes alone must NOT amber the header or add an Errors block.
+        blocks = result_card(
+            n_files=2, n_processed=2, workbooks=["L.xlsx"], errors=[],
+            archive_notes=["archive workbook L.xlsx: GCS down"],
+        )
+        header = blocks[0]["text"]["text"]
+        assert ":white_check_mark:" in header
+        assert ":warning:" not in header
+        # muted context line present
+        ctx = [b for b in blocks if b.get("type") == "context"]
+        assert any("archive" in str(b).lower() for b in ctx)
+        # no :x: Errors block
+        assert ":x: *Errors" not in str(blocks)

@@ -127,6 +127,95 @@ Note the deployed URL, e.g. `https://ledgr-slack-xxxx-as.a.run.app`.
 
 ---
 
+## Multi-workspace (OAuth distribution)
+
+The single-workspace setup above installs the bot into one workspace with a fixed
+bot token. To let **many** client workspaces install Ledgr themselves, run it in
+OAuth distribution mode. Each install stores its own per-team token in Firestore;
+Bolt resolves the right token per request automatically, so no per-client config
+or redeploy is needed.
+
+| Variable | Where to get it | Required for |
+|---|---|---|
+| `SLACK_CLIENT_ID` | Basic Information → App Credentials → Client ID | OAuth distribution |
+| `SLACK_CLIENT_SECRET` | Basic Information → App Credentials → Client Secret | OAuth distribution |
+| `SLACK_SIGNING_SECRET` | Basic Information → App Credentials → Signing Secret | OAuth distribution |
+| `SLACK_BASE_URL` | Public https base of your deployment (Cloud Run URL) | OAuth distribution |
+| `SLACK_OAUTH_STATE_SECRET` | Any random secret you generate | OAuth distribution |
+
+When all of `SLACK_CLIENT_ID`, `SLACK_CLIENT_SECRET`, `SLACK_SIGNING_SECRET`, and
+`SLACK_BASE_URL` are set, the app starts in OAuth mode and exposes the install
+routes `GET /slack/install` and `GET /slack/oauth_redirect` (in addition to
+`POST /slack/events`). With any of them missing it falls back to single-workspace
+HTTP mode.
+
+### Steps
+
+1. **Deploy to Cloud Run** and note the URL:
+   ```bash
+   gcloud run deploy ledgr \
+     --source . \
+     --region asia-southeast1 \
+     --allow-unauthenticated
+   ```
+   The deployed URL looks like `https://ledgr-xxxx-as.a.run.app`.
+
+2. **Configure the Slack app from the distribution manifest.** Use
+   [`slack/manifest-distributed.json`](../slack/manifest-distributed.json) and
+   replace every `https://YOUR_CLOUD_RUN_URL` placeholder with your Cloud Run URL.
+   This manifest has Socket Mode **off**, sets the event/interactivity/command
+   request URLs to `/slack/events`, and registers the OAuth redirect URL
+   `…/slack/oauth_redirect`.
+
+3. **Copy the OAuth credentials.** From **Basic Information → App Credentials**,
+   copy the Client ID and Client Secret into `SLACK_CLIENT_ID` /
+   `SLACK_CLIENT_SECRET`. Set `SLACK_BASE_URL=https://<cloud-run-url>` and a random
+   `SLACK_OAUTH_STATE_SECRET` (e.g. `python -c "import secrets;print(secrets.token_hex(32))"`).
+
+4. **Set those as Cloud Run env vars / Secret Manager and redeploy** so the
+   running service picks them up:
+   ```bash
+   gcloud run deploy ledgr \
+     --source . \
+     --region asia-southeast1 \
+     --allow-unauthenticated \
+     --set-env-vars "SLACK_CLIENT_ID=…,SLACK_CLIENT_SECRET=…,SLACK_SIGNING_SECRET=…,SLACK_BASE_URL=https://<cloud-run-url>,SLACK_OAUTH_STATE_SECRET=…,PROJECT_ID=…,LOCATION=asia-southeast1"
+   ```
+   (Store the secrets in Secret Manager and reference them with `--set-secrets`
+   in production.)
+
+4b. **REQUIRED — grant the Cloud Run runtime service account Firestore + GCS access.**
+   Without this, `/slack/install` returns **500** (`PermissionDenied` when it writes the
+   OAuth state + per-team installation to Firestore) and document archiving fails. Find the
+   service account (`gcloud run services describe ledgr --region asia-southeast1
+   --format='value(spec.template.spec.serviceAccountName)'`; the default is
+   `<PROJECT_NUMBER>-compute@developer.gserviceaccount.com`), then:
+   ```bash
+   SA=<PROJECT_NUMBER>-compute@developer.gserviceaccount.com
+   gcloud projects add-iam-policy-binding <PROJECT_ID> \
+     --member="serviceAccount:$SA" --role="roles/datastore.user" --condition=None
+   gcloud storage buckets add-iam-policy-binding gs://<BUCKET> \
+     --member="serviceAccount:$SA" --role="roles/storage.objectAdmin"
+   ```
+   IAM takes ~1–2 min to propagate (no redeploy needed). **Best practice:** deploy with a
+   dedicated least-privilege `app_sa` (`--service-account`) instead of the default compute SA.
+
+5. **Activate public distribution.** In the Slack app under **Manage
+   Distribution**, complete the checklist and click **Activate Public
+   Distribution**.
+
+6. **Client install flow.** A client installs Ledgr by visiting
+   `https://<cloud-run-url>/slack/install` → **Allow**. Slack redirects back to
+   `…/slack/oauth_redirect`, the per-team token is saved to Firestore, and they
+   can then run `/ledgr settings` (or the **Set up** button) and drop documents
+   in their channel — no further configuration required.
+
+> **Local dev without Cloud Run.** Start a tunnel (e.g. `ngrok http 8080`) and use
+> the tunnel URL as `SLACK_BASE_URL`, and as the request/redirect URLs in the
+> manifest. The OAuth flow then works against your local server.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -135,4 +224,6 @@ Note the deployed URL, e.g. `https://ledgr-slack-xxxx-as.a.run.app`.
 | `invalid_auth` from Slack | Check that `SLACK_BOT_TOKEN` starts with `xoxb-` and was copied in full |
 | Bot joins channel but does nothing | Ensure `message.channels` / `message.groups` events are enabled in the manifest |
 | Cloud Run returns 403 on `/slack/events` | Slack signature verification failed — check `SLACK_SIGNING_SECRET` |
-| Firestore permission denied | Ensure the Cloud Run service account has the **Cloud Datastore User** role |
+| Firestore permission denied | Ensure the Cloud Run service account has the **Cloud Datastore User** role (see step 4b) |
+| `/slack/install` returns **500** | The runtime SA is missing `roles/datastore.user` — do step 4b, wait ~1–2 min for IAM to propagate |
+| Document uploaded but never archived | The runtime SA is missing `roles/storage.objectAdmin` on the bucket — do step 4b |

@@ -190,3 +190,37 @@ class TestInMemoryClientStoreFromSetupDir:
 
         assert ctx is not None
         assert len(ctx.coa) == 2
+
+
+# --------------------------------------------------------------------------- #
+# Item 7: save_coa REPLACE semantics (InMemory)
+# --------------------------------------------------------------------------- #
+
+def _rows(n: int) -> list[dict]:
+    return [
+        {"code": f"{i}-000", "description": f"Acct {i}", "account_type": "Asset",
+         "financial_statement": "Balance Sheet", "nature": "Debit", "keywords": ""}
+        for i in range(n)
+    ]
+
+
+class TestInMemorySaveCoaReplaces:
+    def _store(self):
+        store = InMemoryClientStore()
+        store.save_profile({
+            "client_id": "cli-replace",
+            "channel_id": "C-REP",
+            "fye_month": 12,
+            "status": "pending_coa",
+        })
+        return store
+
+    def test_reupload_replaces_not_appends(self):
+        store = self._store()
+        store.save_coa("cli-replace", _rows(5))
+        assert len(store.get("cli-replace").coa) == 5
+        # Re-upload a smaller 2-row COA — must REPLACE, leaving exactly 2.
+        store.save_coa("cli-replace", _rows(2))
+        ctx = store.get("cli-replace")
+        assert len(ctx.coa) == 2
+        assert [a.code for a in ctx.coa] == ["0-000", "1-000"]

@@ -1,0 +1,36 @@
+# Keep the Cloud Run build context small + NEVER bake secrets into the image.
+# Runtime needs: app/, invoice_processing/, pyproject.toml, uv.lock, README.md.
+
+# Secrets — must never be copied into the image (set as Cloud Run env vars instead)
+.env
+.env.*
+
+# Virtualenv / VCS / caches (huge or irrelevant)
+.venv/
+.git/
+.gitignore
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+*.egg-info/
+
+# Not needed at runtime
+tests/
+docs/
+eval/
+scripts/
+agent_pattern.png
+*.png
+*.ipynb
+
+# Tooling / local state
+.omc/
+.claude/
+.DS_Store
+.idea/
+.vscode/

@@ -19,7 +19,7 @@ Firestore layout (spec §1 — 2026-06-12):
   clients/{client_id}/entity_memory/{n}-> { name, reg_no, mapping_code, role, tax_code }
   channels/{channel_id}        -> { client_id }     # reverse index: channel -> client
 
-Client Setup workbook schema (verified against real Cast Unity files):
+Client Setup workbook schema (verified against a sample client's files):
 - ``COA``: ``Account code | Description | Account type | Financial Statement | Nature |
   AI Search Keywords``. In SG/QBS files ``Account code`` is blank — the account is keyed
   by ``Description``; in MY files it is a code like ``200-010``.
@@ -392,6 +392,8 @@ class InMemoryClientStore:
         ctx = self._by_id.get(client_id)
         if ctx is None:
             return
+        # REPLACE semantics: a re-upload fully supersedes any prior COA.
+        ctx.coa.clear()
         for row in coa_rows:
             ctx.coa.append(CoaAccount(
                 code=row.get("code"),
@@ -639,9 +641,19 @@ class FirestoreClientStore:
         db.collection("channels").document(channel_id).set({"client_id": client_id})
 
     def save_coa(self, client_id: str, coa_rows: list[dict]) -> None:
-        """Write each COA row into ``clients/{client_id}/coa/{i}``."""
+        """REPLACE the COA: delete every existing ``coa/{n}`` doc, then write the
+        new rows by index.
+
+        Writing by index without first clearing orphans higher-index docs when a
+        smaller COA replaces a larger one (e.g. a 5-row COA replaced by 2 rows
+        would leave docs 2,3,4 behind). Streaming + deleting first guarantees the
+        subcollection holds exactly the new rows.
+        """
         db = self._firestore()
         coa_col = db.collection(self._collection).document(client_id).collection("coa")
+        # Delete existing docs first (REPLACE, not append/orphan).
+        for snap in coa_col.stream():
+            snap.reference.delete()
         for i, row in enumerate(coa_rows):
             coa_col.document(str(i)).set(row)
 
