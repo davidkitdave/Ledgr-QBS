@@ -536,7 +536,11 @@ def profile_summary_blocks(profile: dict) -> list:
     """Confirmation card summarising the client profile that was just registered."""
     name = profile.get("client_name") or "(unnamed client)"
     software = profile.get("accounting_software") or "—"
-    fye_num = profile.get("fye_month")
+    raw = profile.get("fye_month")
+    try:
+        fye_num = int(raw) if raw not in (None, "") else None
+    except (TypeError, ValueError):
+        fye_num = None
     fye = next((n for num, n in _MONTHS if num == fye_num), "—")
     gst = "GST-registered" if profile.get("gst_registered") else "Not GST-registered"
     return [

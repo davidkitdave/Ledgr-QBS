@@ -384,3 +384,35 @@ def test_profile_summary_shows_all_registered_fields():
     assert "October" in text          # fye_month 10 -> month name
     assert "Not GST-registered" in text
 
+
+def test_profile_summary_positive_gst_case():
+    blocks = profile_summary_blocks({
+        "client_name": "X Ltd",
+        "accounting_software": "QBS Ledger",
+        "fye_month": 12,
+        "gst_registered": True,
+    })
+    text = _flat_text(blocks)
+    assert "GST-registered" in text
+    assert "Not GST-registered" not in text
+    assert "December" in text
+
+
+def test_profile_summary_falls_back_for_missing_fields():
+    blocks = profile_summary_blocks({})
+    text = _flat_text(blocks)
+    assert "(unnamed client)" in text
+    assert "—" in text  # software + FYE both fall back
+    assert "Not GST-registered" in text  # falsy default
+
+
+def test_profile_summary_accepts_string_fye_month():
+    blocks = profile_summary_blocks({
+        "client_name": "X Ltd",
+        "accounting_software": "Xero",
+        "fye_month": "10",  # string variant
+        "gst_registered": False,
+    })
+    text = _flat_text(blocks)
+    assert "October" in text
+

@@ -272,6 +272,15 @@ class TestHandleOnboardingSubmit:
         assert "Xero" in joined
         assert "Profile saved" in joined  # the COA prompt still follows
 
+        # explicit ordering: summary card MUST be posted first, COA prompt second
+        first_text = " ".join(
+            b.get("text", {}).get("text", "")
+            for b in client.posted_messages[0].get("blocks", [])
+            if isinstance(b.get("text"), dict)
+        )
+        assert "Client registered" in first_text
+        assert "Profile saved" not in first_text
+
 
 # --------------------------------------------------------------------------- #
 # build_app
