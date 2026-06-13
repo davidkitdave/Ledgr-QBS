@@ -552,6 +552,9 @@ def invoice_edit_modal(op_id: str, lines: list[dict], coa_options: list[tuple[st
     tax_opts = [{"text": {"type": "plain_text", "text": t}, "value": t}
                 for t in ("SR", "ZR", "ES", "TX", "OS")]
     blocks: list = []
+    # Modal exposes the subset of nodes.EDITABLE_LINE_FIELDS that users can
+    # actually correct in-place (account_code/tax_code/amount). The line
+    # description is shown read-only as the section header above each group.
     for i, ln in enumerate(lines):
         blocks.append({"type": "section",
                        "text": {"type": "mrkdwn", "text": f"*Line {i + 1}: {ln.get('description', '')}*"}})

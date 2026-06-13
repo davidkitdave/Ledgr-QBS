@@ -513,3 +513,19 @@ class TestInvoiceEditModal:
         inputs = [b for b in view["blocks"] if b.get("type") == "input"]
         assert len(inputs) >= 3
 
+    def test_block_id_encoding_uses_acct_tax_amt_prefixes(self):
+        """Lock the block_id encoding so the modal builder and ``_edits_from_view_state`` stay in sync."""
+        view = invoice_edit_modal(
+            op_id="OP1",
+            lines=[
+                {"description": "Room", "account_code": "6010", "tax_code": "SR", "amount": 51.49},
+                {"description": "Tax", "account_code": None, "tax_code": "ZR", "amount": 3.60},
+            ],
+            coa_options=[("6010", "6010 — Travel")],
+        )
+        input_block_ids = [b["block_id"] for b in view["blocks"] if b.get("type") == "input"]
+        assert input_block_ids == [
+            "acct_0", "tax_0", "amt_0",
+            "acct_1", "tax_1", "amt_1",
+        ]
+

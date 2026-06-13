@@ -478,6 +478,204 @@ def test_reject_action_resumes_without_appending():
 
 
 # =========================================================================== #
+# Task 7: Edit action + view_submission handlers (modal-based per-line edits)
+# =========================================================================== #
+
+
+class _FakeActionViewRunner:
+    """Minimal Runner for Edit-modal tests: app_name + session_service stub."""
+
+    def __init__(self, app_name="acc", session_service=None):
+        self.app_name = app_name
+        self.session_service = session_service
+
+
+class _FakeSessionSvc:
+    """In-memory session service stub keyed by (user_id, session_id)."""
+
+    def __init__(self, sessions):
+        self._sessions = sessions
+
+    async def get_session(self, *, app_name, user_id, session_id):
+        return self._sessions.get((user_id, session_id))
+
+
+def _capture_hitl_handlers(runner_mock=None, ledger_store_mock=None, db_mock=None):
+    """Build the Bolt app with fakes and capture the ``edit`` action + ``ledgr_invoice_edit`` view.
+
+    Mirrors ``_capture_message_handler`` but for the action/view decorators. The
+    fake app records registered actions/views in a dict keyed by their first
+    positional argument (the action_id or callback_id), so callers can retrieve
+    the actual coroutine that ``build_async_app`` registered.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from app.slack_app import _SeenEvents
+    from accounting_agents import slack_runner
+
+    registered = {"actions": {}, "views": {}}
+
+    def action_decorator(action_id, *a, **k):
+        def decorator(fn):
+            registered["actions"][action_id] = fn
+            return fn
+        return decorator
+
+    def view_decorator(callback_id, *a, **k):
+        def decorator(fn):
+            registered["views"][callback_id] = fn
+            return fn
+        return decorator
+
+    fake_app = MagicMock()
+    fake_app.event = lambda *a, **k: (lambda fn: fn)
+    fake_app.action = action_decorator
+    fake_app.view = view_decorator
+    fake_app.command = lambda *a, **k: (lambda fn: fn)
+
+    fresh_seen = _SeenEvents()
+    rm = runner_mock or _FakeActionViewRunner()
+
+    with patch.object(slack_runner, "_seen", fresh_seen), \
+         patch("slack_bolt.async_app.AsyncApp", return_value=fake_app), \
+         patch("invoice_processing.export.client_context.InMemoryClientStore"):
+        build_async_app(
+            runner=rm,
+            ledger_store=ledger_store_mock or MagicMock(),
+            db=db_mock or MagicMock(),
+        )
+
+    return registered["actions"]["edit"], registered["views"]["ledgr_invoice_edit"]
+
+
+def test_edit_action_opens_invoice_modal_with_proposed_lines():
+    """Clicking Edit MUST call views_open with a well-formed modal (callback_id + op_id).
+
+    The modal body is pre-filled from the paused session's normalized invoice
+    lines + COA, so the user can correct the fields in-place before resubmitting.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from accounting_agents import slack_runner
+
+    db = FakeFirestore()
+    # Seed the HITL interrupt correlation doc so the handler can read session state.
+    write_interrupt(
+        db, "OP1", session_id="S-OP1", channel_id="C-OP1", slack_file_id="F-OP1", message_ts="1.1",
+    )
+
+    # Seed a paused session whose state the Edit modal reads to pre-fill lines.
+    paused_session = _FakeSession({
+        nodes.NORMALIZED_KEY: [
+            {
+                "lines": [
+                    {"description": "Room", "account_code": "6010", "tax_code": "SR", "amount": 51.49},
+                    {"description": "Tax", "account_code": None, "tax_code": "ZR", "amount": 3.60},
+                ]
+            }
+        ],
+        "coa": [{"code": "6010", "description": "Travel"}],
+    })
+    session_svc = _FakeSessionSvc({("C-OP1", "S-OP1"): paused_session})
+
+    # Recording fake for the sync WebClient that build_async_app instantiates.
+    sync_client = MagicMock()
+    with patch("slack_sdk.WebClient", return_value=sync_client):
+        edit_handler, _ = _capture_hitl_handlers(
+            runner_mock=_FakeActionViewRunner(session_service=session_svc),
+            db_mock=db,
+        )
+
+    body = {
+        "actions": [{"action_id": "edit", "value": "OP1"}],
+        "trigger_id": "T-EDIT-1",
+        "channel": {"id": "C-OP1"},
+    }
+
+    with patch.object(slack_runner, "read_interrupt") as mock_read, \
+         patch.object(slack_runner, "_read_session_state", AsyncMock(return_value=paused_session.state)):
+        # Make read_interrupt return our seeded doc.
+        mock_read.return_value = {
+            "op_id": "OP1", "user_id": "C-OP1", "session_id": "S-OP1", "channel_id": "C-OP1",
+        }
+        ack = AsyncMock()
+        bolt_client = MagicMock()
+        asyncio.run(edit_handler(ack=ack, body=body, client=bolt_client))
+
+    # The handler MUST ack (within Bolt's 3s window) before opening the modal.
+    ack.assert_awaited_once()
+
+    # views_open was called with trigger_id + a modal carrying the right IDs.
+    sync_client.views_open.assert_called_once()
+    kwargs = sync_client.views_open.call_args.kwargs
+    assert kwargs["trigger_id"] == "T-EDIT-1"
+    view = kwargs["view"]
+    assert view["callback_id"] == "ledgr_invoice_edit"
+    assert view["private_metadata"] == "OP1"
+    # The modal blocks must include the proposed-line prefill (one input group per line).
+    inputs = [b for b in view["blocks"] if b.get("type") == "input"]
+    assert len(inputs) == 6  # 2 lines × (acct + tax + amt)
+
+
+def test_edit_submit_invokes_handle_approval_action_with_parsed_edits():
+    """Submitting the Edit modal MUST call handle_approval_action(decision="edit", edits=...).
+
+    Seats a recorder on ``handle_approval_action``, drives the view handler with
+    a realistic ``view_submission`` body (private_metadata + state.values), and
+    asserts the recorder was called with op_id, decision="edit", and edits
+    parsed from the ``acct_<i>`` / ``tax_<i>`` / ``amt_<i>`` block_ids.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from accounting_agents import slack_runner
+
+    db = FakeFirestore()
+
+    edit_handler, edit_submit_handler = _capture_hitl_handlers(db_mock=db)
+
+    # Build a view_submission body with two edited lines.
+    body = {
+        "view": {
+            "callback_id": "ledgr_invoice_edit",
+            "private_metadata": "OP-SUBMIT-1",
+            "state": {
+                "values": {
+                    "acct_0": {"v": {"selected_option": {"value": "6200"}}},
+                    "tax_0": {"v": {"selected_option": {"value": "ZR"}}},
+                    "amt_0": {"v": {"value": "99.95"}},
+                    "acct_1": {"v": {"selected_option": {"value": "6010"}}},
+                    "tax_1": {"v": {"selected_option": {"value": "SR"}}},
+                    "amt_1": {"v": {"value": "12.00"}},
+                }
+            },
+        }
+    }
+
+    # Record calls to handle_approval_action without actually resuming a workflow.
+    # AsyncMock auto-awaits when patched over an `async def` function.
+    recorder = AsyncMock(return_value={"status": "resumed"})
+
+    with patch.object(slack_runner, "handle_approval_action", recorder):
+        ack = AsyncMock()
+        bolt_client = MagicMock()
+        asyncio.run(edit_submit_handler(ack=ack, body=body, client=bolt_client))
+
+    # Bolt ack must be called within 3s.
+    ack.assert_awaited_once()
+    recorder.assert_called_once()
+    call = recorder.call_args
+    assert call.kwargs["op_id"] == "OP-SUBMIT-1"
+    assert call.kwargs["decision"] == "edit"
+    edits = call.kwargs["edits"]
+    assert edits == {
+        "lines": [
+            {"index": 0, "account_code": "6200", "tax_code": "ZR", "amount": 99.95},
+            {"index": 1, "account_code": "6010", "tax_code": "SR", "amount": 12.0},
+        ]
+    }
+
+
+# =========================================================================== #
 # Stage detection + live status message
 # =========================================================================== #
 

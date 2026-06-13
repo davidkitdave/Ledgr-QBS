@@ -1010,6 +1010,8 @@ def build_async_app(
 
     @async_app.action("edit")
     async def _edit(ack, body, client):
+        # The gate's RequestInput only accepts the schema-validated ApproveDecision;
+        # per-line edits require a Block-Kit modal where the user can correct fields.
         # Edit opens a per-line modal pre-filled with the proposed extraction.
         # We must ack() immediately (<3s) and then synchronously call views_open
         # with the trigger_id (Slack invalidates it after a few seconds).
@@ -1022,6 +1024,8 @@ def build_async_app(
             await _read_session_state(runner, app_name, interrupt)
             if interrupt else {}
         )
+        # Single-invoice assumption (Task 6's apply_decision_node logs a WARNING
+        # when len(invs) > 1 — modal mirrors the same per-doc-session contract).
         invs = state.get(nodes.NORMALIZED_KEY) or [{}]
         lines = invs[0].get("lines") or []
         coa_options = [
@@ -1037,6 +1041,8 @@ def build_async_app(
     async def _edit_submit(ack, body, client):
         await ack()
         view = body["view"]
+        # Empty op_id falls through to handle_approval_action which logs and no-ops
+        # (matches the approve/reject convention in app/slack_app.py).
         op_id = view.get("private_metadata") or ""
         edits = _edits_from_view_state(view)
         await handle_approval_action(
