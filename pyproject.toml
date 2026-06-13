@@ -13,7 +13,7 @@ authors = [
 ]
 
 dependencies = [
-    "google-adk>=1.0.0",
+    "google-adk>=2.0.0,<3.0.0",
     "google-cloud-aiplatform>=1.38.0",
     "vertexai>=1.38.0",
     "pydantic>=2.8.0",
@@ -51,6 +51,12 @@ dev = [
 [tool.pytest.ini_options]
 # Only collect the test suite — keep pytest out of scripts/ and sample dirs.
 testpaths = ["tests"]
+# The agents-cli scaffold dropped integration/e2e + eval stubs under tests/.
+# They make live LLM calls and boot a FastAPI server (creds + deploy wiring
+# required), so they are kept OUT of the default fast unit loop. Run them
+# deliberately: `uv run pytest tests/integration` (with creds + server) or
+# `agents-cli eval` for tests/eval.
+addopts = "--ignore=tests/integration --ignore=tests/eval"
 
 [tool.agent_packs]
 template = "adk"

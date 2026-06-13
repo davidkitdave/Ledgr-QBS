@@ -18,6 +18,8 @@ venv/
 # Tooling / local state
 .omc/
 .claude/settings.local.json
+.adk/
+**/.adk/
 .DS_Store
 *.log
 
