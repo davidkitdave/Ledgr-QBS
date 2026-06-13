@@ -31,6 +31,7 @@ State-key / artifact-filename convention (hand this to the Slack + graph tasks):
 
 from __future__ import annotations
 
+import logging
 from datetime import date
 from typing import Any, Callable, Literal, Optional
 
@@ -69,6 +70,8 @@ from invoice_processing.extract.invoice_extractor import (
 
 from .config import MODEL_LITE, MODEL_STD
 
+logger = logging.getLogger(__name__)
+
 # --------------------------------------------------------------------------- #
 # State-key + artifact-filename convention (shared with Slack + graph tasks)
 # --------------------------------------------------------------------------- #
@@ -102,6 +105,9 @@ APPROVAL_CONFIDENCE_THRESHOLD = 0.7
 
 #: State key recording the gate's outcome ("auto_approved" | the human decision).
 APPROVAL_STATUS_KEY = "approval_status"
+
+#: Fields on an invoice line that the HITL Edit flow may overwrite.
+EDITABLE_LINE_FIELDS: tuple[str, ...] = ("account_code", "tax_code", "amount", "description")
 
 
 class ApproveDecision(BaseModel):
@@ -285,10 +291,31 @@ async def extract_bank_node(ctx) -> Event:
 async def apply_decision_node(ctx, node_input=None) -> Event:
     """Apply the human's ApproveDecision (resume node_input) to the run state.
 
-    Auto-approved runs pass ``node_input=None`` and fall straight through. On
-    ``edit`` the per-line corrections are written onto ``state[NORMALIZED_KEY]``
-    before routing/consolidation; on ``reject`` the invoices are cleared so the
-    consolidate/deliver spine produces nothing.
+    The node has three observable branches, distinguished in
+    ``state[APPROVAL_STATUS_KEY]`` for audit:
+
+    * **Auto-approved** (no HITL): ``node_input`` is ``None`` or has no
+      ``decision`` key. The node returns immediately and does NOT touch
+      ``state`` — :data:`APPROVAL_STATUS_KEY` stays unset (the ``approval_gate``
+      sets it to ``"auto_approved"`` itself in this case).
+    * **Approve** (human hit Approve): records ``APPROVAL_STATUS_KEY='approve'``
+      and leaves ``state[NORMALIZED_KEY]`` unchanged. The audit trail can
+      therefore distinguish a human-click approval from an auto-approval even
+      though both pass the invoices through to the consolidate/deliver spine.
+    * **Edit** (human edited one or more lines): records
+      ``APPROVAL_STATUS_KEY='edit'`` and mutates ``invoices[0]['lines']`` in
+      place. **Single-invoice assumption:** the spine pauses once per session
+      and a session holds at most one document, so ``len(invoices) == 1`` is
+      the expected shape. Multi-invoice bundles per pause are OUT OF SCOPE for
+      this node because the current HITL DTO (see :class:`ApproveDecision`)
+      carries no ``invoice_index`` field. If extraction ever fans out into >1
+      invoice during a HITL pause, this node logs a WARNING and still applies
+      edits to ``invoices[0]`` only — the other invoice(s) are left unchanged.
+      Adding an ``invoice_index`` to the edit DTO is a forward-compatible API
+      change that should be coordinated with the Task 7 modal builder.
+    * **Reject**: records ``APPROVAL_STATUS_KEY='reject'`` and clears
+      ``state[NORMALIZED_KEY]`` so the consolidate/deliver spine produces
+      nothing.
 
     Inserted between ``approval_gate`` and ``route_node`` so ADK delivers the
     resume ``ApproveDecision`` (the user's response to the ``RequestInput``) as
@@ -309,12 +336,18 @@ async def apply_decision_node(ctx, node_input=None) -> Event:
     if choice == "edit":
         edits = (decision.get("edits") or {}).get("lines") or []
         invoices = ctx.state.get(NORMALIZED_KEY) or []
+        if len(invoices) > 1:
+            logger.warning(
+                "apply_decision_node: edit DTO has no invoice_index; "
+                "applying %d edits to invoices[0] only — %d other invoice(s) unchanged",
+                len(edits), len(invoices) - 1,
+            )
         if invoices:
             lines = invoices[0].get("lines") or []
             for e in edits:
                 i = e.get("index")
                 if isinstance(i, int) and 0 <= i < len(lines):
-                    for field in ("account_code", "tax_code", "amount", "description"):
+                    for field in EDITABLE_LINE_FIELDS:
                         if e.get(field) is not None:
                             lines[i][field] = e[field]
             ctx.state[NORMALIZED_KEY] = invoices
