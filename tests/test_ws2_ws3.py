@@ -99,6 +99,34 @@ class TestXeroTotalPerLine:
 # WS3 — QBS unchanged + header order matches the demo templates
 # =========================================================================== #
 
+class TestXeroUnitAmountTiesOnDiscount:
+    """*UnitAmount = effective (post-discount) amount so Qty×UnitAmount = line net."""
+
+    def test_unit_amount_uses_net_not_sticker(self):
+        inv = NormalizedInvoice(
+            doc_type="purchase",
+            invoice_number="INV-D",
+            invoice_date=date(2025, 1, 15),
+            currency="USD",
+            supplier=PartyInfo(name="Gymsales Software Pty Ltd"),
+            doc_total=220.0,
+            lines=[
+                # sticker 275, discounted to 220
+                InvoiceLine(description="Essential", quantity=1, unit_amount=275.0,
+                            net_amount=220.0, gst_amount=0.0, account_code="6-4500"),
+                # sticker 150, 100% discount -> 0
+                InvoiceLine(description="Stand Alone App", quantity=1, unit_amount=150.0,
+                            net_amount=0.0, gst_amount=0.0, account_code="6-4500"),
+            ],
+        )
+        rows = XeroLedgerExporter().rows([inv], "purchase")
+        units = [float(r["*UnitAmount"]) for r in rows]
+        qtys = [float(r["*Quantity"]) for r in rows]
+        assert units == [220.0, 0.0]                                  # net/qty, not sticker
+        assert sum(q * u for q, u in zip(qtys, units)) == 220.0       # ties to the line nets
+        assert all(float(r["Total"]) == 220.0 for r in rows)         # invoice total per row
+
+
 class TestQbsExporterUnchanged:
     def test_per_line_total_is_net_plus_tax(self):
         """QBS Total Amount stays per-line net+tax (NOT the invoice total)."""

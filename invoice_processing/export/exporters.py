@@ -214,9 +214,14 @@ class XeroLedgerExporter(LedgerExporter):
         party = inv.counterparty
         tax_type = self.clf.tax_code(line.tax_treatment, inv.doc_type, "xero")
         qty = line.quantity if line.quantity is not None else 1
-        unit = line.unit_amount
-        if unit is None and line.net_amount is not None:
+        # *UnitAmount must satisfy Quantity × UnitAmount = the line's post-discount net,
+        # so the invoice ties out on Xero import. Prefer the effective amount derived from
+        # net_amount; the raw unit_amount is the pre-discount sticker price and over-states
+        # discounted lines. Fall back to unit_amount only when net_amount is absent.
+        if line.net_amount is not None:
             unit = line.net_amount / qty if qty else line.net_amount
+        else:
+            unit = line.unit_amount
         return {
             "*ContactName": party.name or "",
             "POCountry": party.country or "",
