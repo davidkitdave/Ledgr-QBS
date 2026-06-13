@@ -33,7 +33,7 @@ def parse_ledgr_command(text: str | None) -> LedgrCommand:
     sub = tokens[0]
     args = tokens[1:]
 
-    if sub in ("settings", "export", "help"):
+    if sub in ("settings", "export", "help", "profile"):
         return LedgrCommand(subcommand=sub, args=args)
 
     # unknown subcommand -> help

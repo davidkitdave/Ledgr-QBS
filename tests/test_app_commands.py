@@ -123,6 +123,10 @@ class TestParseLedgrCommand:
         cmd = parse_ledgr_command("export")
         assert cmd.subcommand == "export"
 
+    def test_parse_profile_subcommand(self):
+        from app.commands import parse_ledgr_command
+        assert parse_ledgr_command("profile").subcommand == "profile"
+
     def test_bogus_returns_help(self):
         cmd = parse_ledgr_command("bogus")
         assert cmd.subcommand == "help"
@@ -345,6 +349,67 @@ class TestHandleLedgrCommandHelp:
         client = FakeClient()
         handle_ledgr_command(FakeAck(), _ledgr_body("help", channel_id="C-XYZ"), client, InMemoryClientStore())
         assert client.posted_messages[0]["channel"] == "C-XYZ"
+
+
+class TestHandleLedgrCommandProfile:
+
+    def test_acks(self):
+        store = InMemoryClientStore()
+        ack = FakeAck()
+        handle_ledgr_command(ack, _ledgr_body("profile"), FakeClient(), store)
+        assert ack.called
+
+    def test_ledgr_profile_posts_summary(self):
+        from app.slack_app import handle_ledgr_command
+        from invoice_processing.export.client_context import ClientContext
+
+        posted = []
+
+        class _Client:
+            def chat_postMessage(self, **kw): posted.append(kw)
+
+        class _Store:
+            def get_by_channel(self, cid):
+                return ClientContext(
+                    client_id="CL-1",
+                    client_name="Auditair International Pte. Ltd.",
+                    accounting_software="Xero",
+                    fye_month=10,
+                    tax_registered=False,
+                )
+
+        handle_ledgr_command(
+            ack=lambda: None,
+            body={"channel_id": "C1", "text": "profile"},
+            client=_Client(),
+            store=_Store(),
+        )
+        joined = " ".join(
+            blk.get("text", {}).get("text", "")
+            for call in posted
+            for blk in call.get("blocks", [])
+            if isinstance(blk.get("text"), dict)
+        )
+        assert "Auditair International Pte. Ltd." in joined and "Xero" in joined
+
+    def test_ledgr_profile_no_client_posts_guidance(self):
+        from app.slack_app import handle_ledgr_command
+
+        posted = []
+
+        class _Client:
+            def chat_postMessage(self, **kw): posted.append(kw)
+
+        handle_ledgr_command(
+            ack=lambda: None,
+            body={"channel_id": "C-EMPTY", "text": "profile"},
+            client=_Client(),
+            store=InMemoryClientStore(),
+        )
+        assert len(posted) == 1
+        text = posted[0].get("text", "")
+        assert "settings" in text
+        assert "blocks" not in posted[0] or posted[0]["blocks"] is None
 
 
 # --------------------------------------------------------------------------- #

@@ -419,6 +419,7 @@ def ledgr_help_blocks() -> list:
                 "text": (
                     "*Ledgr slash commands*\n"
                     "*/ledgr settings* — edit this client's profile\n"
+                    "*/ledgr profile* — show this client's registered profile\n"
                     "*/ledgr export* — re-send the latest ledger\n"
                     "*/ledgr help* — show this message"
                 ),
