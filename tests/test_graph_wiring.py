@@ -191,6 +191,11 @@ def test_placeholder_spine_invoice_pass_reaches_deliver():
         nodes.DIRECTION_KEY: "purchase",
         "client_id": "test-client",
         "fye_month": 3,
+        # consolidate_node no longer falls back silently to "qbs" when software
+        # is missing — the runner seeds it from the per-channel client profile
+        # in production. This unit test drives consolidate_node directly, so we
+        # seed the state explicitly to keep it self-contained.
+        "software": "qbs",
         nodes.NORMALIZED_KEY: [
             {
                 "doc_type": "purchase",

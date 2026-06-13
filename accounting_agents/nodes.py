@@ -455,7 +455,7 @@ async def consolidate_node(ctx) -> Event:
     routes = state.get(ROUTES_KEY) or []
     doc_type = (state.get(DOC_TYPE_KEY) or "").strip().lower()
     client_id = state.get("client_id") or "unknown"
-    software = state.get("software") or "qbs"
+    software = state.get("software")  # seeded by the runner; get_exporter raises if missing
 
     # Representative FY for the run (the workbook is per-FY); take the first route.
     fy = str(routes[0]["fy"]) if routes else "unknown"

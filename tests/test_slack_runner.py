@@ -145,6 +145,95 @@ def _ledger_payload(sheet="Purchase", doc_key="F1:Purchase:INV-1"):
     }
 
 
+# --------------------------------------------------------------------------- #
+# Test fixture: a Firestore-backed client store with a known QBS profile so
+# process_file_event's soft-gate lets the run proceed.
+# --------------------------------------------------------------------------- #
+_TEST_PROFILE: dict = {
+    "client_id": "c1",
+    "client_name": "Test Client",
+    "fye_month": 12,
+    "accounting_software": "QBS Ledger",
+    "gst_registered": True,
+    "region": "SINGAPORE",
+    "base_currency": "SGD",
+    "status": "active",
+}
+
+
+def _seeded_client_store(db: FakeFirestore, channel_id: str = "C1",
+                        client_id: str = "c1") -> "FirestoreClientStore":
+    """Write a minimal QBS client profile + channel reverse-index into ``db``
+    and return a :class:`FirestoreClientStore` bound to that fake. The default
+    channel/client ids match the rest of this test module.
+    """
+    from invoice_processing.export.client_context import FirestoreClientStore
+
+    profile = dict(_TEST_PROFILE, client_id=client_id)
+    db.collection("clients").document(client_id).set(profile)
+    db.collection("channels").document(channel_id).set({"client_id": client_id})
+    return FirestoreClientStore(client=db)
+
+
+def test_profile_state_delta_includes_software_and_coa():
+    from accounting_agents.slack_runner import _profile_state_delta
+    from invoice_processing.export.client_context import ClientContext, CoaAccount
+
+    class _Store:
+        def get_by_channel(self, channel_id):
+            assert channel_id == "C1"
+            return ClientContext(
+                client_id="CL-1",
+                client_name="Auditair International Pte. Ltd.",
+                accounting_software="Xero",
+                fye_month=10,
+                coa=[CoaAccount(code="6010", description="Travel",
+                                account_type="Expense", financial_statement="P&L",
+                                nature="Dr", keywords="travel")],
+            )
+
+    delta = _profile_state_delta(_Store(), "C1")
+    assert delta["software"] == "Xero"
+    assert delta["client_id"] == "CL-1"
+    assert len(delta["coa"]) == 1
+    # Each COA entry exposes its `key` (the export-stable identifier) — verifies
+    # the helper preserves what the categorizer needs downstream.
+    assert delta["coa"][0]["key"] == "6010"
+    assert delta["coa"][0]["keywords"] == "travel"
+
+
+def test_profile_state_delta_empty_when_no_profile():
+    from accounting_agents.slack_runner import _profile_state_delta
+
+    class _Store:
+        def get_by_channel(self, channel_id):
+            return None
+
+    assert _profile_state_delta(_Store(), "C1") == {}
+
+
+def test_process_file_event_softgates_when_no_profile():
+    slack = FakeSlackClient()
+    db = FakeFirestore()
+    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+
+    class _NoProfileStore:
+        def get_by_channel(self, channel_id):
+            return None
+
+    runner = _FakeRunner([], _ledger_payload())  # should never run
+    result = asyncio.run(
+        process_file_event(
+            runner=runner, ledger_store=store, db=db, slack_client=slack,
+            channel_id="C1", file_id="F1", app_name="acc",
+            download_fn=lambda c, f: b"%PDF-1.4 fake",
+            source_filename="invoice.pdf", client_store=_NoProfileStore(),
+        )
+    )
+    assert result["status"] == "no_profile"
+    assert any("this client set up" in t.lower() for t in _posted_texts(slack))
+
+
 def test_process_file_event_completion_appends_ledger_once():
     slack = FakeSlackClient()
     db = FakeFirestore()
@@ -173,6 +262,7 @@ def test_process_file_event_completion_appends_ledger_once():
             app_name="acc",
             download_fn=fake_download,
             source_filename="invoice.pdf",
+            client_store=_seeded_client_store(db),
         )
     )
 
@@ -208,6 +298,7 @@ def test_process_file_event_interrupt_posts_card_and_writes_doc():
             file_id="F1",
             app_name="acc",
             download_fn=lambda c, f: b"%PDF fake",
+            client_store=_seeded_client_store(db),
         )
     )
 
@@ -444,6 +535,7 @@ def test_process_file_event_posts_status_once_and_updates_per_stage():
             app_name="acc",
             download_fn=lambda c, f: b"%PDF fake",
             source_filename="invoice.pdf",
+            client_store=_seeded_client_store(db),
         )
     )
     assert result["status"] == "delivered"
@@ -513,6 +605,7 @@ def test_instant_ack_reaction_and_status_before_semaphore_heavy_work():
             app_name="acc",
             download_fn=blocking_download,
             source_filename="invoice.pdf",
+            client_store=_seeded_client_store(db),
         )
         result_holder.append(r)
 
@@ -564,6 +657,7 @@ def test_process_file_event_status_update_failure_does_not_crash_run():
             file_id="F1",
             app_name="acc",
             download_fn=lambda c, f: b"%PDF fake",
+            client_store=_seeded_client_store(db),
         )
     )
     assert result["status"] == "delivered"
@@ -591,6 +685,7 @@ def test_process_file_event_interrupt_sets_needs_review_status():
             file_id="F1",
             app_name="acc",
             download_fn=lambda c, f: b"%PDF fake",
+            client_store=_seeded_client_store(db),
         )
     )
     assert result["status"] == "paused"

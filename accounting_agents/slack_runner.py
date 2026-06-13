@@ -59,10 +59,28 @@ from accounting_agents.ledger_store import SlackLedgerStore
 from accounting_agents.nodes import ApproveDecision
 from app.blocks import approval_card_blocks, approval_outcome_blocks
 from app.slack_app import _SeenEvents, _event_id as _slack_event_id
+from invoice_processing.export.client_context import FirestoreClientStore
 
 # One shared dedup set for all handlers in this module (process-local; see
 # app.slack_app._SeenEvents for the Cloud Run note about multi-instance gaps).
 _seen = _SeenEvents()
+
+#: Default client store for profile seeding (overridable in tests).
+_DEFAULT_CLIENT_STORE = FirestoreClientStore()
+
+
+def _profile_state_delta(client_store, channel_id: str) -> dict:
+    """Return the client's ``to_state()`` keys for seeding the run, or ``{}``.
+
+    The coordinator's ``before_agent_callback`` does not reliably propagate the
+    profile into the document lane, so the runner seeds it directly at run start
+    (alongside ``channel_id``). Empty dict means "no profile for this channel" —
+    callers soft-gate on that. See ADR-0005 (2026-06-14 addendum).
+    """
+    ctx = client_store.get_by_channel(channel_id)
+    if ctx is None:
+        return {}
+    return ctx.to_state()
 
 logger = logging.getLogger(__name__)
 
@@ -360,6 +378,7 @@ async def process_file_event(
     download_fn,
     source_filename: str = "document.pdf",
     thread_ts: Optional[str] = None,
+    client_store=None,
 ) -> dict:
     """Download the dropped PDF, run the workflow, and persist OR pause for HITL.
 
@@ -385,6 +404,19 @@ async def process_file_event(
     # Per-document session id so concurrent drops never share a session; user_id
     # stays channel_id (the before_agent_callback resolves the client by channel).
     session_id = _per_doc_session_id(channel_id, file_id)
+
+    # Soft-gate on client profile: if this channel has not been onboarded yet,
+    # there is no software target and no COA — the run would silently default
+    # to QBS and write the wrong columns. Tell the user how to set up first.
+    client_store = client_store or _DEFAULT_CLIENT_STORE
+    profile_delta = _profile_state_delta(client_store, channel_id)
+    if not profile_delta or not profile_delta.get("software"):
+        _post_message(
+            slack_client, channel_id,
+            "I don't have this client set up yet — run */ledgr settings* to choose "
+            "the accounting software and financial year, then re-drop the document.",
+        )
+        return {"status": "no_profile", "channel_id": channel_id, "file_id": file_id}
 
     # ── INSTANT ACK (before semaphore, before download) ──────────────────────
     # Resolve the user's upload-message ts so we can react to it immediately.
@@ -421,6 +453,7 @@ async def process_file_event(
             "file_id": file_id,
             "source_filename": source_filename,
             nodes.ARTIFACT_NAME_KEY: artifact_name,
+            **profile_delta,
         }
 
         interrupt_id: Optional[str] = None
