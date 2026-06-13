@@ -15,7 +15,7 @@ DocumentWorkflow (resumable, dynamic)::
     START -> classify_node
       -> { "invoice":        extract_invoice_node -> categorize_node -> tax_node,
            "bank_statement": extract_bank_node }
-      -> approval_gate -> route_node -> consolidate_node -> deliver_node
+      -> approval_gate -> apply_decision_node -> route_node -> consolidate_node -> deliver_node
 
 Convergence note: ``classify_node`` emits exactly one route per document, so only
 ONE branch fires. A plain graph node runs when ANY predecessor triggers it (it
@@ -208,9 +208,13 @@ document_workflow = Workflow(
         # gate runs exactly once.
         (nodes.tax_node, nodes.approval_gate),
         (nodes.extract_bank_node, nodes.approval_gate),
-        # Post-approval spine: route -> consolidate -> deliver (terminal).
+        # Post-approval spine: apply_decision -> route -> consolidate -> deliver
+        # (terminal). ``apply_decision_node`` is the first downstream node after
+        # ``approval_gate``'s RequestInput, so ADK delivers the resume
+        # ``ApproveDecision`` here as its ``node_input`` (Task 6).
         (
             nodes.approval_gate,
+            nodes.apply_decision_node,
             nodes.route_node,
             nodes.consolidate_node,
             nodes.deliver_node,

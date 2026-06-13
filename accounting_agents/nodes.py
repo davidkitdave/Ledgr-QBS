@@ -282,6 +282,45 @@ async def extract_bank_node(ctx) -> Event:
     return Event(output={"count": len(statements)})
 
 
+async def apply_decision_node(ctx, node_input=None) -> Event:
+    """Apply the human's ApproveDecision (resume node_input) to the run state.
+
+    Auto-approved runs pass ``node_input=None`` and fall straight through. On
+    ``edit`` the per-line corrections are written onto ``state[NORMALIZED_KEY]``
+    before routing/consolidation; on ``reject`` the invoices are cleared so the
+    consolidate/deliver spine produces nothing.
+
+    Inserted between ``approval_gate`` and ``route_node`` so ADK delivers the
+    resume ``ApproveDecision`` (the user's response to the ``RequestInput``) as
+    this node's ``node_input`` (see tests/test_hitl_roundtrip.py — the gate's
+    downstream node already receives the decision in its ``node_input``).
+    """
+    decision = node_input if isinstance(node_input, dict) else {}
+    choice = decision.get("decision")
+    if not choice:
+        return Event(output={"decision": "auto_approved"})
+
+    ctx.state[APPROVAL_STATUS_KEY] = choice
+
+    if choice == "reject":
+        ctx.state[NORMALIZED_KEY] = []
+        return Event(output={"decision": "reject"})
+
+    if choice == "edit":
+        edits = (decision.get("edits") or {}).get("lines") or []
+        invoices = ctx.state.get(NORMALIZED_KEY) or []
+        if invoices:
+            lines = invoices[0].get("lines") or []
+            for e in edits:
+                i = e.get("index")
+                if isinstance(i, int) and 0 <= i < len(lines):
+                    for field in ("account_code", "tax_code", "amount", "description"):
+                        if e.get(field) is not None:
+                            lines[i][field] = e[field]
+            ctx.state[NORMALIZED_KEY] = invoices
+    return Event(output={"decision": choice})
+
+
 async def route_node(ctx) -> Event:
     """Compute FY + sheet/direction routing metadata (NO GCS)."""
     fye_month, _defaulted = _effective_fye_month(ctx.state)

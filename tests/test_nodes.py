@@ -362,6 +362,46 @@ def test_route_node_bank_workbook():
 
 
 # =========================================================================== #
+# apply_decision_node — apply human approve/edit/reject decision in the spine
+# =========================================================================== #
+
+
+def test_apply_decision_node_applies_line_edits():
+    state = _base_state()
+    state[nodes.NORMALIZED_KEY] = [{
+        "invoice_number": "INV-1", "lines": [
+            {"description": "Room", "account_code": None, "tax_code": "SR", "amount": 51.49}
+        ],
+    }]
+    ctx = FakeContext(state)
+    decision = {"decision": "edit", "edits": {"lines": [
+        {"index": 0, "account_code": "6010", "tax_code": "ZR"}
+    ]}}
+    asyncio.run(nodes.apply_decision_node(ctx, decision))
+    line = ctx.state[nodes.NORMALIZED_KEY][0]["lines"][0]
+    assert line["account_code"] == "6010"
+    assert line["tax_code"] == "ZR"
+    assert ctx.state[nodes.APPROVAL_STATUS_KEY] == "edit"
+
+
+def test_apply_decision_node_reject_clears_invoices():
+    state = _base_state()
+    state[nodes.NORMALIZED_KEY] = [{"invoice_number": "INV-1", "lines": []}]
+    ctx = FakeContext(state)
+    asyncio.run(nodes.apply_decision_node(ctx, {"decision": "reject"}))
+    assert ctx.state[nodes.NORMALIZED_KEY] == []
+    assert ctx.state[nodes.APPROVAL_STATUS_KEY] == "reject"
+
+
+def test_apply_decision_node_autoapprove_passthrough():
+    state = _base_state()
+    state[nodes.NORMALIZED_KEY] = [{"invoice_number": "INV-1", "lines": []}]
+    ctx = FakeContext(state)
+    asyncio.run(nodes.apply_decision_node(ctx, None))  # no HITL → node_input is None
+    assert ctx.state[nodes.NORMALIZED_KEY] == [{"invoice_number": "INV-1", "lines": []}]
+
+
+# =========================================================================== #
 # deliver_node summary echoes the accounting-software target
 # =========================================================================== #
 
