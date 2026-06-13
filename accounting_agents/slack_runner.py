@@ -827,6 +827,17 @@ def build_async_app(
     token = bot_token or os.environ.get("SLACK_BOT_TOKEN")
     async_app = AsyncApp(token=token)
 
+    # Bolt hands async handlers an AsyncWebClient, but ALL our downstream Slack Web
+    # API calls (files_info, chat_postMessage, reactions, files_upload_v2,
+    # files_delete, conversations_info) + the parked sync handlers are written
+    # synchronously. Use one sync WebClient (same bot token) for every Web API call;
+    # the async `client` is only used for Bolt's `ack()`. This is why uploads
+    # silently did nothing before — sync calls on the async client returned
+    # un-awaited coroutines.
+    from slack_sdk import WebClient as _SyncWebClient
+
+    sync_client = _SyncWebClient(token=token)
+
     @async_app.event("file_shared")
     async def _file_shared(event, body, client):
         eid = body.get("event_id") or f"{event.get('type')}:{event.get('event_ts') or event.get('ts')}"
@@ -837,11 +848,16 @@ def build_async_app(
         channel_id = event.get("channel_id") or event.get("channel")
         if not file_id or not channel_id:
             return
+        # File-level dedup: Slack sends BOTH file_shared and message/file_share for
+        # one upload (distinct event_ids), so guard on the file id to process once.
+        if _seen.seen_before(f"file:{file_id}"):
+            logger.debug("dedup: file %s already being processed", file_id)
+            return
         await process_file_event(
             runner=runner,
             ledger_store=ledger_store,
             db=db,
-            slack_client=client,
+            slack_client=sync_client,
             channel_id=channel_id,
             file_id=file_id,
             app_name=app_name,
@@ -858,7 +874,7 @@ def build_async_app(
             runner=runner,
             ledger_store=ledger_store,
             db=db,
-            slack_client=client,
+            slack_client=sync_client,
             op_id=op_id,
             decision=decision,
             app_name=app_name,
@@ -881,16 +897,16 @@ def build_async_app(
     @async_app.action("ledgr_setup_open")
     async def _setup_open(body, ack, client):
         await ack()
-        prefill = await _derive_setup_prefill(client, body)
+        prefill = await _derive_setup_prefill(sync_client, body)
         await asyncio.to_thread(
-            handle_setup_open, body, lambda *a, **k: None, client, prefill
+            handle_setup_open, body, lambda *a, **k: None, sync_client, prefill
         )
 
     @async_app.action("ledgr_use_standard_coa")
     async def _use_standard(body, ack, client):
         await ack()
         await asyncio.to_thread(
-            handle_use_standard_coa, body, lambda *a, **k: None, client, store
+            handle_use_standard_coa, body, lambda *a, **k: None, sync_client, store
         )
 
     @async_app.view("ledgr_onboarding")
@@ -900,7 +916,7 @@ def build_async_app(
             handle_onboarding_submit,
             body,
             lambda *a, **k: None,
-            client,
+            sync_client,
             store,
             lambda: "client-" + os.urandom(6).hex(),
         )
@@ -909,7 +925,7 @@ def build_async_app(
     async def _ledgr(ack, body, client):
         await ack()
         await asyncio.to_thread(
-            handle_ledgr_command, lambda *a, **k: None, body, client, store
+            handle_ledgr_command, lambda *a, **k: None, body, sync_client, store
         )
 
     @async_app.event("member_joined_channel")
@@ -919,7 +935,7 @@ def build_async_app(
             logger.debug("dedup: dropping duplicate member_joined_channel event %s", eid)
             return
         bot_user_id = context.get("bot_user_id") or ""
-        await asyncio.to_thread(handle_member_joined, body, None, client, bot_user_id)
+        await asyncio.to_thread(handle_member_joined, body, None, sync_client, bot_user_id)
 
     # --- text-question + file-upload handler ---
 
@@ -955,6 +971,11 @@ def build_async_app(
                 file_id = f.get("id") if isinstance(f, dict) else None
                 if not file_id:
                     continue
+                # File-level dedup: file_shared + message/file_share both fire for
+                # one upload; guard on the file id so it's processed exactly once.
+                if _seen.seen_before(f"file:{file_id}"):
+                    logger.debug("dedup: file %s already being processed", file_id)
+                    continue
                 logger.info(
                     "file upload received via message: file=%s channel=%s",
                     file_id, channel_id,
@@ -963,7 +984,7 @@ def build_async_app(
                     runner=runner,
                     ledger_store=ledger_store,
                     db=db,
-                    slack_client=client,
+                    slack_client=sync_client,
                     channel_id=channel_id,
                     file_id=file_id,
                     app_name=app_name,
@@ -984,7 +1005,7 @@ def build_async_app(
         await answer_question(
             runner=runner,
             ledger_store=ledger_store,
-            slack_client=client,
+            slack_client=sync_client,
             channel_id=channel_id,
             question=text,
             app_name=app_name,

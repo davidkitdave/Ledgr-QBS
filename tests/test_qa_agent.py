@@ -18,7 +18,7 @@ import json
 import pytest
 from openpyxl import Workbook
 
-from accounting_agents.ledger_store import DEDUPE_COL, SlackLedgerStore
+from accounting_agents.ledger_store import SlackLedgerStore
 from accounting_agents.qa_agent import (
     LEDGER_DATA_KEY,
     GST_THRESHOLD_SGD,
@@ -201,9 +201,8 @@ class TestGstThresholdCheck:
 def _build_fake_xlsx(sheets: dict[str, list[dict]]) -> bytes:
     """Build an in-memory xlsx workbook with the given sheet→rows mapping.
 
-    Each row dict key becomes a column header; a DEDUPE_COL column is appended
-    to every sheet (mirroring the real workbook format) and should be stripped
-    by ``read_rows``.
+    Each row dict key becomes a column header. The workbook contains no hidden
+    dedupe column — dedupe state is now fully Firestore-side.
     """
     wb = Workbook()
     first = True
@@ -216,10 +215,10 @@ def _build_fake_xlsx(sheets: dict[str, list[dict]]) -> bytes:
             ws = wb.create_sheet(sheet_name)
         if not rows:
             continue
-        headers = list(rows[0].keys()) + [DEDUPE_COL]
+        headers = list(rows[0].keys())
         ws.append(headers)
         for row in rows:
-            ws.append(list(row.values()) + [f"dedupe-key-{id(row)}"])
+            ws.append(list(row.values()))
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -300,14 +299,18 @@ class TestReadRows:
         assert amounts["INV-1"] == pytest.approx(100.0)
         assert amounts["INV-2"] == pytest.approx(200.0)
 
-    def test_dedupe_col_is_stripped(self):
+    def test_no_internal_keys_in_output(self):
+        """read_rows must never expose internal / system columns to callers."""
         purchase_rows = [{"Invoice Number": "INV-1", "Source Amount": 50.0}]
         xlsx = _build_fake_xlsx({"Purchase": purchase_rows})
         slack = _FakeSlackForRead(xlsx)
         store = _make_store_with_pointer(slack)
 
         rows = store.read_rows("c1", "2026", slack_client=slack, channel_id="C1")
-        assert DEDUPE_COL not in rows[0]
+        # The workbook has no dedupe column; none should leak into the output.
+        assert "_ledgr_doc_key" not in rows[0]
+        # The data columns are present.
+        assert rows[0]["Invoice Number"] == "INV-1"
 
     def test_sheet_name_injected_as_sheet_key(self):
         rows_data = [{"Amount": 99.0}]

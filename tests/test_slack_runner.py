@@ -141,7 +141,7 @@ def _ledger_payload(sheet="Purchase", doc_key="F1:Purchase:INV-1"):
                 }
             ],
         },
-        nodes.DELIVER_SUMMARY_KEY: "Added 1 line to your FY2026 ledger (auto_approved).",
+        nodes.DELIVER_SUMMARY_KEY: "📒 Added 1 line from 1 document to your FY2026 ledger.",
     }
 
 
@@ -254,7 +254,7 @@ async def _terminal(ctx, node_input) -> Event:
             }
         ],
     }
-    ctx.state[nodes.DELIVER_SUMMARY_KEY] = "Added 1 line to your FY2026 ledger (approve)."
+    ctx.state[nodes.DELIVER_SUMMARY_KEY] = "📒 Added 1 line from 1 document to your FY2026 ledger."
     return Event(output={"ok": True})
 
 

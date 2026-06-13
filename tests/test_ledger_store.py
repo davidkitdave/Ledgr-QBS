@@ -19,7 +19,7 @@ import uuid
 
 from openpyxl import load_workbook
 
-from accounting_agents.ledger_store import DEDUPE_COL, SlackLedgerStore
+from accounting_agents.ledger_store import SlackLedgerStore
 from tests._fake_firestore import FakeFirestore
 
 
@@ -65,6 +65,8 @@ class FakeSlackClient:
         # Optional per-file share ts injected by tests to simulate files_info shares.
         # Maps file_id → {"channel_id": ts_string}.
         self._file_share_ts: dict[str, dict[str, str]] = {}
+        # Tracks deleted file ids (Fix 1: old ledger file cleanup).
+        self.deleted_file_ids: list[str] = []
 
     def chat_postMessage(self, **kwargs):
         self._posts.append(kwargs)
@@ -97,6 +99,11 @@ class FakeSlackClient:
         else:
             url = f"https://files.slack.com/{file}/unknown"
         return {"file": {"id": file, "url_private_download": url, "name": "ledger.xlsx", "shares": shares}}
+
+    def files_delete(self, *, file):
+        self.deleted_file_ids.append(file)
+        self.files.pop(file, None)
+        return {"ok": True}
 
     def reactions_add(self, *, channel, timestamp, name):
         self.reactions_added.append({"channel": channel, "timestamp": timestamp, "name": name})
@@ -220,9 +227,105 @@ def test_bank_workbook_one_sheet_per_account():
     wb = load_workbook(io.BytesIO(data))
     assert "OCBC - 5001" in wb.sheetnames
     assert "DBS - 9002" in wb.sheetnames
-    # The dedupe column is present on the header.
+    # No hidden dedupe column in the workbook — dedupe is Firestore-side.
     header = [c.value for c in wb["OCBC - 5001"][1]]
-    assert DEDUPE_COL in header
+    assert "_ledgr_doc_key" not in header
+
+
+def test_bank_sheet_has_no_dedupe_column():
+    """The written bank sheet must contain NO _ledgr_doc_key column at all."""
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+    from invoice_processing.export.exporters import BankStatementExporter
+    from invoice_processing.export.models import BankStatement, BankTransaction
+    from datetime import date as _date
+
+    exporter = BankStatementExporter()
+    stmt = BankStatement(
+        bank_name="OCBC - 5001",
+        currency="SGD",
+        opening_balance=1000.0,
+        closing_balance=900.0,
+        transactions=[
+            BankTransaction(date=_date(2025, 4, 1), description="ATM", withdrawal=100.0, deposit=None, balance=900.0)
+        ],
+    )
+    result = store.append_rows(
+        client_id="c1", fy="2025", slack_client=slack, channel_id="C1",
+        kind="bank",
+        batches=[{"sheet": stmt.bank_name, "doc_key": "F1:OCBC:1", "rows": exporter.bank_rows(stmt)}],
+    )
+    wb = load_workbook(io.BytesIO(slack.files[result["slack_file_id"]]))
+    header = [c.value for c in wb["OCBC - 5001"][1]]
+    assert "_ledgr_doc_key" not in header, f"Unexpected dedupe column in header: {header}"
+
+
+def test_dedupe_via_firestore_no_duplicate_rows():
+    """Re-appending the same doc_key must not add duplicate rows — dedupe is Firestore-side."""
+    slack = FakeSlackClient()
+    db = FakeFirestore()
+    store = SlackLedgerStore(db, opener=slack.opener())
+
+    store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        software="qbs", kind="invoice",
+        batches=[{"sheet": "Purchase", "doc_key": "F1:Purchase:INV-1", "rows": [_row("first")]}],
+    )
+    # Verify the seen_doc_keys were persisted to Firestore.
+    ptr = store.get_pointer("c1", "2026")
+    assert "F1:Purchase:INV-1" in ptr.get("seen_doc_keys", [])
+
+    # Re-append the SAME doc_key — must be deduped via Firestore (no sheet read needed).
+    result2 = store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        software="qbs", kind="invoice",
+        batches=[{"sheet": "Purchase", "doc_key": "F1:Purchase:INV-1", "rows": [_row("first")]}],
+    )
+    assert result2["appended"] == 0
+    assert result2["deduped"] == 1
+    data = slack.files[result2["slack_file_id"]]
+    rows = _read_sheet_rows(data, "Purchase")
+    assert len(rows) == 1  # still exactly one row
+
+
+def test_second_append_deletes_first_file():
+    """After a second append, the FIRST (superseded) Slack file must be deleted."""
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+
+    result1 = store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        software="qbs", kind="invoice",
+        batches=[{"sheet": "Purchase", "doc_key": "F1:Purchase:INV-1", "rows": [_row("first")]}],
+    )
+    first_file_id = result1["slack_file_id"]
+
+    result2 = store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        software="qbs", kind="invoice",
+        batches=[{"sheet": "Purchase", "doc_key": "F2:Purchase:INV-2", "rows": [_row("second")]}],
+    )
+    second_file_id = result2["slack_file_id"]
+
+    # The first file was deleted after the second upload succeeded.
+    assert first_file_id in slack.deleted_file_ids
+    # The second file (latest) was NOT deleted.
+    assert second_file_id not in slack.deleted_file_ids
+    # The pointer points at the second file.
+    assert store.get_pointer("c1", "2026")["slack_file_id"] == second_file_id
+
+
+def test_first_append_does_not_delete_any_file():
+    """On the very first append there is no previous file — nothing should be deleted."""
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+
+    store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        software="qbs", kind="invoice",
+        batches=[{"sheet": "Purchase", "doc_key": "F1:Purchase:INV-1", "rows": [_row("first")]}],
+    )
+    assert slack.deleted_file_ids == []
 
 
 # --------------------------------------------------------------------------- #
@@ -364,5 +467,5 @@ def test_bank_formulas_correct_after_second_append():
     assert ws.cell(row=4, column=bi).value == f"={bal}3"
     # Second month's txn (row 5) chains from the carried-forward B/F (row 4).
     assert ws.cell(row=5, column=bi).value.startswith(f"={bal}4")
-    # Dedupe column still present and trailing.
-    assert header[-1] == DEDUPE_COL
+    # No hidden dedupe column — the Excel is clean / human-readable.
+    assert "_ledgr_doc_key" not in header

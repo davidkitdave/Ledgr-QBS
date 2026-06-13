@@ -11,11 +11,14 @@ the only place that talks to Slack about the ledger workbook. Each drop:
 2. If a pointer exists, **download the current workbook bytes** from Slack (via
    the parked SSRF-hardened downloader) and open it; else start a **fresh
    workbook** with the right exporter's sheet layout.
-3. **Append** the new rows into the correct sheet, **idempotently** — a stable
-   per-document key recorded in a hidden trailing column dedupes re-processing so
-   the same document never double-appends.
-4. **Re-upload** the updated workbook via ``files_upload_v2`` and **update the
-   Firestore pointer** with the new ``slack_file_id``.
+3. **Append** the new rows into the correct sheet, **idempotently** — the set of
+   already-seen doc keys is stored in Firestore on the pointer doc (``seen_doc_keys``
+   array field) so the same document never double-appends. The Excel workbook itself
+   contains NO dedupe column — it is clean and human-readable.
+4. **Re-upload** the updated workbook via ``files_upload_v2``, **update the
+   Firestore pointer** with the new ``slack_file_id`` and the updated
+   ``seen_doc_keys``, then **delete the previous Slack file** so only ONE growing
+   ledger file exists in the channel at any time.
 
 Concurrency: two drops racing the same FY workbook are serialized **per channel**
 by an in-process lock keyed on ``(channel_id, fy)``. (A multi-instance Cloud Run
@@ -48,11 +51,6 @@ logger = logging.getLogger(__name__)
 _CLIENTS_COLLECTION = "clients"
 #: Subcollection name for the per-FY ledger pointer docs.
 _LEDGERS_SUBCOLLECTION = "ledgers"
-
-#: Hidden trailing column header carrying the idempotency doc key on every row.
-#: Re-processing a document re-emits the same key; we skip rows whose key is
-#: already present in the sheet, so a re-drop never double-appends.
-DEDUPE_COL = "_ledgr_doc_key"
 
 #: Sheet titles for the invoice ledger workbook (mirrors LedgerExporter).
 _INVOICE_SHEETS = ("Purchase", "Sales")
@@ -99,10 +97,25 @@ class SlackLedgerStore:
             return None
         return snap.to_dict()
 
-    def _set_pointer(self, client_id: str, fy: str, slack_file_id: str, **extra: Any) -> None:
-        doc = {"slack_file_id": slack_file_id, "fy": str(fy), "client_id": client_id}
+    def _set_pointer(
+        self,
+        client_id: str,
+        fy: str,
+        slack_file_id: str,
+        seen_doc_keys: Optional[list] = None,
+        **extra: Any,
+    ) -> None:
+        doc: dict = {"slack_file_id": slack_file_id, "fy": str(fy), "client_id": client_id}
+        if seen_doc_keys is not None:
+            doc["seen_doc_keys"] = list(seen_doc_keys)
         doc.update(extra)
         self._pointer_ref(client_id, fy).set(doc, merge=True)
+
+    def _get_seen_doc_keys(self, pointer: Optional[dict]) -> set:
+        """Return the set of already-processed doc keys from the Firestore pointer."""
+        if not pointer:
+            return set()
+        return set(pointer.get("seen_doc_keys") or [])
 
     # ------------------------------------------------------------------ #
     # Per-channel serialization
@@ -153,7 +166,11 @@ class SlackLedgerStore:
         return get_exporter(software or "qbs")
 
     def _fresh_invoice_workbook(self, software: str) -> Workbook:
-        """Create an empty invoice workbook (Purchase + Sales sheets, headers only)."""
+        """Create an empty invoice workbook (Purchase + Sales sheets, headers only).
+
+        No dedupe column is written — the Excel is clean/human-readable. Dedupe
+        state lives in Firestore on the pointer doc (``seen_doc_keys`` field).
+        """
         exporter = self._exporter_for(software)
         wb = Workbook()
         for i, (title, cols) in enumerate(
@@ -161,15 +178,18 @@ class SlackLedgerStore:
         ):
             sheet = wb.active if i == 0 else wb.create_sheet(title)
             sheet.title = title
-            sheet.append(list(cols) + [DEDUPE_COL])
+            sheet.append(list(cols))
         return wb
 
     def _fresh_bank_workbook(self) -> Workbook:
-        """Create an empty bank workbook (header-only single placeholder sheet)."""
+        """Create an empty bank workbook (header-only single placeholder sheet).
+
+        No dedupe column — dedupe state is in Firestore ``seen_doc_keys``.
+        """
         wb = Workbook()
         sheet = wb.active
         sheet.title = "Bank"
-        sheet.append(list(BankStatementExporter.BANK_COLS) + [DEDUPE_COL])
+        sheet.append(list(BankStatementExporter.BANK_COLS))
         return wb
 
     @staticmethod
@@ -183,112 +203,65 @@ class SlackLedgerStore:
         return buf.getvalue()
 
     @staticmethod
-    def _existing_keys(sheet) -> set[str]:
-        """Read the set of dedupe doc keys already present in a sheet.
+    def _append_rows_to_sheet(sheet, cols: list[str], rows: list[dict]) -> int:
+        """Append ``rows`` to ``sheet`` in ``cols`` order (no dedupe column).
 
-        The dedupe key lives in the last column (header == :data:`DEDUPE_COL`).
-        Sheets created before this column existed are treated as having no keys.
+        Dedupe is now handled by the Firestore ``seen_doc_keys`` set before this is
+        called, so this method always appends. Returns the number of rows appended.
         """
-        header = [c.value for c in sheet[1]] if sheet.max_row >= 1 else []
-        if DEDUPE_COL not in header:
-            return set()
-        idx = header.index(DEDUPE_COL)
-        keys: set[str] = set()
-        for row in sheet.iter_rows(min_row=2, values_only=True):
-            if idx < len(row) and row[idx]:
-                keys.add(str(row[idx]))
-        return keys
-
-    @staticmethod
-    def _append_rows(sheet, cols: list[str], rows: list[dict], doc_key: str, seen: set[str]) -> int:
-        """Append ``rows`` to ``sheet`` in ``cols`` order + a trailing dedupe key.
-
-        Skips entirely when ``doc_key`` is already present in ``seen``. Returns the
-        number of rows appended (0 if deduped).
-        """
-        if doc_key in seen:
-            return 0
-        header = [c.value for c in sheet[1]] if sheet.max_row >= 1 else []
-        # Ensure the dedupe column exists on legacy sheets.
-        if DEDUPE_COL not in header:
-            sheet.cell(row=1, column=len(header) + 1, value=DEDUPE_COL)
         for row in rows:
-            sheet.append([row.get(c, "") for c in cols] + [doc_key])
-        seen.add(doc_key)
+            sheet.append([row.get(c, "") for c in cols])
         return len(rows)
 
     @staticmethod
-    def _read_bank_blocks(sheet, cols: list[str]) -> tuple[list[dict], set[str]]:
-        """Read an existing bank sheet back into normalized month-blocks + key set.
+    def _read_bank_blocks(sheet, cols: list[str]) -> list[dict]:
+        """Read an existing bank sheet back into normalized month-blocks.
 
-        Returns ``(blocks, seen_keys)`` where each block is the
-        ``{"stated_bf", "currency", "transactions": [...], "bf_key"}`` shape the
-        exporter rebuilds from, with the per-row dedupe key carried in each row dict
-        and on the block's ``bf_key``. ``TOTALS`` rows are dropped (regenerated on
-        rebuild). ``seen_keys`` lets the caller dedupe whole statements by doc key.
+        Returns a list of ``{"stated_bf", "currency", "transactions": [...]}`` blocks
+        the exporter rebuilds from. ``TOTALS`` rows are dropped (regenerated on
+        rebuild). Dedupe is now fully Firestore-side, so no key tracking here.
         """
         header = [c.value for c in sheet[1]] if sheet.max_row >= 1 else []
         if not header:
-            return [], set()
+            return []
         col_idx = {name: i for i, name in enumerate(header)}
-        dedupe_idx = col_idx.get(DEDUPE_COL)
 
         value_rows: list[dict] = []
-        seen: set[str] = set()
         for raw in sheet.iter_rows(min_row=2, values_only=True):
-            key = ""
-            if dedupe_idx is not None and dedupe_idx < len(raw) and raw[dedupe_idx]:
-                key = str(raw[dedupe_idx])
-                seen.add(key)
             row: dict = {}
             for name in cols:
                 i = col_idx.get(name)
                 row[name] = raw[i] if i is not None and i < len(raw) else None
-            row[DEDUPE_COL] = key
             value_rows.append(row)
 
-        # Split into blocks, carrying the dedupe key onto the block + its txns.
-        blocks = BankStatementExporter.rows_to_blocks(value_rows)
-        for block in blocks:
-            txns = block["transactions"]
-            block["bf_key"] = txns[0].get(DEDUPE_COL, "") if txns else ""
-        return blocks, seen
+        return BankStatementExporter.rows_to_blocks(value_rows)
 
     def _merge_bank_statement(
-        self, sheet, cols: list[str], rows: list[dict], doc_key: str
+        self, sheet, cols: list[str], rows: list[dict]
     ) -> int:
         """Merge one statement's value rows into the account sheet's continuous chain.
 
         Reads the existing sheet back into sorted month-blocks, appends this
-        statement's block(s) (tagged with ``doc_key`` on every row so dedupe + the
-        chain coexist), re-sorts by date, and REBUILDS the whole sheet. Idempotent:
-        if ``doc_key`` already appears in the sheet the statement is skipped and 0 is
-        returned; otherwise the count of newly-added value rows is returned.
+        statement's blocks, re-sorts by date, and REBUILDS the whole sheet.
+        Dedupe (doc_key already seen?) is checked in Firestore before this is called.
+        Returns the count of newly-added value rows.
         """
-        # Ensure the dedupe column exists (header-only / legacy sheets).
+        # Ensure the header exists on a brand-new sheet.
         header = [c.value for c in sheet[1]] if sheet.max_row >= 1 else []
         if not header:
-            sheet.append(list(cols) + [DEDUPE_COL])
-        elif DEDUPE_COL not in header:
-            sheet.cell(row=1, column=len(header) + 1, value=DEDUPE_COL)
+            sheet.append(list(cols))
 
-        existing_blocks, seen = self._read_bank_blocks(sheet, cols)
-        if doc_key in seen:
-            return 0  # already merged this statement — dedupe.
+        existing_blocks = self._read_bank_blocks(sheet, cols)
 
         new_blocks = BankStatementExporter.rows_to_blocks(rows)
         added = 0
         for block in new_blocks:
-            block["bf_key"] = doc_key
-            for txn in block["transactions"]:
-                txn[DEDUPE_COL] = doc_key
+            for _txn in block["transactions"]:
                 added += 1
             added += 1  # the BALANCE B/F marker row
 
         all_blocks = BankStatementExporter.sort_blocks(existing_blocks + new_blocks)
-        BankStatementExporter.rebuild_account_sheet(
-            sheet, all_blocks, cols, key_col=DEDUPE_COL
-        )
+        BankStatementExporter.rebuild_account_sheet(sheet, all_blocks, cols)
         return added
 
     # ------------------------------------------------------------------ #
@@ -349,8 +322,14 @@ class SlackLedgerStore:
     ) -> dict:
         pointer = self.get_pointer(client_id, fy)
 
-        if pointer and pointer.get("slack_file_id"):
-            data = self._download_workbook(slack_client, pointer["slack_file_id"])
+        # Capture the PREVIOUS file id before we overwrite the pointer.
+        prev_file_id: Optional[str] = pointer.get("slack_file_id") if pointer else None
+
+        # Read the Firestore-side set of already-processed doc keys.
+        seen_doc_keys: set = self._get_seen_doc_keys(pointer)
+
+        if prev_file_id:
+            data = self._download_workbook(slack_client, prev_file_id)
             wb = self._load_workbook(data)
         elif kind == "bank":
             wb = self._fresh_bank_workbook()
@@ -375,21 +354,26 @@ class SlackLedgerStore:
             doc_key = str(batch["doc_key"])
             rows = batch.get("rows") or []
 
+            # Firestore-side dedupe: skip entirely if this doc was already processed.
+            if doc_key in seen_doc_keys:
+                deduped += 1
+                continue
+
             sheet = self._get_or_create_sheet(wb, sheet_name, kind)
             if kind == "bank":
                 # Bank: REBUILD the account sheet as one continuous, date-sorted chain
                 # (merge existing rows + this statement, sort months, re-thread the
                 # running balance), rather than blindly appending a self-seeding block.
-                n = self._merge_bank_statement(sheet, cols, rows, doc_key)
+                n = self._merge_bank_statement(sheet, cols, rows)
             else:
-                seen = self._existing_keys(sheet)
                 cols_for_sheet = sheet_cols.get(sheet_name, list(exporter.purchase_cols))
-                n = self._append_rows(sheet, cols_for_sheet, rows, doc_key, seen)
+                n = self._append_rows_to_sheet(sheet, cols_for_sheet, rows)
 
             if n == 0:
                 deduped += 1
             else:
                 appended += n
+                seen_doc_keys.add(doc_key)
 
         new_bytes = self._to_bytes(wb)
         result = slack_client.files_upload_v2(
@@ -400,7 +384,26 @@ class SlackLedgerStore:
         )
         new_file_id = self._extract_uploaded_file_id(result)
         if new_file_id:
-            self._set_pointer(client_id, fy, new_file_id, channel_id=channel_id, kind=kind)
+            self._set_pointer(
+                client_id,
+                fy,
+                new_file_id,
+                seen_doc_keys=list(seen_doc_keys),
+                channel_id=channel_id,
+                kind=kind,
+            )
+
+        # Fix 1: Delete the OLD Slack file AFTER the new upload + pointer update
+        # succeed so the channel never has zero ledger files. Only delete when there
+        # was a previous file AND it differs from the newly uploaded file.
+        if prev_file_id and new_file_id and prev_file_id != new_file_id:
+            try:
+                slack_client.files_delete(file=prev_file_id)
+            except Exception:  # noqa: BLE001 — cosmetic, log but never crash append
+                logger.warning(
+                    "Could not delete superseded ledger file %s (non-fatal).",
+                    prev_file_id,
+                )
 
         return {
             "slack_file_id": new_file_id,
@@ -439,8 +442,8 @@ class SlackLedgerStore:
         """Download the current FY workbook and return all data rows as dicts.
 
         Fetches the workbook pointed to by Firestore ``clients/{client_id}/ledgers/{fy}``.
-        Strips the hidden ``_ledgr_doc_key`` (DEDUPE_COL) trailing column before
-        returning so callers never see the internal deduplication key.
+        The workbook contains no internal dedupe column (dedupe is Firestore-side),
+        so all columns are returned as-is.
 
         Returns an empty list when no pointer exists yet (ledger not started).
 
@@ -468,19 +471,11 @@ class SlackLedgerStore:
         for sheet in wb.worksheets:
             if sheet.max_row < 1:
                 continue
-            raw_headers = [c.value for c in sheet[1]]
-            # Find the DEDUPE_COL index to strip it from output.
-            dedupe_idx: Optional[int] = None
-            if DEDUPE_COL in raw_headers:
-                dedupe_idx = raw_headers.index(DEDUPE_COL)
-            headers = [h for h in raw_headers if h != DEDUPE_COL]
+            headers = [c.value for c in sheet[1]]
 
             for row in sheet.iter_rows(min_row=2, values_only=True):
-                # Build the dict, skipping the dedupe column position.
                 row_dict: dict = {"_sheet": sheet.title}
-                for idx, header in enumerate(raw_headers):
-                    if dedupe_idx is not None and idx == dedupe_idx:
-                        continue
+                for idx, header in enumerate(headers):
                     if header is not None:
                         row_dict[header] = row[idx] if idx < len(row) else None
                 # Skip entirely-blank rows (all values None).

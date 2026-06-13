@@ -504,6 +504,57 @@ async def consolidate_node(ctx) -> Event:
     return Event(output={"consolidated": len(batches), "fy": fy, "kind": kind})
 
 
+def _month_label(rows: list[dict]) -> str:
+    """Derive a human-readable month label from transaction date rows.
+
+    Parses the ``Date`` field (DD/MM/YYYY) from each row and returns a compact
+    label: a single month name for single-month statements, a range like
+    "Jan–Mar 2025" for multi-month, or "" when no dates are parseable.
+    """
+    months: list[tuple[int, int]] = []  # (year, month) pairs
+    for row in rows:
+        d = _parse_iso(row.get("Date") or "")
+        if d is not None:
+            months.append((d.year, d.month))
+    if not months:
+        return ""
+    unique = sorted(set(months))
+    _MONTH_ABBR = [
+        "", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ]
+    if len(unique) == 1:
+        yr, mo = unique[0]
+        return f"{_MONTH_ABBR[mo]} {yr}"
+    first_yr, first_mo = unique[0]
+    last_yr, last_mo = unique[-1]
+    if first_yr == last_yr:
+        return f"{_MONTH_ABBR[first_mo]}–{_MONTH_ABBR[last_mo]} {first_yr}"
+    return f"{_MONTH_ABBR[first_mo]} {first_yr}–{_MONTH_ABBR[last_mo]} {last_yr}"
+
+
+def _closing_balance_from_rows(rows: list[dict]) -> Optional[float]:
+    """Return the closing balance from a set of bank rows.
+
+    Looks for the last TOTALS row's ``Stated Balance`` (the closing balance the
+    exporter writes there), falling back to the last non-None ``Stated Balance``
+    value found in any row.
+    """
+    last_stated: Optional[float] = None
+    for row in rows:
+        desc = row.get("Description") or ""
+        stated = row.get("Stated Balance")
+        if stated is not None:
+            try:
+                val = float(stated)
+                if desc == "TOTALS":
+                    return val
+                last_stated = val
+            except (TypeError, ValueError):
+                pass
+    return last_stated
+
+
 async def deliver_node(ctx) -> Event:
     """Emit the final user-facing summary text (NO Slack I/O).
 
@@ -511,23 +562,59 @@ async def deliver_node(ctx) -> Event:
     what was consolidated and writes it to ``state[DELIVER_SUMMARY_KEY]``. The
     runner reads ``state[LEDGER_ROWS_KEY]`` to persist the workbook to Slack and
     posts this summary; the node itself never touches the Slack client.
+
+    Bank summary format:
+        "📒 Added **April 2025** (12 transactions) to your FY2025 ledger
+         — closing balance SGD 4,210.55."
+    Invoice summary format:
+        "📒 Added **INV-001** (3 lines) to your FY2025 ledger."
     """
     state = ctx.state
     payload = state.get(LEDGER_ROWS_KEY) or {}
     batches = payload.get("batches") or []
-    n_rows = sum(len(b.get("rows") or []) for b in batches)
     fy = payload.get("fy", "?")
     kind = payload.get("kind", "document")
-    status = state.get(APPROVAL_STATUS_KEY, "auto_approved")
 
     if not batches:
-        summary = "No ledger entries were produced for this document."
+        state[DELIVER_SUMMARY_KEY] = "No ledger entries were produced for this document."
+        state["delivered"] = True
+        return Event(output={"delivered": True, "summary": state[DELIVER_SUMMARY_KEY]})
+
+    if kind == "bank":
+        # Build a named summary per account batch.
+        parts: list[str] = []
+        for batch in batches:
+            rows = batch.get("rows") or []
+            # Count only real transaction rows (exclude BALANCE B/F + TOTALS markers).
+            txn_rows = [
+                r for r in rows
+                if (r.get("Description") or "") not in ("BALANCE B/F", "TOTALS")
+            ]
+            txn_count = len(txn_rows)
+            month_label = _month_label(txn_rows)
+            closing = _closing_balance_from_rows(rows)
+
+            # Derive currency from the first row that has it.
+            currency = next(
+                (r.get("Currency") for r in rows if r.get("Currency")), "SGD"
+            )
+
+            label = f"**{month_label}**" if month_label else "statement"
+            count_str = f"{txn_count} transaction{'s' if txn_count != 1 else ''}"
+            bal_str = (
+                f" — closing balance {currency} {closing:,.2f}"
+                if closing is not None
+                else ""
+            )
+            parts.append(f"{label} ({count_str}){bal_str}")
+
+        summary = f"📒 Added {'; '.join(parts)} to your FY{fy} ledger."
     else:
-        noun = "bank statement" if kind == "bank" else "document"
+        n_rows = sum(len(b.get("rows") or []) for b in batches)
         summary = (
-            f"Added {n_rows} line{'s' if n_rows != 1 else ''} from "
-            f"{len(batches)} {noun}{'s' if len(batches) != 1 else ''} to your "
-            f"FY{fy} ledger ({status})."
+            f"📒 Added {n_rows} line{'s' if n_rows != 1 else ''} from "
+            f"{len(batches)} document{'s' if len(batches) != 1 else ''} "
+            f"to your FY{fy} ledger."
         )
 
     state[DELIVER_SUMMARY_KEY] = summary
