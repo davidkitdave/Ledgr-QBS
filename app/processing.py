@@ -180,6 +180,7 @@ def process_shared_files(
                 errors=all_errors,
                 coa_missing=coa_missing,
                 archive_notes=archive_notes,
+                docs=result.docs,
             ),
             text=f"Processed {n_processed}/{len(file_ids)} documents.",
         )

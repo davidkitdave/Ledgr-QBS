@@ -35,8 +35,8 @@ class ExtractedLine(BaseModel):
 class ExtractedInvoice(BaseModel):
     doc_type: str = Field(description="invoice or receipt")
     invoice_number: Optional[str] = None
-    invoice_date: Optional[str] = Field(None, description="ISO date YYYY-MM-DD if determinable")
-    due_date: Optional[str] = None
+    invoice_date: Optional[str] = Field(None, description="ISO date YYYY-MM-DD — always return the document/issue date")
+    due_date: Optional[str] = Field(None, description="ISO date YYYY-MM-DD — always return the payment due date (derive from terms if not stated)")
     currency: Optional[str] = Field(None, description="ISO currency code, e.g. SGD/MYR/USD")
     issuer_name: Optional[str] = Field(None, description="Supplier/seller — who issued the document")
     issuer_gst_regno: Optional[str] = Field(None, description="Issuer GST registration no. / UEN if shown")
@@ -45,6 +45,28 @@ class ExtractedInvoice(BaseModel):
     subtotal: Optional[float] = None
     gst_total: Optional[float] = None
     total: Optional[float] = None
+
+
+class ExtractedInvoiceBundle(BaseModel):
+    """One uploaded PDF/image may hold several distinct logical documents.
+
+    Mirrors the bank lane's ``ExtractedBankStatement.accounts: list[...]`` pattern:
+    each UNIQUE invoice/receipt becomes its own ``ExtractedInvoice`` entry, so a
+    multi-invoice PDF, a scanned page of several receipts, or an SOA package (whose
+    summary/cover page is skipped) all fan out into per-document records downstream.
+    """
+
+    invoices: list[ExtractedInvoice] = Field(
+        default_factory=list,
+        description="One entry per unique invoice/receipt found in the document",
+    )
+    notes: Optional[str] = Field(
+        None, description="Optional free-text note about segmentation decisions"
+    )
+    skipped_pages: Optional[list[int]] = Field(
+        None,
+        description="1-based page numbers deliberately skipped (e.g. an SOA summary/cover page)",
+    )
 
 
 _PROMPT = """You are extracting an invoice/receipt for a Singapore/Malaysia bookkeeping ledger.
@@ -75,12 +97,43 @@ Per line:
 Document-level fields:
 - issuer_name = the supplier/seller (letterhead/"From"); bill_to_name = who it is addressed to.
 - issuer_gst_regno = the supplier's GST registration number / UEN if printed.
-- invoice_date in ISO YYYY-MM-DD if you can determine it; currency as ISO code.
+- invoice_date = the document/issue date, always returned in ISO YYYY-MM-DD; currency as ISO code.
+- due_date = the payment due date, always returned in ISO YYYY-MM-DD; if no explicit due date is
+  printed, derive it from the stated payment terms (e.g. 'Net 30' from the invoice date). Leave
+  null only when neither a due date nor terms are present.
 - Always also return invoice-level subtotal, gst_total, total (the grand totals from the bill),
   used for reconciliation.
 
 - Do not invent values; if the summary is unclear, return your best ledger-level grouping and
   ensure the line nets + GST reconcile to the document totals. Leave a field null if not visible."""
+
+
+_BUNDLE_PROMPT = (
+    """You are extracting invoices/receipts for a Singapore/Malaysia bookkeeping ledger from a
+single uploaded file that may contain MORE THAN ONE distinct document.
+
+Return a LIST of invoice/receipt records under "invoices" — ONE entry per UNIQUE logical
+document. Apply these segmentation rules:
+
+- MULTIPLE INVOICES IN ONE PDF: if the file contains several separate invoices/bills (e.g. a
+  pack of supplier invoices), emit one entry for EACH distinct invoice (its own invoice number,
+  date, issuer, totals).
+- MULTIPLE RECEIPTS ON ONE SCANNED PAGE: if a single scanned page shows several separate
+  receipts side by side or at different orientations/angles, enumerate EACH receipt as its own
+  entry. Four receipts on one page → four entries. Read receipts that are rotated, skewed, or
+  upside down.
+- STATEMENT OF ACCOUNT (SOA) PACKAGE: if the file is an SOA package — a summary/cover page that
+  lists multiple invoices/balances, followed by the actual embedded invoices — SKIP the SOA
+  summary/cover page entirely and extract only the real embedded invoice(s). Record the skipped
+  page number(s) in "skipped_pages". Do NOT emit the SOA summary itself as an invoice.
+- If the file is just ONE ordinary invoice/receipt, return a single-element list.
+
+For EACH invoice/receipt entry, follow exactly the same per-document and per-line rules as a
+single document:
+
+"""
+    + _PROMPT
+)
 
 
 def mime_for(path: str | Path) -> str:
@@ -113,6 +166,40 @@ def extract_invoice(
 def extract_file(path: str | Path, **kwargs) -> ExtractedInvoice:
     path = Path(path)
     return extract_invoice(path.read_bytes(), mime_for(path), **kwargs)
+
+
+def extract_invoice_bundle(
+    data: bytes,
+    mime_type: str,
+    *,
+    project: Optional[str] = None,
+    location: Optional[str] = None,
+    model: Optional[str] = None,
+) -> ExtractedInvoiceBundle:
+    """Extract one-or-more invoices/receipts from a single document into a bundle.
+
+    Segments multi-invoice PDFs, multi-receipt scanned pages, and SOA packages
+    (skipping the SOA summary/cover page). Always returns at least an empty list
+    rather than raising on a model that returns no entries.
+    """
+    client = make_client(project, location)
+    model = model or default_model()
+    part = types.Part.from_bytes(data=data, mime_type=mime_type)
+    resp = client.models.generate_content(
+        model=model,
+        contents=[part, _BUNDLE_PROMPT],
+        config=types.GenerateContentConfig(
+            temperature=0,
+            response_mime_type="application/json",
+            response_schema=ExtractedInvoiceBundle,
+        ),
+    )
+    return ExtractedInvoiceBundle.model_validate_json(resp.text)
+
+
+def extract_file_bundle(path: str | Path, **kwargs) -> ExtractedInvoiceBundle:
+    path = Path(path)
+    return extract_invoice_bundle(path.read_bytes(), mime_for(path), **kwargs)
 
 
 def _parse_date(s: Optional[str]) -> Optional[date]:
@@ -191,6 +278,9 @@ def to_normalized(
         supplier=supplier,
         customer=customer,
         lines=lines,
+        doc_subtotal=ex.subtotal,
+        doc_gst_total=ex.gst_total,
+        doc_total=ex.total,
         our_gst_registered=our_gst_registered,
         reconciled=ok,
         reconcile_note=detail,

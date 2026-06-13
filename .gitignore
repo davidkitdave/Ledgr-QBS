@@ -18,11 +18,16 @@ venv/
 # Tooling / local state
 .omc/
 .claude/settings.local.json
+.adk/
+**/.adk/
 .DS_Store
 *.log
 
 # Agent output / scratch
 invoice_processing/data/agent_output/
 invoice_processing/data/alf_output/
-graphify-out/
+
+# Local eval data (real invoices — never commit, see no-real-client-data rule)
 tests/eval_invoices/
+# Knowledge-graph tooling output
+graphify-out/

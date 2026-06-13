@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Optional
 
 from openpyxl import Workbook
+from openpyxl.utils import get_column_letter
 
 from .models import BankStatement, InvoiceLine, NormalizedInvoice
 from .tax_classifier import TaxClassifier, classify_invoice
@@ -48,6 +49,16 @@ def _tax_amount(line: InvoiceLine, inv: NormalizedInvoice, clf: TaxClassifier) -
     return 0.0
 
 
+def _invoice_total(inv: NormalizedInvoice, clf: TaxClassifier) -> float:
+    """Invoice-level grand total. Prefer the authoritative doc total carried from
+    extraction; otherwise fall back to Σ line net + Σ line tax."""
+    if inv.doc_total is not None:
+        return round(float(inv.doc_total), 2)
+    net = sum((line.net_amount or 0.0) for line in inv.lines)
+    tax = sum(_tax_amount(line, inv, clf) for line in inv.lines)
+    return round(net + tax, 2)
+
+
 class LedgerExporter:
     """Base: write a Ledger_FY workbook (Sys_Config + Purchase + Sales)."""
 
@@ -58,6 +69,12 @@ class LedgerExporter:
 
     def __init__(self, classifier: Optional[TaxClassifier] = None):
         self.clf = classifier or TaxClassifier()
+
+    def required_fields(self, doc_type: str) -> list[str]:
+        """Column names that must be non-empty in every exported row for this
+        software. Subclasses override; used by the pipeline to flag (not drop)
+        documents that would export half-filled rows."""
+        return []
 
     # subclasses implement the per-line row dicts
     def _purchase_row(self, inv: NormalizedInvoice, line: InvoiceLine) -> dict:
@@ -119,6 +136,17 @@ class QbsLedgerExporter(LedgerExporter):
         "Currency", "Currency Rate", "Amount", "Tax Amount", "Total", "Account Code / COA",
     ]
 
+    def required_fields(self, doc_type: str) -> list[str]:
+        if doc_type == "sales":
+            return [
+                "Invoice Number", "Invoice Date", "Customer Name", "Amount", "Total",
+                "Account Code / COA",
+            ]
+        return [
+            "Invoice Number", "Invoice Date", "Vendor Name", "Sub Total", "Total Amount",
+            "Account Code / COA",
+        ]
+
     def _purchase_row(self, inv, line):
         net = _num(line.net_amount) or 0
         tax = _tax_amount(line, inv, self.clf)
@@ -178,19 +206,30 @@ class XeroLedgerExporter(LedgerExporter):
     purchase_cols = list(_XERO_PURCHASE)
     sales_cols = list(_XERO_SALES)
 
+    def required_fields(self, doc_type: str) -> list[str]:
+        """Xero-required columns = the `*`-marked headers."""
+        cols = self.sales_cols if doc_type == "sales" else self.purchase_cols
+        return [c for c in cols if c.startswith("*")]
+
     def _xero_common(self, inv, line):
         party = inv.counterparty
         tax_type = self.clf.tax_code(line.tax_treatment, inv.doc_type, "xero")
         qty = line.quantity if line.quantity is not None else 1
-        unit = line.unit_amount
-        if unit is None and line.net_amount is not None:
+        # *UnitAmount must satisfy Quantity × UnitAmount = the line's post-discount net,
+        # so the invoice ties out on Xero import. Prefer the effective amount derived from
+        # net_amount; the raw unit_amount is the pre-discount sticker price and over-states
+        # discounted lines. Fall back to unit_amount only when net_amount is absent.
+        if line.net_amount is not None:
             unit = line.net_amount / qty if qty else line.net_amount
+        else:
+            unit = line.unit_amount
         return {
             "*ContactName": party.name or "",
             "POCountry": party.country or "",
             "*InvoiceNumber": inv.invoice_number or "",
             "*InvoiceDate": _fmt_date(inv.invoice_date),
             "*DueDate": _fmt_date(inv.due_date or inv.invoice_date),
+            "Total": _invoice_total(inv, self.clf),
             "*Quantity": _num(qty),
             "*UnitAmount": _num(unit),
             "*AccountCode": line.account_code or "",
@@ -222,6 +261,65 @@ def get_exporter(system: str, classifier: Optional[TaxClassifier] = None) -> Led
     raise ValueError(f"unknown export system '{system}'; have {list(EXPORTERS)}")
 
 
+# Map exporter column headers to readable snake_case names for review notes.
+_FIELD_LABELS = {
+    "*ContactName": "contact_name", "*InvoiceNumber": "invoice_number",
+    "*InvoiceDate": "invoice_date", "*DueDate": "due_date", "*Quantity": "quantity",
+    "*UnitAmount": "unit_amount", "*AccountCode": "account_code", "*TaxType": "tax_type",
+    "*Description": "description",
+    "Vendor Name": "vendor_name", "Customer Name": "customer_name",
+    "Invoice Number": "invoice_number", "Invoice Date": "invoice_date",
+    "Sub Total": "sub_total", "Total Amount": "total", "Amount": "amount", "Total": "total",
+    "Account Code / COA": "account_code",
+}
+
+
+def _field_label(col: str) -> str:
+    return _FIELD_LABELS.get(col, col.lstrip("*"))
+
+
+def _is_empty(value) -> bool:
+    """A required cell is missing when it is None or a blank/whitespace string."""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip() == ""
+    return False
+
+
+def validate_required_fields(
+    inv: NormalizedInvoice, exporter: LedgerExporter, doc_type: str
+) -> list[str]:
+    """Return readable labels for export-required fields that are missing/empty.
+
+    Builds the rows exactly as they would be exported and checks the software's
+    required columns. Invoice-level fields (empty on every line) are reported once;
+    line-level fields are reported with a 1-based line number. Empty list = complete.
+    """
+    required = exporter.required_fields(doc_type)
+    if not required:
+        return []
+    rows = exporter.rows([inv], doc_type)
+    if not rows:
+        # No lines were extracted — flag the doc so it surfaces for review rather
+        # than being silently written as an empty shell or silently dropped.
+        return ["no line items extracted"]
+    n = len(rows)
+    missing: list[str] = []
+    for col in required:
+        empty_lines = [i for i, row in enumerate(rows, start=1) if _is_empty(row.get(col, ""))]
+        if not empty_lines:
+            continue
+        label = _field_label(col)
+        if len(empty_lines) == n:
+            # invoice-level (missing on every line) — report once, no line number
+            missing.append(label)
+        else:
+            for i in empty_lines:
+                missing.append(f"{label} (line {i})")
+    return missing
+
+
 _SHEET_INVALID = str.maketrans({c: None for c in "[]:*?/\\"})
 
 
@@ -229,31 +327,79 @@ def _sheet_title(name: str) -> str:
     return (name or "Bank").translate(_SHEET_INVALID).strip()[:31] or "Bank"
 
 
+def _parse_ddmmyyyy(value) -> Optional[datetime]:
+    """Parse a ``DD/MM/YYYY`` date string into a ``datetime`` (None if unparseable).
+
+    Robust to ``date``/``datetime`` inputs and a few separator variants; never
+    raises — an unparseable value yields ``None`` so callers can keep stable order
+    instead of crashing on a malformed row.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day)
+    text = str(value).strip()
+    if not text:
+        return None
+    for fmt in ("%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt)
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
 class BankStatementExporter:
-    """Write a bank-statement workbook: one sheet per account, every txn row preserved."""
+    """Write an accountant-grade, continuous bank-statement workbook.
+
+    One sheet per account; every txn row preserved. Unlike a per-statement-block
+    layout, each account sheet is ONE continuous chain across the whole FY:
+
+    - Statements (months) are sorted ascending by date regardless of upload order,
+      and transactions within a month are sorted ascending by date too.
+    - The running ``Balance`` (col E) chains top-to-bottom across the ENTIRE sheet:
+      every txn row = ``=<prev_balance_cell> + Deposit - Withdrawal``, crossing
+      month boundaries (it does NOT re-seed each month).
+    - Each month keeps one ``BALANCE B/F`` marker row as a visual separator. Its
+      running ``Balance`` *carries forward* from the prior row (``=<prev_E>``),
+      while ``Stated Balance`` (col F) holds that month's stated opening B/F. The
+      FIRST B/F of the FY seeds from its own stated opening (``=F<row>``).
+    - A cross-month continuity ``Check`` (col G) on each B/F row flags ``GAP`` when
+      the carried-forward balance ≠ the stated B/F (a missing/duplicate month);
+      txn rows keep the per-row ``CHECK`` against their own stated balance.
+    - A single per-account ``TOTALS`` row at the bottom sums all withdrawals/deposits.
+
+    The sheet is REBUILT from a normalized list of month-blocks on every append, so
+    the result is identical no matter what order statements arrived in.
+    """
 
     BANK_COLS = [
-        "Date", "Description", "Withdrawal", "Deposit", "Balance",
-        "Currency", "Math_Check", "Notes", "Source File ID",
+        "Date", "Description", "Withdrawal", "Deposit",
+        "Balance", "Currency", "Math_Check",
     ]
 
+    #: Description markers used to detect row roles.
+    OPENING_MARKER = "BALANCE B/F"
+    TOTALS_MARKER = "TOTALS"
+
     def bank_rows(self, stmt: BankStatement) -> list[dict]:
+        """Build the data rows for one statement (values only; formulas added later).
+
+        The opening row seeds ``Stated Balance`` from the opening balance; each txn
+        row carries its withdrawal/deposit + the extracted ``Stated Balance``. A
+        trailing ``TOTALS`` row closes the block. These value rows are the unit a
+        caller hands to the store as a batch; the store normalizes + re-sorts them
+        into the continuous chain (formula cells are filled on rebuild).
+        """
         rows: list[dict] = []
-        if stmt.opening_balance is not None:
-            rows.append({
-                "Description": "BALANCE B/F",
-                "Balance": _num(stmt.opening_balance),
-                "Currency": stmt.currency,
-                "Math_Check": "✅",
-                "Source File ID": stmt.source_file_id or "",
-            })
+        rows.append({
+            "Description": self.OPENING_MARKER,
+            "Balance": _num(stmt.opening_balance),
+            "Currency": stmt.currency,
+        })
         for txn in stmt.transactions:
-            if txn.math_ok is True:
-                check = "✅"
-            elif txn.math_ok is False:
-                check = "⚠️"
-            else:
-                check = ""
             rows.append({
                 "Date": _fmt_date(txn.date),
                 "Description": txn.description,
@@ -261,28 +407,220 @@ class BankStatementExporter:
                 "Deposit": _num(txn.deposit),
                 "Balance": _num(txn.balance),
                 "Currency": stmt.currency,
-                "Math_Check": check,
-                "Notes": txn.note or "",
-                "Source File ID": stmt.source_file_id or "",
             })
+        rows.append({
+            "Description": self.TOTALS_MARKER,
+            "Currency": stmt.currency,
+        })
         return rows
 
-    def write_bank_workbook(self, path: str | Path, statements: list[BankStatement]) -> Path:
-        wb = Workbook()
-        used: dict[str, int] = {}
-        for i, stmt in enumerate(statements):
-            title = _sheet_title(stmt.bank_name)
-            if title in used:
-                used[title] += 1
-                suffix = f" ({used[title]})"
-                title = title[: 31 - len(suffix)] + suffix
+    # ------------------------------------------------------------------ #
+    # Continuous-chain rebuild
+    # ------------------------------------------------------------------ #
+
+    @classmethod
+    def rows_to_blocks(cls, rows: list[dict]) -> list[dict]:
+        """Split a flat list of value-row dicts (a statement) into month-blocks.
+
+        Each ``BALANCE B/F`` marker starts a new block carrying its stated opening
+        balance; subsequent non-marker rows are that block's transactions. ``TOTALS``
+        markers are dropped (the per-account total is regenerated on rebuild). A
+        leading run of transactions with no preceding B/F forms a headless block
+        (``stated_bf=None``) so nothing is lost.
+        """
+        blocks: list[dict] = []
+        current: Optional[dict] = None
+        for row in rows:
+            desc = row.get("Description")
+            if desc == cls.OPENING_MARKER:
+                current = {
+                    "stated_bf": row.get("Balance"),
+                    "currency": row.get("Currency"),
+                    "transactions": [],
+                }
+                blocks.append(current)
+            elif desc == cls.TOTALS_MARKER:
+                continue
             else:
-                used[title] = 0
+                if current is None:
+                    current = {"stated_bf": None, "currency": row.get("Currency"), "transactions": []}
+                    blocks.append(current)
+                current["transactions"].append(dict(row))
+        return blocks
+
+    @classmethod
+    def _block_sort_key(cls, block: dict):
+        """Sort key for a month-block: earliest parseable txn date.
+
+        Blocks whose dates are all unparseable sort last but keep stable relative
+        order (Python's sort is stable), so a malformed month never crashes the build.
+        """
+        dates = [
+            d for d in (_parse_ddmmyyyy(t.get("Date")) for t in block["transactions"])
+            if d is not None
+        ]
+        return (0, min(dates)) if dates else (1, datetime.max)
+
+    @classmethod
+    def sort_blocks(cls, blocks: list[dict]) -> list[dict]:
+        """Return month-blocks sorted ascending by date, txns sorted within each.
+
+        Months are ordered by their earliest transaction date (upload-order
+        independent); within a month, transactions are ordered ascending by date.
+        Unparseable dates keep their stable relative position (never crash).
+        """
+        ordered = sorted(blocks, key=cls._block_sort_key)
+        for block in ordered:
+            block["transactions"].sort(
+                key=lambda t: (0, _parse_ddmmyyyy(t.get("Date")))
+                if _parse_ddmmyyyy(t.get("Date")) is not None
+                else (1, datetime.max)
+            )
+        return ordered
+
+    @classmethod
+    def rebuild_account_sheet(
+        cls,
+        sheet,
+        blocks: list[dict],
+        cols: list[str],
+        *,
+        key_col: Optional[str] = None,
+    ) -> None:
+        """Wipe a sheet's body and rewrite it as one continuous chain of month-blocks.
+
+        ``blocks`` is the normalized, already-sorted list from :meth:`sort_blocks`
+        (each ``{"stated_bf", "currency", "transactions": [row_dict]}``). For each
+        block we emit a ``BALANCE B/F`` row then its txn rows; a single ``TOTALS``
+        row closes the whole account. The header row (row 1) is preserved; an
+        optional ``key_col`` (the hidden dedupe column) is carried per-row from each
+        row dict's ``key_col`` value so dedupe survives the rebuild.
+        """
+        # Clear everything below the header.
+        if sheet.max_row > 1:
+            sheet.delete_rows(2, sheet.max_row - 1)
+
+        currency = ""
+        for block in blocks:
+            if block.get("currency"):
+                currency = block["currency"]
+                break
+
+        def emit(row: dict) -> None:
+            values = [row.get(c, "") for c in cols]
+            if key_col is not None:
+                values.append(row.get(key_col, ""))
+            sheet.append(values)
+
+        for block in blocks:
+            emit({
+                "Description": cls.OPENING_MARKER,
+                "Balance": block.get("stated_bf"),
+                "Currency": block.get("currency") or currency,
+                key_col: block.get("bf_key", "") if key_col else "",
+            })
+            for txn in block["transactions"]:
+                emit(txn)
+
+        # Single per-account TOTALS row at the bottom.
+        emit({"Description": cls.TOTALS_MARKER, "Currency": currency})
+
+        cls.apply_bank_formulas(sheet, cols)
+
+    @classmethod
+    def apply_bank_formulas(cls, sheet, cols: Optional[list[str]] = None) -> None:
+        """Write Math_Check formulas and TOTALS SUM over the sheet.
+
+        Balance holds the actual bank-stated value on every row — no formula.
+        Math_Check (col G) validates each row arithmetically:
+
+        - ``BALANCE B/F`` row: first B/F of the FY gets ``✅`` (no prior row);
+          later months get ``=IF(ROUND(E_bf-E_prev,2)=0,"✅","GAP")`` — a ``GAP``
+          means the stated opening doesn't match the prior month's closing balance.
+        - txn row: ``=IF(ROUND(E-(E_prev+Deposit-Withdrawal),2)=0,"✅","❌")``.
+        - ``TOTALS`` row: ``=SUM(...)`` over the Withdrawal/Deposit txn range.
+        """
+        header = [c.value for c in sheet[1]] if sheet.max_row >= 1 else []
+        if not header:
+            return
+        idx = {name: i for i, name in enumerate(header)}
+        if "Balance" not in idx or "Description" not in idx:
+            return
+
+        def col(name: str) -> Optional[str]:
+            i = idx.get(name)
+            return get_column_letter(i + 1) if i is not None else None
+
+        c_desc = idx["Description"]
+        bal_col = col("Balance")
+        check_col = col("Math_Check")
+        wd_col = col("Withdrawal")
+        dep_col = col("Deposit")
+
+        prev_balance_row: Optional[int] = None
+        seen_first_bf = False
+        first_txn_row: Optional[int] = None
+        last_txn_row: Optional[int] = None
+        totals_row: Optional[int] = None
+
+        for r in range(2, sheet.max_row + 1):
+            desc = sheet.cell(row=r, column=c_desc + 1).value
+            if desc == cls.OPENING_MARKER:
+                if check_col and bal_col:
+                    if not seen_first_bf or prev_balance_row is None:
+                        # First B/F of the FY — no prior row to compare against.
+                        sheet[f"{check_col}{r}"] = "✅"
+                    else:
+                        sheet[f"{check_col}{r}"] = (
+                            f'=IF(ROUND({bal_col}{r}-{bal_col}{prev_balance_row},2)=0,"✅","GAP")'
+                        )
+                prev_balance_row = r
+                seen_first_bf = True
+            elif desc == cls.TOTALS_MARKER:
+                totals_row = r
+            else:
+                if first_txn_row is None:
+                    first_txn_row = r
+                last_txn_row = r
+                if check_col and bal_col and prev_balance_row is not None:
+                    arithmetic = f"{bal_col}{prev_balance_row}"
+                    if dep_col:
+                        arithmetic += f"+{dep_col}{r}"
+                    if wd_col:
+                        arithmetic += f"-{wd_col}{r}"
+                    sheet[f"{check_col}{r}"] = (
+                        f'=IF(ROUND({bal_col}{r}-({arithmetic}),2)=0,"✅","❌")'
+                    )
+                prev_balance_row = r
+
+        # TOTALS row: SUM over all txn rows for Withdrawal and Deposit.
+        if totals_row is not None and first_txn_row is not None and last_txn_row is not None:
+            if wd_col:
+                sheet[f"{wd_col}{totals_row}"] = f"=SUM({wd_col}{first_txn_row}:{wd_col}{last_txn_row})"
+            if dep_col:
+                sheet[f"{dep_col}{totals_row}"] = f"=SUM({dep_col}{first_txn_row}:{dep_col}{last_txn_row})"
+
+    def write_bank_workbook(self, path: str | Path, statements: list[BankStatement]) -> Path:
+        """Write a workbook with one continuous-chain sheet per account.
+
+        Statements sharing a bank/account sheet are merged into a single continuous
+        ledger (sorted by date, one chain), so a year of monthly statements for an
+        account lands as one sorted, cross-month-reconciling sheet.
+        """
+        wb = Workbook()
+        # Group statements by their sheet title, preserving first-seen order.
+        grouped: dict[str, list[BankStatement]] = {}
+        for stmt in statements:
+            grouped.setdefault(_sheet_title(stmt.bank_name), []).append(stmt)
+
+        for i, (title, stmts) in enumerate(grouped.items()):
             sheet = wb.active if i == 0 else wb.create_sheet()
             sheet.title = title
             sheet.append(self.BANK_COLS)
-            for row in self.bank_rows(stmt):
-                sheet.append([row.get(c, "") for c in self.BANK_COLS])
+            blocks: list[dict] = []
+            for stmt in stmts:
+                blocks.extend(self.rows_to_blocks(self.bank_rows(stmt)))
+            self.rebuild_account_sheet(sheet, self.sort_blocks(blocks), self.BANK_COLS)
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         wb.save(path)

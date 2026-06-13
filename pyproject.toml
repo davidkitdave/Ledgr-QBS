@@ -1,7 +1,7 @@
 [project]
-name = "invoice-processing"
+name = "ledgr-qbs"
 version = "1.0.0"
-description = "Invoice Processing -- Unified inference and learning agent for invoice processing"
+description = "Ledgr QBS - Accounting Multi-Agent Framework"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 keywords = ['agent-catalog', 'adk', 'agent']
@@ -13,7 +13,7 @@ authors = [
 ]
 
 dependencies = [
-    "google-adk>=1.0.0",
+    "google-adk>=2.0.0,<3.0.0",
     "google-cloud-aiplatform>=1.38.0",
     "vertexai>=1.38.0",
     "pydantic>=2.8.0",
@@ -25,6 +25,7 @@ dependencies = [
     "slack-bolt>=1.28.0",
     "fastapi>=0.135.3",
     "uvicorn[standard]>=0.44.0",
+    "aiohttp>=3.14.1",
 ]
 
 [project.urls]
@@ -34,12 +35,14 @@ Repository = "https://github.com/GoogleCloudPlatform/adk-samples"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-# Ship BOTH the pipeline package and the Slack app layer in the wheel.
-# (Hatchling defaults to only the package matching the project name —
-# without this, `pip install .` in the Dockerfile would omit `app/` and
-# Cloud Run would fail on `import app.main`.)
 [tool.hatch.build.targets.wheel]
-packages = ["invoice_processing", "app"]
+packages = ["accounting_agents", "app", "invoice_processing"]
+
+# Non-.py runtime data files must ship in the wheel (loaded at runtime):
+# the SG GST rate/code table and the standard SG SME chart of accounts.
+[tool.hatch.build.targets.wheel.force-include]
+"invoice_processing/shared_libraries/sg_gst.yaml" = "invoice_processing/shared_libraries/sg_gst.yaml"
+"app/data/standard_sg_sme_coa.json" = "app/data/standard_sg_sme_coa.json"
 
 [dependency-groups]
 dev = [
@@ -51,6 +54,12 @@ dev = [
 [tool.pytest.ini_options]
 # Only collect the test suite — keep pytest out of scripts/ and sample dirs.
 testpaths = ["tests"]
+# The agents-cli scaffold dropped integration/e2e + eval stubs under tests/.
+# They make live LLM calls and boot a FastAPI server (creds + deploy wiring
+# required), so they are kept OUT of the default fast unit loop. Run them
+# deliberately: `uv run pytest tests/integration` (with creds + server) or
+# `agents-cli eval` for tests/eval.
+addopts = "--ignore=tests/integration --ignore=tests/eval"
 
 [tool.agent_packs]
 template = "adk"
@@ -59,7 +68,7 @@ template = "adk"
 example_question = "Process the invoice for case_001."
 
 [tool.agent-starter-pack.settings]
-agent_directory = "invoice_processing"
+agent_directory = "accounting_agents"
 
 [[tool.uv.index]]
 name = "default"

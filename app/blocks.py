@@ -181,6 +181,82 @@ def needs_setup_blocks() -> list:
     ]
 
 
+def _fmt_money(amount: float | None, currency: str = "SGD") -> str:
+    """Format a document total with its currency, e.g. '$1,234.50' / 'SGD 1,234.50'."""
+    if amount is None:
+        return "—"
+    cur = (currency or "SGD").strip().upper()
+    return f"{cur} {amount:,.2f}"
+
+
+_MAX_SECTION = 2900  # Slack section text hard-fails > 3000 chars; keep headroom.
+
+
+def _clamp_section(text: str) -> str:
+    """Keep a Block Kit section's mrkdwn text under Slack's 3000-char ceiling."""
+    return text if len(text) <= _MAX_SECTION else text[: _MAX_SECTION - 1] + "…"
+
+
+def _per_doc_line(doc) -> str:
+    """Build one concise mrkdwn line for a processed document (item: rich per-doc card).
+
+    Invoices / receipts show counterparty, invoice number, date, total, and the
+    FY + workbook they landed in. Bank statements show a simpler bank/period/N-txns
+    line (they carry ``doc.bank``, not ``doc.normalized``). A ``reconciled is False``
+    doc is prefixed with a ``:warning: needs review`` marker plus the reason.
+    """
+    route = getattr(doc, "route", None)
+    fy = getattr(route, "fy", None)
+    workbook = getattr(route, "workbook", None)
+    dest = ""
+    if fy is not None and workbook:
+        dest = f"\n   ↳ FY{fy} · `{workbook}`"
+    elif workbook:
+        dest = f"\n   ↳ `{workbook}`"
+
+    needs_review = getattr(doc, "reconciled", True) is False
+    marker = ""
+    if needs_review:
+        note = (getattr(doc, "note", "") or "").strip()
+        # Keep the reason short — an error note can be an unbounded exception string.
+        reason = note if len(note) <= 140 else note[:139] + "…"
+        if note.upper().startswith("ERROR"):
+            marker = f":x: *failed to process*{f' — {reason}' if reason else ''}\n"
+        else:
+            marker = f":warning: *needs review*{f' — {reason}' if reason else ''}\n"
+
+    if getattr(doc, "doc_type", None) in ("bank_statement", "bank") or getattr(doc, "bank", None) is not None:
+        bank = getattr(doc, "bank", None)
+        accounts = getattr(bank, "accounts", None) or []
+        names = ", ".join(a.bank_name for a in accounts if getattr(a, "bank_name", None)) or "Bank statement"
+        period = next((a.statement_period for a in accounts if getattr(a, "statement_period", None)), None)
+        n_txns = sum(len(getattr(a, "transactions", []) or []) for a in accounts)
+        parts = [f"*{names}*"]
+        if period:
+            parts.append(period)
+        parts.append(f"{n_txns} transaction{'s' if n_txns != 1 else ''}")
+        return _clamp_section(f"{marker}:bank: " + "  •  ".join(parts) + dest)
+
+    norm = getattr(doc, "normalized", None)
+    direction = (getattr(doc, "direction", None) or "").strip().lower()
+    party = None
+    if norm is not None:
+        party = norm.customer if direction == "sales" else norm.supplier
+    counterparty = (getattr(party, "name", None) or "Unknown").strip() or "Unknown"
+    inv_no = getattr(norm, "invoice_number", None)
+    inv_date = getattr(norm, "invoice_date", None)
+    total = getattr(norm, "doc_total", None)
+    currency = getattr(norm, "currency", None) or "SGD"
+
+    parts = [f"*{counterparty}*"]
+    if inv_no:
+        parts.append(f"#{inv_no}")
+    if inv_date is not None:
+        parts.append(inv_date.isoformat() if hasattr(inv_date, "isoformat") else str(inv_date))
+    parts.append(_fmt_money(total, currency))
+    return _clamp_section(f"{marker}:page_facing_up: " + "  •  ".join(parts) + dest)
+
+
 def result_card(
     *,
     n_files: int,
@@ -189,6 +265,7 @@ def result_card(
     errors: list[str],
     coa_missing: bool = False,
     archive_notes: list[str] | None = None,
+    docs: list | None = None,
 ) -> list:
     """Summary card posted after processing a batch of shared documents.
 
@@ -202,6 +279,10 @@ def result_card(
         archive_notes:  Background-archive hiccups. These DO NOT turn the header
                         amber — the run still succeeded for the user — and are
                         surfaced only as a muted context line.
+        docs:           Optional list of processed docs (``ProcessedDoc``). When
+                        provided, a per-doc detail section is rendered between the
+                        header and the workbooks list. Backward-compatible default
+                        is None (summary-only card).
     """
     archive_notes = archive_notes or []
     # Header line — green unless a real processing/upload error occurred.
@@ -218,6 +299,30 @@ def result_card(
             "text": {"type": "mrkdwn", "text": header_text},
         }
     ]
+
+    # Per-doc detail — one section per doc, capped to keep within Slack block
+    # limits. Beyond the cap, a "+N more" context line summarises the remainder.
+    if docs:
+        _DOC_CAP = 10
+        for doc in docs[:_DOC_CAP]:
+            blocks.append(
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": _per_doc_line(doc)},
+                }
+            )
+        if len(docs) > _DOC_CAP:
+            blocks.append(
+                {
+                    "type": "context",
+                    "elements": [
+                        {
+                            "type": "mrkdwn",
+                            "text": f"_+{len(docs) - _DOC_CAP} more document(s) — see the workbook for the full ledger._",
+                        }
+                    ],
+                }
+            )
 
     # Workbooks uploaded
     if workbooks:
@@ -334,6 +439,69 @@ def export_unavailable_blocks() -> list:
                     "drop documents and I'll build one."
                 ),
             },
+        }
+    ]
+
+
+def approval_card_blocks(summary: str, op_id: str) -> list:
+    """HITL Approve / Edit / Reject card for a document that needs human review.
+
+    Args:
+        summary: Human-readable explanation of why the document needs a decision
+                 (built by the approval gate from the flagged / unreconciled lines).
+        op_id:   The interrupt id correlating this card with the paused workflow;
+                 carried as each button's ``value`` so the action handler can
+                 resume the right session.
+    """
+    return [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f":mag: *Review needed before adding to the ledger*\n{summary}",
+            },
+        },
+        {
+            "type": "actions",
+            "block_id": "ledgr_approval",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Approve", "emoji": True},
+                    "action_id": "approve",
+                    "style": "primary",
+                    "value": op_id,
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Edit", "emoji": True},
+                    "action_id": "edit",
+                    "value": op_id,
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Reject", "emoji": True},
+                    "action_id": "reject",
+                    "style": "danger",
+                    "value": op_id,
+                },
+            ],
+        },
+    ]
+
+
+def approval_outcome_blocks(summary: str, decision: str) -> list:
+    """Replacement card (via ``chat_update``) showing the resolved HITL outcome."""
+    icon = {"approve": ":white_check_mark:", "edit": ":pencil2:", "reject": ":x:"}.get(
+        decision, ":information_source:"
+    )
+    verb = {"approve": "Approved", "edit": "Approved with edits", "reject": "Rejected"}.get(
+        decision, decision.title()
+    )
+    return [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"{icon} *{verb}.* {summary}"},
         }
     ]
 

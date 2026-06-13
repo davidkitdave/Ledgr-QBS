@@ -1,0 +1,268 @@
+"""Structural wiring tests for the ADK 2.0 accounting graph (accounting_agents.agent).
+
+These assert the App / Workflow are constructed and the nodes/edges are wired in
+the expected order WITHOUT any network call (no Gemini, no Firestore, no real
+session or artifact service). They also drive the post-classification placeholder
+spine (approval_gate -> route_node -> consolidate_node -> deliver_node) directly
+with a fake Context to prove a document pass reaches ``deliver_node``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from types import SimpleNamespace
+
+from google.adk.apps import App
+from google.adk.workflow import Workflow
+
+from accounting_agents import nodes
+from accounting_agents.agent import (
+    ROUTE_DOCUMENT,
+    ROUTE_QUESTION,
+    ROUTE_UNKNOWN,
+    RouteDecision,
+    app,
+    coordinator,
+    coordinator_graph,
+    document_workflow,
+    dynamic_router,
+)
+
+
+# =========================================================================== #
+# Helpers
+# =========================================================================== #
+
+
+def _edges(wf: Workflow) -> list[tuple[str, str, object]]:
+    """(from_name, to_name, route) triples for a workflow's compiled graph."""
+    return [(e.from_node.name, e.to_node.name, e.route) for e in wf.graph.edges]
+
+
+def _node_names(wf: Workflow) -> set[str]:
+    return {n.name for n in wf.graph.nodes}
+
+
+class _FakeContext:
+    """Duck-typed stand-in for google.adk.agents.context.Context (state only)."""
+
+    def __init__(self, state: dict):
+        self.state = dict(state)
+
+
+# =========================================================================== #
+# App construction
+# =========================================================================== #
+
+
+def test_app_constructed_and_resumable():
+    assert isinstance(app, App)
+    assert app.name == "accounting_agents"
+    assert app.root_agent is coordinator_graph
+    assert isinstance(app.root_agent, Workflow)
+    assert app.resumability_config is not None
+    assert app.resumability_config.is_resumable is True
+
+
+def test_coordinator_has_profile_callback_and_schema():
+    # Schema-only router: structured output, no tools.
+    assert coordinator.output_schema is RouteDecision
+    assert not getattr(coordinator, "tools", None)
+    # mode must be single_turn to be usable as a graph node.
+    assert coordinator.mode == "single_turn"
+    # before_agent_callback wires the channel profile loader.
+    assert coordinator.before_agent_callback is not None
+
+
+# =========================================================================== #
+# Top-level coordinator graph wiring
+# =========================================================================== #
+
+
+def test_coordinator_graph_nodes_present():
+    names = _node_names(coordinator_graph)
+    assert {
+        "__START__",
+        "coordinator",
+        "dynamic_router",
+        "document_workflow",
+        "qa_agent",
+        "help_node",
+    } <= names
+
+
+def test_coordinator_graph_start_chain_and_routes():
+    edges = _edges(coordinator_graph)
+    # START -> coordinator -> dynamic_router (unconditional chain).
+    assert ("__START__", "coordinator", None) in edges
+    assert ("coordinator", "dynamic_router", None) in edges
+    # dynamic_router fans out to the three lanes by route label.
+    assert ("dynamic_router", "document_workflow", ROUTE_DOCUMENT) in edges
+    assert ("dynamic_router", "qa_agent", ROUTE_QUESTION) in edges
+    assert ("dynamic_router", "help_node", ROUTE_UNKNOWN) in edges
+
+
+# =========================================================================== #
+# DocumentWorkflow wiring
+# =========================================================================== #
+
+
+def test_document_workflow_nodes_present():
+    names = _node_names(document_workflow)
+    assert {
+        "__START__",
+        "classify_node",
+        "extract_invoice_node",
+        "categorize_node",
+        "tax_node",
+        "extract_bank_node",
+        "approval_gate",
+        "route_node",
+        "consolidate_node",
+        "deliver_node",
+    } <= names
+
+
+def test_document_workflow_classify_fanout_routes():
+    edges = _edges(document_workflow)
+    assert ("__START__", "classify_node", None) in edges
+    # classify fans out by document type.
+    assert ("classify_node", "extract_invoice_node", nodes.ROUTE_INVOICE) in edges
+    assert ("classify_node", "extract_bank_node", nodes.ROUTE_BANK) in edges
+
+
+def test_document_workflow_invoice_lane_chain():
+    edges = _edges(document_workflow)
+    assert ("extract_invoice_node", "categorize_node", None) in edges
+    assert ("categorize_node", "tax_node", None) in edges
+
+
+def test_document_workflow_branches_converge_on_approval_gate():
+    edges = _edges(document_workflow)
+    # Both lane tails edge into the shared approval_gate (convergence point).
+    assert ("tax_node", "approval_gate", None) in edges
+    assert ("extract_bank_node", "approval_gate", None) in edges
+
+
+def test_document_workflow_post_approval_spine_to_terminal():
+    edges = _edges(document_workflow)
+    assert ("approval_gate", "route_node", None) in edges
+    assert ("route_node", "consolidate_node", None) in edges
+    assert ("consolidate_node", "deliver_node", None) in edges
+    # deliver_node is terminal (no outgoing edges).
+    assert all(frm != "deliver_node" for frm, _to, _r in edges)
+
+
+# =========================================================================== #
+# dynamic_router behavior (no network)
+# =========================================================================== #
+
+
+def _run_router(node_input):
+    ctx = _FakeContext(state={})
+    # FunctionNode stores the wrapped callable on the ``_func`` PrivateAttr.
+    fn = dynamic_router._func
+    result = fn(ctx, node_input)
+    if asyncio.iscoroutine(result):
+        result = asyncio.run(result)
+    return result
+
+
+def test_dynamic_router_maps_each_intent():
+    assert _run_router(RouteDecision(intent="document")).actions.route == ROUTE_DOCUMENT
+    assert _run_router(RouteDecision(intent="question")).actions.route == ROUTE_QUESTION
+    assert _run_router(RouteDecision(intent="unknown")).actions.route == ROUTE_UNKNOWN
+    # Dict / unexpected input falls back to 'unknown' without raising.
+    assert _run_router({"intent": "question"}).actions.route == ROUTE_QUESTION
+    assert _run_router(object()).actions.route == ROUTE_UNKNOWN
+
+
+# =========================================================================== #
+# Placeholder spine reaches deliver_node (document pass, fakes only)
+# =========================================================================== #
+
+
+def test_placeholder_spine_invoice_pass_reaches_deliver():
+    """Drive approval_gate -> route_node -> consolidate_node -> deliver_node with a
+    fake Context carrying one normalized invoice, proving the spine is runnable and
+    terminates at deliver_node (no Gemini / artifact / Firestore)."""
+    state = {
+        nodes.DOC_TYPE_KEY: "invoice",
+        nodes.DIRECTION_KEY: "purchase",
+        "client_id": "test-client",
+        "fye_month": 3,
+        nodes.NORMALIZED_KEY: [
+            {
+                "doc_type": "purchase",
+                "invoice_number": "INV-1",
+                "invoice_date": "2026-01-15",
+                "currency": "SGD",
+                "supplier": {"name": "Acme"},
+                "customer": {},
+                "lines": [],
+                "our_gst_registered": True,
+                "reconciled": True,
+            }
+        ],
+    }
+    ctx = _FakeContext(state=state)
+
+    # Fully reconciled, no flagged / low-confidence lines -> the gate
+    # auto-approves and yields NO RequestInput (it's an async generator now).
+    interrupts = _drain_gate(ctx)
+    assert interrupts == []
+    assert ctx.state["approval_status"] == "auto_approved"
+
+    asyncio.run(nodes.route_node(ctx))
+    assert len(ctx.state[nodes.ROUTES_KEY]) == 1
+
+    consolidate = asyncio.run(nodes.consolidate_node(ctx))
+    assert consolidate.output["consolidated"] == 1
+    # consolidate_node prepares a Slack-agnostic ledger payload in state.
+    assert ctx.state[nodes.LEDGER_ROWS_KEY]["kind"] == "invoice"
+    assert len(ctx.state[nodes.LEDGER_ROWS_KEY]["batches"]) == 1
+
+    deliver = asyncio.run(nodes.deliver_node(ctx))
+    assert deliver.output["delivered"] is True
+    assert ctx.state["delivered"] is True
+
+
+def test_placeholder_spine_bank_pass_reaches_deliver():
+    """Same spine via the bank lane (one BankStatement) -> deliver_node."""
+    state = {
+        nodes.DOC_TYPE_KEY: "bank_statement",
+        nodes.DIRECTION_KEY: None,
+        "client_id": "test-client",
+        "fye_month": 3,
+        nodes.BANK_STATEMENTS_KEY: [
+            {
+                "account_number": "123-456",
+                "currency": "SGD",
+                "transactions": [{"date": "2026-02-10", "description": "x", "amount": 10.0}],
+            }
+        ],
+    }
+    ctx = _FakeContext(state=state)
+
+    # Bank lane has no normalized invoices to inspect -> gate auto-approves.
+    assert _drain_gate(ctx) == []
+    assert ctx.state["approval_status"] == "auto_approved"
+    asyncio.run(nodes.route_node(ctx))
+    assert len(ctx.state[nodes.ROUTES_KEY]) == 1
+    assert asyncio.run(nodes.consolidate_node(ctx)).output["consolidated"] == 1
+    assert ctx.state[nodes.LEDGER_ROWS_KEY]["kind"] == "bank"
+    assert asyncio.run(nodes.deliver_node(ctx)).output["delivered"] is True
+
+
+def _drain_gate(ctx) -> list:
+    """Drive the ``approval_gate`` async generator; return any yielded items.
+
+    The gate yields a ``RequestInput`` only when the document needs human
+    review; on the auto-approve path it yields nothing. Returns the list of
+    yielded items so tests can assert pause vs pass-through.
+    """
+
+    async def _collect() -> list:
+        return [item async for item in nodes.approval_gate(ctx)]
+
+    return asyncio.run(_collect())

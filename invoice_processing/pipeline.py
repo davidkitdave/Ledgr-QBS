@@ -32,7 +32,13 @@ from .export.client_context import (
     coa_from_state,
     entity_memory_from_state,
 )
-from .export.exporters import BankStatementExporter, _sheet_title, get_bank_exporter, get_exporter
+from .export.exporters import (
+    BankStatementExporter,
+    _sheet_title,
+    get_bank_exporter,
+    get_exporter,
+    validate_required_fields,
+)
 from .export.models import BankStatement, BankTransaction, NormalizedInvoice
 from .export.routing import DocRoute, route_document
 from .extract.bank_statement_extractor import (
@@ -136,22 +142,27 @@ def _build_bank_workbook(
     bank_exporter: BankStatementExporter,
     statements: list[BankStatement],
 ) -> bytes:
-    """Build an in-memory BankStatement workbook and return its bytes."""
+    """Build an in-memory BankStatement workbook and return its bytes.
+
+    Statements sharing an account sheet are merged into one continuous, date-sorted
+    chain (see :class:`BankStatementExporter`), so a year of monthly statements for
+    an account lands as a single cross-month-reconciling sheet.
+    """
     wb = Workbook()
-    used: dict[str, int] = {}
-    for i, stmt in enumerate(statements):
-        title = _sheet_title(stmt.bank_name)
-        if title in used:
-            used[title] += 1
-            suffix = f" ({used[title]})"
-            title = title[: 31 - len(suffix)] + suffix
-        else:
-            used[title] = 0
+    grouped: dict[str, list[BankStatement]] = {}
+    for stmt in statements:
+        grouped.setdefault(_sheet_title(stmt.bank_name), []).append(stmt)
+
+    for i, (title, stmts) in enumerate(grouped.items()):
         sheet = wb.active if i == 0 else wb.create_sheet()
         sheet.title = title
         sheet.append(bank_exporter.BANK_COLS)
-        for row in bank_exporter.bank_rows(stmt):
-            sheet.append([row.get(c, "") for c in bank_exporter.BANK_COLS])
+        blocks: list[dict] = []
+        for stmt in stmts:
+            blocks.extend(bank_exporter.rows_to_blocks(bank_exporter.bank_rows(stmt)))
+        bank_exporter.rebuild_account_sheet(
+            sheet, bank_exporter.sort_blocks(blocks), bank_exporter.BANK_COLS
+        )
     buf = BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -248,6 +259,24 @@ def process_document(
             category_mapping=category_mapping_from_state(state),
             entity_memory=entity_memory_from_state(state),
         )
+
+        # ------------------------------------------------------------------ #
+        # Step 3b — validate export-required fields for the client's software.
+        # Flag (don't drop): the row is still written so no data is lost, but a
+        # missing required field marks the doc for review.
+        # ------------------------------------------------------------------ #
+        exporter = get_exporter(client.accounting_software)
+        missing = validate_required_fields(normalized, exporter, effective_direction)
+        if missing:
+            reconciled = False
+            normalized.reconciled = False
+            review_note = "needs review: missing " + ", ".join(missing)
+            normalized.reconcile_note = (
+                f"{normalized.reconcile_note}; {review_note}"
+                if normalized.reconcile_note
+                else review_note
+            )
+            rec_note = f"{rec_note}; {review_note}" if rec_note else review_note
 
         # ------------------------------------------------------------------ #
         # Step 4 — route
