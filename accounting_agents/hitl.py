@@ -57,6 +57,7 @@ def write_interrupt(
     channel_id: str,
     slack_file_id: str,
     message_ts: Optional[str] = None,
+    user_id: Optional[str] = None,
     status: str = "pending",
     extra: Optional[dict[str, Any]] = None,
 ) -> None:
@@ -65,10 +66,13 @@ def write_interrupt(
     Args:
         db: A Firestore client (or compatible fake).
         op_id: The interrupt id used by ``approval_gate`` (== the resume key).
-        session_id: ADK session id (== channel id, by convention).
+        session_id: ADK session id of the paused (per-document) session
+            (``f"{channel_id}:{file_id}"`` by convention).
         channel_id: Slack channel the document was dropped in.
         slack_file_id: Slack file id (re-download the PDF on resume if needed).
         message_ts: Timestamp of the Slack approval card (for updating it).
+        user_id: ADK user id the session is stored under (the ``channel_id`` by
+            convention). Defaults to ``session_id`` for backward compatibility.
         status: Lifecycle status; starts ``"pending"``.
         extra: Optional additional fields to merge into the doc.
     """
@@ -78,6 +82,7 @@ def write_interrupt(
         "channel_id": channel_id,
         "slack_file_id": slack_file_id,
         "message_ts": message_ts,
+        "user_id": user_id if user_id is not None else session_id,
         "status": status,
     }
     if extra:
@@ -177,11 +182,14 @@ async def resume_session(
         raise KeyError(f"No interrupt correlation doc for op_id {op_id!r}.")
 
     session_id = interrupt["session_id"]
+    # user_id the paused session is stored under (channel_id by convention).
+    # Older docs omit it → fall back to session_id (legacy single-id sessions).
+    user_id = interrupt.get("user_id") or session_id
     message = build_resume_message(op_id, decision)
 
     events: list[Any] = []
     async for event in runner.run_async(
-        user_id=session_id,
+        user_id=user_id,
         session_id=session_id,
         new_message=message,
     ):

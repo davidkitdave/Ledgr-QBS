@@ -30,6 +30,11 @@ from accounting_agents.ledger_store import SlackLedgerStore
 from accounting_agents.nodes import ApproveDecision, approval_gate
 from accounting_agents.sessions import FirestoreSessionService
 from accounting_agents.slack_runner import (
+    _derive_setup_prefill,
+    build_async_app,
+    deslugify_channel_name,
+    event_node_name,
+    event_stage_label,
     extract_final_text,
     find_interrupt_id,
     handle_approval_action,
@@ -381,6 +386,267 @@ def test_reject_action_resumes_without_appending():
 
 
 # =========================================================================== #
+# Stage detection + live status message
+# =========================================================================== #
+
+
+def _node_event(node_name: str, *, text: str = "", interrupt: bool = False):
+    """A scripted event tagged with a node path the way the ADK Workflow does."""
+    calls = (
+        [SimpleNamespace(name="adk_request_input", id="C1:F1")] if interrupt else []
+    )
+    return SimpleNamespace(
+        node_info=SimpleNamespace(path=f"document_workflow@1/{node_name}@1"),
+        content=SimpleNamespace(parts=[SimpleNamespace(text=text)] if text else []),
+        get_function_calls=lambda: calls,
+    )
+
+
+def test_event_node_name_parses_trailing_node():
+    ev = _node_event("classify_node")
+    assert event_node_name(ev) == "classify_node"
+    # No node_info / empty path → None (e.g. coordinator chatter).
+    assert event_node_name(SimpleNamespace()) is None
+    assert event_node_name(SimpleNamespace(node_info=SimpleNamespace(path=""))) is None
+
+
+def test_event_stage_label_maps_known_nodes():
+    assert "Classifying" in event_stage_label(_node_event("classify_node"))
+    assert "bank statement" in event_stage_label(_node_event("extract_bank_node"))
+    assert "invoice" in event_stage_label(_node_event("extract_invoice_node"))
+    # Unmapped / untagged events do not trigger a status change.
+    assert event_stage_label(_node_event("some_unknown_node")) is None
+    assert event_stage_label(SimpleNamespace()) is None
+
+
+def test_process_file_event_posts_status_once_and_updates_per_stage():
+    slack = FakeSlackClient()
+    db = FakeFirestore()
+    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+
+    # A realistic single-document stream: classify → extract → tax → final text.
+    events = [
+        _node_event("classify_node"),
+        _node_event("extract_invoice_node"),
+        _node_event("tax_node"),
+        _node_event("deliver_node", text="done"),
+    ]
+    runner = _FakeRunner(events, _ledger_payload())
+
+    result = asyncio.run(
+        process_file_event(
+            runner=runner,
+            ledger_store=store,
+            db=db,
+            slack_client=slack,
+            channel_id="C1",
+            file_id="F1",
+            app_name="acc",
+            download_fn=lambda c, f: b"%PDF fake",
+            source_filename="invoice.pdf",
+        )
+    )
+    assert result["status"] == "delivered"
+
+    # Exactly ONE status message was posted (the initial "received" message). The
+    # delivery summary is a separate post; assert the status post is distinct and
+    # there is only one "received" message.
+    received = [p for p in _post_calls(slack) if "Received" in p.get("text", "")]
+    assert len(received) == 1
+    assert "invoice.pdf" in received[0]["text"]
+
+    # The status message was edited in place through the stages (distinct labels)
+    # plus the terminal ✅. The status post is the FIRST chat_postMessage, whose
+    # returned ts is "1.000" (FakeSlackClient numbers posts 1-based).
+    status_ts = "1.000"
+    update_texts = [u["text"] for u in slack.updates]
+    assert any("Classifying" in t for t in update_texts)
+    assert any("Extracting" in t for t in update_texts)
+    assert any("Reconciling" in t for t in update_texts)
+    assert update_texts[-1] == "✅ Processed"
+    # Every update targeted the single status message ts.
+    assert all(u["ts"] == status_ts for u in slack.updates)
+
+
+def test_instant_ack_reaction_and_status_before_semaphore_heavy_work():
+    """👀 reaction + initial status message fire BEFORE the download (semaphore-guarded).
+
+    Strategy: the download fn blocks on a threading.Event until we confirm both
+    the reaction and the status post have already happened, then unblocks.
+    This proves the ack is outside/before the semaphore-guarded heavy work.
+    """
+    import threading
+
+    slack = FakeSlackClient()
+    db = FakeFirestore()
+    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+
+    # Teach the fake client that file F1 was shared in channel C1 at ts "9.001".
+    slack._file_share_ts["F1"] = {"C1": "9.001"}
+
+    # The download blocks until we release it.
+    download_started = threading.Event()
+    download_may_proceed = threading.Event()
+
+    def blocking_download(client, file_id):
+        download_started.set()
+        download_may_proceed.wait(timeout=5)
+        return b"%PDF-1.4 fake"
+
+    # Run process_file_event in a background thread so we can inspect state
+    # while the download is blocked.
+    result_holder: list = []
+
+    async def _run():
+        r = await process_file_event(
+            runner=_FakeRunner([
+                SimpleNamespace(
+                    content=SimpleNamespace(parts=[SimpleNamespace(text="done")]),
+                    get_function_calls=lambda: [],
+                )
+            ], _ledger_payload()),
+            ledger_store=store,
+            db=db,
+            slack_client=slack,
+            channel_id="C1",
+            file_id="F1",
+            app_name="acc",
+            download_fn=blocking_download,
+            source_filename="invoice.pdf",
+        )
+        result_holder.append(r)
+
+    t = threading.Thread(target=lambda: asyncio.run(_run()), daemon=True)
+    t.start()
+
+    # Wait for the download to start (we are now inside the semaphore).
+    assert download_started.wait(timeout=5), "download never started"
+
+    # At this point the download is blocked inside _SEM. Assert that the INSTANT
+    # ack (reaction + status post) already happened BEFORE we entered _SEM.
+    assert any(r["name"] == "eyes" and r["timestamp"] == "9.001"
+               for r in slack.reactions_added), \
+        "👀 reaction must be added before semaphore-guarded download starts"
+
+    received_posts = [p for p in slack._posts if "on it" in p.get("text", "")]
+    assert received_posts, "initial status message must be posted before download starts"
+
+    # Release the download and wait for the run to finish.
+    download_may_proceed.set()
+    t.join(timeout=10)
+
+    assert result_holder and result_holder[0]["status"] == "delivered"
+    # On completion the 👀 is removed and ✅ added.
+    assert any(r["name"] == "eyes" for r in slack.reactions_removed), \
+        "👀 reaction must be removed on completion"
+    assert any(r["name"] == "white_check_mark" for r in slack.reactions_added), \
+        "✅ reaction must be added on completion"
+
+
+def test_process_file_event_status_update_failure_does_not_crash_run():
+    class _FlakyUpdateClient(FakeSlackClient):
+        def chat_update(self, **kwargs):
+            raise RuntimeError("slack 500")
+
+    slack = _FlakyUpdateClient()
+    db = FakeFirestore()
+    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+    runner = _FakeRunner([_node_event("classify_node", text="done")], _ledger_payload())
+
+    # The cosmetic chat_update failures must NOT abort processing.
+    result = asyncio.run(
+        process_file_event(
+            runner=runner,
+            ledger_store=store,
+            db=db,
+            slack_client=slack,
+            channel_id="C1",
+            file_id="F1",
+            app_name="acc",
+            download_fn=lambda c, f: b"%PDF fake",
+        )
+    )
+    assert result["status"] == "delivered"
+    assert len(slack.uploads) == 1
+
+
+def test_process_file_event_interrupt_sets_needs_review_status():
+    slack = FakeSlackClient()
+    db = FakeFirestore()
+    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+
+    events = [
+        _node_event("classify_node"),
+        _node_event("approval_gate", interrupt=True),
+    ]
+    runner = _FakeRunner(events, {"approval_message": "needs review: line X"})
+
+    result = asyncio.run(
+        process_file_event(
+            runner=runner,
+            ledger_store=store,
+            db=db,
+            slack_client=slack,
+            channel_id="C1",
+            file_id="F1",
+            app_name="acc",
+            download_fn=lambda c, f: b"%PDF fake",
+        )
+    )
+    assert result["status"] == "paused"
+    update_texts = [u["text"] for u in slack.updates]
+    assert any("Needs your review" in t for t in update_texts)
+
+
+# =========================================================================== #
+# De-slugify channel name
+# =========================================================================== #
+
+
+def test_deslugify_channel_name_basic():
+    assert deslugify_channel_name("akar-enterprises-pte-ltd") == "Akar Enterprises Pte Ltd"
+
+
+def test_deslugify_channel_name_underscores_and_suffixes():
+    assert deslugify_channel_name("foo_bar_llp") == "Foo Bar LLP"
+    assert deslugify_channel_name("acme-sg-pte-ltd") == "Acme SG Pte Ltd"
+
+
+def test_deslugify_channel_name_empty():
+    assert deslugify_channel_name("") == ""
+    assert deslugify_channel_name("---") == ""
+
+
+# =========================================================================== #
+# Setup-open prefill from channel name
+# =========================================================================== #
+
+
+def test_derive_setup_prefill_from_channel_name():
+    class _InfoClient:
+        def conversations_info(self, *, channel):
+            assert channel == "C-OPEN"
+            return {"ok": True, "channel": {"id": channel, "name": "akar-enterprises-pte-ltd"}}
+
+    body = {"channel": {"id": "C-OPEN"}, "trigger_id": "t1"}
+    prefill = asyncio.run(_derive_setup_prefill(_InfoClient(), body))
+    assert prefill == {"client_name": "Akar Enterprises Pte Ltd"}
+
+
+def test_derive_setup_prefill_handles_lookup_failure():
+    class _BoomClient:
+        def conversations_info(self, *, channel):
+            raise RuntimeError("missing_scope")
+
+    body = {"channel": {"id": "C-OPEN"}}
+    assert asyncio.run(_derive_setup_prefill(_BoomClient(), body)) is None
+
+
+def test_derive_setup_prefill_no_channel_returns_none():
+    assert asyncio.run(_derive_setup_prefill(object(), {})) is None
+
+
+# =========================================================================== #
 # helpers
 # =========================================================================== #
 
@@ -398,3 +664,130 @@ def _last_blocks(slack: FakeSlackClient):
         if p.get("blocks"):
             return p["blocks"]
     return []
+
+
+# =========================================================================== #
+# message/file_share wiring: uploads delivered via the message event path
+# =========================================================================== #
+
+
+def _capture_message_handler(runner_mock=None, ledger_store_mock=None, db_mock=None):
+    """Build the Bolt app with fakes and return the registered ``message`` handler."""
+    from unittest.mock import MagicMock, patch
+
+    from app.slack_app import _SeenEvents
+    from accounting_agents import slack_runner
+
+    registered = {}
+    fake_app = MagicMock()
+
+    def event_decorator(name):
+        def decorator(fn):
+            registered[name] = fn
+            return fn
+        return decorator
+
+    fake_app.event = event_decorator
+    fake_app.action = lambda *a, **k: (lambda fn: fn)
+    fake_app.view = lambda *a, **k: (lambda fn: fn)
+    fake_app.command = lambda *a, **k: (lambda fn: fn)
+
+    fresh_seen = _SeenEvents()
+    rm = runner_mock or MagicMock()
+    rm.app_name = "acc"
+
+    with patch.object(slack_runner, "_seen", fresh_seen), \
+         patch("slack_bolt.async_app.AsyncApp", return_value=fake_app), \
+         patch("invoice_processing.export.client_context.InMemoryClientStore"):
+        build_async_app(
+            runner=rm,
+            ledger_store=ledger_store_mock or MagicMock(),
+            db=db_mock or MagicMock(),
+        )
+
+    return registered["message"], fresh_seen
+
+
+def test_message_file_share_calls_process_file_event_per_file():
+    """A message/file_share event with 2 files calls process_file_event twice."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from accounting_agents import slack_runner
+
+    handler, _ = _capture_message_handler()
+
+    body = {"event_id": "Ev-file-1"}
+    event = {
+        "type": "message",
+        "subtype": "file_share",
+        "ts": "111.001",
+        "channel": "C-file",
+        "files": [{"id": "FA1"}, {"id": "FA2"}],
+    }
+    fake_client = MagicMock()
+    mock_pfe = AsyncMock(return_value={"status": "delivered"})
+
+    with patch.object(slack_runner, "process_file_event", mock_pfe), \
+         patch.object(slack_runner, "download_pdf_bytes", return_value=b"%PDF fake"):
+        asyncio.run(handler(event=event, body=body, client=fake_client))
+
+    assert mock_pfe.call_count == 2
+    called_file_ids = {c.kwargs["file_id"] for c in mock_pfe.call_args_list}
+    assert called_file_ids == {"FA1", "FA2"}
+    # channel_id threaded through correctly
+    assert all(c.kwargs["channel_id"] == "C-file" for c in mock_pfe.call_args_list)
+
+
+def test_message_file_share_dedup_not_reprocessed():
+    """Same event_id redelivered → process_file_event called only once (not twice)."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from accounting_agents import slack_runner
+
+    handler, _ = _capture_message_handler()
+
+    body = {"event_id": "Ev-file-dup"}
+    event = {
+        "type": "message",
+        "subtype": "file_share",
+        "ts": "111.002",
+        "channel": "C-file",
+        "files": [{"id": "FB1"}],
+    }
+    fake_client = MagicMock()
+    mock_pfe = AsyncMock(return_value={"status": "delivered"})
+
+    with patch.object(slack_runner, "process_file_event", mock_pfe), \
+         patch.object(slack_runner, "download_pdf_bytes", return_value=b"%PDF fake"):
+        # First delivery
+        asyncio.run(handler(event=event, body=body, client=fake_client))
+        assert mock_pfe.call_count == 1
+        # Duplicate delivery — same event_id
+        asyncio.run(handler(event=event, body=body, client=fake_client))
+        assert mock_pfe.call_count == 1  # unchanged
+
+
+def test_message_text_only_routes_to_question_not_file():
+    """A plain text message (no files, no subtype) goes to answer_question only."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from accounting_agents import slack_runner
+
+    handler, _ = _capture_message_handler()
+
+    body = {"event_id": "Ev-text-1"}
+    event = {
+        "type": "message",
+        "ts": "111.003",
+        "channel": "C-qa",
+        "text": "What is my GST balance?",
+    }
+    fake_client = MagicMock()
+    mock_pfe = AsyncMock(return_value={"status": "delivered"})
+    mock_aq = AsyncMock(return_value={"status": "answered", "text": "42"})
+
+    with patch.object(slack_runner, "process_file_event", mock_pfe), \
+         patch.object(slack_runner, "answer_question", mock_aq):
+        asyncio.run(handler(event=event, body=body, client=fake_client))
+
+    mock_pfe.assert_not_called()
+    mock_aq.assert_called_once()
+    assert mock_aq.call_args.kwargs["question"] == "What is my GST balance?"
+    assert mock_aq.call_args.kwargs["channel_id"] == "C-qa"

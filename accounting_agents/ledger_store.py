@@ -109,6 +109,9 @@ class SlackLedgerStore:
     # ------------------------------------------------------------------ #
 
     def _lock_for(self, channel_id: str, fy: str) -> threading.Lock:
+        # TODO(concurrency): cross-instance via Firestore txn. This in-process lock
+        # only serializes drops within a single process; a multi-instance Cloud Run
+        # deployment needs a Firestore transaction on the pointer doc.
         key = (channel_id, str(fy))
         with self._locks_guard:
             lock = self._locks.get(key)
@@ -214,6 +217,80 @@ class SlackLedgerStore:
         seen.add(doc_key)
         return len(rows)
 
+    @staticmethod
+    def _read_bank_blocks(sheet, cols: list[str]) -> tuple[list[dict], set[str]]:
+        """Read an existing bank sheet back into normalized month-blocks + key set.
+
+        Returns ``(blocks, seen_keys)`` where each block is the
+        ``{"stated_bf", "currency", "transactions": [...], "bf_key"}`` shape the
+        exporter rebuilds from, with the per-row dedupe key carried in each row dict
+        and on the block's ``bf_key``. ``TOTALS`` rows are dropped (regenerated on
+        rebuild). ``seen_keys`` lets the caller dedupe whole statements by doc key.
+        """
+        header = [c.value for c in sheet[1]] if sheet.max_row >= 1 else []
+        if not header:
+            return [], set()
+        col_idx = {name: i for i, name in enumerate(header)}
+        dedupe_idx = col_idx.get(DEDUPE_COL)
+
+        value_rows: list[dict] = []
+        seen: set[str] = set()
+        for raw in sheet.iter_rows(min_row=2, values_only=True):
+            key = ""
+            if dedupe_idx is not None and dedupe_idx < len(raw) and raw[dedupe_idx]:
+                key = str(raw[dedupe_idx])
+                seen.add(key)
+            row: dict = {}
+            for name in cols:
+                i = col_idx.get(name)
+                row[name] = raw[i] if i is not None and i < len(raw) else None
+            row[DEDUPE_COL] = key
+            value_rows.append(row)
+
+        # Split into blocks, carrying the dedupe key onto the block + its txns.
+        blocks = BankStatementExporter.rows_to_blocks(value_rows)
+        for block in blocks:
+            txns = block["transactions"]
+            block["bf_key"] = txns[0].get(DEDUPE_COL, "") if txns else ""
+        return blocks, seen
+
+    def _merge_bank_statement(
+        self, sheet, cols: list[str], rows: list[dict], doc_key: str
+    ) -> int:
+        """Merge one statement's value rows into the account sheet's continuous chain.
+
+        Reads the existing sheet back into sorted month-blocks, appends this
+        statement's block(s) (tagged with ``doc_key`` on every row so dedupe + the
+        chain coexist), re-sorts by date, and REBUILDS the whole sheet. Idempotent:
+        if ``doc_key`` already appears in the sheet the statement is skipped and 0 is
+        returned; otherwise the count of newly-added value rows is returned.
+        """
+        # Ensure the dedupe column exists (header-only / legacy sheets).
+        header = [c.value for c in sheet[1]] if sheet.max_row >= 1 else []
+        if not header:
+            sheet.append(list(cols) + [DEDUPE_COL])
+        elif DEDUPE_COL not in header:
+            sheet.cell(row=1, column=len(header) + 1, value=DEDUPE_COL)
+
+        existing_blocks, seen = self._read_bank_blocks(sheet, cols)
+        if doc_key in seen:
+            return 0  # already merged this statement — dedupe.
+
+        new_blocks = BankStatementExporter.rows_to_blocks(rows)
+        added = 0
+        for block in new_blocks:
+            block["bf_key"] = doc_key
+            for txn in block["transactions"]:
+                txn[DEDUPE_COL] = doc_key
+                added += 1
+            added += 1  # the BALANCE B/F marker row
+
+        all_blocks = BankStatementExporter.sort_blocks(existing_blocks + new_blocks)
+        BankStatementExporter.rebuild_account_sheet(
+            sheet, all_blocks, cols, key_col=DEDUPE_COL
+        )
+        return added
+
     # ------------------------------------------------------------------ #
     # Public API
     # ------------------------------------------------------------------ #
@@ -300,12 +377,15 @@ class SlackLedgerStore:
 
             sheet = self._get_or_create_sheet(wb, sheet_name, kind)
             if kind == "bank":
-                cols_for_sheet = cols
+                # Bank: REBUILD the account sheet as one continuous, date-sorted chain
+                # (merge existing rows + this statement, sort months, re-thread the
+                # running balance), rather than blindly appending a self-seeding block.
+                n = self._merge_bank_statement(sheet, cols, rows, doc_key)
             else:
+                seen = self._existing_keys(sheet)
                 cols_for_sheet = sheet_cols.get(sheet_name, list(exporter.purchase_cols))
+                n = self._append_rows(sheet, cols_for_sheet, rows, doc_key, seen)
 
-            seen = self._existing_keys(sheet)
-            n = self._append_rows(sheet, cols_for_sheet, rows, doc_key, seen)
             if n == 0:
                 deduped += 1
             else:

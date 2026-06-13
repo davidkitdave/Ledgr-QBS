@@ -49,7 +49,7 @@ class _FakeOpener:
 
 
 class FakeSlackClient:
-    """In-memory Slack file store supporting upload + info + download."""
+    """In-memory Slack file store supporting upload + info + download + reactions."""
 
     token = "xoxb-test"
 
@@ -59,6 +59,12 @@ class FakeSlackClient:
         self.uploads: list[dict] = []
         self._posts: list[dict] = []
         self.updates: list[dict] = []
+        # Reaction tracking: list of {"channel", "timestamp", "name"} dicts.
+        self.reactions_added: list[dict] = []
+        self.reactions_removed: list[dict] = []
+        # Optional per-file share ts injected by tests to simulate files_info shares.
+        # Maps file_id → {"channel_id": ts_string}.
+        self._file_share_ts: dict[str, dict[str, str]] = {}
 
     def chat_postMessage(self, **kwargs):
         self._posts.append(kwargs)
@@ -77,10 +83,28 @@ class FakeSlackClient:
         return {"files": [{"id": file_id, "url_private_download": url}]}
 
     def files_info(self, *, file):
-        # Find the URL that maps to this file id's bytes.
-        data = self.files[file]
-        url = next(u for u, b in self.urls.items() if b is data)
-        return {"file": {"id": file, "url_private_download": url, "name": "ledger.xlsx"}}
+        # Build shares from _file_share_ts if present, so tests can exercise the
+        # reaction path. Also include url_private_download for ledger-store tests.
+        shares: dict = {}
+        if file in self._file_share_ts:
+            shares["private"] = {
+                ch: [{"ts": ts}]
+                for ch, ts in self._file_share_ts[file].items()
+            }
+        if file in self.files:
+            data = self.files[file]
+            url = next(u for u, b in self.urls.items() if b is data)
+        else:
+            url = f"https://files.slack.com/{file}/unknown"
+        return {"file": {"id": file, "url_private_download": url, "name": "ledger.xlsx", "shares": shares}}
+
+    def reactions_add(self, *, channel, timestamp, name):
+        self.reactions_added.append({"channel": channel, "timestamp": timestamp, "name": name})
+        return {"ok": True}
+
+    def reactions_remove(self, *, channel, timestamp, name):
+        self.reactions_removed.append({"channel": channel, "timestamp": timestamp, "name": name})
+        return {"ok": True}
 
     def opener(self) -> _FakeOpener:
         return _FakeOpener(self.urls)
@@ -199,3 +223,146 @@ def test_bank_workbook_one_sheet_per_account():
     # The dedupe column is present on the header.
     header = [c.value for c in wb["OCBC - 5001"][1]]
     assert DEDUPE_COL in header
+
+
+# --------------------------------------------------------------------------- #
+# Accountant-grade bank export: live formulas, no legacy columns
+# --------------------------------------------------------------------------- #
+
+from datetime import date  # noqa: E402
+
+from invoice_processing.export.exporters import BankStatementExporter  # noqa: E402
+from invoice_processing.export.models import BankStatement, BankTransaction  # noqa: E402
+
+
+def _bank_stmt(
+    name: str,
+    opening: float,
+    txns: list[tuple],
+    closing: float,
+    txn_date: date = date(2026, 2, 1),
+) -> BankStatement:
+    """Build a BankStatement; each txn = (description, withdrawal, deposit, stated_balance).
+
+    All transactions share ``txn_date`` (override per statement to exercise the
+    cross-month, date-sorted continuous chain).
+    """
+    return BankStatement(
+        bank_name=name,
+        currency="SGD",
+        opening_balance=opening,
+        closing_balance=closing,
+        transactions=[
+            BankTransaction(
+                date=txn_date,
+                description=d,
+                withdrawal=w,
+                deposit=dep,
+                balance=bal,
+            )
+            for (d, w, dep, bal) in txns
+        ],
+    )
+
+
+def _bank_batch(exporter, stmt, doc_key):
+    return {"sheet": stmt.bank_name, "doc_key": doc_key, "rows": exporter.bank_rows(stmt)}
+
+
+def test_bank_export_no_legacy_columns():
+    exporter = BankStatementExporter()
+    header = exporter.BANK_COLS
+    assert "Notes" not in header
+    assert "Source File ID" not in header
+    assert "Math_Check" not in header
+    # New accountant-grade columns present.
+    assert "Stated Balance" in header
+    assert "Check" in header
+    assert "Balance" in header
+
+
+def test_bank_balance_and_check_are_live_formulas():
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+    exporter = BankStatementExporter()
+
+    stmt = _bank_stmt(
+        "OCBC - 5001", 1000.0,
+        [("ATM withdrawal", 100.0, None, 900.0), ("Salary", None, 500.0, 1400.0)],
+        1400.0,
+    )
+    result = store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1", kind="bank",
+        batches=[_bank_batch(exporter, stmt, "F1:OCBC:1")],
+    )
+
+    wb = load_workbook(io.BytesIO(slack.files[result["slack_file_id"]]), data_only=False)
+    ws = wb["OCBC - 5001"]
+    header = [c.value for c in ws[1]]
+    bi = header.index("Balance") + 1
+    ci = header.index("Check") + 1
+    wi = header.index("Withdrawal") + 1
+    di = header.index("Deposit") + 1
+
+    # Row layout: 1=header, 2=BALANCE B/F, 3=txn, 4=txn, 5=TOTALS.
+    # Opening Balance seeds from its own Stated Balance.
+    assert str(ws.cell(row=2, column=bi).value).startswith("=")
+    # First txn running balance references the opening row's balance cell.
+    f_txn1 = ws.cell(row=3, column=bi).value
+    assert isinstance(f_txn1, str) and f_txn1.startswith("=")
+    assert "B2" in f_txn1 or "2" in f_txn1  # references prior balance row
+    # Second txn references the first txn's balance row (running chain).
+    f_txn2 = ws.cell(row=4, column=bi).value
+    assert f_txn2.startswith("=") and "3" in f_txn2
+    # Check is an IF/ROUND formula, not a static marker.
+    chk = ws.cell(row=3, column=ci).value
+    assert isinstance(chk, str) and chk.startswith("=IF(ROUND(")
+    # Totals row has SUM formulas over the txn block.
+    totals_wd = ws.cell(row=5, column=wi).value
+    totals_dep = ws.cell(row=5, column=di).value
+    assert str(totals_wd).startswith("=SUM(") and str(totals_dep).startswith("=SUM(")
+
+
+def test_bank_formulas_correct_after_second_append():
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+    exporter = BankStatementExporter()
+
+    stmt1 = _bank_stmt("OCBC - 5001", 1000.0, [("w1", 100.0, None, 900.0)], 900.0)
+    store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1", kind="bank",
+        batches=[_bank_batch(exporter, stmt1, "F1:OCBC:1")],
+    )
+    stmt2 = _bank_stmt("OCBC - 5001", 900.0, [("d1", None, 250.0, 1150.0)], 1150.0)
+    result2 = store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1", kind="bank",
+        batches=[_bank_batch(exporter, stmt2, "F2:OCBC:2")],
+    )
+
+    wb = load_workbook(io.BytesIO(slack.files[result2["slack_file_id"]]), data_only=False)
+    ws = wb["OCBC - 5001"]
+    header = [c.value for c in ws[1]]
+    bi = header.index("Balance") + 1
+    di = header.index("Description") + 1
+    si = header.index("Stated Balance") + 1
+
+    from openpyxl.utils import get_column_letter
+    bal = get_column_letter(bi)
+
+    # Continuous layout after two appends (months merged into one chain, single TOTALS):
+    # 1 header
+    # 2 B/F (stmt1)  3 w1
+    # 4 B/F (stmt2)  5 d1
+    # 6 TOTALS
+    descs = [ws.cell(row=r, column=di).value for r in range(2, ws.max_row + 1)]
+    assert descs == ["BALANCE B/F", "w1", "BALANCE B/F", "d1", "TOTALS"]
+
+    # First B/F seeds from its OWN stated opening.
+    assert ws.cell(row=2, column=bi).value == f"={get_column_letter(si)}2"
+    # CONTINUOUS CHAIN: the second month's B/F (row 4) carries forward from the prior
+    # month's closing balance (row 3) — NOT re-seeded from its own stated opening.
+    assert ws.cell(row=4, column=bi).value == f"={bal}3"
+    # Second month's txn (row 5) chains from the carried-forward B/F (row 4).
+    assert ws.cell(row=5, column=bi).value.startswith(f"={bal}4")
+    # Dedupe column still present and trailing.
+    assert header[-1] == DEDUPE_COL

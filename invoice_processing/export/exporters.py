@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Optional
 
 from openpyxl import Workbook
+from openpyxl.utils import get_column_letter
 
 from .models import BankStatement, InvoiceLine, NormalizedInvoice
 from .tax_classifier import TaxClassifier, classify_invoice
@@ -229,60 +230,316 @@ def _sheet_title(name: str) -> str:
     return (name or "Bank").translate(_SHEET_INVALID).strip()[:31] or "Bank"
 
 
+def _parse_ddmmyyyy(value) -> Optional[datetime]:
+    """Parse a ``DD/MM/YYYY`` date string into a ``datetime`` (None if unparseable).
+
+    Robust to ``date``/``datetime`` inputs and a few separator variants; never
+    raises — an unparseable value yields ``None`` so callers can keep stable order
+    instead of crashing on a malformed row.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day)
+    text = str(value).strip()
+    if not text:
+        return None
+    for fmt in ("%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt)
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
 class BankStatementExporter:
-    """Write a bank-statement workbook: one sheet per account, every txn row preserved."""
+    """Write an accountant-grade, continuous bank-statement workbook.
+
+    One sheet per account; every txn row preserved. Unlike a per-statement-block
+    layout, each account sheet is ONE continuous chain across the whole FY:
+
+    - Statements (months) are sorted ascending by date regardless of upload order,
+      and transactions within a month are sorted ascending by date too.
+    - The running ``Balance`` (col E) chains top-to-bottom across the ENTIRE sheet:
+      every txn row = ``=<prev_balance_cell> + Deposit - Withdrawal``, crossing
+      month boundaries (it does NOT re-seed each month).
+    - Each month keeps one ``BALANCE B/F`` marker row as a visual separator. Its
+      running ``Balance`` *carries forward* from the prior row (``=<prev_E>``),
+      while ``Stated Balance`` (col F) holds that month's stated opening B/F. The
+      FIRST B/F of the FY seeds from its own stated opening (``=F<row>``).
+    - A cross-month continuity ``Check`` (col G) on each B/F row flags ``GAP`` when
+      the carried-forward balance ≠ the stated B/F (a missing/duplicate month);
+      txn rows keep the per-row ``CHECK`` against their own stated balance.
+    - A single per-account ``TOTALS`` row at the bottom sums all withdrawals/deposits.
+
+    The sheet is REBUILT from a normalized list of month-blocks on every append, so
+    the result is identical no matter what order statements arrived in.
+    """
 
     BANK_COLS = [
-        "Date", "Description", "Withdrawal", "Deposit", "Balance",
-        "Currency", "Math_Check", "Notes", "Source File ID",
+        "Date", "Description", "Withdrawal", "Deposit",
+        "Balance", "Stated Balance", "Check", "Currency",
     ]
 
+    #: Description markers used to detect row roles.
+    OPENING_MARKER = "BALANCE B/F"
+    TOTALS_MARKER = "TOTALS"
+
     def bank_rows(self, stmt: BankStatement) -> list[dict]:
+        """Build the data rows for one statement (values only; formulas added later).
+
+        The opening row seeds ``Stated Balance`` from the opening balance; each txn
+        row carries its withdrawal/deposit + the extracted ``Stated Balance``. A
+        trailing ``TOTALS`` row closes the block. These value rows are the unit a
+        caller hands to the store as a batch; the store normalizes + re-sorts them
+        into the continuous chain (formula cells are filled on rebuild).
+        """
         rows: list[dict] = []
-        if stmt.opening_balance is not None:
-            rows.append({
-                "Description": "BALANCE B/F",
-                "Balance": _num(stmt.opening_balance),
-                "Currency": stmt.currency,
-                "Math_Check": "✅",
-                "Source File ID": stmt.source_file_id or "",
-            })
+        rows.append({
+            "Description": self.OPENING_MARKER,
+            "Stated Balance": _num(stmt.opening_balance),
+            "Currency": stmt.currency,
+        })
         for txn in stmt.transactions:
-            if txn.math_ok is True:
-                check = "✅"
-            elif txn.math_ok is False:
-                check = "⚠️"
-            else:
-                check = ""
             rows.append({
                 "Date": _fmt_date(txn.date),
                 "Description": txn.description,
                 "Withdrawal": _num(txn.withdrawal),
                 "Deposit": _num(txn.deposit),
-                "Balance": _num(txn.balance),
+                "Stated Balance": _num(txn.balance),
                 "Currency": stmt.currency,
-                "Math_Check": check,
-                "Notes": txn.note or "",
-                "Source File ID": stmt.source_file_id or "",
             })
+        rows.append({
+            "Description": self.TOTALS_MARKER,
+            "Stated Balance": _num(stmt.closing_balance),
+            "Currency": stmt.currency,
+        })
         return rows
 
-    def write_bank_workbook(self, path: str | Path, statements: list[BankStatement]) -> Path:
-        wb = Workbook()
-        used: dict[str, int] = {}
-        for i, stmt in enumerate(statements):
-            title = _sheet_title(stmt.bank_name)
-            if title in used:
-                used[title] += 1
-                suffix = f" ({used[title]})"
-                title = title[: 31 - len(suffix)] + suffix
+    # ------------------------------------------------------------------ #
+    # Continuous-chain rebuild
+    # ------------------------------------------------------------------ #
+
+    @classmethod
+    def rows_to_blocks(cls, rows: list[dict]) -> list[dict]:
+        """Split a flat list of value-row dicts (a statement) into month-blocks.
+
+        Each ``BALANCE B/F`` marker starts a new block carrying its stated opening
+        balance; subsequent non-marker rows are that block's transactions. ``TOTALS``
+        markers are dropped (the per-account total is regenerated on rebuild). A
+        leading run of transactions with no preceding B/F forms a headless block
+        (``stated_bf=None``) so nothing is lost.
+        """
+        blocks: list[dict] = []
+        current: Optional[dict] = None
+        for row in rows:
+            desc = row.get("Description")
+            if desc == cls.OPENING_MARKER:
+                current = {
+                    "stated_bf": row.get("Stated Balance"),
+                    "currency": row.get("Currency"),
+                    "transactions": [],
+                }
+                blocks.append(current)
+            elif desc == cls.TOTALS_MARKER:
+                continue
             else:
-                used[title] = 0
+                if current is None:
+                    current = {"stated_bf": None, "currency": row.get("Currency"), "transactions": []}
+                    blocks.append(current)
+                current["transactions"].append(dict(row))
+        return blocks
+
+    @classmethod
+    def _block_sort_key(cls, block: dict):
+        """Sort key for a month-block: earliest parseable txn date.
+
+        Blocks whose dates are all unparseable sort last but keep stable relative
+        order (Python's sort is stable), so a malformed month never crashes the build.
+        """
+        dates = [
+            d for d in (_parse_ddmmyyyy(t.get("Date")) for t in block["transactions"])
+            if d is not None
+        ]
+        return (0, min(dates)) if dates else (1, datetime.max)
+
+    @classmethod
+    def sort_blocks(cls, blocks: list[dict]) -> list[dict]:
+        """Return month-blocks sorted ascending by date, txns sorted within each.
+
+        Months are ordered by their earliest transaction date (upload-order
+        independent); within a month, transactions are ordered ascending by date.
+        Unparseable dates keep their stable relative position (never crash).
+        """
+        ordered = sorted(blocks, key=cls._block_sort_key)
+        for block in ordered:
+            block["transactions"].sort(
+                key=lambda t: (0, _parse_ddmmyyyy(t.get("Date")))
+                if _parse_ddmmyyyy(t.get("Date")) is not None
+                else (1, datetime.max)
+            )
+        return ordered
+
+    @classmethod
+    def rebuild_account_sheet(
+        cls,
+        sheet,
+        blocks: list[dict],
+        cols: list[str],
+        *,
+        key_col: Optional[str] = None,
+    ) -> None:
+        """Wipe a sheet's body and rewrite it as one continuous chain of month-blocks.
+
+        ``blocks`` is the normalized, already-sorted list from :meth:`sort_blocks`
+        (each ``{"stated_bf", "currency", "transactions": [row_dict]}``). For each
+        block we emit a ``BALANCE B/F`` row then its txn rows; a single ``TOTALS``
+        row closes the whole account. The header row (row 1) is preserved; an
+        optional ``key_col`` (the hidden dedupe column) is carried per-row from each
+        row dict's ``key_col`` value so dedupe survives the rebuild.
+        """
+        # Clear everything below the header.
+        if sheet.max_row > 1:
+            sheet.delete_rows(2, sheet.max_row - 1)
+
+        currency = ""
+        for block in blocks:
+            if block.get("currency"):
+                currency = block["currency"]
+                break
+
+        def emit(row: dict) -> None:
+            values = [row.get(c, "") for c in cols]
+            if key_col is not None:
+                values.append(row.get(key_col, ""))
+            sheet.append(values)
+
+        for block in blocks:
+            emit({
+                "Description": cls.OPENING_MARKER,
+                "Stated Balance": block.get("stated_bf"),
+                "Currency": block.get("currency") or currency,
+                key_col: block.get("bf_key", "") if key_col else "",
+            })
+            for txn in block["transactions"]:
+                emit(txn)
+
+        # Single per-account TOTALS row at the bottom.
+        emit({"Description": cls.TOTALS_MARKER, "Currency": currency})
+
+        cls.apply_bank_formulas(sheet, cols)
+
+    @classmethod
+    def apply_bank_formulas(cls, sheet, cols: Optional[list[str]] = None) -> None:
+        """Write the continuous Balance/Check/SUM formula chain over the sheet.
+
+        Walks every data row top-to-bottom and threads ONE running-balance chain
+        across the whole account (across month boundaries):
+
+        - ``BALANCE B/F`` row: ``Balance`` carries forward from the prior row
+          (``=<prev_E>``); the FIRST B/F of the sheet seeds from its own stated
+          opening (``=F<row>``). ``Check`` is the continuity test
+          ``=IF(ROUND(E-F,2)=0,"OK","GAP")`` — a ``GAP`` means the carried balance
+          ≠ the stated B/F (missing/duplicate month).
+        - txn row: ``Balance = <prev_E> + Deposit - Withdrawal``; ``Check`` is the
+          per-row ``=IF(ROUND(E-F,2)=0,"OK","CHECK")`` against its stated balance.
+        - ``TOTALS`` row: ``=SUM(...)`` over the Withdrawal/Deposit columns of all
+          transactions, and ``Balance`` mirrors the final running balance.
+        """
+        header = [c.value for c in sheet[1]] if sheet.max_row >= 1 else []
+        if not header:
+            return
+        idx = {name: i for i, name in enumerate(header)}
+        if "Balance" not in idx or "Description" not in idx:
+            return
+
+        def col(name: str) -> Optional[str]:
+            i = idx.get(name)
+            return get_column_letter(i + 1) if i is not None else None
+
+        c_desc = idx["Description"]
+        bal_col = col("Balance")
+        stated_col = col("Stated Balance")
+        check_col = col("Check")
+        wd_col = col("Withdrawal")
+        dep_col = col("Deposit")
+
+        prev_balance_row: Optional[int] = None   # row whose Balance feeds the next row
+        seen_first_bf = False                     # has the FY-opening B/F been emitted?
+        first_txn_row: Optional[int] = None       # first txn row (for the TOTALS sum)
+        last_txn_row: Optional[int] = None        # last txn row (for the TOTALS sum)
+        totals_row: Optional[int] = None
+
+        for r in range(2, sheet.max_row + 1):
+            desc = sheet.cell(row=r, column=c_desc + 1).value
+            if desc == cls.OPENING_MARKER:
+                if bal_col:
+                    if not seen_first_bf or prev_balance_row is None:
+                        # First B/F of the FY: seed from its own stated opening.
+                        if stated_col:
+                            sheet[f"{bal_col}{r}"] = f"={stated_col}{r}"
+                    else:
+                        # Later month: carry the running balance forward.
+                        sheet[f"{bal_col}{r}"] = f"={bal_col}{prev_balance_row}"
+                    prev_balance_row = r
+                seen_first_bf = True
+                # Continuity Check: carried balance vs this month's stated B/F → GAP.
+                if check_col and stated_col and bal_col:
+                    sheet[f"{check_col}{r}"] = (
+                        f'=IF(ROUND({bal_col}{r}-{stated_col}{r},2)=0,"OK","GAP")'
+                    )
+            elif desc == cls.TOTALS_MARKER:
+                totals_row = r
+            else:
+                # Normal txn row: running balance chains from the previous row.
+                if first_txn_row is None:
+                    first_txn_row = r
+                last_txn_row = r
+                if bal_col and prev_balance_row is not None:
+                    expr = f"={bal_col}{prev_balance_row}"
+                    if dep_col:
+                        expr += f"+{dep_col}{r}"
+                    if wd_col:
+                        expr += f"-{wd_col}{r}"
+                    sheet[f"{bal_col}{r}"] = expr
+                    prev_balance_row = r
+                if check_col and stated_col and bal_col:
+                    sheet[f"{check_col}{r}"] = (
+                        f'=IF(ROUND({bal_col}{r}-{stated_col}{r},2)=0,"OK","CHECK")'
+                    )
+
+        # Single per-account TOTALS row: SUM over all txns + final running balance.
+        if totals_row is not None and first_txn_row is not None and last_txn_row is not None:
+            if wd_col:
+                sheet[f"{wd_col}{totals_row}"] = f"=SUM({wd_col}{first_txn_row}:{wd_col}{last_txn_row})"
+            if dep_col:
+                sheet[f"{dep_col}{totals_row}"] = f"=SUM({dep_col}{first_txn_row}:{dep_col}{last_txn_row})"
+            if bal_col and prev_balance_row is not None:
+                sheet[f"{bal_col}{totals_row}"] = f"={bal_col}{prev_balance_row}"
+
+    def write_bank_workbook(self, path: str | Path, statements: list[BankStatement]) -> Path:
+        """Write a workbook with one continuous-chain sheet per account.
+
+        Statements sharing a bank/account sheet are merged into a single continuous
+        ledger (sorted by date, one chain), so a year of monthly statements for an
+        account lands as one sorted, cross-month-reconciling sheet.
+        """
+        wb = Workbook()
+        # Group statements by their sheet title, preserving first-seen order.
+        grouped: dict[str, list[BankStatement]] = {}
+        for stmt in statements:
+            grouped.setdefault(_sheet_title(stmt.bank_name), []).append(stmt)
+
+        for i, (title, stmts) in enumerate(grouped.items()):
             sheet = wb.active if i == 0 else wb.create_sheet()
             sheet.title = title
             sheet.append(self.BANK_COLS)
-            for row in self.bank_rows(stmt):
-                sheet.append([row.get(c, "") for c in self.BANK_COLS])
+            blocks: list[dict] = []
+            for stmt in stmts:
+                blocks.extend(self.rows_to_blocks(self.bank_rows(stmt)))
+            self.rebuild_account_sheet(sheet, self.sort_blocks(blocks), self.BANK_COLS)
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         wb.save(path)

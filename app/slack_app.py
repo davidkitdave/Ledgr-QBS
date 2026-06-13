@@ -402,8 +402,15 @@ def handle_file_share(body_or_event: dict, client, store, archive=None) -> None:
 # Pure handler functions (importable + testable without a Bolt server)
 # --------------------------------------------------------------------------- #
 
-def handle_setup_open(body: dict, ack: Callable, client) -> None:
-    """Ack the button, open the onboarding modal with private_metadata=channel_id."""
+def handle_setup_open(
+    body: dict, ack: Callable, client, prefill: dict | None = None
+) -> None:
+    """Ack the button, open the onboarding modal with private_metadata=channel_id.
+
+    ``prefill`` (optional) is passed straight through to ``onboarding_modal`` to
+    pre-populate fields (e.g. a ``client_name`` derived from the channel name by
+    the caller). Defaults to ``None`` for backward-compatible callers.
+    """
     ack()
     # Prefer container channel (message context), fall back to body channel
     channel_id = (
@@ -412,7 +419,7 @@ def handle_setup_open(body: dict, ack: Callable, client) -> None:
         or body.get("channel_id")
         or ""
     )
-    modal = onboarding_modal()
+    modal = onboarding_modal(prefill)
     modal["private_metadata"] = channel_id
     client.views_open(trigger_id=body["trigger_id"], view=modal)
 
