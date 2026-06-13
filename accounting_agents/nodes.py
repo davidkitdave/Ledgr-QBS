@@ -574,6 +574,8 @@ async def deliver_node(ctx) -> Event:
     batches = payload.get("batches") or []
     fy = payload.get("fy", "?")
     kind = payload.get("kind", "document")
+    software = payload.get("software") or ""
+    target = f"{software} " if software else ""
 
     if not batches:
         state[DELIVER_SUMMARY_KEY] = "No ledger entries were produced for this document."
@@ -608,13 +610,13 @@ async def deliver_node(ctx) -> Event:
             )
             parts.append(f"{label} ({count_str}){bal_str}")
 
-        summary = f"📒 Added {'; '.join(parts)} to your FY{fy} ledger."
+        summary = f"📒 Added {'; '.join(parts)} to your {target}FY{fy} ledger."
     else:
         n_rows = sum(len(b.get("rows") or []) for b in batches)
         summary = (
             f"📒 Added {n_rows} line{'s' if n_rows != 1 else ''} from "
             f"{len(batches)} document{'s' if len(batches) != 1 else ''} "
-            f"to your FY{fy} ledger."
+            f"to your {target}FY{fy} ledger."
         )
 
     state[DELIVER_SUMMARY_KEY] = summary

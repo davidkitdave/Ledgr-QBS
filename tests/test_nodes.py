@@ -359,3 +359,22 @@ def test_route_node_bank_workbook():
 
     assert event.output == {"count": 1}
     assert ctx.state[nodes.ROUTES_KEY][0]["workbook"] == "BankStatement_FY2025.xlsx"
+
+
+# =========================================================================== #
+# deliver_node summary echoes the accounting-software target
+# =========================================================================== #
+
+
+def test_deliver_echoes_software_target():
+    ctx = FakeContext({
+        nodes.LEDGER_ROWS_KEY: {
+            "fy": "2026", "kind": "invoice", "software": "Xero",
+            "batches": [{"sheet": "Purchase", "rows": [{"Total Amount": 10}]}],
+        }
+    })
+    asyncio.run(nodes.deliver_node(ctx))
+    summary = ctx.state[nodes.DELIVER_SUMMARY_KEY]
+    assert "Xero" in summary
+    assert "FY2026" in summary
+
