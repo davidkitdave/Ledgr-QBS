@@ -6,7 +6,13 @@ from datetime import date
 
 import pytest
 
-from app.blocks import coa_prompt_blocks, onboarding_modal, result_card, welcome_blocks
+from app.blocks import (
+    coa_prompt_blocks,
+    onboarding_modal,
+    profile_summary_blocks,
+    result_card,
+    welcome_blocks,
+)
 from invoice_processing.export.models import NormalizedInvoice, PartyInfo
 from invoice_processing.export.routing import DocRoute
 from invoice_processing.pipeline import ProcessedDoc
@@ -351,3 +357,30 @@ class TestResultCardPerDoc:
         )
         blocks = result_card(n_files=1, n_processed=1, workbooks=[], errors=[], docs=[doc])
         assert "0 transactions" in _all_block_text(blocks)
+
+
+# --------------------------------------------------------------------------- #
+# Profile summary card (Task 3)
+# --------------------------------------------------------------------------- #
+
+
+def _flat_text(blocks):
+    return " ".join(
+        b.get("text", {}).get("text", "")
+        for b in blocks if isinstance(b.get("text"), dict)
+    )
+
+
+def test_profile_summary_shows_all_registered_fields():
+    blocks = profile_summary_blocks({
+        "client_name": "Auditair International Pte. Ltd.",
+        "accounting_software": "Xero",
+        "fye_month": 10,
+        "gst_registered": False,
+    })
+    text = _flat_text(blocks)
+    assert "Auditair International Pte. Ltd." in text
+    assert "Xero" in text
+    assert "October" in text          # fye_month 10 -> month name
+    assert "Not GST-registered" in text
+

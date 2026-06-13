@@ -28,6 +28,7 @@ from app.blocks import (
     export_unavailable_blocks,
     ledgr_help_blocks,
     onboarding_modal,
+    profile_summary_blocks,
     welcome_blocks,
 )
 from app.commands import parse_ledgr_command, settings_prefill
@@ -461,6 +462,7 @@ def handle_onboarding_submit(
     store.save_profile(doc)
     store.set_channel(channel_id, client_id)
 
+    client.chat_postMessage(channel=channel_id, blocks=profile_summary_blocks(doc))
     client.chat_postMessage(channel=channel_id, blocks=coa_prompt_blocks())
 
 

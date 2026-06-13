@@ -530,3 +530,26 @@ def coa_prompt_blocks() -> list:
             ],
         },
     ]
+
+
+def profile_summary_blocks(profile: dict) -> list:
+    """Confirmation card summarising the client profile that was just registered."""
+    name = profile.get("client_name") or "(unnamed client)"
+    software = profile.get("accounting_software") or "—"
+    fye_num = profile.get("fye_month")
+    fye = next((n for num, n in _MONTHS if num == fye_num), "—")
+    gst = "GST-registered" if profile.get("gst_registered") else "Not GST-registered"
+    return [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f"✅ *Client registered: {name}*\n"
+                    f"• Accounting software: *{software}*\n"
+                    f"• Financial year-end: *{fye}*\n"
+                    f"• GST status: *{gst}*"
+                ),
+            },
+        }
+    ]

@@ -224,7 +224,8 @@ class TestHandleOnboardingSubmit:
 
     def test_chat_post_message_called(self):
         _, _, client = self._run()
-        assert len(client.posted_messages) == 1
+        # Task 3: 2 messages — profile summary first, then COA prompt.
+        assert len(client.posted_messages) == 2
 
     def test_chat_post_message_channel(self):
         _, _, client = self._run()
@@ -234,7 +235,8 @@ class TestHandleOnboardingSubmit:
     def test_chat_post_message_has_coa_prompt_blocks(self):
         from app.blocks import coa_prompt_blocks
         _, _, client = self._run()
-        msg = client.posted_messages[0]
+        # COA prompt is the second message; first is the profile summary.
+        msg = client.posted_messages[1]
         assert msg.get("blocks") == coa_prompt_blocks()
 
     def test_different_channel_ids_are_isolated(self):
@@ -248,6 +250,27 @@ class TestHandleOnboardingSubmit:
         handle_onboarding_submit(body2, FakeAck(), FakeClient(), store, lambda: "id-bbb")
         assert store.get_by_channel("C-AAA").client_name == "ClientA"
         assert store.get_by_channel("C-BBB").client_name == "ClientB"
+
+    def test_onboarding_posts_profile_summary_then_coa_prompt(self):
+        body = _submit_body(
+            client_name="Auditair International Pte. Ltd.",
+            fye_month="10", accounting_software="Xero", gst_value="no",
+            channel_id="C1",
+        )
+        ack = FakeAck()
+        client = FakeClient()
+        store = InMemoryClientStore()
+        handle_onboarding_submit(body, ack, client, store, _fixed_id_factory)
+
+        joined = " ".join(
+            blk.get("text", {}).get("text", "")
+            for msg in client.posted_messages
+            for blk in msg.get("blocks", [])
+            if isinstance(blk.get("text"), dict)
+        )
+        assert "Client registered" in joined
+        assert "Xero" in joined
+        assert "Profile saved" in joined  # the COA prompt still follows
 
 
 # --------------------------------------------------------------------------- #
