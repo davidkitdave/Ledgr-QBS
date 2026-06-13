@@ -57,7 +57,7 @@ from accounting_agents.hitl import (
 )
 from accounting_agents.ledger_store import SlackLedgerStore
 from accounting_agents.nodes import ApproveDecision
-from app.blocks import approval_card_blocks, approval_outcome_blocks
+from app.blocks import approval_card_blocks, approval_outcome_blocks, invoice_edit_modal
 from app.slack_app import _SeenEvents, _event_id as _slack_event_id
 from invoice_processing.export.client_context import FirestoreClientStore
 
@@ -492,8 +492,9 @@ async def process_file_event(
             # many files can tell the review cards apart. Read the paused
             # session state (the same fetch that backs the summary helper)
             # to derive filename + first invoice vendor / total.
-            paused_state = await _read_paused_session_state(
-                runner, app_name, channel_id, session_id
+            paused_state = await _read_session_state(
+                runner, app_name,
+                {"user_id": channel_id, "session_id": session_id},
             )
             doc_label = _doc_label_from_state(paused_state)
             posted = _post_approval_card(
@@ -571,24 +572,30 @@ async def _read_interrupt_summary(
     return fallback or "This document needs your review before it is added to the ledger."
 
 
-async def _read_paused_session_state(
-    runner: Any, app_name: str, user_id: str, session_id: str
+async def _read_session_state(
+    runner: Any, app_name: str, interrupt: dict
 ) -> dict:
     """Best-effort: return the paused session's state dict (empty if unavailable).
 
-    Used at the HITL pause site to enrich the approval card with the
-    uploaded document's identity (filename + first invoice vendor / total).
+    Reads the per-document session identified by the HITL interrupt correlation
+    doc (its ``user_id`` / ``session_id``). Used at the HITL pause site to
+    enrich the approval card with the uploaded document's identity, AND by the
+    Edit-modal opener to pre-fill the per-line account / tax / amount fields.
     Returns an empty dict on any failure so callers can fall back gracefully
-    — the label is cosmetic and a label-less card is still a valid card.
+    — both call sites are best-effort.
     """
+    user_id = interrupt.get("user_id") or interrupt.get("session_id")
+    session_id = interrupt.get("session_id")
+    if not session_id or not user_id:
+        return {}
     try:
         session = await runner.session_service.get_session(
             app_name=app_name, user_id=user_id, session_id=session_id
         )
         if session and getattr(session, "state", None):
             return dict(session.state)
-    except Exception:  # noqa: BLE001 - label is cosmetic
-        logger.debug("get_session failed for %s/%s; doc label will be bare filename",
+    except Exception:  # noqa: BLE001 - best-effort reader
+        logger.debug("get_session failed for %s/%s; falling back to empty state",
                      user_id, session_id)
     return {}
 
@@ -615,6 +622,32 @@ def _doc_label_from_state(state: dict) -> str:
         vend = f" · {vendor}" if vendor else ""
         return f"📄 {fname}{vend}{money}"
     return f"📄 {fname}"
+
+
+def _edits_from_view_state(view: dict) -> dict:
+    """Convert a ``view_submission`` state into the line-edits dict.
+
+    Maps each ``block_id`` of the form ``<prefix>_<i>`` (where ``<prefix>`` is
+    ``acct`` / ``tax`` / ``amt``) into a field on the edits line at index ``i``.
+    Lines are returned in ascending index order. The shape matches what
+    ``apply_decision_node`` expects in ``ApproveDecision.edits["lines"]``.
+    """
+    values = (view.get("state") or {}).get("values") or {}
+    by_index: dict[int, dict] = {}
+    for block_id, payload in values.items():
+        prefix, _, idx_s = block_id.partition("_")
+        if not idx_s.isdigit():
+            continue
+        i = int(idx_s)
+        el = payload.get("v") or {}
+        if prefix == "acct" and el.get("selected_option"):
+            by_index.setdefault(i, {})["account_code"] = el["selected_option"]["value"]
+        elif prefix == "tax" and el.get("selected_option"):
+            by_index.setdefault(i, {})["tax_code"] = el["selected_option"]["value"]
+        elif prefix == "amt" and el.get("value"):
+            by_index.setdefault(i, {})["amount"] = float(el["value"])
+    lines = [{"index": i, **fields} for i, fields in sorted(by_index.items())]
+    return {"lines": lines}
 
 
 def _post_approval_card(
@@ -977,7 +1010,39 @@ def build_async_app(
 
     @async_app.action("edit")
     async def _edit(ack, body, client):
-        await _run_action(ack, body, client, "edit")
+        # Edit opens a per-line modal pre-filled with the proposed extraction.
+        # We must ack() immediately (<3s) and then synchronously call views_open
+        # with the trigger_id (Slack invalidates it after a few seconds).
+        await ack()
+        op_id = (body.get("actions") or [{}])[0].get("value")
+        if not op_id:
+            return
+        interrupt = read_interrupt(db, op_id)
+        state = (
+            await _read_session_state(runner, app_name, interrupt)
+            if interrupt else {}
+        )
+        invs = state.get(nodes.NORMALIZED_KEY) or [{}]
+        lines = invs[0].get("lines") or []
+        coa_options = [
+            (c.get("code"), f"{c.get('code')} — {c.get('description')}")
+            for c in (state.get("coa") or [])
+        ]
+        sync_client.views_open(
+            trigger_id=body["trigger_id"],
+            view=invoice_edit_modal(op_id, lines, coa_options),
+        )
+
+    @async_app.view("ledgr_invoice_edit")
+    async def _edit_submit(ack, body, client):
+        await ack()
+        view = body["view"]
+        op_id = view.get("private_metadata") or ""
+        edits = _edits_from_view_state(view)
+        await handle_approval_action(
+            runner=runner, ledger_store=ledger_store, db=db, slack_client=sync_client,
+            op_id=op_id, decision="edit", edits=edits, app_name=app_name,
+        )
 
     @async_app.action("reject")
     async def _reject(ack, body, client):

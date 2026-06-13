@@ -31,6 +31,7 @@ from accounting_agents.sessions import FirestoreSessionService
 from accounting_agents.slack_runner import (
     _derive_setup_prefill,
     _doc_label_from_state,
+    _edits_from_view_state,
     build_async_app,
     deslugify_channel_name,
     event_node_name,
@@ -1022,3 +1023,19 @@ def test_process_file_event_interrupt_persists_doc_label_and_renders_it():
     doc = snap.to_dict()
     assert doc.get("doc_label")
     assert "Receipt-Hotel.pdf" in doc["doc_label"]
+
+
+# =========================================================================== #
+# Task 7: edits-from-view-state parser (Slack view_submission → line edits DTO)
+# =========================================================================== #
+
+
+def test_edits_from_view_state_builds_line_edits():
+    view = {"state": {"values": {
+        "acct_0": {"v": {"selected_option": {"value": "6010"}}},
+        "tax_0":  {"v": {"selected_option": {"value": "ZR"}}},
+        "amt_0":  {"v": {"value": "44.74"}},
+    }}}
+    edits = _edits_from_view_state(view)
+    assert edits == {"lines": [{"index": 0, "account_code": "6010",
+                                "tax_code": "ZR", "amount": 44.74}]}

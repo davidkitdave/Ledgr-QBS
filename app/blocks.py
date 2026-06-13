@@ -541,6 +541,49 @@ def coa_prompt_blocks() -> list:
     ]
 
 
+def invoice_edit_modal(op_id: str, lines: list[dict], coa_options: list[tuple[str, str]]) -> dict:
+    """Modal to correct each flagged line's account code / tax code / amount.
+
+    ``coa_options`` is a list of (code, label) for the static_select; ``lines`` is
+    the proposed extraction. ``block_id`` encodes the line index: ``acct_<i>`` etc.
+    """
+    coa = [{"text": {"type": "plain_text", "text": lbl[:75]}, "value": code}
+           for code, lbl in coa_options]
+    tax_opts = [{"text": {"type": "plain_text", "text": t}, "value": t}
+                for t in ("SR", "ZR", "ES", "TX", "OS")]
+    blocks: list = []
+    for i, ln in enumerate(lines):
+        blocks.append({"type": "section",
+                       "text": {"type": "mrkdwn", "text": f"*Line {i + 1}: {ln.get('description', '')}*"}})
+        acct_initial = next((o for o in coa if o["value"] == ln.get("account_code")), None)
+        blocks.append({
+            "type": "input", "block_id": f"acct_{i}", "optional": True,
+            "label": {"type": "plain_text", "text": "Account code"},
+            "element": {"type": "static_select", "action_id": "v", "options": coa,
+                        **({"initial_option": acct_initial} if acct_initial else {})},
+        })
+        tax_initial = next((o for o in tax_opts if o["value"] == ln.get("tax_code")), None)
+        blocks.append({
+            "type": "input", "block_id": f"tax_{i}", "optional": True,
+            "label": {"type": "plain_text", "text": "Tax code"},
+            "element": {"type": "static_select", "action_id": "v", "options": tax_opts,
+                        **({"initial_option": tax_initial} if tax_initial else {})},
+        })
+        blocks.append({
+            "type": "input", "block_id": f"amt_{i}", "optional": True,
+            "label": {"type": "plain_text", "text": "Amount"},
+            "element": {"type": "number_input", "action_id": "v", "is_decimal_allowed": True,
+                        **({"initial_value": str(ln["amount"])} if ln.get("amount") is not None else {})},
+        })
+    return {
+        "type": "modal", "callback_id": "ledgr_invoice_edit", "private_metadata": op_id,
+        "title": {"type": "plain_text", "text": "Review invoice"},
+        "submit": {"type": "plain_text", "text": "Post to ledger"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": blocks,
+    }
+
+
 def profile_summary_blocks(profile: dict) -> list:
     """Confirmation card summarising the client profile that was just registered."""
     name = profile.get("client_name") or "(unnamed client)"

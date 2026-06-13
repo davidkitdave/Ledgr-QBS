@@ -9,6 +9,7 @@ import pytest
 from app.blocks import (
     approval_card_blocks,
     coa_prompt_blocks,
+    invoice_edit_modal,
     onboarding_modal,
     profile_summary_blocks,
     result_card,
@@ -484,4 +485,31 @@ class TestApprovalCardBlocks:
         )
         head = self._head_text(blocks)
         assert "lines $51.49 vs $44.74" in head
+
+
+# --------------------------------------------------------------------------- #
+# Invoice edit modal (Task 7)
+# --------------------------------------------------------------------------- #
+
+
+class TestInvoiceEditModal:
+
+    def test_callback_id_and_private_metadata(self):
+        view = invoice_edit_modal(
+            op_id="OP1",
+            lines=[{"description": "Room", "account_code": "6010", "tax_code": "SR", "amount": 51.49}],
+            coa_options=[("6010", "6010 — Travel"), ("6200", "6200 — Office")],
+        )
+        assert view["callback_id"] == "ledgr_invoice_edit"
+        assert view["private_metadata"] == "OP1"
+
+    def test_one_input_group_per_line_min_three(self):
+        # One input group per line (account + tax + amount) → at least 3 input blocks.
+        view = invoice_edit_modal(
+            op_id="OP1",
+            lines=[{"description": "Room", "account_code": "6010", "tax_code": "SR", "amount": 51.49}],
+            coa_options=[("6010", "6010 — Travel"), ("6200", "6200 — Office")],
+        )
+        inputs = [b for b in view["blocks"] if b.get("type") == "input"]
+        assert len(inputs) >= 3
 
