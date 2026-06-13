@@ -280,7 +280,7 @@ class BankStatementExporter:
 
     BANK_COLS = [
         "Date", "Description", "Withdrawal", "Deposit",
-        "Balance", "Stated Balance", "Check", "Currency",
+        "Balance", "Currency", "Math_Check",
     ]
 
     #: Description markers used to detect row roles.
@@ -299,7 +299,7 @@ class BankStatementExporter:
         rows: list[dict] = []
         rows.append({
             "Description": self.OPENING_MARKER,
-            "Stated Balance": _num(stmt.opening_balance),
+            "Balance": _num(stmt.opening_balance),
             "Currency": stmt.currency,
         })
         for txn in stmt.transactions:
@@ -308,12 +308,11 @@ class BankStatementExporter:
                 "Description": txn.description,
                 "Withdrawal": _num(txn.withdrawal),
                 "Deposit": _num(txn.deposit),
-                "Stated Balance": _num(txn.balance),
+                "Balance": _num(txn.balance),
                 "Currency": stmt.currency,
             })
         rows.append({
             "Description": self.TOTALS_MARKER,
-            "Stated Balance": _num(stmt.closing_balance),
             "Currency": stmt.currency,
         })
         return rows
@@ -338,7 +337,7 @@ class BankStatementExporter:
             desc = row.get("Description")
             if desc == cls.OPENING_MARKER:
                 current = {
-                    "stated_bf": row.get("Stated Balance"),
+                    "stated_bf": row.get("Balance"),
                     "currency": row.get("Currency"),
                     "transactions": [],
                 }
@@ -419,7 +418,7 @@ class BankStatementExporter:
         for block in blocks:
             emit({
                 "Description": cls.OPENING_MARKER,
-                "Stated Balance": block.get("stated_bf"),
+                "Balance": block.get("stated_bf"),
                 "Currency": block.get("currency") or currency,
                 key_col: block.get("bf_key", "") if key_col else "",
             })
@@ -433,20 +432,16 @@ class BankStatementExporter:
 
     @classmethod
     def apply_bank_formulas(cls, sheet, cols: Optional[list[str]] = None) -> None:
-        """Write the continuous Balance/Check/SUM formula chain over the sheet.
+        """Write Math_Check formulas and TOTALS SUM over the sheet.
 
-        Walks every data row top-to-bottom and threads ONE running-balance chain
-        across the whole account (across month boundaries):
+        Balance holds the actual bank-stated value on every row — no formula.
+        Math_Check (col G) validates each row arithmetically:
 
-        - ``BALANCE B/F`` row: ``Balance`` carries forward from the prior row
-          (``=<prev_E>``); the FIRST B/F of the sheet seeds from its own stated
-          opening (``=F<row>``). ``Check`` is the continuity test
-          ``=IF(ROUND(E-F,2)=0,"OK","GAP")`` — a ``GAP`` means the carried balance
-          ≠ the stated B/F (missing/duplicate month).
-        - txn row: ``Balance = <prev_E> + Deposit - Withdrawal``; ``Check`` is the
-          per-row ``=IF(ROUND(E-F,2)=0,"OK","CHECK")`` against its stated balance.
-        - ``TOTALS`` row: ``=SUM(...)`` over the Withdrawal/Deposit columns of all
-          transactions, and ``Balance`` mirrors the final running balance.
+        - ``BALANCE B/F`` row: first B/F of the FY gets ``✅`` (no prior row);
+          later months get ``=IF(ROUND(E_bf-E_prev,2)=0,"✅","GAP")`` — a ``GAP``
+          means the stated opening doesn't match the prior month's closing balance.
+        - txn row: ``=IF(ROUND(E-(E_prev+Deposit-Withdrawal),2)=0,"✅","❌")``.
+        - ``TOTALS`` row: ``=SUM(...)`` over the Withdrawal/Deposit txn range.
         """
         header = [c.value for c in sheet[1]] if sheet.max_row >= 1 else []
         if not header:
@@ -461,63 +456,52 @@ class BankStatementExporter:
 
         c_desc = idx["Description"]
         bal_col = col("Balance")
-        stated_col = col("Stated Balance")
-        check_col = col("Check")
+        check_col = col("Math_Check")
         wd_col = col("Withdrawal")
         dep_col = col("Deposit")
 
-        prev_balance_row: Optional[int] = None   # row whose Balance feeds the next row
-        seen_first_bf = False                     # has the FY-opening B/F been emitted?
-        first_txn_row: Optional[int] = None       # first txn row (for the TOTALS sum)
-        last_txn_row: Optional[int] = None        # last txn row (for the TOTALS sum)
+        prev_balance_row: Optional[int] = None
+        seen_first_bf = False
+        first_txn_row: Optional[int] = None
+        last_txn_row: Optional[int] = None
         totals_row: Optional[int] = None
 
         for r in range(2, sheet.max_row + 1):
             desc = sheet.cell(row=r, column=c_desc + 1).value
             if desc == cls.OPENING_MARKER:
-                if bal_col:
+                if check_col and bal_col:
                     if not seen_first_bf or prev_balance_row is None:
-                        # First B/F of the FY: seed from its own stated opening.
-                        if stated_col:
-                            sheet[f"{bal_col}{r}"] = f"={stated_col}{r}"
+                        # First B/F of the FY — no prior row to compare against.
+                        sheet[f"{check_col}{r}"] = "✅"
                     else:
-                        # Later month: carry the running balance forward.
-                        sheet[f"{bal_col}{r}"] = f"={bal_col}{prev_balance_row}"
-                    prev_balance_row = r
+                        sheet[f"{check_col}{r}"] = (
+                            f'=IF(ROUND({bal_col}{r}-{bal_col}{prev_balance_row},2)=0,"✅","GAP")'
+                        )
+                prev_balance_row = r
                 seen_first_bf = True
-                # Continuity Check: carried balance vs this month's stated B/F → GAP.
-                if check_col and stated_col and bal_col:
-                    sheet[f"{check_col}{r}"] = (
-                        f'=IF(ROUND({bal_col}{r}-{stated_col}{r},2)=0,"OK","GAP")'
-                    )
             elif desc == cls.TOTALS_MARKER:
                 totals_row = r
             else:
-                # Normal txn row: running balance chains from the previous row.
                 if first_txn_row is None:
                     first_txn_row = r
                 last_txn_row = r
-                if bal_col and prev_balance_row is not None:
-                    expr = f"={bal_col}{prev_balance_row}"
+                if check_col and bal_col and prev_balance_row is not None:
+                    arithmetic = f"{bal_col}{prev_balance_row}"
                     if dep_col:
-                        expr += f"+{dep_col}{r}"
+                        arithmetic += f"+{dep_col}{r}"
                     if wd_col:
-                        expr += f"-{wd_col}{r}"
-                    sheet[f"{bal_col}{r}"] = expr
-                    prev_balance_row = r
-                if check_col and stated_col and bal_col:
+                        arithmetic += f"-{wd_col}{r}"
                     sheet[f"{check_col}{r}"] = (
-                        f'=IF(ROUND({bal_col}{r}-{stated_col}{r},2)=0,"OK","CHECK")'
+                        f'=IF(ROUND({bal_col}{r}-({arithmetic}),2)=0,"✅","❌")'
                     )
+                prev_balance_row = r
 
-        # Single per-account TOTALS row: SUM over all txns + final running balance.
+        # TOTALS row: SUM over all txn rows for Withdrawal and Deposit.
         if totals_row is not None and first_txn_row is not None and last_txn_row is not None:
             if wd_col:
                 sheet[f"{wd_col}{totals_row}"] = f"=SUM({wd_col}{first_txn_row}:{wd_col}{last_txn_row})"
             if dep_col:
                 sheet[f"{dep_col}{totals_row}"] = f"=SUM({dep_col}{first_txn_row}:{dep_col}{last_txn_row})"
-            if bal_col and prev_balance_row is not None:
-                sheet[f"{bal_col}{totals_row}"] = f"={bal_col}{prev_balance_row}"
 
     def write_bank_workbook(self, path: str | Path, statements: list[BankStatement]) -> Path:
         """Write a workbook with one continuous-chain sheet per account.

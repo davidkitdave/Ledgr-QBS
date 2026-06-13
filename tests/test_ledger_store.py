@@ -377,11 +377,12 @@ def test_bank_export_no_legacy_columns():
     header = exporter.BANK_COLS
     assert "Notes" not in header
     assert "Source File ID" not in header
-    assert "Math_Check" not in header
-    # New accountant-grade columns present.
-    assert "Stated Balance" in header
-    assert "Check" in header
+    assert "Stated Balance" not in header
+    assert "Check" not in header
+    # Rosebery-pattern columns present.
     assert "Balance" in header
+    assert "Math_Check" in header
+    assert "Currency" in header
 
 
 def test_bank_balance_and_check_are_live_formulas():
@@ -403,21 +404,18 @@ def test_bank_balance_and_check_are_live_formulas():
     ws = wb["OCBC - 5001"]
     header = [c.value for c in ws[1]]
     bi = header.index("Balance") + 1
-    ci = header.index("Check") + 1
+    ci = header.index("Math_Check") + 1
     wi = header.index("Withdrawal") + 1
     di = header.index("Deposit") + 1
 
     # Row layout: 1=header, 2=BALANCE B/F, 3=txn, 4=txn, 5=TOTALS.
-    # Opening Balance seeds from its own Stated Balance.
-    assert str(ws.cell(row=2, column=bi).value).startswith("=")
-    # First txn running balance references the opening row's balance cell.
-    f_txn1 = ws.cell(row=3, column=bi).value
-    assert isinstance(f_txn1, str) and f_txn1.startswith("=")
-    assert "B2" in f_txn1 or "2" in f_txn1  # references prior balance row
-    # Second txn references the first txn's balance row (running chain).
-    f_txn2 = ws.cell(row=4, column=bi).value
-    assert f_txn2.startswith("=") and "3" in f_txn2
-    # Check is an IF/ROUND formula, not a static marker.
+    # Balance is always an actual number (never a formula).
+    assert not str(ws.cell(row=2, column=bi).value).startswith("=")  # B/F row
+    assert not str(ws.cell(row=3, column=bi).value).startswith("=")  # txn row
+    assert not str(ws.cell(row=4, column=bi).value).startswith("=")  # txn row
+    # First B/F Math_Check is a static ✅ (no prior row to compare).
+    assert ws.cell(row=2, column=ci).value == "✅"
+    # Txn Math_Check is an IF/ROUND formula referencing balance and arithmetic.
     chk = ws.cell(row=3, column=ci).value
     assert isinstance(chk, str) and chk.startswith("=IF(ROUND(")
     # Totals row has SUM formulas over the txn block.
@@ -447,7 +445,7 @@ def test_bank_formulas_correct_after_second_append():
     header = [c.value for c in ws[1]]
     bi = header.index("Balance") + 1
     di = header.index("Description") + 1
-    si = header.index("Stated Balance") + 1
+    ci = header.index("Math_Check") + 1
 
     from openpyxl.utils import get_column_letter
     bal = get_column_letter(bi)
@@ -460,12 +458,233 @@ def test_bank_formulas_correct_after_second_append():
     descs = [ws.cell(row=r, column=di).value for r in range(2, ws.max_row + 1)]
     assert descs == ["BALANCE B/F", "w1", "BALANCE B/F", "d1", "TOTALS"]
 
-    # First B/F seeds from its OWN stated opening.
-    assert ws.cell(row=2, column=bi).value == f"={get_column_letter(si)}2"
-    # CONTINUOUS CHAIN: the second month's B/F (row 4) carries forward from the prior
-    # month's closing balance (row 3) — NOT re-seeded from its own stated opening.
-    assert ws.cell(row=4, column=bi).value == f"={bal}3"
-    # Second month's txn (row 5) chains from the carried-forward B/F (row 4).
-    assert ws.cell(row=5, column=bi).value.startswith(f"={bal}4")
+    # Balance is always an actual number from the bank statement, never a formula.
+    for r in (2, 3, 4, 5):
+        assert not str(ws.cell(row=r, column=bi).value).startswith("="), f"row {r} Balance should be a number"
+
+    # First B/F Math_Check: static ✅ (no prior row).
+    assert ws.cell(row=2, column=ci).value == "✅"
+    # Second B/F Math_Check: continuity formula — carried balance (E3) vs this B/F (E4).
+    assert ws.cell(row=4, column=ci).value == f'=IF(ROUND({bal}4-{bal}3,2)=0,"✅","GAP")'
+    # Txn Math_Check: arithmetic formula referencing prior balance row.
+    assert ws.cell(row=5, column=ci).value.startswith("=IF(ROUND(")
     # No hidden dedupe column — the Excel is clean / human-readable.
     assert "_ledgr_doc_key" not in header
+
+
+# --------------------------------------------------------------------------- #
+# Edge-case coverage: descending balance, overdraft, wrong balance, continuity
+# --------------------------------------------------------------------------- #
+
+def _build_sheet(rows_dicts, cols=None):
+    """Build a populated worksheet from value-row dicts; return (ws, header_idx)."""
+    from openpyxl import Workbook as _WB
+    exp = BankStatementExporter()
+    cols = cols or exp.BANK_COLS
+    wb = _WB()
+    ws = wb.active
+    ws.append(list(cols))
+    for row in rows_dicts:
+        ws.append([row.get(c, "") for c in cols])
+    exp.apply_bank_formulas(ws, cols)
+    idx = {c.value: c.column for c in ws[1]}
+    return ws, idx
+
+
+def test_descending_balance_balance_is_always_number():
+    """All Balance cells are actual numbers even when balance falls every row."""
+    stmt = BankStatement(
+        bank_name="DBS - 9999", currency="SGD", opening_balance=5000.0, closing_balance=2300.0,
+        transactions=[
+            BankTransaction(date=date(2025, 6, 1),  description="Rent",      withdrawal=1500.0, deposit=None,  balance=3500.0),
+            BankTransaction(date=date(2025, 6, 5),  description="Utilities", withdrawal=200.0,  deposit=None,  balance=3300.0),
+            BankTransaction(date=date(2025, 6, 10), description="Insurance", withdrawal=1000.0, deposit=None,  balance=2300.0),
+        ],
+    )
+    exp = BankStatementExporter()
+    ws, idx = _build_sheet(exp.bank_rows(stmt))
+    bi = idx["Balance"]
+    # Rows 2 (B/F), 3,4,5 (txns) — all numbers, never formulas.
+    for r in range(2, 6):
+        v = ws.cell(row=r, column=bi).value
+        assert not str(v).startswith("="), f"row {r} Balance should be a number, got {v!r}"
+    assert ws.cell(row=2, column=bi).value == 5000.0
+    assert ws.cell(row=3, column=bi).value == 3500.0
+    assert ws.cell(row=4, column=bi).value == 3300.0
+    assert ws.cell(row=5, column=bi).value == 2300.0
+
+
+def test_descending_balance_math_check_formula_chains():
+    """Math_Check formulas reference the correct prior-row Balance cells."""
+    stmt = BankStatement(
+        bank_name="DBS - 9999", currency="SGD", opening_balance=5000.0, closing_balance=2300.0,
+        transactions=[
+            BankTransaction(date=date(2025, 6, 1), description="Rent",      withdrawal=1500.0, deposit=None, balance=3500.0),
+            BankTransaction(date=date(2025, 6, 5), description="Utilities", withdrawal=200.0,  deposit=None, balance=3300.0),
+            BankTransaction(date=date(2025, 6, 10),description="Insurance", withdrawal=1000.0, deposit=None, balance=2300.0),
+        ],
+    )
+    exp = BankStatementExporter()
+    ws, idx = _build_sheet(exp.bank_rows(stmt))
+    from openpyxl.utils import get_column_letter
+    bal = get_column_letter(idx["Balance"])
+    dep = get_column_letter(idx["Deposit"])
+    wd  = get_column_letter(idx["Withdrawal"])
+    ci  = idx["Math_Check"]
+
+    # B/F row (row 2): static ✅, no prior row.
+    assert ws.cell(row=2, column=ci).value == "✅"
+    # Txn rows: formula references prior Balance and this row's Deposit/Withdrawal.
+    assert ws.cell(row=3, column=ci).value == f'=IF(ROUND({bal}3-({bal}2+{dep}3-{wd}3),2)=0,"✅","❌")'
+    assert ws.cell(row=4, column=ci).value == f'=IF(ROUND({bal}4-({bal}3+{dep}4-{wd}4),2)=0,"✅","❌")'
+    assert ws.cell(row=5, column=ci).value == f'=IF(ROUND({bal}5-({bal}4+{dep}5-{wd}5),2)=0,"✅","❌")'
+    # TOTALS row (row 6): no Math_Check.
+    assert ws.cell(row=6, column=ci).value in (None, "")
+
+
+def test_overdraft_negative_balance():
+    """Negative (overdraft) balances are stored as-is and formulas still chain correctly."""
+    stmt = BankStatement(
+        bank_name="OD - 0001", currency="SGD", opening_balance=100.0, closing_balance=-450.0,
+        transactions=[
+            BankTransaction(date=date(2025, 6, 1), description="Big payment", withdrawal=550.0, deposit=None,   balance=-450.0),
+            BankTransaction(date=date(2025, 6, 5), description="Refund",       withdrawal=None,  deposit=100.0, balance=-350.0),
+        ],
+    )
+    exp = BankStatementExporter()
+    ws, idx = _build_sheet(exp.bank_rows(stmt))
+    bi = idx["Balance"]
+    assert ws.cell(row=2, column=bi).value == 100.0    # B/F opening
+    assert ws.cell(row=3, column=bi).value == -450.0   # after big withdrawal
+    assert ws.cell(row=4, column=bi).value == -350.0   # after refund
+    # Math_Check formulas still present and well-formed.
+    ci = idx["Math_Check"]
+    assert ws.cell(row=3, column=ci).value.startswith("=IF(ROUND(")
+    assert ws.cell(row=4, column=ci).value.startswith("=IF(ROUND(")
+
+
+def test_wrong_balance_math_check_formula_structure():
+    """When the bank states a wrong balance, the Math_Check formula exposes it.
+
+    We can't evaluate Excel formulas in openpyxl, but we verify the formula
+    compares E_curr (the stated value) against the arithmetic — so Excel will
+    show ❌ when they differ.
+    """
+    # Txn says balance=500 but arithmetic (1000-600=400) gives 400 — wrong.
+    stmt = BankStatement(
+        bank_name="ERR - 0001", currency="SGD", opening_balance=1000.0, closing_balance=500.0,
+        transactions=[
+            BankTransaction(date=date(2025, 6, 1), description="Wrong bal txn", withdrawal=600.0, deposit=None, balance=500.0),
+        ],
+    )
+    exp = BankStatementExporter()
+    ws, idx = _build_sheet(exp.bank_rows(stmt))
+    from openpyxl.utils import get_column_letter
+    bal = get_column_letter(idx["Balance"])
+    dep = get_column_letter(idx["Deposit"])
+    wd  = get_column_letter(idx["Withdrawal"])
+    ci  = idx["Math_Check"]
+
+    # Balance holds the bank's stated value (500 — wrong, but faithfully stored).
+    assert ws.cell(row=3, column=idx["Balance"]).value == 500.0
+    # Math_Check formula references E3 (stated=500) vs arithmetic E2+D3-C3 (=400).
+    # In Excel this resolves to ❌ because ROUND(500-400,2)≠0.
+    expected = f'=IF(ROUND({bal}3-({bal}2+{dep}3-{wd}3),2)=0,"✅","❌")'
+    assert ws.cell(row=3, column=ci).value == expected
+
+
+def test_cross_month_descending_chain_balance_and_continuity():
+    """Two descending-balance months: second B/F continuity formula references prior closing."""
+    exp = BankStatementExporter()
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+
+    stmt1 = _bank_stmt("DBS - 8888", 5000.0,
+                       [("Rent", 2000.0, None, 3000.0), ("Bills", 500.0, None, 2500.0)],
+                       2500.0, txn_date=date(2025, 6, 15))
+    stmt2 = _bank_stmt("DBS - 8888", 2500.0,
+                       [("Salary", None, 3000.0, 5500.0), ("Tax", 1000.0, None, 4500.0)],
+                       4500.0, txn_date=date(2025, 7, 15))
+
+    store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1", kind="bank",
+        batches=[_bank_batch(exp, stmt1, "F1:DBS:1")],
+    )
+    result = store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1", kind="bank",
+        batches=[_bank_batch(exp, stmt2, "F2:DBS:2")],
+    )
+
+    wb = load_workbook(io.BytesIO(slack.files[result["slack_file_id"]]), data_only=False)
+    ws = wb["DBS - 8888"]
+    header = [c.value for c in ws[1]]
+    bi = header.index("Balance") + 1
+    ci = header.index("Math_Check") + 1
+    di = header.index("Description") + 1
+
+    from openpyxl.utils import get_column_letter
+    bal = get_column_letter(bi)
+
+    # Layout: 1=hdr, 2=B/F(jun), 3=Rent, 4=Bills, 5=B/F(jul), 6=Salary, 7=Tax, 8=TOTALS
+    descs = [ws.cell(row=r, column=di).value for r in range(2, ws.max_row + 1)]
+    assert descs == ["BALANCE B/F", "Rent", "Bills", "BALANCE B/F", "Salary", "Tax", "TOTALS"]
+
+    # Balance is a real number on every data row.
+    for r in range(2, 8):
+        v = ws.cell(row=r, column=bi).value
+        assert not str(v).startswith("="), f"row {r} Balance should be a number"
+    assert ws.cell(row=2, column=bi).value == 5000.0
+    assert ws.cell(row=3, column=bi).value == 3000.0
+    assert ws.cell(row=4, column=bi).value == 2500.0
+    assert ws.cell(row=5, column=bi).value == 2500.0   # second B/F stated opening
+    assert ws.cell(row=6, column=bi).value == 5500.0
+    assert ws.cell(row=7, column=bi).value == 4500.0
+
+    # First B/F Math_Check: ✅ (no prior month).
+    assert ws.cell(row=2, column=ci).value == "✅"
+    # Second B/F continuity check: compares E5 (stated 2500) against E4 (closing 2500).
+    assert ws.cell(row=5, column=ci).value == f'=IF(ROUND({bal}5-{bal}4,2)=0,"✅","GAP")'
+    # Txn Math_Check formulas all well-formed.
+    for r in (3, 4, 6, 7):
+        assert ws.cell(row=r, column=ci).value.startswith("=IF(ROUND("), f"row {r} missing formula"
+
+
+def test_cross_month_gap_is_flagged_by_formula():
+    """When month 2 B/F opening ≠ month 1 closing, the GAP formula exposes it.
+
+    We verify the formula references the right cells so Excel would evaluate to GAP.
+    """
+    exp = BankStatementExporter()
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+
+    stmt1 = _bank_stmt("OCBC - 7777", 1000.0, [("w1", 100.0, None, 900.0)], 900.0,
+                       txn_date=date(2025, 6, 15))
+    # Second month's stated opening is 1000 — but month 1 closed at 900 (GAP of 100).
+    stmt2 = _bank_stmt("OCBC - 7777", 1000.0, [("d1", None, 50.0, 1050.0)], 1050.0,
+                       txn_date=date(2025, 7, 15))
+
+    store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1", kind="bank",
+        batches=[_bank_batch(exp, stmt1, "F1:OCBC:1")],
+    )
+    result = store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1", kind="bank",
+        batches=[_bank_batch(exp, stmt2, "F2:OCBC:2")],
+    )
+
+    wb = load_workbook(io.BytesIO(slack.files[result["slack_file_id"]]), data_only=False)
+    ws = wb["OCBC - 7777"]
+    header = [c.value for c in ws[1]]
+    bi = header.index("Balance") + 1
+    ci = header.index("Math_Check") + 1
+
+    from openpyxl.utils import get_column_letter
+    bal = get_column_letter(bi)
+
+    # Layout: 1=hdr, 2=B/F(jun), 3=w1, 4=B/F(jul), 5=d1, 6=TOTALS
+    # Second B/F (row 4): stated=1000, prior closing (row 3)=900 → formula will show GAP.
+    assert ws.cell(row=4, column=bi).value == 1000.0   # stated opening stored faithfully
+    continuity = ws.cell(row=4, column=ci).value
+    assert continuity == f'=IF(ROUND({bal}4-{bal}3,2)=0,"✅","GAP")'
+    # (In Excel: ROUND(1000-900,2)=100≠0 → "GAP")
