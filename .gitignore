@@ -24,3 +24,5 @@ venv/
 # Agent output / scratch
 invoice_processing/data/agent_output/
 invoice_processing/data/alf_output/
+graphify-out/
+tests/eval_invoices/
