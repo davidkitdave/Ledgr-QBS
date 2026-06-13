@@ -5,6 +5,9 @@ invoice / receipt PDFs:
   - classification rate (doc_type resolved, not "unknown" / error)
   - reconciliation pass-rate (among invoice/receipt docs)
   - COA categorization fill-rate (lines with account_code populated)
+  - direction resolution rate (sales-vs-purchase resolved, not "unknown")
+  - per-target completeness: per-required-header fill for each export
+    target (QBS Ledger + Xero), aligned to ADR-0005's completeness contract
 
 Run:
     uv run python -m eval.ledger_eval [--limit 6] [--root /path/to/TestDoc]
@@ -16,12 +19,17 @@ The ``run_eval`` function is hermetically testable — inject a stub
 from __future__ import annotations
 
 import argparse
-import glob
 import os
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
+
+from invoice_processing.export.exporters import (
+    QbsLedgerExporter,
+    XeroLedgerExporter,
+    _is_empty,
+)
 
 # ---------------------------------------------------------------------------
 # Public data models
@@ -41,6 +49,31 @@ class DocEval:
 
 
 @dataclass
+class HeaderFill:
+    """Fill tally for one required header in one export target."""
+    header: str
+    filled: int = 0
+    total: int = 0
+
+    @property
+    def rate(self) -> float:
+        return self.filled / self.total if self.total else 0.0
+
+
+@dataclass
+class TargetCompleteness:
+    """Per-required-header fill table for one export target (QBS or Xero).
+
+    ``headers`` is keyed by required-header name (preserving exporter order);
+    each :class:`HeaderFill` tallies non-empty cells across every exported row
+    of every processed NormalizedInvoice. ``n_rows`` is the total rows tallied.
+    """
+    target: str                     # "QBS Ledger" | "Xero"
+    headers: dict[str, HeaderFill] = field(default_factory=dict)
+    n_rows: int = 0
+
+
+@dataclass
 class EvalReport:
     n_docs: int
     classify_ok: int                # doc_type resolved (not "unknown" / error)
@@ -50,6 +83,12 @@ class EvalReport:
     total_lines: int
     categorization_fill_rate: float
     errors: int
+    # Direction resolution (among doc_type == "invoice")
+    direction_eligible: int = 0     # invoices considered for direction
+    direction_resolved: int = 0     # direction in {sales, purchase}
+    direction_rate: float = 0.0
+    # Per-target completeness tables, keyed by target name ("QBS Ledger"/"Xero")
+    completeness: dict[str, TargetCompleteness] = field(default_factory=dict)
     docs: list[DocEval] = field(default_factory=list)
 
 
@@ -59,6 +98,36 @@ class EvalReport:
 
 _INVOICE_RECEIPT_TYPES = {"invoice", "receipt"}
 _UNKNOWN_TYPES = {"unknown", ""}
+_RESOLVED_DIRECTIONS = {"sales", "purchase"}
+
+
+def _tally_completeness(
+    table: TargetCompleteness,
+    exporter,
+    inv,
+    side: str,
+) -> None:
+    """Build *inv*'s export rows for *exporter* and tally each required header.
+
+    *side* is the exporter doc_type ("purchase" / "sales"). Uses the exporter's
+    OWN ``required_fields`` + ``rows`` so the header contract is never re-derived
+    here. A required header is "filled" on a row when its cell is non-empty
+    (per the exporter's ``_is_empty``). Aggregates in place into *table*.
+    """
+    required = exporter.required_fields(side)
+    rows = exporter.rows([inv], side)
+    for col in required:
+        hf = table.headers.get(col)
+        if hf is None:
+            hf = HeaderFill(header=col)
+            table.headers[col] = hf
+    for row in rows:
+        table.n_rows += 1
+        for col in required:
+            hf = table.headers[col]
+            hf.total += 1
+            if not _is_empty(row.get(col, "")):
+                hf.filled += 1
 
 
 def run_eval(
@@ -94,6 +163,14 @@ def run_eval(
     total_lines = 0
     errors = 0
 
+    direction_eligible = 0
+    direction_resolved = 0
+
+    qbs_exporter = QbsLedgerExporter()
+    xero_exporter = XeroLedgerExporter()
+    qbs_table = TargetCompleteness(target="QBS Ledger")
+    xero_table = TargetCompleteness(target="Xero")
+
     for p in paths:
         path_str = str(p)
         try:
@@ -116,12 +193,27 @@ def run_eval(
                     if doc.reconciled:
                         recon_pass += 1
 
+                # Direction resolution: among invoices (doc_type == "invoice")
+                dir_norm = (doc.direction or "").strip().lower()
+                if dt == "invoice":
+                    direction_eligible += 1
+                    if dir_norm in _RESOLVED_DIRECTIONS:
+                        direction_resolved += 1
+
                 # Categorization lines
                 if doc.normalized is not None:
                     for line in doc.normalized.lines:
                         total_lines += 1
                         if line.account_code:
                             categorized_lines += 1
+
+                # Per-target completeness: evaluate BOTH exporters for the
+                # appropriate side. Unknown direction is evaluated as purchase
+                # (but does NOT get direction credit above).
+                if doc.normalized is not None:
+                    side = dir_norm if dir_norm in _RESOLVED_DIRECTIONS else "purchase"
+                    _tally_completeness(qbs_table, qbs_exporter, doc.normalized, side)
+                    _tally_completeness(xero_table, xero_exporter, doc.normalized, side)
 
             # Per-doc tax treatments
             tax_treatments: list[str] = []
@@ -170,6 +262,9 @@ def run_eval(
     # Fill rate: lines with account_code / total lines; 0.0 when no lines
     fill_rate = categorized_lines / total_lines if total_lines else 0.0
 
+    # Direction rate: resolved / eligible (invoices); 0.0 when none eligible
+    direction_rate = direction_resolved / direction_eligible if direction_eligible else 0.0
+
     return EvalReport(
         n_docs=n_docs,
         classify_ok=classify_ok,
@@ -179,6 +274,10 @@ def run_eval(
         total_lines=total_lines,
         categorization_fill_rate=fill_rate,
         errors=errors,
+        direction_eligible=direction_eligible,
+        direction_resolved=direction_resolved,
+        direction_rate=direction_rate,
+        completeness={"QBS Ledger": qbs_table, "Xero": xero_table},
         docs=doc_evals,
     )
 
@@ -314,6 +413,38 @@ def _print_report(report: EvalReport) -> None:
     print(f"  Lines with account_code:      {report.categorized_lines} / {report.total_lines}"
           f"  fill={report.categorization_fill_rate*100:.1f}%")
     print(f"  Errors:                       {report.errors}")
+    print()
+
+    # ------------------------------------------------------------------ #
+    # DIRECTION (sales-vs-purchase resolution among invoices)
+    # ------------------------------------------------------------------ #
+    print("DIRECTION")
+    print(
+        f"  direction_resolved {report.direction_resolved}/{report.direction_eligible} "
+        f"rate={report.direction_rate*100:.1f}%"
+        + ("  (no invoice docs)" if report.direction_eligible == 0 else "")
+    )
+    print()
+
+    # ------------------------------------------------------------------ #
+    # COMPLETENESS (per target) — per-required-header fill table
+    # ------------------------------------------------------------------ #
+    print("COMPLETENESS (per target)")
+    print("  Per-required-header fill across all exported rows (filled/total, rate%).")
+    for target_name in ("QBS Ledger", "Xero"):
+        table = report.completeness.get(target_name)
+        if table is None:
+            continue
+        print()
+        print(f"  [{table.target}]  rows={table.n_rows}")
+        if not table.headers:
+            print("    (no NormalizedInvoices to evaluate)")
+            continue
+        print(f"    {'Header':<22} {'Filled/Total':>14} {'Rate':>8}")
+        print(f"    {'-'*22} {'-'*14:>14} {'-'*8:>8}")
+        for hf in table.headers.values():
+            ft = f"{hf.filled}/{hf.total}"
+            print(f"    {hf.header:<22} {ft:>14} {hf.rate*100:>7.1f}%")
     print()
 
     # Verdict
