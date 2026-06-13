@@ -1,0 +1,361 @@
+"""Hermetic tests for accounting_agents.nodes.
+
+The processing nodes wrap the invoice_processing brain. Every brain callable is
+swapped for a deterministic fake via the node module's ``*_FN`` injection seams,
+and the ADK ``ctx`` (state + artifact loading) is mocked — no Gemini / network /
+real artifact service is touched.
+
+Coverage:
+- invoice bundle fan-out (3 invoices -> 3 normalized)
+- multi-receipt page (4 receipts -> 4 normalized)
+- SOA skip (bundle returns only the embedded invoice)
+- classify routing (invoice vs bank_statement)
+- bank list (2 accounts -> 2 statements)
+"""
+
+from __future__ import annotations
+
+import asyncio
+from types import SimpleNamespace
+
+import pytest
+
+from accounting_agents import nodes
+from invoice_processing.classify.document_classifier import ClassificationResult
+from invoice_processing.extract.bank_statement_extractor import (
+    ExtractedAccount,
+    ExtractedBankStatement,
+    ExtractedBankTxn,
+)
+from invoice_processing.extract.invoice_extractor import (
+    ExtractedInvoice,
+    ExtractedInvoiceBundle,
+    ExtractedLine,
+)
+
+
+# =========================================================================== #
+# Fake ADK Context
+# =========================================================================== #
+
+
+class FakeContext:
+    """Duck-typed stand-in for google.adk.agents.context.Context.
+
+    Provides a mutable ``.state`` dict and an async ``load_artifact`` that returns
+    a fake ``types.Part`` carrying the configured PDF bytes.
+    """
+
+    def __init__(self, state: dict, pdf_bytes: bytes = b"%PDF-1.4 stub", mime="application/pdf"):
+        self.state = dict(state)
+        self._pdf_bytes = pdf_bytes
+        self._mime = mime
+
+    async def load_artifact(self, filename, version=None):
+        inline = SimpleNamespace(data=self._pdf_bytes, mime_type=self._mime)
+        return SimpleNamespace(inline_data=inline)
+
+
+def _base_state(**overrides) -> dict:
+    state = {
+        nodes.ARTIFACT_NAME_KEY: nodes.ARTIFACT_NAME_FMT.format(file_id="F123"),
+        "client_id": "test-client",
+        "client_name": "Test Client Pte Ltd",
+        "fye_month": 3,
+        "tax_registered": True,
+        "coa": [],
+        "category_mapping": {},
+        "entity_memory": [],
+    }
+    state.update(overrides)
+    return state
+
+
+# =========================================================================== #
+# Builders for fake extracted objects
+# =========================================================================== #
+
+
+def _ex_invoice(number: str, net: float = 100.0, gst: float = 9.0) -> ExtractedInvoice:
+    return ExtractedInvoice(
+        doc_type="invoice",
+        invoice_number=number,
+        invoice_date="2025-01-15",
+        currency="SGD",
+        issuer_name="Acme Supplier",
+        issuer_gst_regno="200012345A",
+        bill_to_name="Test Client Pte Ltd",
+        lines=[ExtractedLine(description="Goods", net_amount=net, gst_amount=gst, tax_label="SR")],
+        subtotal=net,
+        gst_total=gst,
+        total=net + gst,
+    )
+
+
+def _ex_receipt(number: str) -> ExtractedInvoice:
+    return ExtractedInvoice(
+        doc_type="receipt",
+        invoice_number=number,
+        invoice_date="2025-02-01",
+        currency="SGD",
+        issuer_name="Coffee Shop",
+        bill_to_name="Test Client Pte Ltd",
+        lines=[ExtractedLine(description="Meal", net_amount=10.0, gst_amount=0.9, tax_label="SR")],
+        subtotal=10.0,
+        gst_total=0.9,
+        total=10.9,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _restore_seams():
+    """Snapshot and restore the node injection seams around every test."""
+    saved = {
+        name: getattr(nodes, name)
+        for name in (
+            "CLASSIFY_FN",
+            "DIRECTION_FN",
+            "EXTRACT_BUNDLE_FN",
+            "EXTRACT_BANK_FN",
+            "CATEGORIZE_FN",
+        )
+    }
+    yield
+    for name, fn in saved.items():
+        setattr(nodes, name, fn)
+
+
+# =========================================================================== #
+# classify_node routing
+# =========================================================================== #
+
+
+def test_classify_routes_invoice():
+    nodes.CLASSIFY_FN = lambda data, mime, **kw: ClassificationResult(
+        doc_type="invoice",
+        issuer_name="Acme Supplier",
+        bill_to_name="Test Client Pte Ltd",
+        currency="SGD",
+        total_amount=109.0,
+        confidence=0.99,
+        reason="stub",
+    )
+    nodes.DIRECTION_FN = lambda cls, client_name=None, **kw: "purchase"
+
+    ctx = FakeContext(_base_state())
+    event = asyncio.run(nodes.classify_node(ctx))
+
+    assert event.actions.route == nodes.ROUTE_INVOICE
+    assert ctx.state[nodes.DOC_TYPE_KEY] == "invoice"
+    assert ctx.state[nodes.DIRECTION_KEY] == "purchase"
+
+
+def test_classify_routes_bank_statement():
+    nodes.CLASSIFY_FN = lambda data, mime, **kw: ClassificationResult(
+        doc_type="bank_statement",
+        confidence=0.97,
+        reason="stub",
+    )
+
+    ctx = FakeContext(_base_state())
+    event = asyncio.run(nodes.classify_node(ctx))
+
+    assert event.actions.route == nodes.ROUTE_BANK
+    assert ctx.state[nodes.DOC_TYPE_KEY] == "bank_statement"
+    assert ctx.state[nodes.DIRECTION_KEY] is None
+
+
+def test_classify_missing_artifact_raises():
+    ctx = FakeContext({})  # no artifact-name key
+    with pytest.raises(ValueError):
+        asyncio.run(nodes.classify_node(ctx))
+
+
+# =========================================================================== #
+# extract_invoice_node fan-out
+# =========================================================================== #
+
+
+def test_invoice_bundle_fanout_three():
+    bundle = ExtractedInvoiceBundle(
+        invoices=[_ex_invoice("INV-1"), _ex_invoice("INV-2"), _ex_invoice("INV-3")]
+    )
+    nodes.EXTRACT_BUNDLE_FN = lambda data, mime, **kw: bundle
+
+    ctx = FakeContext(_base_state(**{nodes.DIRECTION_KEY: "purchase"}))
+    event = asyncio.run(nodes.extract_invoice_node(ctx))
+
+    assert event.output == {"count": 3}
+    normalized = ctx.state[nodes.NORMALIZED_KEY]
+    assert len(normalized) == 3
+    assert {n["invoice_number"] for n in normalized} == {"INV-1", "INV-2", "INV-3"}
+    assert all(n["doc_type"] == "purchase" for n in normalized)
+
+
+def test_multi_receipt_page_fanout_four():
+    bundle = ExtractedInvoiceBundle(
+        invoices=[_ex_receipt(f"R-{i}") for i in range(1, 5)],
+        notes="4 receipts on one scanned page",
+    )
+    nodes.EXTRACT_BUNDLE_FN = lambda data, mime, **kw: bundle
+
+    ctx = FakeContext(_base_state(**{nodes.DIRECTION_KEY: "purchase"}))
+    event = asyncio.run(nodes.extract_invoice_node(ctx))
+
+    assert event.output == {"count": 4}
+    assert len(ctx.state[nodes.NORMALIZED_KEY]) == 4
+
+
+def test_soa_skip_extracts_only_embedded_invoice():
+    # An SOA package: the fake extractor skips the summary/cover page and returns
+    # only the single embedded real invoice.
+    bundle = ExtractedInvoiceBundle(
+        invoices=[_ex_invoice("EMBEDDED-INV")],
+        skipped_pages=[1],
+        notes="skipped SOA summary cover page",
+    )
+    nodes.EXTRACT_BUNDLE_FN = lambda data, mime, **kw: bundle
+
+    ctx = FakeContext(_base_state(**{nodes.DIRECTION_KEY: "purchase"}))
+    event = asyncio.run(nodes.extract_invoice_node(ctx))
+
+    assert event.output == {"count": 1}
+    normalized = ctx.state[nodes.NORMALIZED_KEY]
+    assert len(normalized) == 1
+    assert normalized[0]["invoice_number"] == "EMBEDDED-INV"
+
+
+def test_invoice_node_defaults_direction_to_purchase():
+    nodes.EXTRACT_BUNDLE_FN = lambda data, mime, **kw: ExtractedInvoiceBundle(
+        invoices=[_ex_invoice("INV-X")]
+    )
+    ctx = FakeContext(_base_state())  # no direction in state
+    asyncio.run(nodes.extract_invoice_node(ctx))
+    assert ctx.state[nodes.NORMALIZED_KEY][0]["doc_type"] == "purchase"
+
+
+# =========================================================================== #
+# categorize_node + tax_node (chained off extract)
+# =========================================================================== #
+
+
+def test_categorize_and_tax_chain():
+    nodes.EXTRACT_BUNDLE_FN = lambda data, mime, **kw: ExtractedInvoiceBundle(
+        invoices=[_ex_invoice("INV-1")]
+    )
+    # Fake categorizer stamps a fixed account code on every line.
+    def _fake_categorize(inv, *, coa, category_mapping, entity_memory, **kw):
+        for line in inv.lines:
+            line.account_code = "500"
+        return inv
+
+    nodes.CATEGORIZE_FN = _fake_categorize
+
+    ctx = FakeContext(_base_state(**{nodes.DIRECTION_KEY: "purchase"}))
+    asyncio.run(nodes.extract_invoice_node(ctx))
+    asyncio.run(nodes.categorize_node(ctx))
+    asyncio.run(nodes.tax_node(ctx))
+
+    line = ctx.state[nodes.NORMALIZED_KEY][0]["lines"][0]
+    assert line["account_code"] == "500"
+    # tax_node ran the real TaxClassifier: SR line + supplier GST-registered.
+    assert line["tax_treatment"] == "SR"
+
+
+# =========================================================================== #
+# extract_bank_node list
+# =========================================================================== #
+
+
+def test_bank_node_multi_account_list():
+    ex_bank = ExtractedBankStatement(
+        accounts=[
+            ExtractedAccount(
+                bank_name="OCBC - 5001",
+                account_number="5001",
+                currency="SGD",
+                opening_balance=1000.0,
+                closing_balance=1200.0,
+                transactions=[
+                    ExtractedBankTxn(date="2025-01-10", description="In", deposit=200.0, balance=1200.0)
+                ],
+            ),
+            ExtractedAccount(
+                bank_name="OCBC - 9002 USD",
+                account_number="9002",
+                currency="USD",
+                opening_balance=500.0,
+                closing_balance=450.0,
+                transactions=[
+                    ExtractedBankTxn(date="2025-01-12", description="Out", withdrawal=50.0, balance=450.0)
+                ],
+            ),
+        ]
+    )
+    # Fake returns (statement, mode) tuple like the real extractor.
+    nodes.EXTRACT_BANK_FN = lambda data, mime, **kw: (ex_bank, "vision")
+
+    ctx = FakeContext(_base_state())
+    event = asyncio.run(nodes.extract_bank_node(ctx))
+
+    assert event.output == {"count": 2}
+    statements = ctx.state[nodes.BANK_STATEMENTS_KEY]
+    assert len(statements) == 2
+    assert {s["currency"] for s in statements} == {"SGD", "USD"}
+
+
+def test_bank_node_accepts_bare_statement():
+    ex_bank = ExtractedBankStatement(
+        accounts=[
+            ExtractedAccount(
+                bank_name="DBS - 1",
+                currency="SGD",
+                opening_balance=0.0,
+                transactions=[ExtractedBankTxn(date="2025-03-01", description="x", deposit=1.0, balance=1.0)],
+            )
+        ]
+    )
+    nodes.EXTRACT_BANK_FN = lambda data, mime, **kw: ex_bank  # no tuple
+    ctx = FakeContext(_base_state())
+    event = asyncio.run(nodes.extract_bank_node(ctx))
+    assert event.output == {"count": 1}
+
+
+# =========================================================================== #
+# route_node
+# =========================================================================== #
+
+
+def test_route_node_invoice_fy_and_sheet():
+    nodes.EXTRACT_BUNDLE_FN = lambda data, mime, **kw: ExtractedInvoiceBundle(
+        invoices=[_ex_invoice("INV-1"), _ex_invoice("INV-2")]
+    )
+    ctx = FakeContext(_base_state(**{nodes.DIRECTION_KEY: "purchase"}))
+    asyncio.run(nodes.extract_invoice_node(ctx))
+    event = asyncio.run(nodes.route_node(ctx))
+
+    assert event.output == {"count": 2}
+    routes = ctx.state[nodes.ROUTES_KEY]
+    # Jan 2025 with fye_month=3 -> FY2025
+    assert all(r["workbook"] == "Ledger_FY2025.xlsx" for r in routes)
+    assert all(r["sheet"] == "Purchase" for r in routes)
+
+
+def test_route_node_bank_workbook():
+    ex_bank = ExtractedBankStatement(
+        accounts=[
+            ExtractedAccount(
+                bank_name="OCBC - 5001",
+                currency="SGD",
+                opening_balance=0.0,
+                transactions=[ExtractedBankTxn(date="2025-01-10", description="x", deposit=1.0, balance=1.0)],
+            )
+        ]
+    )
+    nodes.EXTRACT_BANK_FN = lambda data, mime, **kw: (ex_bank, "vision")
+    ctx = FakeContext(_base_state(**{nodes.DOC_TYPE_KEY: "bank_statement"}))
+    asyncio.run(nodes.extract_bank_node(ctx))
+    event = asyncio.run(nodes.route_node(ctx))
+
+    assert event.output == {"count": 1}
+    assert ctx.state[nodes.ROUTES_KEY][0]["workbook"] == "BankStatement_FY2025.xlsx"

@@ -338,6 +338,69 @@ def export_unavailable_blocks() -> list:
     ]
 
 
+def approval_card_blocks(summary: str, op_id: str) -> list:
+    """HITL Approve / Edit / Reject card for a document that needs human review.
+
+    Args:
+        summary: Human-readable explanation of why the document needs a decision
+                 (built by the approval gate from the flagged / unreconciled lines).
+        op_id:   The interrupt id correlating this card with the paused workflow;
+                 carried as each button's ``value`` so the action handler can
+                 resume the right session.
+    """
+    return [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f":mag: *Review needed before adding to the ledger*\n{summary}",
+            },
+        },
+        {
+            "type": "actions",
+            "block_id": "ledgr_approval",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Approve", "emoji": True},
+                    "action_id": "approve",
+                    "style": "primary",
+                    "value": op_id,
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Edit", "emoji": True},
+                    "action_id": "edit",
+                    "value": op_id,
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Reject", "emoji": True},
+                    "action_id": "reject",
+                    "style": "danger",
+                    "value": op_id,
+                },
+            ],
+        },
+    ]
+
+
+def approval_outcome_blocks(summary: str, decision: str) -> list:
+    """Replacement card (via ``chat_update``) showing the resolved HITL outcome."""
+    icon = {"approve": ":white_check_mark:", "edit": ":pencil2:", "reject": ":x:"}.get(
+        decision, ":information_source:"
+    )
+    verb = {"approve": "Approved", "edit": "Approved with edits", "reject": "Rejected"}.get(
+        decision, decision.title()
+    )
+    return [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"{icon} *{verb}.* {summary}"},
+        }
+    ]
+
+
 def coa_prompt_blocks() -> list:
     """Blocks posted in-channel after a profile is saved, asking for COA."""
     return [

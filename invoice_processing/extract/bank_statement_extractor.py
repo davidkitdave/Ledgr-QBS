@@ -15,8 +15,9 @@ Three things set this lane apart from the invoice lane:
 
 from __future__ import annotations
 
+import io
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 from google.genai import types
 from pydantic import BaseModel, Field
@@ -74,12 +75,23 @@ Per account:
 Do not invent values; leave a field null if it is not visible."""
 
 
-def _digital_text(path: str | Path) -> str:
-    """Concatenate the digital text layer of a PDF (page text + table rows) via pdfplumber."""
+def _digital_text(path: Union[str, Path, io.IOBase, None] = None, *, pdf_bytes: Optional[bytes] = None) -> str:
+    """Concatenate the digital text layer of a PDF (page text + table rows) via pdfplumber.
+
+    Accepts either a file-system path (``path``) or raw PDF bytes (``pdf_bytes``).
+    When both are supplied ``path`` takes precedence (avoids an extra read).
+    """
     import pdfplumber
 
+    if path is not None:
+        source = path
+    elif pdf_bytes is not None:
+        source = io.BytesIO(pdf_bytes)
+    else:
+        raise ValueError("_digital_text requires either path or pdf_bytes")
+
     parts: list[str] = []
-    with pdfplumber.open(path) as pdf:
+    with pdfplumber.open(source) as pdf:
         for page in pdf.pages:
             text = page.extract_text() or ""
             if text:
@@ -92,10 +104,13 @@ def _digital_text(path: str | Path) -> str:
     return "\n".join(parts)
 
 
-def _is_digital(path: str | Path) -> bool:
-    """True if the file has a meaningful digital text layer (>=200 chars and some digits)."""
+def _is_digital(path: Union[str, Path, None] = None, *, pdf_bytes: Optional[bytes] = None) -> bool:
+    """True if the PDF has a meaningful digital text layer (>=200 chars and some digits).
+
+    Works from a file-system path or from raw bytes (uses ``io.BytesIO`` internally).
+    """
     try:
-        text = _digital_text(path)
+        text = _digital_text(path, pdf_bytes=pdf_bytes)
     except Exception:
         return False
     stripped = text.strip()
@@ -156,11 +171,14 @@ def extract_bank_statement(
     """Extract a bank statement; returns (parsed, mode_used).
 
     mode:
-    - 'auto'    -> pick digital vs vision via _is_digital (needs `path`; without a path it
-                   falls back to vision on the bytes). On the digital path, if pdfplumber text is
-                   empty / the digital call yields zero accounts or zero txns, FALL BACK to vision.
-    - 'digital' -> force the pdfplumber-text path (requires `path`).
-    - 'vision'  -> force the image/bytes path.
+    - 'auto'    -> pick digital vs vision via _is_digital. Works from either a
+                   file-system ``path`` OR directly from the raw PDF ``data`` bytes
+                   (pdfplumber.open accepts an io.BytesIO — no temp file needed).
+                   If pdfplumber text is empty or the digital call yields no accounts
+                   / transactions, falls back to the vision (multimodal) call.
+                   Non-PDF mime types always use vision.
+    - 'digital' -> force the pdfplumber-text path (requires ``path``).
+    - 'vision'  -> force the multimodal/bytes path.
     """
     kw = dict(model=model, project=project, location=location)
 
@@ -173,8 +191,21 @@ def extract_bank_statement(
         return _extract_digital(_digital_text(path), **kw), "digital"
 
     # mode == 'auto'
-    if path is not None and _is_digital(path):
-        text = _digital_text(path).strip()
+    # Digital detection works from either a path or from the raw bytes directly
+    # (pdfplumber.open accepts an io.BytesIO, so no temp file is needed).
+    if path is not None:
+        is_dig = _is_digital(path)
+        text_src_kw: dict = {"path": path}
+    elif mime_type == "application/pdf":
+        is_dig = _is_digital(pdf_bytes=data)
+        text_src_kw = {"pdf_bytes": data}
+    else:
+        # Non-PDF bytes (image): vision only.
+        is_dig = False
+        text_src_kw = {}
+
+    if is_dig:
+        text = _digital_text(**text_src_kw).strip()
         if text:
             ex = _extract_digital(text, **kw)
             if _has_data(ex):

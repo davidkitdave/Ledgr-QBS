@@ -10,6 +10,7 @@ Usage:
 """
 
 import json
+import os
 import shutil
 import sys
 from dataclasses import dataclass, field
@@ -542,7 +543,7 @@ def run_inference(case_id: str, skip_investigation: str = "false") -> dict:
 
 root_agent = LlmAgent(
     name="invoice_processing",
-    model="gemini-2.5-flash",
+    model=os.getenv("GEMINI_FLASH_MODEL", "gemini-2.5-flash"),
     generate_content_config=types.GenerateContentConfig(temperature=0),
     instruction=INVOICE_PROCESSING_INSTRUCTION,
     tools=[
