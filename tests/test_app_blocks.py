@@ -7,6 +7,7 @@ from datetime import date
 import pytest
 
 from app.blocks import (
+    approval_card_blocks,
     coa_prompt_blocks,
     onboarding_modal,
     profile_summary_blocks,
@@ -415,4 +416,72 @@ def test_profile_summary_accepts_string_fye_month():
     })
     text = _flat_text(blocks)
     assert "October" in text
+
+
+# --------------------------------------------------------------------------- #
+# HITL approval card (Task 5)
+# --------------------------------------------------------------------------- #
+
+
+class TestApprovalCardBlocks:
+
+    def _head_text(self, blocks: list) -> str:
+        """First section's mrkdwn text — the visible header on the card."""
+        for b in blocks:
+            if b.get("type") == "section":
+                return b.get("text", {}).get("text", "")
+        return ""
+
+    def _action_ids(self, blocks: list) -> set:
+        ids: set = set()
+        for b in blocks:
+            if b.get("type") == "actions":
+                for el in b.get("elements", []):
+                    if el.get("action_id"):
+                        ids.add(el["action_id"])
+        return ids
+
+    def test_approval_card_names_the_document(self):
+        # Task 5: passing doc_label renders it above the existing header line.
+        blocks = approval_card_blocks(
+            summary="not reconciled (lines $51.49 vs $44.74 + GST)",
+            op_id="OP1",
+            doc_label="📄 Receipt-Hotel.pdf · Hotel Booking · $51.49",
+        )
+        head = self._head_text(blocks)
+        assert "Receipt-Hotel.pdf" in head
+
+    def test_approval_card_label_appears_above_summary(self):
+        # The doc label is a leading line, not appended after the header.
+        blocks = approval_card_blocks(
+            summary="needs review",
+            op_id="OP2",
+            doc_label="📄 INV-1001.pdf",
+        )
+        head = self._head_text(blocks)
+        assert head.index("INV-1001.pdf") < head.index("Review needed")
+
+    def test_approval_card_keeps_existing_three_action_buttons(self):
+        # Backward-compat: action set must NOT change when a doc_label is added.
+        blocks = approval_card_blocks(
+            summary="x", op_id="OP3", doc_label="📄 foo.pdf"
+        )
+        assert self._action_ids(blocks) == {"approve", "edit", "reject"}
+
+    def test_approval_card_no_label_does_not_break(self):
+        # No label → behaves like before (backward-compatible default).
+        blocks = approval_card_blocks(summary="x", op_id="OP4")
+        head = self._head_text(blocks)
+        assert "Review needed" in head
+        assert "📄" not in head  # no document emoji when no label given
+
+    def test_approval_card_label_does_not_drop_summary(self):
+        # The summary must still be present when a label is supplied.
+        blocks = approval_card_blocks(
+            summary="lines $51.49 vs $44.74",
+            op_id="OP5",
+            doc_label="📄 foo.pdf",
+        )
+        head = self._head_text(blocks)
+        assert "lines $51.49 vs $44.74" in head
 

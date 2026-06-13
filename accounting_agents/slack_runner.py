@@ -488,7 +488,18 @@ async def process_file_event(
             summary = await _read_interrupt_summary(
                 runner, app_name, channel_id, session_id, last_text
             )
-            posted = _post_approval_card(slack_client, channel_id, summary, interrupt_id, thread_ts)
+            # Enrich the card with a per-document label so a user dropping
+            # many files can tell the review cards apart. Read the paused
+            # session state (the same fetch that backs the summary helper)
+            # to derive filename + first invoice vendor / total.
+            paused_state = await _read_paused_session_state(
+                runner, app_name, channel_id, session_id
+            )
+            doc_label = _doc_label_from_state(paused_state)
+            posted = _post_approval_card(
+                slack_client, channel_id, summary, interrupt_id,
+                thread_ts=thread_ts, doc_label=doc_label,
+            )
             write_interrupt(
                 db,
                 interrupt_id,
@@ -497,7 +508,7 @@ async def process_file_event(
                 slack_file_id=file_id,
                 message_ts=posted,
                 user_id=channel_id,
-                extra={"summary": summary},
+                extra={"summary": summary, "doc_label": doc_label},
             )
             return {"status": "paused", "op_id": interrupt_id, "message_ts": posted}
 
@@ -560,12 +571,59 @@ async def _read_interrupt_summary(
     return fallback or "This document needs your review before it is added to the ledger."
 
 
+async def _read_paused_session_state(
+    runner: Any, app_name: str, user_id: str, session_id: str
+) -> dict:
+    """Best-effort: return the paused session's state dict (empty if unavailable).
+
+    Used at the HITL pause site to enrich the approval card with the
+    uploaded document's identity (filename + first invoice vendor / total).
+    Returns an empty dict on any failure so callers can fall back gracefully
+    — the label is cosmetic and a label-less card is still a valid card.
+    """
+    try:
+        session = await runner.session_service.get_session(
+            app_name=app_name, user_id=user_id, session_id=session_id
+        )
+        if session and getattr(session, "state", None):
+            return dict(session.state)
+    except Exception:  # noqa: BLE001 - label is cosmetic
+        logger.debug("get_session failed for %s/%s; doc label will be bare filename",
+                     user_id, session_id)
+    return {}
+
+
+def _doc_label_from_state(state: dict) -> str:
+    """Human label tying a review card to its uploaded document.
+
+    Builds a one-line string that lets a user pick the right card out of N
+    concurrent drops. Format:
+    ``📄 <filename>[ · <vendor>][ · <CUR> <total>]``
+    Vendor is taken from the first normalized invoice's ``vendor_name`` (with
+    ``issuer_name`` as the sales-direction alias); total is shown only when
+    it's a real number. When the state is empty (no invoice yet, or the
+    session fetch failed) the label degrades to ``📄 document``.
+    """
+    fname = (state or {}).get("source_filename") or "document"
+    invs = (state or {}).get(nodes.NORMALIZED_KEY) or []
+    if invs:
+        first = invs[0] if isinstance(invs[0], dict) else {}
+        vendor = first.get("vendor_name") or first.get("issuer_name") or ""
+        total = first.get("total_amount")
+        cur = first.get("currency") or ""
+        money = f" · {cur} {total:,.2f}" if isinstance(total, (int, float)) else ""
+        vend = f" · {vendor}" if vendor else ""
+        return f"📄 {fname}{vend}{money}"
+    return f"📄 {fname}"
+
+
 def _post_approval_card(
-    slack_client: Any, channel_id: str, summary: str, op_id: str, thread_ts=None
+    slack_client: Any, channel_id: str, summary: str, op_id: str, thread_ts=None,
+    doc_label: Optional[str] = None,
 ) -> Optional[str]:
     kwargs = {
         "channel": channel_id,
-        "blocks": approval_card_blocks(summary, op_id),
+        "blocks": approval_card_blocks(summary, op_id, doc_label=doc_label),
         "text": "Review needed before adding to the ledger.",
     }
     if thread_ts:

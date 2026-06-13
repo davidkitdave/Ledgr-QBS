@@ -444,7 +444,7 @@ def export_unavailable_blocks() -> list:
     ]
 
 
-def approval_card_blocks(summary: str, op_id: str) -> list:
+def approval_card_blocks(summary: str, op_id: str, doc_label: str | None = None) -> list:
     """HITL Approve / Edit / Reject card for a document that needs human review.
 
     Args:
@@ -453,13 +453,21 @@ def approval_card_blocks(summary: str, op_id: str) -> list:
         op_id:   The interrupt id correlating this card with the paused workflow;
                  carried as each button's ``value`` so the action handler can
                  resume the right session.
+        doc_label: Optional human label tying this card to the uploaded document
+                 (e.g. ``"📄 Receipt-Hotel.pdf · Hotel Booking · $51.49"``). When
+                 supplied, it is rendered as the leading line of the header so a
+                 user dropping many documents can tell the cards apart. None (or
+                 absent) preserves the original card layout for backward compat.
     """
+    header = ":mag: *Review needed before adding to the ledger*"
+    if doc_label:
+        header = f"{doc_label}\n{header}"
     return [
         {
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f":mag: *Review needed before adding to the ledger*\n{summary}",
+                "text": f"{header}\n{summary}",
             },
         },
         {

@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 
 from types import SimpleNamespace
-
 from google.adk.apps import App, ResumabilityConfig
 from google.adk.events.event import Event
 from google.adk.runners import Runner
@@ -31,6 +30,7 @@ from accounting_agents.nodes import ApproveDecision, approval_gate
 from accounting_agents.sessions import FirestoreSessionService
 from accounting_agents.slack_runner import (
     _derive_setup_prefill,
+    _doc_label_from_state,
     build_async_app,
     deslugify_channel_name,
     event_node_name,
@@ -886,3 +886,139 @@ def test_message_text_only_routes_to_question_not_file():
     mock_aq.assert_called_once()
     assert mock_aq.call_args.kwargs["question"] == "What is my GST balance?"
     assert mock_aq.call_args.kwargs["channel_id"] == "C-qa"
+
+
+# =========================================================================== #
+# Task 5: doc_label built from run state, posted on card, persisted on interrupt
+# =========================================================================== #
+
+
+def test_doc_label_from_state():
+    """First invoice vendor + total formatted as a per-document label."""
+    state = {
+        "source_filename": "Receipt-Hotel.pdf",
+        nodes.NORMALIZED_KEY: [
+            {
+                "vendor_name": "Hotel Booking",
+                "total_amount": 51.49,
+                "currency": "SGD",
+            }
+        ],
+    }
+    label = _doc_label_from_state(state)
+    assert "Receipt-Hotel.pdf" in label
+    assert "Hotel Booking" in label
+    assert "51.49" in label
+
+
+def test_doc_label_from_state_falls_back_on_missing_invoice():
+    """No normalized invoices yet → label is just the filename."""
+    label = _doc_label_from_state({"source_filename": "mystery.pdf"})
+    assert "mystery.pdf" in label
+    # No vendor / total noise when the invoice is absent.
+    assert "·" not in label.split("mystery.pdf", 1)[1]
+
+
+def test_doc_label_from_state_uses_issuer_name_alias():
+    """``issuer_name`` is the sales-direction alias for ``vendor_name``."""
+    state = {
+        "source_filename": "INV-1001.pdf",
+        nodes.NORMALIZED_KEY: [
+            {"issuer_name": "BigBuyer Ltd", "total_amount": 100.0, "currency": "SGD"}
+        ],
+    }
+    label = _doc_label_from_state(state)
+    assert "BigBuyer Ltd" in label
+    assert "100.00" in label
+
+
+def test_doc_label_from_state_skips_money_when_total_missing():
+    """No numeric total → no trailing currency block."""
+    state = {
+        "source_filename": "INV-1001.pdf",
+        nodes.NORMALIZED_KEY: [
+            {"vendor_name": "Acme", "currency": "SGD"}  # no total_amount
+        ],
+    }
+    label = _doc_label_from_state(state)
+    assert "Acme" in label
+    assert "SGD" not in label
+
+
+def test_doc_label_from_state_default_filename():
+    """Empty state still produces a non-empty label (so the card never looks bare)."""
+    label = _doc_label_from_state({})
+    assert "document" in label
+
+
+def test_process_file_event_interrupt_persists_doc_label_and_renders_it():
+    """Approval card header names the document; interrupt doc carries the same label.
+
+    Patches ``_read_interrupt_summary`` to return a known summary, seeds the
+    session state with a normalized invoice so the label is rich, and asserts
+    the resulting card text + Firestore doc both carry the label.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    slack = FakeSlackClient()
+    db = FakeFirestore()
+    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+
+    # Seed a profile whose channel_id matches the run we drive below so the
+    # soft-gate at process_file_event lets the run proceed.
+    seeded = _seeded_client_store(db, channel_id="C5", client_id="c5")
+
+    interrupt_event = SimpleNamespace(
+        content=SimpleNamespace(parts=[]),
+        get_function_calls=lambda: [SimpleNamespace(name="adk_request_input", id="C5:F5")],
+    )
+    # Pre-seed the final-state view with a normalized invoice so the label is
+    # built from the same shape the real graph produces.
+    final_state = {
+        "approval_message": "needs review: line X",
+        "source_filename": "Receipt-Hotel.pdf",
+        nodes.NORMALIZED_KEY: [
+            {"vendor_name": "Hotel Booking", "total_amount": 51.49, "currency": "SGD"}
+        ],
+    }
+    runner = _FakeRunner([interrupt_event], final_state)
+
+    with patch(
+        "accounting_agents.slack_runner._read_interrupt_summary",
+        new=AsyncMock(return_value="needs review: line X"),
+    ):
+        result = asyncio.run(
+            process_file_event(
+                runner=runner,
+                ledger_store=store,
+                db=db,
+                slack_client=slack,
+                channel_id="C5",
+                file_id="F5",
+                app_name="acc",
+                download_fn=lambda c, f: b"%PDF fake",
+                source_filename="Receipt-Hotel.pdf",
+                client_store=seeded,
+            )
+        )
+
+    assert result["status"] == "paused"
+
+    # Card text names the document above the review header.
+    card = _last_blocks(slack)
+    head = next(
+        b["text"]["text"] for b in card
+        if b.get("type") == "section" and b.get("text", {}).get("type") == "mrkdwn"
+    )
+    assert "Receipt-Hotel.pdf" in head
+    assert "Hotel Booking" in head
+    assert "51.49" in head
+    # And the label sits ABOVE the standard review-needed header line.
+    assert head.index("Receipt-Hotel.pdf") < head.index("Review needed")
+
+    # Interrupt correlation doc persists the label alongside the summary.
+    snap = db.collection("interrupts").document("C5:F5").get()
+    assert snap.exists
+    doc = snap.to_dict()
+    assert doc.get("doc_label")
+    assert "Receipt-Hotel.pdf" in doc["doc_label"]
