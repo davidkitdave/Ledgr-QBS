@@ -32,7 +32,13 @@ from .export.client_context import (
     coa_from_state,
     entity_memory_from_state,
 )
-from .export.exporters import BankStatementExporter, _sheet_title, get_bank_exporter, get_exporter
+from .export.exporters import (
+    BankStatementExporter,
+    _sheet_title,
+    get_bank_exporter,
+    get_exporter,
+    validate_required_fields,
+)
 from .export.models import BankStatement, BankTransaction, NormalizedInvoice
 from .export.routing import DocRoute, route_document
 from .extract.bank_statement_extractor import (
@@ -253,6 +259,24 @@ def process_document(
             category_mapping=category_mapping_from_state(state),
             entity_memory=entity_memory_from_state(state),
         )
+
+        # ------------------------------------------------------------------ #
+        # Step 3b — validate export-required fields for the client's software.
+        # Flag (don't drop): the row is still written so no data is lost, but a
+        # missing required field marks the doc for review.
+        # ------------------------------------------------------------------ #
+        exporter = get_exporter(client.accounting_software)
+        missing = validate_required_fields(normalized, exporter, effective_direction)
+        if missing:
+            reconciled = False
+            normalized.reconciled = False
+            review_note = "needs review: missing " + ", ".join(missing)
+            normalized.reconcile_note = (
+                f"{normalized.reconcile_note}; {review_note}"
+                if normalized.reconcile_note
+                else review_note
+            )
+            rec_note = f"{rec_note}; {review_note}" if rec_note else review_note
 
         # ------------------------------------------------------------------ #
         # Step 4 — route

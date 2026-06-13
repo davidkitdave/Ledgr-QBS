@@ -49,6 +49,16 @@ def _tax_amount(line: InvoiceLine, inv: NormalizedInvoice, clf: TaxClassifier) -
     return 0.0
 
 
+def _invoice_total(inv: NormalizedInvoice, clf: TaxClassifier) -> float:
+    """Invoice-level grand total. Prefer the authoritative doc total carried from
+    extraction; otherwise fall back to Σ line net + Σ line tax."""
+    if inv.doc_total is not None:
+        return round(float(inv.doc_total), 2)
+    net = sum((line.net_amount or 0.0) for line in inv.lines)
+    tax = sum(_tax_amount(line, inv, clf) for line in inv.lines)
+    return round(net + tax, 2)
+
+
 class LedgerExporter:
     """Base: write a Ledger_FY workbook (Sys_Config + Purchase + Sales)."""
 
@@ -59,6 +69,12 @@ class LedgerExporter:
 
     def __init__(self, classifier: Optional[TaxClassifier] = None):
         self.clf = classifier or TaxClassifier()
+
+    def required_fields(self, doc_type: str) -> list[str]:
+        """Column names that must be non-empty in every exported row for this
+        software. Subclasses override; used by the pipeline to flag (not drop)
+        documents that would export half-filled rows."""
+        return []
 
     # subclasses implement the per-line row dicts
     def _purchase_row(self, inv: NormalizedInvoice, line: InvoiceLine) -> dict:
@@ -120,6 +136,17 @@ class QbsLedgerExporter(LedgerExporter):
         "Currency", "Currency Rate", "Amount", "Tax Amount", "Total", "Account Code / COA",
     ]
 
+    def required_fields(self, doc_type: str) -> list[str]:
+        if doc_type == "sales":
+            return [
+                "Invoice Number", "Invoice Date", "Customer Name", "Amount", "Total",
+                "Account Code / COA",
+            ]
+        return [
+            "Invoice Number", "Invoice Date", "Vendor Name", "Sub Total", "Total Amount",
+            "Account Code / COA",
+        ]
+
     def _purchase_row(self, inv, line):
         net = _num(line.net_amount) or 0
         tax = _tax_amount(line, inv, self.clf)
@@ -179,19 +206,30 @@ class XeroLedgerExporter(LedgerExporter):
     purchase_cols = list(_XERO_PURCHASE)
     sales_cols = list(_XERO_SALES)
 
+    def required_fields(self, doc_type: str) -> list[str]:
+        """Xero-required columns = the `*`-marked headers."""
+        cols = self.sales_cols if doc_type == "sales" else self.purchase_cols
+        return [c for c in cols if c.startswith("*")]
+
     def _xero_common(self, inv, line):
         party = inv.counterparty
         tax_type = self.clf.tax_code(line.tax_treatment, inv.doc_type, "xero")
         qty = line.quantity if line.quantity is not None else 1
-        unit = line.unit_amount
-        if unit is None and line.net_amount is not None:
+        # *UnitAmount must satisfy Quantity × UnitAmount = the line's post-discount net,
+        # so the invoice ties out on Xero import. Prefer the effective amount derived from
+        # net_amount; the raw unit_amount is the pre-discount sticker price and over-states
+        # discounted lines. Fall back to unit_amount only when net_amount is absent.
+        if line.net_amount is not None:
             unit = line.net_amount / qty if qty else line.net_amount
+        else:
+            unit = line.unit_amount
         return {
             "*ContactName": party.name or "",
             "POCountry": party.country or "",
             "*InvoiceNumber": inv.invoice_number or "",
             "*InvoiceDate": _fmt_date(inv.invoice_date),
             "*DueDate": _fmt_date(inv.due_date or inv.invoice_date),
+            "Total": _invoice_total(inv, self.clf),
             "*Quantity": _num(qty),
             "*UnitAmount": _num(unit),
             "*AccountCode": line.account_code or "",
@@ -221,6 +259,65 @@ def get_exporter(system: str, classifier: Optional[TaxClassifier] = None) -> Led
     if "qbs" in key:
         return QbsLedgerExporter(classifier)
     raise ValueError(f"unknown export system '{system}'; have {list(EXPORTERS)}")
+
+
+# Map exporter column headers to readable snake_case names for review notes.
+_FIELD_LABELS = {
+    "*ContactName": "contact_name", "*InvoiceNumber": "invoice_number",
+    "*InvoiceDate": "invoice_date", "*DueDate": "due_date", "*Quantity": "quantity",
+    "*UnitAmount": "unit_amount", "*AccountCode": "account_code", "*TaxType": "tax_type",
+    "*Description": "description",
+    "Vendor Name": "vendor_name", "Customer Name": "customer_name",
+    "Invoice Number": "invoice_number", "Invoice Date": "invoice_date",
+    "Sub Total": "sub_total", "Total Amount": "total", "Amount": "amount", "Total": "total",
+    "Account Code / COA": "account_code",
+}
+
+
+def _field_label(col: str) -> str:
+    return _FIELD_LABELS.get(col, col.lstrip("*"))
+
+
+def _is_empty(value) -> bool:
+    """A required cell is missing when it is None or a blank/whitespace string."""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip() == ""
+    return False
+
+
+def validate_required_fields(
+    inv: NormalizedInvoice, exporter: LedgerExporter, doc_type: str
+) -> list[str]:
+    """Return readable labels for export-required fields that are missing/empty.
+
+    Builds the rows exactly as they would be exported and checks the software's
+    required columns. Invoice-level fields (empty on every line) are reported once;
+    line-level fields are reported with a 1-based line number. Empty list = complete.
+    """
+    required = exporter.required_fields(doc_type)
+    if not required:
+        return []
+    rows = exporter.rows([inv], doc_type)
+    if not rows:
+        # No lines were extracted — flag the doc so it surfaces for review rather
+        # than being silently written as an empty shell or silently dropped.
+        return ["no line items extracted"]
+    n = len(rows)
+    missing: list[str] = []
+    for col in required:
+        empty_lines = [i for i, row in enumerate(rows, start=1) if _is_empty(row.get(col, ""))]
+        if not empty_lines:
+            continue
+        label = _field_label(col)
+        if len(empty_lines) == n:
+            # invoice-level (missing on every line) — report once, no line number
+            missing.append(label)
+        else:
+            for i in empty_lines:
+                missing.append(f"{label} (line {i})")
+    return missing
 
 
 _SHEET_INVALID = str.maketrans({c: None for c in "[]:*?/\\"})
