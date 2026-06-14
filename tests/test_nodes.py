@@ -550,3 +550,163 @@ def test_extract_node_clean_purchase_unaffected():
     assert "self-referential" not in note.lower()
     assert "direction unknown" not in note.lower()
 
+
+# =========================================================================== #
+# FX / base_currency threading — Task 3b
+# =========================================================================== #
+
+
+def _ex_usd_invoice(number: str, net: float = 100.0, gst: float = 0.0) -> ExtractedInvoice:
+    """A USD-denominated invoice (no GST — overseas supplier)."""
+    return ExtractedInvoice(
+        doc_type="invoice",
+        invoice_number=number,
+        invoice_date="2025-03-10",
+        currency="USD",
+        issuer_name="Overseas Vendor Inc",
+        issuer_gst_regno=None,
+        bill_to_name="Test Client Pte Ltd",
+        lines=[ExtractedLine(description="Consulting", net_amount=net, gst_amount=gst, tax_label="ZR")],
+        subtotal=net,
+        gst_total=gst,
+        total=net + gst,
+    )
+
+
+def _ex_myr_invoice(number: str, net: float = 200.0) -> ExtractedInvoice:
+    """An MYR-denominated invoice."""
+    return ExtractedInvoice(
+        doc_type="invoice",
+        invoice_number=number,
+        invoice_date="2025-04-01",
+        currency="MYR",
+        issuer_name="Malaysian Supplier Sdn Bhd",
+        issuer_gst_regno=None,
+        bill_to_name="Test Client Pte Ltd",
+        lines=[ExtractedLine(description="Services", net_amount=net, gst_amount=0.0, tax_label="ZR")],
+        subtotal=net,
+        gst_total=0.0,
+        total=net,
+    )
+
+
+def test_extract_node_usd_doc_sgd_client_flagged_needs_fx_review():
+    """USD doc for an SGD-ledger client with no fx_rate on the doc must be
+    flagged needs_fx_review=True and reconciled=False."""
+    bundle = ExtractedInvoiceBundle(invoices=[_ex_usd_invoice("USD-INV-001")])
+    nodes.EXTRACT_BUNDLE_FN = lambda data, mime, **kw: bundle
+
+    state = _base_state(**{nodes.DIRECTION_KEY: "purchase", "base_currency": "SGD"})
+    ctx = FakeContext(state)
+    asyncio.run(nodes.extract_invoice_node(ctx))
+
+    inv = ctx.state[nodes.NORMALIZED_KEY][0]
+    assert inv.get("needs_fx_review") is True, (
+        f"Expected needs_fx_review=True for USD doc on SGD client, got {inv.get('needs_fx_review')!r}"
+    )
+    assert inv.get("reconciled") is False, (
+        f"Expected reconciled=False for USD doc on SGD client, got {inv.get('reconciled')!r}"
+    )
+    note = inv.get("reconcile_note") or ""
+    assert "fx" in note.lower() or "exchange" in note.lower(), (
+        f"Expected FX note in reconcile_note, got: {note!r}"
+    )
+
+
+def test_extract_node_usd_doc_with_fx_rate_converts_amounts():
+    """A USD doc that carries its own fx_rate must be converted to SGD amounts.
+    original_total and original_currency must be stored; needs_fx_review must be False."""
+    usd_inv = ExtractedInvoice(
+        doc_type="invoice",
+        invoice_number="USD-RATE-INV",
+        invoice_date="2025-03-10",
+        currency="USD",
+        issuer_name="Overseas Vendor Inc",
+        bill_to_name="Test Client Pte Ltd",
+        lines=[ExtractedLine(description="Consulting", net_amount=100.0, gst_amount=0.0, tax_label="ZR")],
+        subtotal=100.0,
+        gst_total=0.0,
+        total=100.0,
+        fx_rate=1.35,  # document states its own exchange rate
+    )
+    bundle = ExtractedInvoiceBundle(invoices=[usd_inv])
+    nodes.EXTRACT_BUNDLE_FN = lambda data, mime, **kw: bundle
+
+    state = _base_state(**{nodes.DIRECTION_KEY: "purchase", "base_currency": "SGD"})
+    ctx = FakeContext(state)
+    asyncio.run(nodes.extract_invoice_node(ctx))
+
+    inv = ctx.state[nodes.NORMALIZED_KEY][0]
+    assert inv.get("needs_fx_review") is False, (
+        f"Expected needs_fx_review=False when fx_rate supplied, got {inv.get('needs_fx_review')!r}"
+    )
+    assert inv.get("original_currency") == "USD"
+    assert inv.get("original_total") == 100.0
+    # doc_total should be converted: 100.0 * 1.35 = 135.0
+    assert inv.get("doc_total") == pytest.approx(135.0), (
+        f"Expected doc_total=135.0, got {inv.get('doc_total')!r}"
+    )
+    assert inv.get("fx_rate") == pytest.approx(1.35)
+
+
+def test_extract_node_myr_client_myr_doc_not_flagged():
+    """An MYR doc for an MYR-ledger client is the base currency — must NOT be
+    flagged as foreign (needs_fx_review must be False, reconciled per normal)."""
+    bundle = ExtractedInvoiceBundle(invoices=[_ex_myr_invoice("MYR-INV-001")])
+    nodes.EXTRACT_BUNDLE_FN = lambda data, mime, **kw: bundle
+
+    state = _base_state(**{nodes.DIRECTION_KEY: "purchase", "base_currency": "MYR"})
+    ctx = FakeContext(state)
+    asyncio.run(nodes.extract_invoice_node(ctx))
+
+    inv = ctx.state[nodes.NORMALIZED_KEY][0]
+    assert inv.get("needs_fx_review") is False, (
+        f"Expected needs_fx_review=False for MYR doc on MYR client, got {inv.get('needs_fx_review')!r}"
+    )
+    note = inv.get("reconcile_note") or ""
+    assert "fx" not in note.lower(), (
+        f"Unexpected FX note for same-currency doc: {note!r}"
+    )
+
+
+def test_extract_node_needs_fx_review_routes_to_human_review():
+    """A needs_fx_review doc (reconciled=False) must trigger _needs_review so
+    approval_gate pauses for human review rather than auto-approving."""
+    from accounting_agents.nodes import _needs_review
+
+    # Simulate what extract_invoice_node writes for a USD doc with no rate.
+    state = _base_state()
+    state[nodes.NORMALIZED_KEY] = [
+        {
+            "doc_type": "purchase",
+            "invoice_number": "FX-INV-001",
+            "invoice_date": None,
+            "due_date": None,
+            "currency": "USD",
+            "po_number": None,
+            "supplier": {"name": "Overseas Vendor", "country": None, "gst_regno": None, "email": None},
+            "customer": {"name": "Test Client", "country": None, "gst_regno": None, "email": None},
+            "lines": [{"description": "Consulting", "quantity": None, "unit_amount": None,
+                        "net_amount": 100.0, "gst_amount": 0.0, "account_code": None,
+                        "item_code": None, "tax_keyword": "ZR",
+                        "tax_treatment": None, "tax_confidence": None,
+                        "tax_flagged": False, "tax_reason": None}],
+            "doc_subtotal": 100.0,
+            "doc_gst_total": 0.0,
+            "doc_total": 100.0,
+            "our_gst_registered": True,
+            "fx_rate": None,
+            "original_total": 100.0,
+            "original_currency": "USD",
+            "needs_fx_review": True,
+            "reconciled": False,
+            "reconcile_note": "needs fx review: document currency USD differs from base currency SGD; no exchange rate available",
+        }
+    ]
+
+    needs_review, reasons = _needs_review(state)
+    assert needs_review is True, (
+        f"Expected _needs_review to return True for needs_fx_review doc, got {needs_review!r}"
+    )
+    assert len(reasons) >= 1, f"Expected at least one reason, got: {reasons!r}"
+

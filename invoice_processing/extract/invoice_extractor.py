@@ -61,6 +61,14 @@ class ExtractedInvoice(BaseModel):
         ),
     )
     currency: Optional[str] = Field(None, description="ISO currency code, e.g. SGD/MYR/USD")
+    fx_rate: Optional[float] = Field(
+        None,
+        description=(
+            "If the document itself states an exchange rate to the ledger/base currency "
+            "(e.g. 'Exchange Rate: 1 USD = 1.35 SGD'), return it as a decimal multiplier "
+            "(e.g. 1.35). Otherwise return null — never invent a rate."
+        ),
+    )
     issuer_name: Optional[str] = Field(None, description="Supplier/seller — who issued the document")
     issuer_gst_regno: Optional[str] = Field(None, description="Issuer GST registration no. / UEN if shown")
     bill_to_name: Optional[str] = Field(None, description="Customer/buyer — who it is billed to")
@@ -139,6 +147,9 @@ Document-level fields:
 - Always also return invoice-level subtotal, gst_total, total (the grand totals from the bill),
   used for reconciliation.
 
+- If the document explicitly states an exchange rate to the ledger/base currency (e.g.
+  'Exchange Rate: 1 USD = 1.35 SGD', 'Rate: 1.35'), return it as fx_rate (a decimal multiplier,
+  e.g. 1.35). Otherwise leave fx_rate null — never invent or estimate a rate.
 - Do not invent values; if the summary is unclear, return your best ledger-level grouping and
   ensure the line nets + GST reconcile to the document totals. Leave a field null if not visible."""
 

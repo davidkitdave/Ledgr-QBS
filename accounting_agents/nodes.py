@@ -234,6 +234,8 @@ async def extract_invoice_node(ctx) -> Event:
     effective_direction = direction if direction in ("purchase", "sales") else "purchase"
     our_gst = bool(ctx.state.get("tax_registered", True))
 
+    base_currency: str = ctx.state.get("base_currency") or "SGD"
+
     normalized: list[NormalizedInvoice] = []
     for ex in bundle.invoices:
         ok, _detail = reconcile(ex)
@@ -241,8 +243,14 @@ async def extract_invoice_node(ctx) -> Event:
             ex,
             direction=effective_direction,
             our_gst_registered=our_gst,
+            base_currency=base_currency,
+            fx_rate=ex.fx_rate,
         )
-        inv.reconciled = ok
+        # to_normalized already sets reconciled=False when needs_fx_review is True;
+        # only overwrite with the totals-reconcile result when FX has not already
+        # forced reconciled=False, so we don't accidentally clear the FX flag.
+        if not inv.needs_fx_review:
+            inv.reconciled = ok
         # Self-referential / ambiguous direction guard (mirrors pipeline.py).
         if direction == "self_referential":
             inv.reconciled = False
@@ -758,7 +766,14 @@ def _dict_to_inv(d: dict) -> NormalizedInvoice:
         supplier=sup,
         customer=cus,
         lines=lines,
+        doc_subtotal=d.get("doc_subtotal"),
+        doc_gst_total=d.get("doc_gst_total"),
+        doc_total=d.get("doc_total"),
         our_gst_registered=bool(d.get("our_gst_registered", True)),
+        fx_rate=d.get("fx_rate"),
+        original_total=d.get("original_total"),
+        original_currency=d.get("original_currency"),
+        needs_fx_review=bool(d.get("needs_fx_review", False)),
         reconciled=bool(d.get("reconciled", True)),
         reconcile_note=d.get("reconcile_note"),
     )

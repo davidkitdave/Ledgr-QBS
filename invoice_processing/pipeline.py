@@ -257,6 +257,8 @@ def process_document(
             ex,
             direction=effective_direction,
             our_gst_registered=client.tax_registered,
+            base_currency=client.base_currency,
+            fx_rate=ex.fx_rate,
         )
 
         reconciled, rec_note = reconcile(ex)
