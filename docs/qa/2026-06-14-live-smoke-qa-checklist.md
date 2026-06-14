@@ -148,6 +148,27 @@ Status legend: [ ] pending · [~] in progress · [x] pass · [!] FAIL (file foll
 - Akar bank continuity: drop jun-2025 → running-balance continuity
 - Unreadable-file rejection: `/tmp/QA Unreadable Test.exe` staged → expect "❌ Couldn't read this file"
 
+## §8 Bank continuity FAIL (found 2026-06-14, NOT yet fixed)
+- [!] Dropping a new month (Akar jun-2025) onto an existing FY bank ledger CRASHES:
+  `ledger_store.py:296 _recompute_balances → running = float(bal) → ValueError: could not
+  convert string to float: 'SGD'`. Month never posts (stuck "Finalising… 0 posted").
+- ROOT CAUSE: `_recompute_balances` assumes every balance cell is numeric, but the sheet has
+  non-numeric balance cells (currency string 'SGD' / "BALANCE B/F" carry-forward rows).
+- FIX: guard non-numeric balance cells in `_recompute_balances` / `_read_bank_blocks` (skip or
+  treat as section markers) so recompute is robust to header/B-F/currency rows.
+
+## §9 Robustness FAIL + root cause (found 2026-06-14, NOT yet fixed)
+- [!] **Unsupported file (.exe) was NOT rejected** — it reached Gemini and errored
+  `400 INVALID_ARGUMENT "The document has no pages"`, then showed a misleading "Processed 1 document".
+- ROOT CAUSE (single): `_file_shared` (slack_runner.py:1127) calls `process_file_event` WITHOUT
+  `source_filename`, so it defaults to `"document.pdf"`. Therefore:
+  1. `_validate_download` always checks `.pdf` (supported) → can never reject unsupported types.
+  2. Review cards/status always show `document.pdf` instead of the uploaded filename (== Plan A T5 gap).
+- FIX: thread the real Slack filename (+ filetype) from the file event into `process_file_event`
+  (fetch via files.info for file_shared; use event['files'][0]['name'] on the message path).
+  Fixes rejection AND the card label together. (NOTE: Slack also re-typed the .exe to a text
+  snippet — but that's moot once the real name/extension is passed.)
+
 ## Secondary bug found during re-verify (NOW FIXED — see commit e8b21df above)
 - [!] **Multi-line invoice learns the WRONG account.** The Edit modal submits ALL lines (changed
   or not); `_persist_corrections` writes one Correction per line, all keyed by the same vendor →
