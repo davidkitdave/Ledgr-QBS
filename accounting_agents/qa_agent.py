@@ -39,6 +39,14 @@ from . import config
 #: The session state key the runner must set before routing to the Q&A path.
 LEDGER_DATA_KEY = "ledger_data"
 
+#: The session state key carrying the user's raw question. The runner sets this
+#: alongside ``ledger_data``. It is needed because ``qa_agent`` runs in
+#: ``single_turn`` mode (ADK forces ``include_contents='none'``), so the agent
+#: cannot see the user turn from history — and the graph delivers only the
+#: router's ``{"intent": "question"}`` payload as ``node_input``. Without this
+#: the model never sees the actual question and falls back to listing its tools.
+QUESTION_KEY = "question_text"
+
 #: SGD threshold for mandatory GST registration (s.40B GST Act, Singapore).
 GST_THRESHOLD_SGD = 1_000_000.0
 
@@ -177,7 +185,7 @@ def gst_threshold_check(tool_context: ToolContext) -> str:
 # Q&A LlmAgent
 # --------------------------------------------------------------------------- #
 
-_INSTRUCTION = """
+_BASE_INSTRUCTION = """
 You are a read-only accounting assistant for a Singapore SME's financial ledger.
 You answer questions strictly based on the ledger data that has been loaded into
 your session — you do NOT make up numbers, guess, or call external services.
@@ -196,17 +204,46 @@ answer.
 Be concise and professional. Do not invent figures not returned by the tools.
 """.strip()
 
+
+def qa_instruction(ctx) -> str:
+    """Build the Q&A system prompt, embedding the user's actual question.
+
+    ``qa_agent`` runs single-turn so the model cannot see the user turn from
+    history; the graph only delivers the router's ``{"intent": "question"}``
+    payload as ``node_input``. We therefore read the raw question from
+    ``state[QUESTION_KEY]`` (set by the runner) and embed it in the system
+    prompt, which is always sent regardless of ``include_contents``. Falls back
+    to the base instruction when no question is present so document/other lanes
+    (which never render this) and tests stay robust.
+    """
+    try:
+        question = (ctx.state.get(QUESTION_KEY) or "").strip()
+    except Exception:  # noqa: BLE001 — never let prompt assembly crash the lane
+        question = ""
+    if not question:
+        return _BASE_INSTRUCTION
+    return (
+        f"{_BASE_INSTRUCTION}\n\n"
+        f"The user has asked this question:\n\"\"\"\n{question}\n\"\"\"\n"
+        "Answer THIS question now: call the most relevant tool first, then give a "
+        "concise plain-English answer grounded in the tool result. Do NOT reply "
+        "with a generic list of what you can do."
+    )
+
+
 qa_agent = LlmAgent(
     name="qa_agent",
     model=config.MODEL_LITE,
     mode="single_turn",
-    instruction=_INSTRUCTION,
+    instruction=qa_instruction,
     tools=[summarize_by_category, pnl_for_fy, gst_threshold_check],
 )
 
 __all__ = [
     "qa_agent",
+    "qa_instruction",
     "LEDGER_DATA_KEY",
+    "QUESTION_KEY",
     "GST_THRESHOLD_SGD",
     "summarize_by_category",
     "pnl_for_fy",

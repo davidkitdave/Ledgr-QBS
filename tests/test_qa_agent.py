@@ -21,7 +21,6 @@ from openpyxl import Workbook
 from accounting_agents.ledger_store import SlackLedgerStore
 from accounting_agents.qa_agent import (
     LEDGER_DATA_KEY,
-    GST_THRESHOLD_SGD,
     gst_threshold_check,
     pnl_for_fy,
     summarize_by_category,
@@ -343,3 +342,29 @@ class TestReadRows:
         assert rows == [] or all(
             all(v is None for k, v in r.items() if k != "_sheet") for r in rows
         )
+
+
+# --------------------------------------------------------------------------- #
+# Instruction provider — the question must reach the agent's system prompt
+# (regression for: qa_agent only received {"intent":"question"} and replied
+#  with a generic capability menu instead of answering).
+# --------------------------------------------------------------------------- #
+
+
+def test_qa_instruction_embeds_question_from_state():
+    from accounting_agents.qa_agent import QUESTION_KEY, qa_instruction
+
+    ctx = _FakeToolContext({QUESTION_KEY: "What was my total software spend in FY2026?"})
+    text = qa_instruction(ctx)
+    assert "What was my total software spend in FY2026?" in text
+    assert "Answer THIS question now" in text
+
+
+def test_qa_instruction_falls_back_without_question():
+    from accounting_agents.qa_agent import qa_instruction
+
+    base = qa_instruction(_FakeToolContext({}))
+    assert "read-only accounting assistant" in base
+    # No question → no "answer this" directive, must not crash, blanks ignored.
+    assert "Answer THIS question now" not in base
+    assert qa_instruction(_FakeToolContext({"question_text": "   "})) == base

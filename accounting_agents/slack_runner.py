@@ -46,7 +46,7 @@ from typing import Any, Optional
 # the string annotations produced by `from __future__ import annotations`.
 from fastapi import Request, Response
 
-from accounting_agents.qa_agent import LEDGER_DATA_KEY
+from accounting_agents.qa_agent import LEDGER_DATA_KEY, QUESTION_KEY
 
 from google.genai import types
 
@@ -956,6 +956,10 @@ async def answer_question(
         state_delta = {
             "channel_id": channel_id,
             LEDGER_DATA_KEY: ledger_rows,
+            # qa_agent runs single_turn and only receives the router's
+            # {"intent": "question"} payload, so it can't see the user turn.
+            # Carry the raw question in state for its instruction provider.
+            QUESTION_KEY: question,
         }
 
         answer_text = ""
