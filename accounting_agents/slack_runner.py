@@ -353,6 +353,29 @@ def _resolve_file_message_ts(slack_client: Any, file_id: str, channel_id: str) -
     return None
 
 
+def _resolve_file_name(slack_client: Any, file_id: str, file_obj: Optional[dict] = None) -> str:
+    """Best-effort REAL uploaded filename for a Slack file.
+
+    The extension drives :func:`_validate_download` and the name labels every
+    review card. ``message``/``file_share`` events carry the full file object
+    (with ``name``); ``file_shared`` events may not, so we fall back to
+    ``files_info``. Returns ``"document.pdf"`` only when the name is truly
+    unavailable — NEVER hard-code this elsewhere, or validation always sees a
+    supported ``.pdf`` extension and can't reject unsupported uploads (and cards
+    all read "document.pdf"). See ADR / QA 2026-06-14.
+    """
+    name = file_obj.get("name") if isinstance(file_obj, dict) else None
+    if not name:
+        try:
+            resp = slack_client.files_info(file=file_id)
+            data = resp.data if hasattr(resp, "data") else resp
+            if isinstance(data, dict):
+                name = (data.get("file") or {}).get("name")
+        except Exception:  # noqa: BLE001 - fall back to default below
+            logger.debug("files_info(name) failed for file %s", file_id)
+    return name or "document.pdf"
+
+
 def _add_reaction(slack_client: Any, channel_id: str, ts: Optional[str], name: str) -> None:
     """Add an emoji reaction to a message. Cosmetic: any error is swallowed."""
     if not ts:
@@ -1133,6 +1156,7 @@ def build_async_app(
             file_id=file_id,
             app_name=app_name,
             download_fn=download_pdf_bytes,
+            source_filename=_resolve_file_name(sync_client, file_id, event.get("file")),
         )
 
     async def _run_action(ack, body, client, decision):
@@ -1388,6 +1412,7 @@ def build_async_app(
                     app_name=app_name,
                     download_fn=download_pdf_bytes,
                     thread_ts=summary_ts,
+                    source_filename=_resolve_file_name(sync_client, file_id, f),
                 )
                 # Aggregate per-doc outcomes for the final tally edit.
                 status = (result or {}).get("status")

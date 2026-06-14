@@ -26,7 +26,7 @@ from google.genai import types
 from accounting_agents import nodes
 from accounting_agents.hitl import write_interrupt
 from accounting_agents.ledger_store import SlackLedgerStore
-from accounting_agents.nodes import ApproveDecision, approval_gate
+from accounting_agents.nodes import approval_gate
 from accounting_agents.sessions import FirestoreSessionService
 from accounting_agents.slack_runner import (
     _derive_setup_prefill,
@@ -1928,3 +1928,44 @@ def test_build_fastapi_app_wires_adk_graph(monkeypatch):
 
     # A FirestoreClientStore was passed as the `store` (not InMemory).
     assert app_calls[0]["store"] is not None
+
+
+# =========================================================================== #
+# _resolve_file_name — real uploaded filename for validation + card labels
+# (regression: handlers passed no name → default "document.pdf" → unsupported
+#  files never rejected + every card mislabeled)
+# =========================================================================== #
+
+
+def test_resolve_file_name_prefers_file_object_name():
+    from accounting_agents.slack_runner import _resolve_file_name
+
+    class _Client:
+        def files_info(self, file):
+            raise AssertionError("must not call files_info when the name is present")
+
+    assert _resolve_file_name(_Client(), "F1", {"name": "Invoice-99.pdf"}) == "Invoice-99.pdf"
+
+
+def test_resolve_file_name_falls_back_to_files_info():
+    from accounting_agents.slack_runner import _resolve_file_name
+
+    class _Resp:
+        data = {"file": {"name": "scan.exe"}}
+
+    class _Client:
+        def files_info(self, file):
+            return _Resp()
+
+    # No name on the (minimal file_shared) object → fetch via files_info, keep .exe.
+    assert _resolve_file_name(_Client(), "F1", None) == "scan.exe"
+
+
+def test_resolve_file_name_defaults_only_when_truly_unavailable():
+    from accounting_agents.slack_runner import _resolve_file_name
+
+    class _Client:
+        def files_info(self, file):
+            raise RuntimeError("boom")
+
+    assert _resolve_file_name(_Client(), "F1", None) == "document.pdf"
