@@ -1578,3 +1578,124 @@ def test_persist_corrections_noop_without_client_id_or_invoice():
     _persist_corrections(_Store(), {"client_id": "X", nodes.NORMALIZED_KEY: []},
                          {"lines": [{"index": 0, "account_code": "6010"}]})
     assert saved == []
+
+
+# =========================================================================== #
+# Task 8: Reject unreadable uploads — empty bytes or unknown mime
+# =========================================================================== #
+
+
+def test_process_file_event_rejects_empty_bytes():
+    """An empty download is rejected with a friendly message; NOT counted as processed.
+
+    The pipeline must post a clear rejection message and return status
+    ``"rejected_unreadable"`` so the batch-drop tally excludes it from
+    the "Processed N documents" count (neither ``posted`` nor ``needs_review``
+    increments for rejected files).
+    """
+    slack = FakeSlackClient()
+    db = FakeFirestore()
+    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+
+    runner = _FakeRunner([], _ledger_payload())  # should never run the graph
+
+    result = asyncio.run(
+        process_file_event(
+            runner=runner,
+            ledger_store=store,
+            db=db,
+            slack_client=slack,
+            channel_id="C1",
+            file_id="F1",
+            app_name="acc",
+            download_fn=lambda c, f: b"",  # empty — nothing downloaded
+            source_filename="mystery.bin",
+            client_store=_seeded_client_store(db),
+        )
+    )
+
+    # Must return a distinct rejection status (not "delivered" or "paused").
+    assert result["status"] == "rejected_unreadable"
+    # A friendly message was posted — not the "Processed" path.
+    texts = _posted_texts(slack)
+    assert any(
+        "empty" in t.lower() or "supported" in t.lower() or "couldn't read" in t.lower()
+        for t in texts
+    ), f"expected rejection message in: {texts}"
+    # The graph was never driven (no artifacts saved).
+    assert runner.artifact_service.saved == {}
+    # No ledger rows appended (no upload).
+    assert slack.uploads == []
+
+
+def test_process_file_event_rejects_unknown_extension():
+    """A file with an unrecognised extension is rejected before the graph runs.
+
+    Simulates an "unknown/unknown size" upload: the bytes are non-empty but the
+    extension is not one the pipeline supports (.exe is clearly wrong). The
+    validator must catch this and reject it rather than forwarding garbage to
+    Gemini.
+    """
+    slack = FakeSlackClient()
+    db = FakeFirestore()
+    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+
+    runner = _FakeRunner([], _ledger_payload())  # must not run
+
+    result = asyncio.run(
+        process_file_event(
+            runner=runner,
+            ledger_store=store,
+            db=db,
+            slack_client=slack,
+            channel_id="C1",
+            file_id="F1",
+            app_name="acc",
+            download_fn=lambda c, f: b"\x4d\x5a\x90\x00" * 10,  # EXE magic bytes, non-empty
+            source_filename="setup.exe",
+            client_store=_seeded_client_store(db),
+        )
+    )
+
+    assert result["status"] == "rejected_unreadable"
+    texts = _posted_texts(slack)
+    assert any(
+        "empty" in t.lower() or "supported" in t.lower() or "couldn't read" in t.lower()
+        for t in texts
+    ), f"expected rejection message in: {texts}"
+    assert runner.artifact_service.saved == {}
+    assert slack.uploads == []
+
+
+def test_process_file_event_accepted_pdf_still_processes():
+    """A known-good extension (.pdf, non-empty bytes) passes the validator and proceeds.
+
+    Regression guard: the validation guard must NOT block legitimate uploads.
+    """
+    slack = FakeSlackClient()
+    db = FakeFirestore()
+    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+
+    final_event = SimpleNamespace(
+        content=SimpleNamespace(parts=[SimpleNamespace(text="done")]),
+        get_function_calls=lambda: [],
+    )
+    runner = _FakeRunner([final_event], _ledger_payload())
+
+    result = asyncio.run(
+        process_file_event(
+            runner=runner,
+            ledger_store=store,
+            db=db,
+            slack_client=slack,
+            channel_id="C1",
+            file_id="F1",
+            app_name="acc",
+            download_fn=lambda c, f: b"%PDF-1.4 fake content",
+            source_filename="invoice.pdf",
+            client_store=_seeded_client_store(db),
+        )
+    )
+
+    assert result["status"] == "delivered"
+    assert len(slack.uploads) == 1

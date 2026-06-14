@@ -87,6 +87,40 @@ logger = logging.getLogger(__name__)
 #: Artifact filename convention shared with the graph (``nodes.ARTIFACT_NAME_FMT``).
 ARTIFACT_NAME_FMT = nodes.ARTIFACT_NAME_FMT
 
+#: Extensions (and their MIME types) that the classifier + extractors accept.
+#: Mirrors ``_MIME_BY_EXT`` in ``invoice_processing/classify/document_classifier.py``
+#: and ``invoice_processing/extract/invoice_extractor.py`` exactly — do not add
+#: types here without also updating those modules.
+_ACCEPTED_EXTENSIONS: frozenset[str] = frozenset({
+    ".pdf", ".png", ".jpg", ".jpeg", ".webp", ".gif",
+})
+
+
+def _validate_download(data: bytes, source_filename: str) -> Optional[str]:
+    """Return a rejection reason string if ``data`` is unreadable, else ``None``.
+
+    Two checks (in order):
+    1. Non-empty: zero-byte downloads cannot be parsed by any extractor.
+    2. Known extension: the filename extension must be one the pipeline's
+       classifier and extractors support.  An unknown extension means the file
+       type is unsupported (e.g. ``.exe``, ``.csv``, no extension).
+
+    Returns ``None`` when the upload passes both checks (safe to proceed).
+    Returns a human-readable reason string on failure so the caller can include
+    it in the Slack rejection message.
+    """
+    if not data:
+        return "the file appears to be empty"
+    from pathlib import Path as _Path
+    ext = _Path(source_filename).suffix.lower()
+    if ext not in _ACCEPTED_EXTENSIONS:
+        supported = ", ".join(sorted(_ACCEPTED_EXTENSIONS))
+        return (
+            f"the file type is not supported "
+            f"(got `{ext or 'no extension'}`; supported: {supported})"
+        )
+    return None
+
 
 def _max_concurrency() -> int:
     """Max documents/questions processed concurrently per process (env-tunable)."""
@@ -434,6 +468,30 @@ async def process_file_event(
 
     async with _SEM:
         data = download_fn(slack_client, file_id)
+
+        # Validate before touching the graph: reject empty files and unsupported
+        # extensions so garbage never reaches Gemini and is not counted as
+        # "processed" in the batch-drop tally.
+        rejection_reason = _validate_download(data, source_filename)
+        if rejection_reason is not None:
+            logger.warning(
+                "rejected unreadable upload: file=%s channel=%s reason=%s",
+                file_id, channel_id, rejection_reason,
+            )
+            _update_status(slack_client, channel_id, status_ts, "❌ Couldn't read this file")
+            _post_message(
+                slack_client, channel_id,
+                f"Sorry, I couldn't read `{source_filename}` — {rejection_reason}. "
+                "Please re-upload a supported document (PDF, PNG, JPG, WEBP, or GIF).",
+                thread_ts=thread_ts,
+            )
+            return {
+                "status": "rejected_unreadable",
+                "channel_id": channel_id,
+                "file_id": file_id,
+                "reason": rejection_reason,
+            }
+
         artifact_name = ARTIFACT_NAME_FMT.format(file_id=file_id)
 
         await runner.artifact_service.save_artifact(
