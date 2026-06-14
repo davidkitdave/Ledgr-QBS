@@ -677,6 +677,22 @@ async def _read_session_state(
     return {}
 
 
+def _vendor_from_inv_dict(first: dict) -> Optional[str]:
+    """Canonical vendor name from a serialized NormalizedInvoice dict.
+
+    Mirrors ``NormalizedInvoice.counterparty``: ``supplier.name`` for purchases,
+    ``customer.name`` for sales. The serialized shape (``asdict``) nests the
+    parties, so the legacy flat ``vendor_name`` / ``issuer_name`` keys never
+    exist on real state — they remain only as a defensive fallback.
+    """
+    if not isinstance(first, dict):
+        return None
+    doc_type = first.get("doc_type") or "purchase"
+    party = first.get("supplier") if doc_type == "purchase" else first.get("customer")
+    name = (party or {}).get("name") if isinstance(party, dict) else None
+    return name or first.get("vendor_name") or first.get("issuer_name")
+
+
 def _doc_label_from_state(state: dict) -> str:
     """Human label tying a review card to its uploaded document.
 
@@ -708,17 +724,21 @@ def _persist_corrections(client_store, state: dict, edits: dict) -> None:
     Correction keyed by the invoice's vendor so the next document from the same
     vendor auto-applies the human's mapping. Lines whose only change was
     ``amount`` (a one-off variance, not a vendor rule) are skipped. Reads the
-    canonical vendor from the first normalized invoice's ``vendor_name`` with
-    ``issuer_name`` as the sales-direction alias. No-ops cleanly when
-    ``client_id`` is missing or the invoice list is empty so callers never
-    crash on partial state.
+    canonical vendor the SAME way the categorizer resolves it: the counterparty
+    party name — ``supplier.name`` for purchases, ``customer.name`` for sales
+    (mirrors ``NormalizedInvoice.counterparty``). The serialized invoice
+    (``_inv_to_dict`` = ``asdict``) carries these as nested party dicts, never a
+    flat ``vendor_name`` key — reading the flat key silently dropped every
+    correction. Legacy flat keys are kept as a defensive fallback. No-ops
+    cleanly when ``client_id`` is missing or the invoice list is empty so
+    callers never crash on partial state.
     """
     client_id = state.get("client_id") if isinstance(state, dict) else None
     invs = (state.get(nodes.NORMALIZED_KEY) or []) if isinstance(state, dict) else []
     if not client_id or not invs:
         return
     first = invs[0] if isinstance(invs[0], dict) else {}
-    vendor = first.get("vendor_name") or first.get("issuer_name")
+    vendor = _vendor_from_inv_dict(first)
     if not vendor:
         return
     for e in (edits.get("lines") or []):

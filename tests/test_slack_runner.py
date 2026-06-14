@@ -706,11 +706,17 @@ def test_edit_submit_persists_correction_after_resume(monkeypatch):
 
     # Seed a paused session whose state carries the ADR-0004 inputs
     # (client_id + normalized_invoices) that _persist_corrections reads.
+    # Use the REAL serialized NormalizedInvoice shape (_inv_to_dict = asdict):
+    # the vendor lives in the nested ``supplier``/``customer`` party, NOT a flat
+    # ``vendor_name`` key. A prior fixture used ``vendor_name`` and masked the
+    # production bug where _persist_corrections read keys that never exist.
     paused_state = {
         "client_id": "CL-1",
         nodes.NORMALIZED_KEY: [
             {
-                "vendor_name": "Hotel Booking",
+                "doc_type": "purchase",
+                "supplier": {"name": "Hotel Booking"},
+                "customer": {"name": None},
                 "lines": [
                     {"description": "Room", "account_code": "6010", "tax_code": "ZR"},
                 ],
@@ -1525,6 +1531,49 @@ def test_persist_corrections_writes_vendor_mapping():
     edits = {"lines": [{"index": 0, "account_code": "6010", "tax_code": "ZR"}]}
     _persist_corrections(_Store(), state, edits)
     assert saved == [("CL-1", "Hotel Booking", "6010", "ZR")]
+
+
+def test_persist_corrections_reads_nested_party_real_serialized_shape():
+    """Vendor comes from the nested party the SERIALIZER actually produces.
+
+    ``_inv_to_dict`` = ``asdict(NormalizedInvoice)`` nests the parties under
+    ``supplier`` / ``customer`` — there is no flat ``vendor_name`` key on real
+    state. Purchases key off ``supplier.name``; sales key off ``customer.name``
+    (mirroring ``NormalizedInvoice.counterparty``). This is the shape that broke
+    learning in production.
+    """
+    saved = []
+
+    class _Store:
+        def add_correction(self, *, client_id, vendor, account_code=None, tax_code=None):
+            saved.append((client_id, vendor, account_code, tax_code))
+
+    # Purchase → supplier.name
+    purchase_state = {
+        "client_id": "CL-1",
+        nodes.NORMALIZED_KEY: [
+            {"doc_type": "purchase",
+             "supplier": {"name": "Darrell Podaima"},
+             "customer": {"name": "Auditair International Pte. Ltd."},
+             "lines": [{"description": "audit", "account_code": "5-1000"}]}
+        ],
+    }
+    _persist_corrections(_Store(), purchase_state, {"lines": [{"account_code": "5-1000"}]})
+    assert saved == [("CL-1", "Darrell Podaima", "5-1000", None)]
+
+    # Sales → customer.name
+    saved.clear()
+    sales_state = {
+        "client_id": "CL-1",
+        nodes.NORMALIZED_KEY: [
+            {"doc_type": "sales",
+             "supplier": {"name": "Auditair International Pte. Ltd."},
+             "customer": {"name": "PTTEP"},
+             "lines": [{"description": "svc", "tax_code": "SR"}]}
+        ],
+    }
+    _persist_corrections(_Store(), sales_state, {"lines": [{"tax_code": "SR"}]})
+    assert saved == [("CL-1", "PTTEP", None, "SR")]
 
 
 def test_persist_corrections_skips_lines_with_no_code_fields():
