@@ -1578,3 +1578,45 @@ def test_persist_corrections_noop_without_client_id_or_invoice():
     _persist_corrections(_Store(), {"client_id": "X", nodes.NORMALIZED_KEY: []},
                          {"lines": [{"index": 0, "account_code": "6010"}]})
     assert saved == []
+
+
+def test_main_async_wires_firestore_client_store(monkeypatch):
+    """Socket mode must seed onboarding/commands with the SAME Firestore store
+    the document pipeline reads — not an ephemeral in-memory store. Otherwise a
+    profile registered via the modal would be invisible to processing.
+    """
+    import accounting_agents.slack_runner as sr
+    from invoice_processing.export.client_context import FirestoreClientStore
+
+    captured: dict = {}
+
+    monkeypatch.setattr(sr, "build_runner", lambda: SimpleNamespace(app_name="acc"))
+    monkeypatch.setattr(sr, "SlackLedgerStore", lambda db: object())
+    monkeypatch.setattr(
+        "accounting_agents.sessions.FirestoreSessionService",
+        lambda: SimpleNamespace(client=object()),
+    )
+
+    def _fake_build(**kwargs):
+        captured["store"] = kwargs.get("store")
+        return object()
+
+    monkeypatch.setattr(sr, "build_async_app", _fake_build)
+
+    class _FakeHandler:
+        def __init__(self, app, token):
+            captured["token"] = token
+
+        async def start_async(self):
+            captured["started"] = True
+
+    monkeypatch.setattr(
+        "slack_bolt.adapter.socket_mode.async_handler.AsyncSocketModeHandler",
+        _FakeHandler,
+    )
+    monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-test")
+
+    asyncio.run(sr._main_async())
+
+    assert isinstance(captured["store"], FirestoreClientStore)
+    assert captured.get("started") is True

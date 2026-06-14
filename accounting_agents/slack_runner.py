@@ -1309,7 +1309,14 @@ async def _main_async() -> None:
     db = FirestoreSessionService().client
     runner = build_runner()
     ledger_store = SlackLedgerStore(db)
-    async_app = build_async_app(runner=runner, ledger_store=ledger_store, db=db)
+    # Onboarding/commands must write to the SAME Firestore the document pipeline
+    # reads (_DEFAULT_CLIENT_STORE). Without this, build_async_app defaults to an
+    # ephemeral InMemoryClientStore and socket-mode-registered profiles would be
+    # invisible to processing (soft-gated as "no_profile").
+    async_app = build_async_app(
+        runner=runner, ledger_store=ledger_store, db=db,
+        store=FirestoreClientStore(),
+    )
 
     handler = AsyncSocketModeHandler(async_app, os.environ["SLACK_APP_TOKEN"])
     logger.info("Starting Ledgr ADK Slack runner in socket mode...")
