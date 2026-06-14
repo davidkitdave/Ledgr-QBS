@@ -514,6 +514,26 @@ class TestInvoiceEditModal:
         inputs = [b for b in view["blocks"] if b.get("type") == "input"]
         assert len(inputs) >= 3
 
+    def test_empty_coa_omits_account_select(self):
+        """A client with accounting software but no COA must not produce a
+        ``static_select`` with empty ``options`` — Slack rejects that and the
+        whole modal fails to open. The account-code block is dropped; tax and
+        amount stay editable so the modal still opens and works.
+        """
+        view = invoice_edit_modal(
+            op_id="OP1",
+            lines=[{"description": "Room", "account_code": None, "tax_code": "SR", "amount": 51.49}],
+            coa_options=[],
+        )
+        # No empty-options static_select anywhere.
+        for b in view["blocks"]:
+            el = b.get("element", {})
+            if el.get("type") == "static_select":
+                assert el["options"], "static_select must never have empty options"
+        input_block_ids = [b["block_id"] for b in view["blocks"] if b.get("type") == "input"]
+        assert "acct_0" not in input_block_ids   # account block omitted
+        assert input_block_ids == ["tax_0", "amt_0"]
+
     def test_block_id_encoding_uses_acct_tax_amt_prefixes(self):
         """Lock the block_id encoding so the modal builder and ``_edits_from_view_state`` stay in sync."""
         view = invoice_edit_modal(

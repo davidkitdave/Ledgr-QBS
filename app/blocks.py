@@ -589,13 +589,17 @@ def invoice_edit_modal(op_id: str, lines: list[dict], coa_options: list[tuple[st
     for i, ln in enumerate(lines):
         blocks.append({"type": "section",
                        "text": {"type": "mrkdwn", "text": f"*Line {i + 1}: {ln.get('description', '')}*"}})
-        acct_initial = next((o for o in coa if o["value"] == ln.get("account_code")), None)
-        blocks.append({
-            "type": "input", "block_id": f"acct_{i}", "optional": True,
-            "label": {"type": "plain_text", "text": "Account code"},
-            "element": {"type": "static_select", "action_id": "v", "options": coa,
-                        **({"initial_option": acct_initial} if acct_initial else {})},
-        })
+        # Slack rejects a static_select with empty options, which would make the
+        # whole modal fail to open. When the client has no COA, omit the
+        # account-code block entirely — tax and amount stay editable.
+        if coa:
+            acct_initial = next((o for o in coa if o["value"] == ln.get("account_code")), None)
+            blocks.append({
+                "type": "input", "block_id": f"acct_{i}", "optional": True,
+                "label": {"type": "plain_text", "text": "Account code"},
+                "element": {"type": "static_select", "action_id": "v", "options": coa,
+                            **({"initial_option": acct_initial} if acct_initial else {})},
+            })
         tax_initial = next((o for o in tax_opts if o["value"] == ln.get("tax_code")), None)
         blocks.append({
             "type": "input", "block_id": f"tax_{i}", "optional": True,
