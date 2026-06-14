@@ -1,7 +1,11 @@
-"""Tests for app/slack_app.py — Bolt wiring and FastAPI app.
+"""Tests for app/slack_app.py — pure handler functions and download hardening.
 
 All tests use InMemoryClientStore and fake ack/client objects.
 No live Slack token or Firestore call is made.
+
+Note: build_app / fastapi_app / handle_file_share were removed in the
+ADK-consolidation refactor (Tasks 3+4). Tests for the live graph prod entry
+point live in test_slack_runner.py (build_fastapi_app).
 """
 
 from __future__ import annotations
@@ -16,9 +20,6 @@ import pytest
 from app import slack_app
 from app.slack_app import (
     FileTooLargeError,
-    build_app,
-    fastapi_app,
-    handle_file_share,
     handle_onboarding_submit,
     handle_setup_open,
     slack_download_file,
@@ -283,60 +284,6 @@ class TestHandleOnboardingSubmit:
 
 
 # --------------------------------------------------------------------------- #
-# build_app
-# --------------------------------------------------------------------------- #
-
-class TestBuildApp:
-
-    def test_returns_bolt_app(self):
-        from slack_bolt import App
-        app = build_app(InMemoryClientStore())
-        assert isinstance(app, App)
-
-    def test_custom_id_factory(self):
-        store = InMemoryClientStore()
-        app = build_app(store, id_factory=lambda: "custom-id-xyz")
-        assert app is not None  # wiring complete without error
-
-
-# --------------------------------------------------------------------------- #
-# fastapi_app + healthz
-# --------------------------------------------------------------------------- #
-
-class TestFastapiApp:
-
-    def test_constructs_without_error(self):
-        store = InMemoryClientStore()
-        api = fastapi_app(store=store)
-        assert api is not None
-
-    def test_healthz_returns_ok_when_configured(self, monkeypatch):
-        monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-tok")
-        monkeypatch.setenv("SLACK_SIGNING_SECRET", "sig")
-        from fastapi.testclient import TestClient
-        store = InMemoryClientStore()
-        api = fastapi_app(store=store)
-        tc = TestClient(api)
-        resp = tc.get("/healthz")
-        assert resp.status_code == 200
-        assert resp.json() == {"ok": True}
-
-    def test_healthz_returns_503_when_env_missing(self, monkeypatch):
-        # Item 9: fail loud — missing Slack HTTP env vars surface as 503 + list.
-        monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
-        monkeypatch.delenv("SLACK_SIGNING_SECRET", raising=False)
-        from fastapi.testclient import TestClient
-        store = InMemoryClientStore()
-        api = fastapi_app(store=store)
-        tc = TestClient(api)
-        resp = tc.get("/healthz")
-        assert resp.status_code == 503
-        body = resp.json()
-        assert body["ok"] is False
-        assert set(body["missing"]) == {"SLACK_BOT_TOKEN", "SLACK_SIGNING_SECRET"}
-
-
-# --------------------------------------------------------------------------- #
 # slack_download_file hardening (items 3, 4, 5)
 # --------------------------------------------------------------------------- #
 
@@ -421,42 +368,3 @@ class TestSlackDownloadFileHardening:
             dest = slack_download_file(client, "F5", str(tmp_path))
         with open(dest, "rb") as fh:
             assert fh.read() == b"OK"
-
-
-# --------------------------------------------------------------------------- #
-# handle_file_share batch cap (item 5)
-# --------------------------------------------------------------------------- #
-
-class TestHandleFileShareBatchCap:
-
-    def test_over_cap_batch_trimmed_with_notice(self):
-        posted: list = []
-        share_calls: list = []
-        client = MagicMock()
-
-        def _post(**kw):
-            posted.append(kw)
-
-        client.chat_postMessage.side_effect = _post
-
-        store = InMemoryClientStore()
-        store.save_profile({"client_id": "cli-cap", "channel_id": "C-CAP",
-                            "fye_month": 12, "status": "active"})
-
-        n = slack_app.MAX_FILES_PER_BATCH + 5
-        files = [{"id": f"F{i}", "filetype": "pdf", "name": f"d{i}.pdf"} for i in range(n)]
-
-        with patch.object(slack_app, "_seen_events", slack_app._SeenEvents()), \
-             patch.object(slack_app, "run_share",
-                          side_effect=lambda **kw: share_calls.append(kw)), \
-             patch.object(slack_app, "slack_download_file", return_value="/tmp/x.pdf"), \
-             patch.object(slack_app._executor, "submit",
-                          side_effect=lambda fn, *a, **kw: fn(*a, **kw)):
-            event = {"channel": "C-CAP", "files": files}
-            handle_file_share(event, client=client, store=store)
-
-        # User was told some files were skipped.
-        assert any("skipped" in (m.get("text") or "") for m in posted)
-        # Only the cap number of files reached the worker.
-        assert len(share_calls) == 1
-        assert len(share_calls[0]["file_ids"]) == slack_app.MAX_FILES_PER_BATCH

@@ -1,8 +1,21 @@
 # 0001 — Deterministic Engine as one node in a slim Workflow graph
 
-- **Status:** Accepted
+- **Status:** Accepted — **consolidation implemented 2026-06-14** (see "Implementation" below)
 - **Date:** 2026-06-13
 - **Deciders:** David (developer)
+
+> **Implementation (2026-06-14).** The corrected keep/retire list is done:
+> deleted the orphaned agents (`invoice_agent`, `bank_feed_agent`,
+> `bank_statement_extractor_agent`, `invoice_processing/agent.py`) and the second
+> root `ledgr_coordinator/`; retired the dead transport (`app/processing.py`
+> `process_batch`, `app/socket_run.py`, and `build_app`/`fastapi_app` in
+> `app/slack_app.py`); unified prod onto the live graph — `app/main.py` now serves
+> `accounting_agents.slack_runner.build_fastapi_app()` (graph + HITL via
+> `AsyncSlackRequestHandler`), so local (socket) and prod (HTTP) share one runtime.
+> ADR-0006 COA-upload (path A) was ported into the live runner
+> (`_is_coa_upload` → `run_coa_ingest`). `invoice_processing/pipeline.py` is kept
+> only as the engine/eval harness (not live). Deeper "engine as a single node"
+> (ROADMAP Stage 3) remains future work.
 
 ## Context
 

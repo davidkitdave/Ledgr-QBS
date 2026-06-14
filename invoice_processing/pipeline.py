@@ -1,13 +1,21 @@
-"""End-to-end document processing pipeline.
+"""End-to-end document processing pipeline (ENGINE / EVAL HARNESS — not the live runtime).
 
-Deterministic core called by the Slack layer:
+Deterministic procedural orchestration of the engine:
   classify → resolve direction → extract → normalize → tax classify →
   categorize (COA account codes) → route → consolidate into FY workbooks.
 
+IMPORTANT — this is NOT the live runtime. Post ADK consolidation (ADR-0001),
+the production/local bot runs the ``accounting_agents`` ADK graph (via
+``slack_runner``), whose nodes call the engine functions in
+``invoice_processing/{extract,classify,export}`` directly — they do NOT call
+``process_document`` / ``process_batch``. This module is retained as the
+hermetic engine harness that the eval (``eval/client_eval.py``,
+``eval/ledger_eval.py``) and unit tests drive without a Runner/session/artifact
+service or API keys. Keep engine fixes in sync with the graph nodes.
+
 Design principle: every LLM-calling step is injected via a keyword-only
-parameter that defaults to the real function. Tests pass fake callables; the
-real Slack layer passes nothing (uses the defaults). No Gemini call is ever
-made inside this module itself.
+parameter that defaults to the real function. Tests pass fake callables. No
+Gemini call is ever made inside this module itself.
 """
 
 from __future__ import annotations
