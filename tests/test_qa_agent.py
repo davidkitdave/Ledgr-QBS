@@ -21,6 +21,7 @@ from openpyxl import Workbook
 from accounting_agents.ledger_store import SlackLedgerStore
 from accounting_agents.qa_agent import (
     LEDGER_DATA_KEY,
+    bank_totals,
     gst_threshold_check,
     pnl_for_fy,
     summarize_by_category,
@@ -71,6 +72,60 @@ def _sales_rows() -> list[dict]:
 
 def _mixed_rows() -> list[dict]:
     return _purchase_rows() + _sales_rows()
+
+
+def _bank_rows() -> list[dict]:
+    """Two months (Sep + Oct 2025) of bank rows with a B/F opener."""
+    return [
+        {"Description": "BALANCE B/F", "Withdrawal": None, "Deposit": None,
+         "Balance": 1000.0, "Currency": "SGD"},
+        {"Date": "05/09/2025", "Description": "FAST PAYMENT", "Withdrawal": 200.0,
+         "Deposit": None, "Balance": 800.0, "Currency": "SGD"},
+        {"Date": "20/09/2025", "Description": "SALARY", "Withdrawal": None,
+         "Deposit": 500.0, "Balance": 1300.0, "Currency": "SGD"},
+        {"Date": "03/10/2025", "Description": "RENT", "Withdrawal": 600.0,
+         "Deposit": None, "Balance": 700.0, "Currency": "SGD"},
+        {"Date": "18/10/2025", "Description": "REFUND", "Withdrawal": None,
+         "Deposit": 100.0, "Balance": 800.0, "Currency": "SGD"},
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# bank_totals
+# --------------------------------------------------------------------------- #
+
+
+class TestBankTotals:
+    def test_no_bank_data_returns_message(self):
+        # Invoice rows only → not bank data.
+        result = bank_totals(_ctx(_purchase_rows()))
+        assert "no bank-statement data" in result.lower()
+
+    def test_all_months_totals(self):
+        data = json.loads(bank_totals(_ctx(_bank_rows())))
+        assert data["withdrawals"] == pytest.approx(800.0)   # 200 + 600
+        assert data["deposits"] == pytest.approx(600.0)      # 500 + 100
+        assert data["net"] == pytest.approx(-200.0)
+        assert data["transaction_count"] == 4                # B/F excluded
+        assert data["opening_balance"] == pytest.approx(1000.0)
+        assert data["closing_balance"] == pytest.approx(800.0)
+        assert data["currency"] == "SGD"
+
+    def test_month_filter_october(self):
+        data = json.loads(bank_totals(_ctx(_bank_rows()), month="October", year="2025"))
+        assert data["withdrawals"] == pytest.approx(600.0)   # only RENT
+        assert data["deposits"] == pytest.approx(100.0)      # only REFUND
+        assert data["transaction_count"] == 2
+
+    def test_month_filter_numeric_and_abbrev(self):
+        by_num = json.loads(bank_totals(_ctx(_bank_rows()), month="9"))
+        by_abbr = json.loads(bank_totals(_ctx(_bank_rows()), month="Sep"))
+        assert by_num["withdrawals"] == pytest.approx(200.0)
+        assert by_abbr["withdrawals"] == pytest.approx(200.0)
+
+    def test_month_with_no_rows_reports_none(self):
+        data = json.loads(bank_totals(_ctx(_bank_rows()), month="January", year="2025"))
+        assert data["transaction_count"] == 0
 
 
 # --------------------------------------------------------------------------- #

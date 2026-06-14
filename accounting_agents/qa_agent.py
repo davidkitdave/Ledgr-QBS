@@ -136,6 +136,142 @@ def pnl_for_fy(tool_context: ToolContext) -> str:
     )
 
 
+#: Month-name / abbreviation → month number, for bank period filtering.
+_MONTHS = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+    "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+    "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9, "oct": 10,
+    "october": 10, "nov": 11, "november": 11, "dec": 12, "december": 12,
+}
+
+
+def _is_bank_row(row: dict) -> bool:
+    """True when a row looks like a bank-statement line (has bank columns)."""
+    return any(k in row for k in ("Withdrawal", "Deposit", "Balance"))
+
+
+def _month_year_of(value) -> tuple[int, int] | tuple[None, None]:
+    """Extract (month, year) from a bank Date cell (``DD/MM/YYYY`` str or date)."""
+    if value is None:
+        return (None, None)
+    # date / datetime object.
+    month = getattr(value, "month", None)
+    year = getattr(value, "year", None)
+    if month and year:
+        return (int(month), int(year))
+    # String "DD/MM/YYYY" (or "DD/MM/YY").
+    parts = str(value).strip().split("/")
+    if len(parts) == 3:
+        try:
+            mth = int(parts[1])
+            yr = int(parts[2])
+            if yr < 100:
+                yr += 2000
+            return (mth, yr)
+        except ValueError:
+            return (None, None)
+    return (None, None)
+
+
+def _to_float(value) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def bank_totals(tool_context: ToolContext, month: str = "", year: str = "") -> str:
+    """Totals for the client's bank statement: withdrawals, deposits, net, balances.
+
+    Operates on bank-statement rows (``Withdrawal`` / ``Deposit`` / ``Balance``
+    columns), so use THIS tool — not the invoice tools — for any bank-statement
+    question (e.g. "total withdrawals in October", "closing balance", "how much
+    came in").  Optionally filter to one month.
+
+    Args:
+        tool_context: Injected by ADK; provides session state access.
+        month: Optional month filter — name, abbreviation, or number
+            (e.g. "October", "Oct", "10"). Empty = all months.
+        year: Optional 4-digit year filter (e.g. "2025"). Empty = any year.
+
+    Returns:
+        JSON string with ``withdrawals``, ``deposits``, ``net`` (deposits −
+        withdrawals), ``transaction_count``, ``opening_balance``,
+        ``closing_balance``, ``currency``, and ``period``; or a human-readable
+        message when no bank data is loaded / the month has no rows.
+    """
+    rows = [r for r in _get_rows(tool_context) if _is_bank_row(r)]
+    if not rows:
+        return (
+            "No bank-statement data is loaded for this client. Upload the bank "
+            "statement(s) first, or ask about the invoice ledger instead."
+        )
+
+    # Resolve the optional month filter.
+    want_month: int | None = None
+    m = (month or "").strip().lower()
+    if m:
+        want_month = _MONTHS.get(m)
+        if want_month is None and m.isdigit():
+            want_month = int(m)
+    want_year: int | None = int(year) if (year or "").strip().isdigit() else None
+
+    withdrawals = deposits = 0.0
+    txn_count = 0
+    opening_balance: float | None = None
+    closing_balance: float | None = None
+    currency = "SGD"
+
+    for row in rows:
+        desc = str(row.get("Description") or "").strip().upper()
+        if row.get("Currency"):
+            currency = row["Currency"]
+
+        # Opening balance comes from the BALANCE B/F marker; skip it from sums.
+        if desc == "BALANCE B/F":
+            if opening_balance is None:
+                opening_balance = _to_float(row.get("Balance"))
+            continue
+        if desc == "TOTALS":
+            continue
+
+        if want_month is not None or want_year is not None:
+            mth, yr = _month_year_of(row.get("Date"))
+            if want_month is not None and mth != want_month:
+                continue
+            if want_year is not None and yr != want_year:
+                continue
+
+        withdrawals += _to_float(row.get("Withdrawal"))
+        deposits += _to_float(row.get("Deposit"))
+        txn_count += 1
+        bal = row.get("Balance")
+        if bal is not None and str(bal).strip() != "":
+            closing_balance = _to_float(bal)
+
+    if txn_count == 0 and (want_month is not None or want_year is not None):
+        return json.dumps(
+            {"transaction_count": 0, "period": f"{month} {year}".strip(),
+             "message": "No transactions found for that period."},
+            ensure_ascii=False,
+        )
+
+    period = " ".join(p for p in (month, year) if p).strip() or "all loaded months"
+    return json.dumps(
+        {
+            "withdrawals": round(withdrawals, 2),
+            "deposits": round(deposits, 2),
+            "net": round(deposits - withdrawals, 2),
+            "transaction_count": txn_count,
+            "opening_balance": round(opening_balance, 2) if opening_balance is not None else None,
+            "closing_balance": round(closing_balance, 2) if closing_balance is not None else None,
+            "currency": currency,
+            "period": period,
+        },
+        ensure_ascii=False,
+    )
+
+
 def gst_threshold_check(tool_context: ToolContext) -> str:
     """Check whether taxable turnover is approaching the SGD 1 M GST threshold.
 
@@ -190,16 +326,25 @@ You are a read-only accounting assistant for a Singapore SME's financial ledger.
 You answer questions strictly based on the ledger data that has been loaded into
 your session — you do NOT make up numbers, guess, or call external services.
 
-You have three tools:
+The loaded data may be an INVOICE ledger (columns like "Source Amount",
+"Account Code / COA", "Doc Type") or a BANK STATEMENT (columns "Withdrawal",
+"Deposit", "Balance"). Pick the tool that matches the question:
+
+Bank-statement questions (withdrawals, deposits, money in/out, closing or
+opening balance, a given month's totals):
+- ``bank_totals``: withdrawals, deposits, net, opening/closing balance — with an
+  optional month + year filter (e.g. month="October", year="2025").
+
+Invoice-ledger questions (spend by category, P&L, GST):
 - ``summarize_by_category``: total spend per GL account / COA category.
 - ``pnl_for_fy``: revenue, expenses, and net profit/loss for the FY.
 - ``gst_threshold_check``: whether the business is near the SGD 1 M GST
   registration threshold.
 
-For every question, call the relevant tool first, then explain the result in
-plain English. If the ledger is not loaded (tool returns "not loaded yet"),
-tell the user they need to upload their FY ledger workbook before you can
-answer.
+For every question, call the single most relevant tool first, then explain the
+result in plain English. For a bank question naming a month, pass that month
+(and year if given) to ``bank_totals``. If a tool reports that the data is not
+loaded, tell the user to upload the relevant workbook first.
 
 Be concise and professional. Do not invent figures not returned by the tools.
 """.strip()
@@ -236,7 +381,7 @@ qa_agent = LlmAgent(
     model=config.MODEL_LITE,
     mode="single_turn",
     instruction=qa_instruction,
-    tools=[summarize_by_category, pnl_for_fy, gst_threshold_check],
+    tools=[bank_totals, summarize_by_category, pnl_for_fy, gst_threshold_check],
 )
 
 __all__ = [
@@ -245,6 +390,7 @@ __all__ = [
     "LEDGER_DATA_KEY",
     "QUESTION_KEY",
     "GST_THRESHOLD_SGD",
+    "bank_totals",
     "summarize_by_category",
     "pnl_for_fy",
     "gst_threshold_check",
