@@ -863,6 +863,39 @@ def test_formula_balance_cells_are_recomputed_on_append():
     assert may_bal == 2200.0, f"May Salary balance wrong: {may_bal}"
 
 
+def test_is_formula_or_missing_treats_non_numeric_as_untrusted():
+    """Non-numeric Balance cells (e.g. a stray 'SGD') are untrusted, not crashes.
+
+    Regression for the live bank-continuity crash:
+    ``ValueError: could not convert string to float: 'SGD'`` in _recompute_balances.
+    """
+    f = SlackLedgerStore._is_formula_or_missing
+    assert f("SGD") is True          # stray currency code
+    assert f("BALANCE B/F") is True  # a label that leaked into the Balance column
+    assert f("=E4") is True          # formula
+    assert f(None) is True
+    assert f("") is True
+    assert f(538.78) is False        # real numeric balance
+    assert f("538.78") is False      # numeric string
+
+
+def test_recompute_balances_does_not_crash_on_non_numeric_bf_balance():
+    """A B/F row whose Balance cell is 'SGD' must carry forward, not raise — and a
+    later numeric B/F still seeds the running balance and chains correctly."""
+    from invoice_processing.export.exporters import BankStatementExporter as _BX
+    rows = [
+        {"Description": _BX.OPENING_MARKER, "Balance": "SGD", "Deposit": None, "Withdrawal": None},
+        {"Description": _BX.OPENING_MARKER, "Balance": 1000.0, "Deposit": None, "Withdrawal": None},
+        {"Description": "Deposit", "Balance": None, "Deposit": 250.0, "Withdrawal": None},
+        {"Description": "Payment", "Balance": None, "Deposit": None, "Withdrawal": 100.0},
+    ]
+    SlackLedgerStore._recompute_balances(rows)  # must not raise
+    assert rows[0]["Balance"] is None     # 'SGD' untrusted → carried forward (running None)
+    assert rows[1]["Balance"] == 1000.0   # numeric B/F seeds the running balance
+    assert rows[2]["Balance"] == 1250.0   # chained: 1000 + 250
+    assert rows[3]["Balance"] == 1150.0   # chained: 1250 − 100
+
+
 def test_legacy_8col_header_is_migrated_on_read():
     """Regression: a sheet written with the OLD 8-col header (Stated Balance + Check
     instead of Balance + Math_Check) must be read without losing the B/F opening values.

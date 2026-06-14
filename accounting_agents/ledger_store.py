@@ -266,12 +266,28 @@ class SlackLedgerStore:
 
     @staticmethod
     def _is_formula_or_missing(value) -> bool:
-        """Return True when a Balance cell cannot be trusted as a numeric value."""
+        """Return True when a Balance cell cannot be trusted as a numeric value.
+
+        Covers None, formula/empty strings (``=...``), and any other non-numeric
+        text — e.g. a stray currency code (``"SGD"``) or a ``BALANCE B/F`` label
+        that landed in the Balance column of an older sheet. Recompute then
+        carries the running balance forward instead of crashing on
+        ``float(value)`` (live bug: ``ValueError: could not convert 'SGD'``).
+        """
         if value is None:
             return True
-        if isinstance(value, str) and value.strip().startswith("="):
+        if isinstance(value, bool):  # bool is an int subclass — not a balance
             return True
-        return False
+        if isinstance(value, (int, float)):
+            return False
+        s = str(value).strip()
+        if not s or s.startswith("="):
+            return True
+        try:
+            float(s)
+            return False
+        except (TypeError, ValueError):
+            return True
 
     @classmethod
     def _recompute_balances(cls, value_rows: list[dict]) -> None:
