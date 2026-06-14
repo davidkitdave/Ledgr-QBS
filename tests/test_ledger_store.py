@@ -470,7 +470,7 @@ def test_bank_formulas_correct_after_second_append():
     # First B/F Math_Check: static ✅ (no prior row).
     assert ws.cell(row=2, column=ci).value == "✅"
     # Second B/F Math_Check: continuity formula — carried balance (E3) vs this B/F (E4).
-    assert ws.cell(row=4, column=ci).value == f'=IF(ROUND({bal}4-{bal}3,2)=0,"✅","GAP")'
+    assert ws.cell(row=4, column=ci).value == f'=IF(ROUND(N({bal}4)-N({bal}3),2)=0,"✅","GAP")'
     # Txn Math_Check: arithmetic formula referencing prior balance row.
     assert ws.cell(row=5, column=ci).value.startswith("=IF(ROUND(")
     # No hidden dedupe column — the Excel is clean / human-readable.
@@ -540,9 +540,9 @@ def test_descending_balance_math_check_formula_chains():
     # B/F row (row 2): static ✅, no prior row.
     assert ws.cell(row=2, column=ci).value == "✅"
     # Txn rows: formula references prior Balance and this row's Deposit/Withdrawal.
-    assert ws.cell(row=3, column=ci).value == f'=IF(ROUND({bal}3-({bal}2+{dep}3-{wd}3),2)=0,"✅","❌")'
-    assert ws.cell(row=4, column=ci).value == f'=IF(ROUND({bal}4-({bal}3+{dep}4-{wd}4),2)=0,"✅","❌")'
-    assert ws.cell(row=5, column=ci).value == f'=IF(ROUND({bal}5-({bal}4+{dep}5-{wd}5),2)=0,"✅","❌")'
+    assert ws.cell(row=3, column=ci).value == f'=IF(ROUND(N({bal}3)-(N({bal}2)+N({dep}3)-N({wd}3)),2)=0,"✅","❌ Exp: "&ROUND(N({bal}2)+N({dep}3)-N({wd}3),2))'
+    assert ws.cell(row=4, column=ci).value == f'=IF(ROUND(N({bal}4)-(N({bal}3)+N({dep}4)-N({wd}4)),2)=0,"✅","❌ Exp: "&ROUND(N({bal}3)+N({dep}4)-N({wd}4),2))'
+    assert ws.cell(row=5, column=ci).value == f'=IF(ROUND(N({bal}5)-(N({bal}4)+N({dep}5)-N({wd}5)),2)=0,"✅","❌ Exp: "&ROUND(N({bal}4)+N({dep}5)-N({wd}5),2))'
     # TOTALS row (row 6): no Math_Check.
     assert ws.cell(row=6, column=ci).value in (None, "")
 
@@ -594,7 +594,7 @@ def test_wrong_balance_math_check_formula_structure():
     assert ws.cell(row=3, column=idx["Balance"]).value == 500.0
     # Math_Check formula references E3 (stated=500) vs arithmetic E2+D3-C3 (=400).
     # In Excel this resolves to ❌ because ROUND(500-400,2)≠0.
-    expected = f'=IF(ROUND({bal}3-({bal}2+{dep}3-{wd}3),2)=0,"✅","❌")'
+    expected = f'=IF(ROUND(N({bal}3)-(N({bal}2)+N({dep}3)-N({wd}3)),2)=0,"✅","❌ Exp: "&ROUND(N({bal}2)+N({dep}3)-N({wd}3),2))'
     assert ws.cell(row=3, column=ci).value == expected
 
 
@@ -648,7 +648,7 @@ def test_cross_month_descending_chain_balance_and_continuity():
     # First B/F Math_Check: ✅ (no prior month).
     assert ws.cell(row=2, column=ci).value == "✅"
     # Second B/F continuity check: compares E5 (stated 2500) against E4 (closing 2500).
-    assert ws.cell(row=5, column=ci).value == f'=IF(ROUND({bal}5-{bal}4,2)=0,"✅","GAP")'
+    assert ws.cell(row=5, column=ci).value == f'=IF(ROUND(N({bal}5)-N({bal}4),2)=0,"✅","GAP")'
     # Txn Math_Check formulas all well-formed.
     for r in (3, 4, 6, 7):
         assert ws.cell(row=r, column=ci).value.startswith("=IF(ROUND("), f"row {r} missing formula"
@@ -691,7 +691,7 @@ def test_cross_month_gap_is_flagged_by_formula():
     # Second B/F (row 4): stated=1000, prior closing (row 3)=900 → formula will show GAP.
     assert ws.cell(row=4, column=bi).value == 1000.0   # stated opening stored faithfully
     continuity = ws.cell(row=4, column=ci).value
-    assert continuity == f'=IF(ROUND({bal}4-{bal}3,2)=0,"✅","GAP")'
+    assert continuity == f'=IF(ROUND(N({bal}4)-N({bal}3),2)=0,"✅","GAP")'
     # (In Excel: ROUND(1000-900,2)=100≠0 → "GAP")
 
 

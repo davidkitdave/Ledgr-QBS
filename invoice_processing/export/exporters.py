@@ -534,12 +534,19 @@ class BankStatementExporter:
         """Write Math_Check formulas and TOTALS SUM over the sheet.
 
         Balance holds the actual bank-stated value on every row — no formula.
-        Math_Check (col G) validates each row arithmetically:
+        Math_Check (col G) validates each row arithmetically. EVERY cell
+        reference is wrapped in ``N()`` so a non-numeric cell (a stray currency
+        code, a label, a blank) coerces to 0 instead of poisoning the whole
+        formula with ``#VALUE!`` — the robustness pattern from the reference
+        workbook. (See QA 2026-06-14: the un-coerced formula produced ``#VALUE!``
+        whenever a 'SGD' string leaked into the Balance column.)
 
         - ``BALANCE B/F`` row: first B/F of the FY gets ``✅`` (no prior row);
-          later months get ``=IF(ROUND(E_bf-E_prev,2)=0,"✅","GAP")`` — a ``GAP``
-          means the stated opening doesn't match the prior month's closing balance.
-        - txn row: ``=IF(ROUND(E-(E_prev+Deposit-Withdrawal),2)=0,"✅","❌")``.
+          later months get ``=IF(ROUND(N(E_bf)-N(E_prev),2)=0,"✅","GAP")`` — a
+          ``GAP`` means the stated opening doesn't match the prior closing balance.
+        - txn row: ``=IF(ROUND(N(E)-(N(E_prev)+N(Deposit)-N(Withdrawal)),2)=0,
+          "✅","❌ Exp: "&<expected>)`` — the expected running balance is shown on
+          a mismatch so the bookkeeper sees the discrepancy at a glance.
         - ``TOTALS`` row: ``=SUM(...)`` over the Withdrawal/Deposit txn range.
         """
         header = [c.value for c in sheet[1]] if sheet.max_row >= 1 else []
@@ -574,7 +581,7 @@ class BankStatementExporter:
                         sheet[f"{check_col}{r}"] = "✅"
                     else:
                         sheet[f"{check_col}{r}"] = (
-                            f'=IF(ROUND({bal_col}{r}-{bal_col}{prev_balance_row},2)=0,"✅","GAP")'
+                            f'=IF(ROUND(N({bal_col}{r})-N({bal_col}{prev_balance_row}),2)=0,"✅","GAP")'
                         )
                 prev_balance_row = r
                 seen_first_bf = True
@@ -585,13 +592,16 @@ class BankStatementExporter:
                     first_txn_row = r
                 last_txn_row = r
                 if check_col and bal_col and prev_balance_row is not None:
-                    arithmetic = f"{bal_col}{prev_balance_row}"
+                    # Expected running balance = prev balance + deposit − withdrawal,
+                    # every term N()-coerced so text cells become 0 (no #VALUE!).
+                    expected = f"N({bal_col}{prev_balance_row})"
                     if dep_col:
-                        arithmetic += f"+{dep_col}{r}"
+                        expected += f"+N({dep_col}{r})"
                     if wd_col:
-                        arithmetic += f"-{wd_col}{r}"
+                        expected += f"-N({wd_col}{r})"
                     sheet[f"{check_col}{r}"] = (
-                        f'=IF(ROUND({bal_col}{r}-({arithmetic}),2)=0,"✅","❌")'
+                        f'=IF(ROUND(N({bal_col}{r})-({expected}),2)=0,"✅",'
+                        f'"❌ Exp: "&ROUND({expected},2))'
                     )
                 prev_balance_row = r
 
