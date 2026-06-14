@@ -30,8 +30,11 @@ from openpyxl import load_workbook
 
 from eval.ledger_eval import (
     HeaderFill,
+    PlacementResult,
     TargetCompleteness,
     _tally_completeness,
+    load_ground_truth_ledger,
+    score_placement,
 )
 from invoice_processing.export.exporters import (
     QbsLedgerExporter,
@@ -127,6 +130,10 @@ class ClientReport:
     completeness: dict[str, TargetCompleteness] = field(default_factory=dict)
     # Per-doc detail for diagnostics.
     rows: list[dict] = field(default_factory=list)
+    # COA placement-accuracy (Task 1, extraction-accuracy plan). N/A when
+    # the client has no ground-truth ledger; misses are real, scored failures.
+    placement: PlacementResult = field(default_factory=PlacementResult)
+    placement_gt_paths: list[str] = field(default_factory=list)
 
     @property
     def direction_rate(self) -> float:
@@ -174,6 +181,41 @@ def _discover_docs(client_dir: Path, limit: int) -> list[tuple[Path, str]]:
     return docs
 
 
+def _find_ground_truth_ledgers(client_dir: Path) -> list[Path]:
+    """Return all ``<Client> - Ledger_FY*.xlsx`` ground-truth ledgers for *client_dir*.
+
+    Used by the placement-accuracy metric. Skips Excel lock files (``~$``)
+    and returns an empty list when the client has no ground-truth ledger —
+    in which case placement is N/A, not a failure.
+    """
+    return sorted(
+        p for p in client_dir.glob("*Ledger_FY*.xlsx")
+        if not p.name.startswith("~$")
+    )
+
+
+def _resolve_account_description(
+    client, account_code: object
+) -> str | None:
+    """Resolve a produced ``account_code`` to a human description via the
+    client's COA. Returns ``None`` when the code is blank or unknown.
+
+    Per ADR-0006 a client's COA codes are often blank (the QBS exporter
+    keys by description); when the produced line has a code we look it
+    up against the client's own COA so the comparator scores against
+    the actual account chosen, not the raw code.
+    """
+    if not account_code:
+        return None
+    code = str(account_code).strip()
+    if not code:
+        return None
+    for acc in getattr(client, "coa", []) or []:
+        if (acc.code or "").strip() == code:
+            return acc.description or None
+    return None
+
+
 # --------------------------------------------------------------------------- #
 # Core per-client evaluation
 # --------------------------------------------------------------------------- #
@@ -213,6 +255,22 @@ def eval_client(
     # Spy list: one ClassificationResult per doc, in call order.
     cls_results: list[Optional[object]] = []
     classify_spy = _make_classify_spy(cls_results)
+
+    # Ground-truth lookup for placement-accuracy (Task 1). When the client
+    # has no GT ledger, ``gt_lookup`` is empty and the metric reports N/A
+    # for every line — the metric exists as a scoreboard for future
+    # categorisation work, not a check on data we don't have.
+    gt_paths = _find_ground_truth_ledgers(client_dir)
+    report.placement_gt_paths = [str(p) for p in gt_paths]
+    gt_lookup: dict[tuple[str, str], list[str]] = {}
+    for p in gt_paths:
+        try:
+            gt_lookup.update(load_ground_truth_ledger(p))
+        except Exception as exc:  # noqa: BLE001
+            # A corrupt GT must not poison the run — log and continue with
+            # whatever else we loaded.
+            print(f"[WARN] Failed to parse ground-truth ledger {p}: {exc}")
+    placement_produced: list[tuple[str, str, str | None]] = []
 
     for path, expected in _discover_docs(client_dir, limit):
         report.n_docs += 1
@@ -267,6 +325,21 @@ def eval_client(
                     report.completeness[tname], exporter, doc.normalized, side
                 )
 
+            # Placement-accuracy (Task 1): for each line, record
+            # (counterparty_name, line.description, resolved_account_description).
+            # The comparator scores these against the GT ledger below.
+            counterparty_name = (
+                doc.normalized.supplier.name
+                if doc.normalized.doc_type == "purchase"
+                else doc.normalized.customer.name
+            )
+            for line in doc.normalized.lines:
+                placement_produced.append((
+                    counterparty_name or "",
+                    line.description or "",
+                    _resolve_account_description(client, line.account_code),
+                ))
+
         report.rows.append({
             "path": str(path), "expected": expected,
             "resolved": resolved or None, "correct": correct,
@@ -276,6 +349,15 @@ def eval_client(
             "bill_to_name": bill_to_name,
         })
 
+    # Score placement against the GT lookup (if any). Empty lookup + empty
+    # produced list both yield a clean N/A result; we never crash the run
+    # on a missing GT — we just have nothing to grade.
+    if gt_lookup or placement_produced:
+        report.placement = score_placement(
+            # score_placement expects (vendor, desc, account); None becomes "".
+            [(v, d, a or "") for v, d, a in placement_produced],
+            gt_lookup,
+        )
     return report
 
 
@@ -298,6 +380,20 @@ def _print_completeness(completeness: dict[str, TargetCompleteness], indent: str
             print(f"{indent}  {hf.header:<24} {ft:>14} {hf.rate * 100:>7.1f}%")
 
 
+def _print_placement(report: ClientReport, indent: str = "  ") -> None:
+    """Print the COA placement-accuracy line for one client (Task 1)."""
+    p = report.placement
+    if not report.placement_gt_paths:
+        suffix = "N/A (no ground-truth ledger)"
+    elif p.scored == 0 and p.na == 0:
+        suffix = "N/A (no produced lines)"
+    elif p.scored == 0:
+        suffix = f"N/A ({p.na} line(s) with no GT row)"
+    else:
+        suffix = f"{p.correct}/{p.scored}  rate={p.rate * 100:.1f}%"
+    print(f"{indent}PLACEMENT:           {suffix}  (N/A={p.na})")
+
+
 def _print_client(report: ClientReport, client_name: str = "") -> None:
     print()
     print("=" * 100)
@@ -317,6 +413,7 @@ def _print_client(report: ClientReport, client_name: str = "") -> None:
         f"rate={report.recon_rate * 100:.1f}%"
     )
     print(f"  Errors:              {report.errors}")
+    _print_placement(report, indent="  ")
     print()
     print("  COMPLETENESS (per target) — required-header fill across exported rows")
     _print_completeness(report.completeness, indent="    ")
@@ -374,6 +471,14 @@ def _print_overall(reports: list[ClientReport]) -> None:
     recon_pass = sum(r.recon_pass for r in reports)
     errors = sum(r.errors for r in reports)
 
+    # Aggregate placement across all clients (skipping N/A).
+    overall_placement = PlacementResult()
+    for r in reports:
+        overall_placement.correct += r.placement.correct
+        overall_placement.missed += r.placement.missed
+        overall_placement.na += r.placement.na
+        overall_placement.total += r.placement.total
+
     overall_comp: dict[str, TargetCompleteness] = {}
     for r in reports:
         _merge_completeness(overall_comp, r)
@@ -389,6 +494,13 @@ def _print_overall(reports: list[ClientReport]) -> None:
     print(f"  DIRECTION accuracy:  {dir_correct}/{dir_total} correct  rate={dir_rate:.1f}%")
     print(f"  Classify OK:         {classify_ok}/{n_docs}")
     print(f"  Recon pass:          {recon_pass}/{recon_eligible} rate={recon_rate:.1f}%")
+    if overall_placement.scored:
+        print(
+            f"  PLACEMENT:           {overall_placement.correct}/{overall_placement.scored}"
+            f"  rate={overall_placement.rate * 100:.1f}%  (N/A={overall_placement.na})"
+        )
+    else:
+        print("  PLACEMENT:           N/A (no ground-truth ledgers with expected accounts)")
     print(f"  Errors:              {errors}")
     print()
     print("  COMPLETENESS (per target) — aggregated across all clients")
@@ -396,11 +508,19 @@ def _print_overall(reports: list[ClientReport]) -> None:
     print()
     print("PER-CLIENT SUMMARY")
     for r in reports:
+        p = r.placement
+        if p.scored:
+            placement_str = f"placement {p.correct}/{p.scored} ({p.rate * 100:.0f}%, N/A={p.na})"
+        elif r.placement_gt_paths:
+            placement_str = f"placement N/A ({p.na})"
+        else:
+            placement_str = "placement N/A (no GT)"
         print(
             f"  - {r.client_id}: direction "
             f"{r.direction_correct}/{r.direction_total} ({r.direction_rate * 100:.0f}%), "
             f"classify {r.classify_ok}/{r.n_docs}, "
-            f"recon {r.recon_pass}/{r.recon_eligible}, errors {r.errors}"
+            f"recon {r.recon_pass}/{r.recon_eligible}, "
+            f"{placement_str}, errors {r.errors}"
         )
     print()
 

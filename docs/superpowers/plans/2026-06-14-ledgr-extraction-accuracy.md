@@ -40,13 +40,13 @@ blank by design. We need "was the line put under the *correct* account?" vs the
 client's ground-truth ledger.
 
 - Files: `eval/client_eval.py` (+ a ground-truth loader); reuse `eval/ledger_eval.py` helpers.
-- [ ] Load each Cast Unity client's **produced ground-truth ledger** (`<Client> -
+- [x] Load each Cast Unity client's **produced ground-truth ledger** (`<Client> -
   Ledger_FY*.xlsx` where present) as the expected `(vendor/description → account)` map.
-- [ ] For each extracted+categorised line, compare the chosen account (by description
+- [x] For each extracted+categorised line, compare the chosen account (by description
   match, since QBS keys by description) to ground truth → **placement accuracy %**.
-- [ ] Report per-client + overall placement accuracy; mark "no COA provided" clients
+- [x] Report per-client + overall placement accuracy; mark "no COA provided" clients
   as N/A (not failures).
-- [ ] Gate: metric prints; existing eval tests green. **No engine change yet.**
+- [x] Gate: metric prints; existing eval tests green. **No engine change yet.**
 
 ## Task 2 — Sales-vs-purchase / vendor robustness (direction 60% → ≥0.9)
 
