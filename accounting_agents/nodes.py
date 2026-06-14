@@ -202,7 +202,11 @@ async def classify_node(ctx) -> Event:
         ctx.state[DIRECTION_KEY] = None
         return Event(route=ROUTE_BANK, output={"doc_type": "bank_statement"})
 
-    direction = DIRECTION_FN(cls, client_name=ctx.state.get("client_name"))
+    direction = DIRECTION_FN(
+        cls,
+        client_name=ctx.state.get("client_name"),
+        client_uen=ctx.state.get("client_uen"),
+    )
     ctx.state[DOC_TYPE_KEY] = doc_type
     ctx.state[DIRECTION_KEY] = direction
     return Event(
@@ -222,6 +226,11 @@ async def extract_invoice_node(ctx) -> Event:
     bundle: ExtractedInvoiceBundle = EXTRACT_BUNDLE_FN(data, mime_type, model=MODEL_LITE)
 
     direction = ctx.state.get(DIRECTION_KEY)
+    # Structural direction for to_normalized must be "purchase" or "sales".
+    # "self_referential" and "unknown" both default to "purchase" for row
+    # structure, but are immediately flagged for review so the client is
+    # never silently booked as its own vendor (self-referential case) or
+    # routed without a confirmed side (unknown case).
     effective_direction = direction if direction in ("purchase", "sales") else "purchase"
     our_gst = bool(ctx.state.get("tax_registered", True))
 
@@ -234,6 +243,29 @@ async def extract_invoice_node(ctx) -> Event:
             our_gst_registered=our_gst,
         )
         inv.reconciled = ok
+        # Self-referential / ambiguous direction guard (mirrors pipeline.py).
+        if direction == "self_referential":
+            inv.reconciled = False
+            review_note = (
+                "needs review: self-referential document — issuer and bill-to "
+                "both match client; not booked as a purchase"
+            )
+            inv.reconcile_note = (
+                f"{inv.reconcile_note}; {review_note}"
+                if inv.reconcile_note
+                else review_note
+            )
+        elif direction == "unknown":
+            inv.reconciled = False
+            review_note = (
+                "needs review: direction unknown — could not determine whether "
+                "client is issuer or bill-to; defaulted to purchase for routing"
+            )
+            inv.reconcile_note = (
+                f"{inv.reconcile_note}; {review_note}"
+                if inv.reconcile_note
+                else review_note
+            )
         normalized.append(inv)
 
     ctx.state[NORMALIZED_KEY] = [_inv_to_dict(i) for i in normalized]
@@ -700,7 +732,7 @@ async def deliver_node(ctx) -> Event:
 # Serialization helpers — NormalizedInvoice / BankStatement <-> plain dict
 # (workflow state must be JSON-serializable basic types)
 # --------------------------------------------------------------------------- #
-from dataclasses import asdict, is_dataclass  # noqa: E402
+from dataclasses import asdict  # noqa: E402
 
 
 def _inv_to_dict(inv: NormalizedInvoice) -> dict:

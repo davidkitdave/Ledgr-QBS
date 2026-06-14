@@ -459,3 +459,94 @@ def test_deliver_echoes_software_target():
     assert "Xero" in summary
     assert "FY2026" in summary
 
+
+# =========================================================================== #
+# Self-referential / dividend guard — end-to-end through extract_invoice_node
+# =========================================================================== #
+
+
+def _self_ref_bundle() -> "ExtractedInvoiceBundle":
+    """Simulate a dividend cert where issuer == bill_to == client."""
+    inv = ExtractedInvoice(
+        doc_type="invoice",
+        invoice_number="DIV-001",
+        invoice_date="2025-03-31",
+        currency="SGD",
+        issuer_name="Test Client Pte Ltd",
+        issuer_gst_regno=None,
+        bill_to_name="Test Client Pte Ltd",
+        lines=[
+            ExtractedLine(
+                description="Dividend payout",
+                net_amount=5000.0,
+                gst_amount=0.0,
+                tax_label="OS",
+            )
+        ],
+        subtotal=5000.0,
+        gst_total=0.0,
+        total=5000.0,
+    )
+    return ExtractedInvoiceBundle(invoices=[inv])
+
+
+def test_extract_node_self_referential_flagged_for_review():
+    """extract_invoice_node must mark self-referential docs reconciled=False
+    with a 'needs review' note — never silently book as a clean purchase."""
+    nodes.EXTRACT_BUNDLE_FN = lambda data, mime, **kw: _self_ref_bundle()
+
+    state = _base_state(**{nodes.DIRECTION_KEY: "self_referential"})
+    ctx = FakeContext(state)
+    asyncio.run(nodes.extract_invoice_node(ctx))
+
+    normalized_list = ctx.state[nodes.NORMALIZED_KEY]
+    assert len(normalized_list) == 1
+    inv = normalized_list[0]
+
+    # Must be flagged for review.
+    assert inv.get("reconciled") is False, (
+        f"Expected reconciled=False on self-referential doc, got {inv.get('reconciled')!r}"
+    )
+    note = inv.get("reconcile_note") or ""
+    assert "self-referential" in note.lower(), (
+        f"Expected self-referential note, got: {note!r}"
+    )
+    assert "needs review" in note.lower(), (
+        f"Expected 'needs review' in note, got: {note!r}"
+    )
+
+
+def test_extract_node_unknown_direction_flagged_for_review():
+    """extract_invoice_node must flag 'unknown' direction for review too."""
+    nodes.EXTRACT_BUNDLE_FN = lambda data, mime, **kw: _self_ref_bundle()
+
+    state = _base_state(**{nodes.DIRECTION_KEY: "unknown"})
+    ctx = FakeContext(state)
+    asyncio.run(nodes.extract_invoice_node(ctx))
+
+    normalized_list = ctx.state[nodes.NORMALIZED_KEY]
+    assert len(normalized_list) == 1
+    inv = normalized_list[0]
+
+    assert inv.get("reconciled") is False
+    note = inv.get("reconcile_note") or ""
+    assert "needs review" in note.lower()
+    assert "unknown" in note.lower()
+
+
+def test_extract_node_clean_purchase_unaffected():
+    """A normal purchase (direction='purchase') must NOT be flagged for review
+    by the guard — the guard must only fire on self_referential / unknown."""
+    nodes.EXTRACT_BUNDLE_FN = lambda data, mime, **kw: ExtractedInvoiceBundle(
+        invoices=[_ex_invoice("INV-NORMAL")]
+    )
+
+    state = _base_state(**{nodes.DIRECTION_KEY: "purchase"})
+    ctx = FakeContext(state)
+    asyncio.run(nodes.extract_invoice_node(ctx))
+
+    inv = ctx.state[nodes.NORMALIZED_KEY][0]
+    note = inv.get("reconcile_note") or ""
+    assert "self-referential" not in note.lower()
+    assert "direction unknown" not in note.lower()
+

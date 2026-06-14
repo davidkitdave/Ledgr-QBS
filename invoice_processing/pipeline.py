@@ -12,7 +12,7 @@ made inside this module itself.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
 from io import BytesIO
 from pathlib import Path
@@ -39,7 +39,7 @@ from .export.exporters import (
     get_exporter,
     validate_required_fields,
 )
-from .export.models import BankStatement, BankTransaction, NormalizedInvoice
+from .export.models import BankStatement, NormalizedInvoice
 from .export.routing import DocRoute, route_document
 from .extract.bank_statement_extractor import (
     ExtractedBankStatement,
@@ -237,7 +237,19 @@ def process_document(
         # ------------------------------------------------------------------ #
         # Step 2b — invoice / receipt branch
         # ------------------------------------------------------------------ #
-        direction: Optional[str] = direction_fn(cls, client_name=client.client_name)
+        direction: Optional[str] = direction_fn(
+            cls,
+            client_name=client.client_name,
+            client_uen=client.client_uen,
+        )
+        # Determine the structural direction for to_normalized (must be
+        # "purchase" or "sales" to produce a valid row).  For ambiguous
+        # outcomes ("unknown") we default to "purchase" so the row is still
+        # produced.  For "self_referential" we also default to "purchase" for
+        # structural purposes, but we immediately flag the doc for review and
+        # mark it reconciled=False — the client must never be silently booked
+        # as its own vendor.  The raw `direction` value is preserved on
+        # ProcessedDoc so the reviewer sees the real outcome.
         effective_direction = direction if direction in ("purchase", "sales") else "purchase"
 
         ex: ExtractedInvoice = extract_fn(str(path))
@@ -248,6 +260,43 @@ def process_document(
         )
 
         reconciled, rec_note = reconcile(ex)
+
+        # ------------------------------------------------------------------ #
+        # Self-referential / ambiguous direction guard.
+        # A document whose direction is 'self_referential' means the client
+        # appears as BOTH issuer and bill-to — booking it as a purchase would
+        # make the client its own vendor, which is always wrong (e.g. a
+        # dividend certificate, internal transfer confirmation).  Flag for
+        # human review; do NOT silently book as purchase.
+        # 'unknown' is also flagged because we cannot determine the correct
+        # side — a silent purchase default would be misleading.
+        # ------------------------------------------------------------------ #
+        if direction == "self_referential":
+            reconciled = False
+            normalized.reconciled = False
+            review_note = (
+                "needs review: self-referential document — issuer and bill-to "
+                "both match client; not booked as a purchase"
+            )
+            normalized.reconcile_note = (
+                f"{normalized.reconcile_note}; {review_note}"
+                if normalized.reconcile_note
+                else review_note
+            )
+            rec_note = f"{rec_note}; {review_note}" if rec_note else review_note
+        elif direction == "unknown":
+            reconciled = False
+            normalized.reconciled = False
+            review_note = (
+                "needs review: direction unknown — could not determine whether "
+                "client is issuer or bill-to; defaulted to purchase for routing"
+            )
+            normalized.reconcile_note = (
+                f"{normalized.reconcile_note}; {review_note}"
+                if normalized.reconcile_note
+                else review_note
+            )
+            rec_note = f"{rec_note}; {review_note}" if rec_note else review_note
 
         # ------------------------------------------------------------------ #
         # Step 3 — categorize (fill account codes per line)
