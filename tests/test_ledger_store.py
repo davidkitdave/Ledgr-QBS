@@ -693,3 +693,260 @@ def test_cross_month_gap_is_flagged_by_formula():
     continuity = ws.cell(row=4, column=ci).value
     assert continuity == f'=IF(ROUND({bal}4-{bal}3,2)=0,"✅","GAP")'
     # (In Excel: ROUND(1000-900,2)=100≠0 → "GAP")
+
+
+# --------------------------------------------------------------------------- #
+# Task 7 regression: OLD-formula Balance cells mixed with NEW static cells
+# --------------------------------------------------------------------------- #
+
+import openpyxl  # noqa: E402
+
+
+def _make_mixed_formula_workbook() -> bytes:
+    """Build a workbook that mimics Akar's corrupted BankStatement_FY2025.
+
+    Jan–Mar blocks have Balance cells stored as Excel formula strings
+    (``="=E2+D3-C3"`` style — the OLD layout that commit 6ca4e48 replaced).
+    Apr–May blocks have the NEW static numeric values. This is the exact
+    corruption that the append path must survive.
+
+    The sheet uses the CURRENT 7-col header (Date, Description, Withdrawal,
+    Deposit, Balance, Currency, Math_Check) so only the Balance *values* are
+    formulae — the header itself is already migrated.
+    """
+    cols = list(BankStatementExporter.BANK_COLS)
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "OCBC - 5001"
+    ws.append(cols)
+
+    def row_values(desc, wd, dep, bal, currency="SGD", date_str=""):
+        row = [""] * len(cols)
+        row[cols.index("Date")] = date_str
+        row[cols.index("Description")] = desc
+        if wd is not None:
+            row[cols.index("Withdrawal")] = wd
+        if dep is not None:
+            row[cols.index("Deposit")] = dep
+        row[cols.index("Balance")] = bal
+        row[cols.index("Currency")] = currency
+        return row
+
+    # --- OLD-style blocks (Jan–Mar): Balance cells are formula strings ---
+    # Jan B/F
+    ws.append(row_values("BALANCE B/F", None, None, 1000.0, date_str="01/01/2025"))
+    # Jan txn — Balance stored as a formula string (old layout)
+    ws.append(row_values("Salary Jan", None, 500.0, "=E2+D3-C3", date_str="15/01/2025"))
+    ws.append(row_values("Rent Jan", 800.0, None, "=E3+D4-C4", date_str="20/01/2025"))
+    ws.append(row_values("TOTALS", None, None, "", date_str=""))
+
+    # Feb B/F — formula string
+    ws.append(row_values("BALANCE B/F", None, None, "=E4", date_str="01/02/2025"))
+    ws.append(row_values("Salary Feb", None, 500.0, "=E5+D6-C6", date_str="15/02/2025"))
+    ws.append(row_values("TOTALS", None, None, "", date_str=""))
+
+    # --- NEW-style blocks (Apr–May): Balance cells are static numbers ---
+    # Apr B/F
+    ws.append(row_values("BALANCE B/F", None, None, 1200.0, date_str="01/04/2025"))
+    ws.append(row_values("Salary Apr", None, 500.0, 1700.0, date_str="15/04/2025"))
+    ws.append(row_values("TOTALS", None, None, "", date_str=""))
+
+    return _wb_to_bytes(wb)
+
+
+def _wb_to_bytes(wb) -> bytes:
+    import io as _io
+    buf = _io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_formula_balance_cells_are_recomputed_on_append():
+    """Regression: appending to a workbook whose Balance cells are formula strings
+    (old layout, pre-6ca4e48) must yield a clean static running balance — never
+    a formula string stored as a Balance value, and never None.
+
+    Concrete assertions:
+    - After appending a new May statement on top of the corrupted workbook, every
+      Balance cell on the rebuilt sheet is a numeric float (not a str, not None).
+    - The running balance computed from stated_bf + Σ(deposit − withdrawal) is
+      arithmetically correct for the reconstructed rows we *can* verify.
+    - The new May deposit row has a correct running balance chained from prior rows.
+    """
+    slack = FakeSlackClient()
+    exp = BankStatementExporter()
+
+    # Seed the fake Slack store with the corrupted workbook (formula Balance cells).
+    corrupted_bytes = _make_mixed_formula_workbook()
+    seed_id = "Fseed001"
+    seed_url = f"https://files.slack.com/{seed_id}/BankStatement_FY2025.xlsx"
+    slack.files[seed_id] = corrupted_bytes
+    slack.urls[seed_url] = corrupted_bytes
+
+    db = FakeFirestore()
+    # Point Firestore at the seeded file so the store fetches it.
+    db.collection("clients").document("akar").collection("ledgers").document("2025").set({
+        "slack_file_id": seed_id,
+        "fy": "2025",
+        "client_id": "akar",
+        "seen_doc_keys": ["akar:jan2025", "akar:feb2025", "akar:apr2025"],
+        "channel_id": "C_AKAR",
+        "kind": "bank",
+    })
+
+    store = SlackLedgerStore(db, opener=slack.opener())
+
+    # May statement (new, clean static values).
+    may_stmt = BankStatement(
+        bank_name="OCBC - 5001",
+        currency="SGD",
+        opening_balance=1700.0,
+        closing_balance=2200.0,
+        transactions=[
+            BankTransaction(
+                date=date(2025, 5, 15),
+                description="Salary May",
+                withdrawal=None,
+                deposit=500.0,
+                balance=2200.0,
+            )
+        ],
+    )
+    result = store.append_rows(
+        client_id="akar",
+        fy="2025",
+        slack_client=slack,
+        channel_id="C_AKAR",
+        kind="bank",
+        batches=[{"sheet": "OCBC - 5001", "doc_key": "akar:may2025",
+                  "rows": exp.bank_rows(may_stmt)}],
+    )
+
+    # Load the rebuilt workbook (data_only=False to catch any leaked formulas).
+    import io as _io
+    wb = load_workbook(_io.BytesIO(slack.files[result["slack_file_id"]]), data_only=False)
+    ws = wb["OCBC - 5001"]
+    header = [c.value for c in ws[1]]
+    bi = header.index("Balance") + 1
+
+    # CORE ASSERTION: every Balance cell must be a number — never a formula string,
+    # never None (except the TOTALS row which has no Balance).
+    desc_i = header.index("Description") + 1
+    for r in range(2, ws.max_row + 1):
+        desc_val = ws.cell(row=r, column=desc_i).value
+        bal_val = ws.cell(row=r, column=bi).value
+        if desc_val == BankStatementExporter.TOTALS_MARKER:
+            continue  # TOTALS row Balance is intentionally blank
+        assert bal_val is not None, f"Row {r} ({desc_val!r}): Balance is None"
+        assert not isinstance(bal_val, str), (
+            f"Row {r} ({desc_val!r}): Balance is a formula/string {bal_val!r}"
+        )
+        assert isinstance(bal_val, (int, float)), (
+            f"Row {r} ({desc_val!r}): Balance unexpected type {type(bal_val)} = {bal_val!r}"
+        )
+
+    # The Jan B/F (first row after header) should have balance = 1000.0 (the seed value).
+    first_bf_bal = ws.cell(row=2, column=bi).value
+    assert first_bf_bal == 1000.0, f"Jan B/F balance wrong: {first_bf_bal}"
+
+    # May B/F opening should equal the stated opening (1700.0).
+    # Find the last BALANCE B/F before TOTALS.
+    bf_rows = [
+        r for r in range(2, ws.max_row + 1)
+        if ws.cell(row=r, column=desc_i).value == BankStatementExporter.OPENING_MARKER
+    ]
+    assert len(bf_rows) >= 2, "Expected at least two BALANCE B/F rows (Jan+Apr or later)"
+
+    # Salary May should be the last txn row before TOTALS, balance = 2200.0.
+    last_txn_row = ws.max_row - 1  # TOTALS is last row
+    may_bal = ws.cell(row=last_txn_row, column=bi).value
+    assert may_bal == 2200.0, f"May Salary balance wrong: {may_bal}"
+
+
+def test_legacy_8col_header_is_migrated_on_read():
+    """Regression: a sheet written with the OLD 8-col header (Stated Balance + Check
+    instead of Balance + Math_Check) must be read without losing the B/F opening values.
+
+    The migration renames columns on read; ``_read_bank_blocks`` must not return
+    blocks with ``stated_bf=None`` when the column is just named differently.
+    """
+    # Build a workbook with the OLD header layout.
+    old_cols = ["Date", "Description", "Withdrawal", "Deposit",
+                "Stated Balance", "Currency", "Check", "Notes"]
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "OCBC - 5001"
+    ws.append(old_cols)
+
+    # Write one B/F + one txn in the old layout.
+    ws.append(["", "BALANCE B/F", None, None, 500.0, "SGD", "✅", ""])
+    ws.append(["15/03/2025", "Salary", None, 300.0, 800.0, "SGD", "✅", ""])
+    ws.append(["", "TOTALS", None, None, "", "SGD", "", ""])
+
+    slack = FakeSlackClient()
+    corrupted_bytes = _wb_to_bytes(wb)
+    seed_id = "Fold001"
+    seed_url = f"https://files.slack.com/{seed_id}/BankStatement_FY2025.xlsx"
+    slack.files[seed_id] = corrupted_bytes
+    slack.urls[seed_url] = corrupted_bytes
+
+    db = FakeFirestore()
+    db.collection("clients").document("legacy_client").collection("ledgers").document("2025").set({
+        "slack_file_id": seed_id,
+        "fy": "2025",
+        "client_id": "legacy_client",
+        "seen_doc_keys": ["legacy:mar2025"],
+        "channel_id": "C_LEG",
+        "kind": "bank",
+    })
+    store = SlackLedgerStore(db, opener=slack.opener())
+
+    # Append a new statement — this triggers _read_bank_blocks on the old layout.
+    exp = BankStatementExporter()
+    apr_stmt = BankStatement(
+        bank_name="OCBC - 5001",
+        currency="SGD",
+        opening_balance=800.0,
+        closing_balance=1300.0,
+        transactions=[
+            BankTransaction(
+                date=date(2025, 4, 15),
+                description="Bonus",
+                withdrawal=None,
+                deposit=500.0,
+                balance=1300.0,
+            )
+        ],
+    )
+    result = store.append_rows(
+        client_id="legacy_client",
+        fy="2025",
+        slack_client=slack,
+        channel_id="C_LEG",
+        kind="bank",
+        batches=[{"sheet": "OCBC - 5001", "doc_key": "legacy:apr2025",
+                  "rows": exp.bank_rows(apr_stmt)}],
+    )
+
+    import io as _io
+    wb2 = load_workbook(_io.BytesIO(slack.files[result["slack_file_id"]]), data_only=False)
+    ws2 = wb2["OCBC - 5001"]
+    header2 = [c.value for c in ws2[1]]
+    bi2 = header2.index("Balance") + 1
+    desc_i2 = header2.index("Description") + 1
+
+    # The rebuilt sheet uses the NEW header (Balance, not Stated Balance).
+    assert "Balance" in header2
+    assert "Stated Balance" not in header2
+
+    # The old B/F opening (500.0) must be preserved in the rebuilt chain.
+    bf_rows = [
+        r for r in range(2, ws2.max_row + 1)
+        if ws2.cell(row=r, column=desc_i2).value == BankStatementExporter.OPENING_MARKER
+    ]
+    assert len(bf_rows) == 2, f"Expected 2 B/F rows, got {len(bf_rows)}"
+    first_bf_bal = ws2.cell(row=bf_rows[0], column=bi2).value
+    assert first_bf_bal == 500.0, f"Old B/F opening not preserved: {first_bf_bal}"
+    # New B/F opening must also be correct.
+    second_bf_bal = ws2.cell(row=bf_rows[1], column=bi2).value
+    assert second_bf_bal == 800.0, f"Apr B/F opening wrong: {second_bf_bal}"

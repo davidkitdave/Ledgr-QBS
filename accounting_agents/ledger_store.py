@@ -213,17 +213,38 @@ class SlackLedgerStore:
             sheet.append([row.get(c, "") for c in cols])
         return len(rows)
 
-    @staticmethod
-    def _read_bank_blocks(sheet, cols: list[str]) -> list[dict]:
+    # Mapping from old 8-col header names to current BANK_COLS names.
+    _LEGACY_COL_MAP: dict[str, str] = {
+        "Stated Balance": "Balance",
+        "Check": "Math_Check",
+    }
+
+    @classmethod
+    def _read_bank_blocks(cls, sheet, cols: list[str]) -> list[dict]:
         """Read an existing bank sheet back into normalized month-blocks.
 
         Returns a list of ``{"stated_bf", "currency", "transactions": [...]}`` blocks
         the exporter rebuilds from. ``TOTALS`` rows are dropped (regenerated on
         rebuild). Dedupe is now fully Firestore-side, so no key tracking here.
+
+        Hardening applied on every read:
+
+        1. **Legacy header migration**: the old 8-col layout used ``Stated Balance``
+           and ``Check`` instead of ``Balance`` and ``Math_Check``. We remap those
+           column names on the fly so old workbooks are read without data loss.
+        2. **Formula / None Balance recompute**: when a Balance cell is a formula
+           string (starts with ``"="``) or ``None`` — both possible from workbooks
+           written with the old formula-chain style — we RECOMPUTE the running
+           balance deterministically from ``stated_bf + Σ(deposit − withdrawal)``.
+           The stored Balance value is NEVER trusted; recompute is the single source
+           of truth on every rebuild.
         """
-        header = [c.value for c in sheet[1]] if sheet.max_row >= 1 else []
-        if not header:
+        raw_header = [c.value for c in sheet[1]] if sheet.max_row >= 1 else []
+        if not raw_header:
             return []
+
+        # Remap legacy column names to current canonical names.
+        header = [cls._LEGACY_COL_MAP.get(h, h) for h in raw_header]
         col_idx = {name: i for i, name in enumerate(header)}
 
         value_rows: list[dict] = []
@@ -234,7 +255,82 @@ class SlackLedgerStore:
                 row[name] = raw[i] if i is not None and i < len(raw) else None
             value_rows.append(row)
 
+        # Recompute running balances — never trust stored Balance cells.
+        # A stored Balance may be a formula string (old layout) or None (data_only
+        # read of a formula cell that was never evaluated). We walk block-by-block,
+        # seeding each block from its BALANCE B/F opening (which is always a literal
+        # number on the B/F marker row itself), then recomputing every txn balance.
+        cls._recompute_balances(value_rows)
+
         return BankStatementExporter.rows_to_blocks(value_rows)
+
+    @staticmethod
+    def _is_formula_or_missing(value) -> bool:
+        """Return True when a Balance cell cannot be trusted as a numeric value."""
+        if value is None:
+            return True
+        if isinstance(value, str) and value.strip().startswith("="):
+            return True
+        return False
+
+    @classmethod
+    def _recompute_balances(cls, value_rows: list[dict]) -> None:
+        """Recompute Balance on every row in-place from stated_bf + Σ(dep − wd).
+
+        This is the single source of truth: we NEVER use a stored Balance value
+        from the workbook. For ``BALANCE B/F`` marker rows we use the stated
+        opening (the literal number on that row) as the seed; for transaction rows
+        we chain from the prior row's recomputed balance. If the B/F opening
+        itself is a formula/None we carry forward the last known balance so the
+        chain never breaks silently.
+        """
+        running: Optional[float] = None
+        for row in value_rows:
+            desc = row.get("Description")
+            if desc == BankStatementExporter.OPENING_MARKER:
+                bal = row.get("Balance")
+                if cls._is_formula_or_missing(bal):
+                    # Carry forward — the B/F opening was a formula; best we can do.
+                    row["Balance"] = running
+                else:
+                    running = float(bal)
+                    row["Balance"] = running
+            elif desc == BankStatementExporter.TOTALS_MARKER:
+                # TOTALS rows have no meaningful Balance; keep blank.
+                row["Balance"] = None
+            else:
+                # Transaction row: recompute from running + deposit − withdrawal.
+                if running is not None:
+                    dep = row.get("Deposit")
+                    wd = row.get("Withdrawal")
+                    dep_f = float(dep) if dep not in (None, "") else 0.0
+                    wd_f = float(wd) if wd not in (None, "") else 0.0
+                    running = round(running + dep_f - wd_f, 2)
+                    row["Balance"] = running
+                else:
+                    # No prior B/F seed — can't recompute; leave as-is (pass through).
+                    bal = row.get("Balance")
+                    if cls._is_formula_or_missing(bal):
+                        row["Balance"] = None
+                    else:
+                        running = float(bal)
+                        row["Balance"] = running
+
+    @classmethod
+    def _migrate_legacy_header(cls, sheet, cols: list[str]) -> None:
+        """Rewrite row 1 in-place if it contains legacy column names.
+
+        Old 8-col layout used ``Stated Balance`` and ``Check``; current layout
+        uses ``Balance`` and ``Math_Check``. If any cell in the header row
+        matches a known legacy name, replace it with the canonical current name
+        so ``rebuild_account_sheet`` (which always writes the current ``cols``
+        on a fresh sheet) doesn't leave a mismatched header behind.
+        """
+        if sheet.max_row < 1:
+            return
+        for cell in sheet[1]:
+            if cell.value in cls._LEGACY_COL_MAP:
+                cell.value = cls._LEGACY_COL_MAP[cell.value]
 
     def _merge_bank_statement(
         self, sheet, cols: list[str], rows: list[dict]
@@ -250,6 +346,10 @@ class SlackLedgerStore:
         header = [c.value for c in sheet[1]] if sheet.max_row >= 1 else []
         if not header:
             sheet.append(list(cols))
+
+        # Migrate legacy column names in-place before reading blocks, so that
+        # rebuild_account_sheet always writes the current canonical header.
+        self._migrate_legacy_header(sheet, cols)
 
         existing_blocks = self._read_bank_blocks(sheet, cols)
 
