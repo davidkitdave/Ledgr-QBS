@@ -51,15 +51,39 @@ Workspace `qbs-ai.slack.com`; channels: #akar-enterprises-pte-ltd (QBS, FYE Dec,
 
 ### B. Medium builds
 
-**B3. Duplicate-detection UX**
-- Today: dedup is silent — `_seen.seen_before("file:<id>")` (per-file within session) +
-  `seen_doc_keys` on the FY pointer (content-based, on append, `ledger_store.py`). It won't
-  double-post, but the user gets no signal.
-- Want: when a doc was already processed, tell the user **when + which ledger/FY**, and ask them to
-  **confirm new-vs-duplicate** before skipping (a Block-Kit "Add anyway / Skip" prompt).
-- Approach: surface the matched `seen_doc_keys` entry (store its date/FY/file label when first
-  appended, in the pointer doc), and add an approval-style confirm in the file path. Keep the
-  internal idempotency as the safety net.
+**B3. Duplicate-detection UX  (CONFIRMED live 2026-06-14: re-dropping jun-2025 → "Processed 1
+document — 0 posted", no explanation)**
+- Today: dedup is silent. Bank path: `ledger_store.append_rows` reads `seen_doc_keys` from the
+  Firestore pointer; if `doc_key in seen_doc_keys` → `deduped+=1, appended=0` (lines ~444–483).
+  Invoice/file path also has `_seen.seen_before("file:<id>")` within a session. It won't
+  double-post, but the only signal is the misleading "0 posted".
+- ROOT INSIGHT: **dedup state lives in Firestore (`seen_doc_keys`), decoupled from the Excel.**
+  So a user who deletes/edits rows in the workbook and re-drops the file gets silently skipped —
+  there is **no way to force a re-process/replace** today. (This is what David hit live.)
+- Want:
+  1. **Explain, don't emit "0 posted"** — agent says e.g. "I already recorded this June statement on
+     <date> in your FY2025 ledger (39 transactions), so there's nothing new to add."
+  2. **Offer a re-process / replace path** — Block-Kit "Re-process (replace) / Skip". Re-process must
+     clear that `doc_key` from `seen_doc_keys` (and/or rebuild the month's block) so the corrected
+     data posts. Needed especially after a fix (e.g. the new N() bank formula) or a manual edit.
+  3. Confirm new-vs-duplicate when ambiguous.
+- Approach: store date/FY/file label alongside each `seen_doc_keys` entry (in the pointer) so the
+  agent can cite when+where; add the confirm/replace action; keep internal idempotency as the net.
+
+**B3b. Agentic status/result messaging (NEW — cross-cutting UX theme David raised)**
+- Today: results are RIGID TEMPLATES — "📥 Processed 1 document — 0 posted to your ledger",
+  "✅ Processed", "❌". They don't explain *what happened or why* (deduped? rejected? partially
+  posted? needs review?). David: "it needs to be the agent really replying about what he's doing …
+  rather than a random rigid formula."
+- Want: replace the templated status/summary strings with **agent-authored, situation-aware
+  narration** — for dedup, rejection, partial post, FX-hold, needs-review, and normal success.
+  Keep it concise + accurate (grounded in the real `result` dict: status/appended/deduped/posted).
+- Where: the status/summary builders in `accounting_agents/slack_runner.py` (`_post_status`,
+  `_update_status`, `job_summary_text`, the per-doc + batch result rendering ~1256–1430) and
+  `deliver_node` summary text (`nodes.py`). Decide: LLM-generated vs richer rule-based templates
+  (LLM gives natural narration but adds latency/variability — likely a small templated-with-reasons
+  layer is enough, with the reason taken from the result status). Tie into A2 (rejection tally) and
+  B3 (dedup explanation) — they're the same "explain the outcome" gap.
 
 **B4. Q&A FY-resolution** (so Q&A actually answers, not "ledger not loaded")
 - Today: `answer_question` (`slack_runner.py` ~896–978) reads `fy` from a FRESH per-question
@@ -110,5 +134,11 @@ correction; require a confirm step (it changes the book of record).
 ---
 
 ## Suggested order for the next session
-A1 (verify bank) → A2 (rejection tally) → B4 (Q&A FY) → B3 (dedup UX) → C6 (edit fields) →
-C5 research → then C7/C8/C9. Commit each via TDD; restart bot + live-verify after each batch.
+A1 (verify bank) → A2 (rejection tally) + B3b (agentic messaging — same "explain the outcome" gap) →
+B3 (dedup UX + re-process/replace) → B4 (Q&A FY) → C6 (edit fields) → C5 research → then C7/C8/C9.
+Commit each via TDD; restart bot + live-verify after each batch.
+
+NOTE: the bot currently running (PID 79489) predates BOTH the bank N()-formula fix (`209d543`) and
+this plan — so to even see the corrected bank formula / behaviour, restart from HEAD first. To let
+David re-process the jun-2025 statement he edited, the jun-2025 `doc_key` must be cleared from the
+Akar FY2025 pointer's `seen_doc_keys` (B3's replace path) — otherwise it stays deduped.
