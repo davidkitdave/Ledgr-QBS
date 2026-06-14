@@ -131,11 +131,31 @@ class TaxClassifier:
         if gst and gst > 0:
             if supplier.gst_registered:
                 return "SR", 0.92, False, "SR: GST line + supplier GST-registered"
+            # GST shown + explicit standard-rate wording on the invoice -> SR, no flag.
+            # (Covers clean tax invoices like Chubb where reg no. wasn't captured from PDF.)
+            if self._matches(desc, "standard_rated"):
+                return "SR", 0.88, False, "SR: GST line + explicit standard-rate signal in description"
+            # GST shown + amount reconciles to the standard rate for the invoice date -> SR, no flag.
+            # The reg no. may simply not have been extracted from the PDF; a correctly-calculated
+            # GST amount is strong independent evidence of standard-rated treatment.
+            if line.net_amount:
+                rate = self.rate_for_date(inv.invoice_date)
+                expected = line.net_amount * rate
+                denom = max(abs(line.net_amount), 1.0)
+                if abs(gst - expected) / denom <= self._rate_tol:
+                    return "SR", 0.85, False, f"SR: GST line reconciles to standard rate {rate}"
             # GST shown but no reg no. visible -> suspicious, flag.
             return "SR", 0.5, True, "SR(?): GST shown but no supplier GST reg no."
         # 4. Overseas supplier, no GST line -> out-of-scope, flag for reverse charge.
         if supplier.is_overseas and (not gst or gst == 0):
             return "OS", 0.55, True, "OS: overseas supplier, no GST — review Reverse Charge"
+        # 5. Explicit standard-rate wording, no GST amount captured -> SR, no flag.
+        # Handles clean tax invoices where the GST amount wasn't extracted separately
+        # but the invoice explicitly states a standard-rate treatment (e.g. "GST 9%",
+        # "(SR)", "standard-rated"). ZR/ES/NT signals already won above; reaching here
+        # means no conflicting signal, so the explicit SR wording is authoritative.
+        if self._matches(desc, "standard_rated"):
+            return "SR", 0.85, False, "SR: explicit standard-rate signal in description"
         # 6. Supplier not GST-registered / no GST -> no tax.
         if not supplier.gst_registered and (not gst or gst == 0):
             return "NT", 0.7, False, "NT: supplier not GST-registered / no GST line"

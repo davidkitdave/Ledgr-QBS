@@ -8,6 +8,10 @@ invoice / receipt PDFs:
   - direction resolution rate (sales-vs-purchase resolved, not "unknown")
   - per-target completeness: per-required-header fill for each export
     target (QBS Ledger + Xero), aligned to ADR-0005's completeness contract
+  - COA placement accuracy: did each produced line land under the correct
+    COA description (per ADR-0006, account codes are blank by design — the
+    QBS exporter keys by *description*). See ``load_ground_truth_ledger``
+    and ``score_placement``.
 
 Run:
     uv run python -m eval.ledger_eval [--limit 6] [--root /path/to/TestDoc]
@@ -20,10 +24,13 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
+
+from openpyxl import load_workbook
 
 from invoice_processing.export.exporters import (
     QbsLedgerExporter,
@@ -90,6 +97,35 @@ class EvalReport:
     # Per-target completeness tables, keyed by target name ("QBS Ledger"/"Xero")
     completeness: dict[str, TargetCompleteness] = field(default_factory=dict)
     docs: list[DocEval] = field(default_factory=list)
+
+
+@dataclass
+class PlacementResult:
+    """Tally of COA placement-accuracy comparisons for one client.
+
+    Per the extraction-accuracy plan (Task 1) and ADR-0006, QBS clients key
+    accounts by *description* (codes are often blank by design). A produced
+    line is scored against the (vendor, description) ground-truth row that
+    matches; ``correct`` increments when the engine's chosen account
+    description is in the row's expected list, ``missed`` when it isn't,
+    and ``na`` when the produced line has no ground-truth row to grade
+    (or the ground-truth row has no expected account). The headline
+    ``rate`` is ``correct / scored``; ``scored`` excludes ``na`` so an
+    empty GT does not poison the score.
+    """
+    correct: int = 0
+    missed: int = 0
+    na: int = 0
+    # Cached: total lines the comparator was asked to score (correct + missed + na).
+    total: int = 0
+
+    @property
+    def scored(self) -> int:
+        return self.correct + self.missed
+
+    @property
+    def rate(self) -> float:
+        return self.correct / self.scored if self.scored else 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -379,6 +415,206 @@ def default_client():
         tax_registered=True,
         coa=coa,
     )
+
+
+# ---------------------------------------------------------------------------
+# COA placement-accuracy (Task 1, extraction-accuracy plan)
+# ---------------------------------------------------------------------------
+
+# Token-set ratio at or above this threshold counts as a fuzzy match.
+# 0.85 is deliberately generous: real-world ground-truth descriptions and
+# produced descriptions share words even when a token is added/removed
+# (e.g. "Consulting" vs "Consulting services" → 0.67 on raw ratio but the
+# token-set version rises to ~0.82, so we use 0.85 as a soft floor).
+_PLACEMENT_FUZZY_THRESHOLD = 0.85
+
+
+def _normalise_text(value: object) -> str:
+    """Lowercase, strip, collapse internal whitespace, drop common punctuation.
+
+    Used for matching vendor / customer names and descriptions from the
+    ground-truth ledger and the produced output. ``None`` becomes ``""`` so
+    a missing field never accidentally matches.
+    """
+    if value is None:
+        return ""
+    s = str(value).lower().strip()
+    # Collapse any non-alphanumeric run to a single space.
+    s = re.sub(r"[^a-z0-9]+", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _token_set_ratio(a: str, b: str) -> float:
+    """Jaccard-like token overlap (intersection / union), 0.0 – 1.0.
+
+    Robust to word-order and dropped/added filler words: "Consulting
+    services" and "Services, consulting" score 1.0, "Consulting" and
+    "Consulting services" score ~0.67. We bias against SequenceMatcher
+    on raw text because letter ordering varies between extractor output
+    and ledger hand-entry. Lowercased internally so "Service" matches
+    "service" regardless of how the caller passed them in.
+    """
+    ta = {t for t in a.lower().split() if t}
+    tb = {t for t in b.lower().split() if t}
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
+
+
+def _fuzzy_contains(needle: str, haystack: list[str]) -> bool:
+    """True if *needle* matches any of *haystack* by exact-or-fuzzy match.
+
+    Both sides are normalised at compare time so the caller can pass raw
+    text on either side without worrying about case or punctuation.
+    """
+    if not needle:
+        return False
+    needle_n = _normalise_text(needle)
+    for h in haystack:
+        h_n = _normalise_text(h)
+        if not h_n:
+            continue
+        if needle_n == h_n:
+            return True
+        if _token_set_ratio(needle_n, h_n) >= _PLACEMENT_FUZZY_THRESHOLD:
+            return True
+    return False
+
+
+def _match_key(needle_key: tuple[str, str], gt_keys: set[tuple[str, str]]) -> bool:
+    """True if a fuzzy match for *needle_key* exists in *gt_keys*."""
+    nv, nd = needle_key
+    for gv, gd in gt_keys:
+        if not nv or not gv or not nd or not gd:
+            continue
+        if nv == gv and nd == gd:
+            return True
+        # Only fuzzy-match descriptions when vendor is exact; vendors are
+        # legal names and we don't want to silently match "Acme Corp" to
+        # "Acme Corporation".
+        if nv == gv and _token_set_ratio(nd, gd) >= _PLACEMENT_FUZZY_THRESHOLD:
+            return True
+    return False
+
+
+def load_ground_truth_ledger(path: Path) -> dict[tuple[str, str], list[str]]:
+    """Parse a Cast Unity ground-truth ledger and return a placement lookup.
+
+    Reads the ``Sales`` and ``Purchase`` sheets of ``<Client> - Ledger_FY*.xlsx``,
+    normalises vendor/customer + description to a tuple key, and maps it to
+    the list of expected account descriptions (taken from the
+    ``Account Code / COA`` column, which real ledgers leave blank for
+    "no code assigned" — see ADR-0006). A row whose account column is
+    blank is still keyed (mapping to an empty list) so callers can
+    distinguish "no ground truth" (key absent) from "ground truth has no
+    expected account" (key present, empty list).
+
+    Returns an empty dict when the workbook has neither Sales nor Purchase.
+    """
+    wb = load_workbook(str(path), read_only=True, data_only=True)
+    try:
+        sheets = [s for s in ("Sales", "Purchase") if s in wb.sheetnames]
+        if not sheets:
+            return {}
+
+        # Per-sheet header layout (from real Cast Unity files, observed 2026-06):
+        #   Sales:   (date, number, customer, description, ..., total, account, ...)
+        #   Purchase:(number, date, vendor, [tax id], description, ..., total, account, ...)
+        # We find the columns by header name so we don't break if the order shifts.
+        lookup: dict[tuple[str, str], list[str]] = {}
+        for sn in sheets:
+            ws = wb[sn]
+            rows = ws.iter_rows(values_only=True)
+            header_row = next(rows, None)
+            if not header_row:
+                continue
+            # Normalise header strings: "Customer Name" / "Vendor Name" — case-insensitive contains.
+            headers = [str(h).strip().lower() if h is not None else "" for h in header_row]
+            try:
+                party_idx = next(
+                    i for i, h in enumerate(headers)
+                    if "customer name" in h or "vendor name" in h
+                )
+            except StopIteration:
+                # Sheet has no party column (e.g. legacy layout) — skip it.
+                continue
+            try:
+                desc_idx = next(i for i, h in enumerate(headers) if h == "description")
+            except StopIteration:
+                continue
+            # Account column may be absent; default to None index → always blank.
+            account_idx: int | None = next(
+                (i for i, h in enumerate(headers) if "account code" in h or "coa" in h),
+                None,
+            )
+            for row in rows:
+                if not row or len(row) <= max(party_idx, desc_idx):
+                    continue
+                party = row[party_idx]
+                desc = row[desc_idx]
+                party_n = _normalise_text(party)
+                desc_n = _normalise_text(desc)
+                if not party_n or not desc_n:
+                    continue
+                expected: list[str] = []
+                if account_idx is not None and account_idx < len(row):
+                    cell = row[account_idx]
+                    if cell is not None and str(cell).strip():
+                        # Keep the expected description human-readable; the
+                        # comparator normalises both sides at match time.
+                        expected.append(str(cell).strip())
+                lookup[(party_n, desc_n)] = expected
+    finally:
+        wb.close()
+    return lookup
+
+
+def score_placement(
+    produced: list[tuple[str, str, str]],
+    gt: dict[tuple[str, str], list[str]],
+) -> PlacementResult:
+    """Score a list of produced (vendor, description, account_description) lines
+    against a ground-truth lookup built by :func:`load_ground_truth_ledger`.
+
+    A produced line is N/A when no ground-truth row matches its
+    (vendor, description) key, OR the matched row's expected-account list
+    is empty (the ground-truth didn't assign an account). Otherwise the
+    line is correct when the engine's chosen account description matches
+    any expected entry under the same fuzzy rule used by the loader.
+    """
+    result = PlacementResult()
+    gt_keys = set(gt.keys())
+
+    for vendor, desc, account in produced:
+        result.total += 1
+        vendor_n = _normalise_text(vendor)
+        desc_n = _normalise_text(desc)
+        account_n = _normalise_text(account)
+
+        # Find the matching GT key (fuzzy on description, exact on vendor).
+        matched_key: tuple[str, str] | None = None
+        for gv, gd in gt_keys:
+            if gv != vendor_n:
+                continue
+            if gd == desc_n:
+                matched_key = (gv, gd)
+                break
+            if _token_set_ratio(desc_n, gd) >= _PLACEMENT_FUZZY_THRESHOLD:
+                matched_key = (gv, gd)
+                break
+
+        if matched_key is None:
+            result.na += 1
+            continue
+        expected = gt[matched_key]
+        if not expected:
+            result.na += 1
+            continue
+        if _fuzzy_contains(account_n, expected):
+            result.correct += 1
+        else:
+            result.missed += 1
+    return result
 
 
 # ---------------------------------------------------------------------------

@@ -150,6 +150,7 @@ class QbsLedgerExporter(LedgerExporter):
     def _purchase_row(self, inv, line):
         net = _num(line.net_amount) or 0
         tax = _tax_amount(line, inv, self.clf)
+        fx = inv.fx_rate if inv.fx_rate is not None else 1.0
         return {
             "Invoice Number": inv.invoice_number or "",
             "Invoice Date": _fmt_date(inv.invoice_date),
@@ -157,8 +158,8 @@ class QbsLedgerExporter(LedgerExporter):
             "Entity Tax ID": inv.supplier.gst_regno or "",
             "Description": line.description,
             "Source Amount": net,
-            "Currency": inv.currency,
-            "Currency Rate": 1.0,
+            "Currency": inv.original_currency or inv.currency,
+            "Currency Rate": fx,
             "Sub Total": net,
             "Tax Amount": tax,
             "Total Amount": round(net + tax, 2),
@@ -168,14 +169,15 @@ class QbsLedgerExporter(LedgerExporter):
     def _sales_row(self, inv, line):
         net = _num(line.net_amount) or 0
         tax = _tax_amount(line, inv, self.clf)
+        fx = inv.fx_rate if inv.fx_rate is not None else 1.0
         return {
             "Invoice Date": _fmt_date(inv.invoice_date),
             "Invoice Number": inv.invoice_number or "",
             "Customer Name": inv.customer.name or "",
             "Description": line.description,
             "Source Amount": net,
-            "Currency": inv.currency,
-            "Currency Rate": 1.0,
+            "Currency": inv.original_currency or inv.currency,
+            "Currency Rate": fx,
             "Amount": net,
             "Tax Amount": tax,
             "Total": round(net + tax, 2),

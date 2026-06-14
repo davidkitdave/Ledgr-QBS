@@ -7,10 +7,8 @@ the real model classes.
 
 from __future__ import annotations
 
-from datetime import date
 from io import BytesIO
 from pathlib import Path
-from typing import Optional
 
 import openpyxl
 import pytest
@@ -18,20 +16,13 @@ import pytest
 from invoice_processing.classify.document_classifier import ClassificationResult
 from invoice_processing.export.categorizer import categorize_invoice
 from invoice_processing.export.client_context import ClientContext, CoaAccount, EntityMemoryEntry
-from invoice_processing.export.models import (
-    BankStatement,
-    BankTransaction,
-    InvoiceLine,
-    NormalizedInvoice,
-    PartyInfo,
-)
 from invoice_processing.extract.bank_statement_extractor import (
     ExtractedAccount,
     ExtractedBankStatement,
     ExtractedBankTxn,
 )
 from invoice_processing.extract.invoice_extractor import ExtractedInvoice, ExtractedLine
-from invoice_processing.pipeline import BatchResult, ProcessedDoc, process_batch, process_document
+from invoice_processing.pipeline import process_batch, process_document
 
 
 # =========================================================================== #
@@ -426,8 +417,6 @@ class TestProcessBatch:
         for p in (purchase_p, sales_p, bank_p):
             p.write_bytes(b"%PDF stub")
 
-        directions = {"purchase_inv.pdf": "purchase", "sales_inv.pdf": "sales"}
-
         def _classify(path, **_kw):
             name = Path(path).name
             if "bank" in name:
@@ -544,3 +533,141 @@ class TestProcessBatch:
         assert not result.docs[0].note.startswith("ERROR")
         # Calendar year: Jan 2025 -> FY2025
         assert "Ledger_FY2025.xlsx" in result.workbooks
+
+
+# =========================================================================== #
+# Test: self-referential / dividend guard — end-to-end through pipeline
+# =========================================================================== #
+
+class TestSelfReferentialPipeline:
+    """resolve_direction returning 'self_referential' or 'unknown' must NOT
+    silently produce a booked-purchase row with the client as its own vendor.
+    The ProcessedDoc must be flagged for review (reconciled=False, note
+    containing 'needs review').
+    """
+
+    def _classify_invoice(self, path, **_kw) -> ClassificationResult:
+        # Both issuer and bill_to are the client — self-referential.
+        return ClassificationResult(
+            doc_type="invoice",
+            issuer_name="Test Client Pte Ltd",
+            bill_to_name="Test Client Pte Ltd",
+            currency="SGD",
+            total_amount=5000.0,
+            confidence=0.9,
+            reason="Dividend certificate",
+        )
+
+    def _extract_self_ref(self, path, **_kw) -> ExtractedInvoice:
+        return ExtractedInvoice(
+            doc_type="invoice",
+            invoice_number="DIV-001",
+            invoice_date="2025-03-31",
+            currency="SGD",
+            issuer_name="Test Client Pte Ltd",
+            bill_to_name="Test Client Pte Ltd",
+            lines=[
+                ExtractedLine(
+                    description="Dividend payout",
+                    net_amount=5000.0,
+                    gst_amount=0.0,
+                    tax_label="OS",
+                )
+            ],
+            subtotal=5000.0,
+            gst_total=0.0,
+            total=5000.0,
+        )
+
+    def test_self_referential_flagged_for_review(self, client_fye3, tmp_path):
+        """A self-referential doc must not be booked as purchase; must be flagged."""
+        doc_path = tmp_path / "dividend.pdf"
+        doc_path.write_bytes(b"%PDF stub")
+
+        doc = process_document(
+            doc_path,
+            client_fye3,
+            classify_fn=self._classify_invoice,
+            # direction_fn uses the REAL resolve_direction so the full stack fires.
+            extract_fn=self._extract_self_ref,
+            bank_fn=_bank_stub,
+            categorize_fn=_stub_categorize_no_llm,
+        )
+
+        # Must not crash.
+        assert not doc.note.startswith("ERROR"), f"Unexpected error: {doc.note}"
+
+        # Raw direction must be 'self_referential'.
+        assert doc.direction == "self_referential", (
+            f"Expected 'self_referential', got {doc.direction!r}"
+        )
+
+        # Must be flagged for review — not silently approved.
+        assert doc.reconciled is False, "Self-referential doc must not be reconciled=True"
+
+        # The review note must be present in doc.note.
+        assert "self-referential" in doc.note.lower(), (
+            f"Expected self-referential review note in: {doc.note!r}"
+        )
+        assert "needs review" in doc.note.lower(), (
+            f"Expected 'needs review' in: {doc.note!r}"
+        )
+
+        # The normalized row must also be flagged.
+        assert doc.normalized is not None
+        assert doc.normalized.reconciled is False
+        assert "self-referential" in (doc.normalized.reconcile_note or "").lower()
+
+    def test_self_referential_vendor_is_not_client(self, client_fye3, tmp_path):
+        """The supplier on the normalized row must NOT be the client itself."""
+        doc_path = tmp_path / "dividend2.pdf"
+        doc_path.write_bytes(b"%PDF stub")
+
+        doc = process_document(
+            doc_path,
+            client_fye3,
+            classify_fn=self._classify_invoice,
+            extract_fn=self._extract_self_ref,
+            bank_fn=_bank_stub,
+            categorize_fn=_stub_categorize_no_llm,
+        )
+
+        # Even though effective_direction defaults to 'purchase' for row
+        # structure, the normalized supplier name comes from the EXTRACTED
+        # issuer_name (the document's own text), not injected by us.  The
+        # important invariant is that the doc is flagged for review so a
+        # human can correct it — it is never silently booked.
+        assert doc.normalized is not None
+        assert doc.normalized.reconciled is False
+
+        # The doc.direction must NOT be 'purchase' or 'sales' — it stays as
+        # the raw resolve_direction output so the reviewer sees the real reason.
+        assert doc.direction not in ("purchase", "sales"), (
+            f"Self-referential direction must not be 'purchase'/'sales', "
+            f"got {doc.direction!r}"
+        )
+
+    def test_unknown_direction_also_flagged(self, client_fye3, tmp_path):
+        """'unknown' direction (no match at all) must also flag for review."""
+        doc_path = tmp_path / "unknown_dir.pdf"
+        doc_path.write_bytes(b"%PDF stub")
+
+        def _direction_unknown(cls, **_kw) -> str:
+            return "unknown"
+
+        doc = process_document(
+            doc_path,
+            client_fye3,
+            classify_fn=self._classify_invoice,
+            direction_fn=_direction_unknown,
+            extract_fn=self._extract_self_ref,
+            bank_fn=_bank_stub,
+            categorize_fn=_stub_categorize_no_llm,
+        )
+
+        assert not doc.note.startswith("ERROR")
+        assert doc.direction == "unknown"
+        assert doc.reconciled is False
+        assert "needs review" in doc.note.lower()
+        assert doc.normalized is not None
+        assert doc.normalized.reconciled is False

@@ -11,6 +11,8 @@ receipts without Document AI.
 
 from __future__ import annotations
 
+import difflib
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -108,6 +110,100 @@ def _norm(s: Optional[str]) -> str:
     return "".join(ch for ch in (s or "").lower() if ch.isalnum())
 
 
+# Normalised name length must exceed this to participate in any match (exact or
+# fuzzy).  Prevents single-word / initialism false-positives (preserves original
+# len > 3 guard).
+_MIN_NORM_LEN = 3
+
+# Weighted best-token-match threshold: average of per-client-token best
+# character-ratio scores must be at or above this value.
+# 0.7 cleanly separates:
+#   "sanesea international" vs "sanersea international"  -> 0.967  (typo)
+#   "sanesea international" vs "sanesee international"   -> 0.929  (1-char swap)
+#   "sanesea international" vs "sanesea intl"            -> 0.735  (abbreviation)
+#   "sanesea international" vs "alpha corp"              -> 0.278  (unrelated)
+_BEST_TOKEN_THRESHOLD = 0.7
+
+
+def _normalise_party(s: Optional[str]) -> str:
+    """Lowercase, strip punctuation, collapse whitespace — for name comparison."""
+    if not s:
+        return ""
+    t = s.lower()
+    t = re.sub(r"[^a-z0-9]+", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _best_token_match(client_norm: str, party_norm: str) -> float:
+    """Weighted best-token match score, 0.0–1.0.
+
+    For each token in *client_norm*, find the highest character-level
+    SequenceMatcher ratio across all tokens in *party_norm*, then average.
+    This handles:
+    - Single-character typos ("sanersea" -> "sanesea": ratio 0.933).
+    - Abbreviations ("intl" best-matches "international": ratio 0.471, but
+      "sanesea" exact-matches "sanesea": ratio 1.0, averaging above 0.7).
+    - Word-order is irrelevant (each client token scans all party tokens).
+    """
+    c_toks = client_norm.split()
+    p_toks = party_norm.split()
+    if not c_toks or not p_toks:
+        return 0.0
+    total = 0.0
+    for ct in c_toks:
+        best = max(
+            difflib.SequenceMatcher(None, ct, pt).ratio() for pt in p_toks
+        )
+        total += best
+    return total / len(c_toks)
+
+
+def _uen_norm(s: Optional[str]) -> str:
+    """Strip spaces and uppercase a UEN/registration number for exact comparison."""
+    return (s or "").replace(" ", "").upper()
+
+
+def _party_matches_client(
+    party_raw: Optional[str],
+    client_norm: str,
+    client_uen_norm: str,
+) -> bool:
+    """Return True if *party_raw* refers to the client.
+
+    Resolution order:
+    1. UEN exact match (if client_uen_norm is non-empty): scan *party_raw* for
+       the UEN token.  Reliable even when the company name is garbled.
+    2. Exact normalised-alphanumeric substring check (fast path, original behaviour).
+    3. Weighted best-token character-ratio >= _BEST_TOKEN_THRESHOLD — catches
+       single-character typos and abbreviations missed by substring check.
+
+    All name paths require normalised len > _MIN_NORM_LEN (preserves the
+    original len > 3 guard against short-string false positives).
+    """
+    if not party_raw:
+        return False
+
+    # --- 1. UEN path (preferred when available) ---
+    if client_uen_norm:
+        party_uen = _uen_norm(party_raw)
+        if client_uen_norm in party_uen:
+            return True
+
+    # --- 2 & 3. Name paths ---
+    party_norm = _normalise_party(party_raw)
+    if len(party_norm) <= _MIN_NORM_LEN or len(client_norm) <= _MIN_NORM_LEN:
+        return False
+
+    # Fast path: exact alphanumeric substring (original behaviour).
+    c_alpha = _norm(client_norm)
+    p_alpha = _norm(party_raw)
+    if c_alpha and p_alpha and (c_alpha in p_alpha or p_alpha in c_alpha):
+        return True
+
+    # Fuzzy path: weighted best-token character-ratio.
+    return _best_token_match(client_norm, party_norm) >= _BEST_TOKEN_THRESHOLD
+
+
 def resolve_direction(
     result: ClassificationResult,
     client_name: Optional[str] = None,
@@ -115,20 +211,41 @@ def resolve_direction(
 ) -> str:
     """Resolve purchase vs sales using the client's identity.
 
-    Returns 'purchase' (client is the bill-to), 'sales' (client is the issuer),
-    or 'unknown' if it can't be determined. Only meaningful for invoice/credit_note.
+    Returns:
+    - ``'purchase'``: client is the bill-to party.
+    - ``'sales'``: client is the issuer.
+    - ``'self_referential'``: client appears as BOTH issuer AND bill-to — the
+      document is self-referential (dividend cert, internal transfer, etc.) and
+      must NEVER be booked as a purchase with the client as its own vendor.
+    - ``'unknown'``: direction cannot be determined.
+    - ``'n/a'``: doc_type is not one that has a direction (e.g. bank_statement).
+
+    Resolution order inside the function:
+    1. ``n/a`` guard — non-invoice doc types exit immediately.
+    2. UEN match (preferred when ``client_uen`` is supplied): find the UEN
+       token in issuer_name / bill_to_name text; exact, robust to name typos.
+    3. Fuzzy name match with token-set ratio >= 0.5 (tolerates typos,
+       abbreviations); inherits the original ``len > 3`` guard.
+    4. Self-referential guard: if the client matches BOTH sides, return
+       ``'self_referential'`` rather than a spurious direction.
     """
     if result.doc_type not in ("invoice", "credit_note", "statement_of_account"):
         return "n/a"
     if not client_name:
         return "unknown"
-    c = _norm(client_name)
-    issuer = _norm(result.issuer_name)
-    billed = _norm(result.bill_to_name)
-    client_is_issuer = bool(c) and (c in issuer or issuer in c) and len(issuer) > 3
-    client_is_billed = bool(c) and (c in billed or billed in c) and len(billed) > 3
-    if client_is_billed and not client_is_issuer:
+
+    client_norm = _normalise_party(client_name)
+    client_uen_norm = _uen_norm(client_uen)
+
+    client_is_issuer = _party_matches_client(result.issuer_name, client_norm, client_uen_norm)
+    client_is_billed = _party_matches_client(result.bill_to_name, client_norm, client_uen_norm)
+
+    # Self-referential guard: client on both sides -> neither purchase nor sales.
+    if client_is_billed and client_is_issuer:
+        return "self_referential"
+
+    if client_is_billed:
         return "purchase"
-    if client_is_issuer and not client_is_billed:
+    if client_is_issuer:
         return "sales"
     return "unknown"

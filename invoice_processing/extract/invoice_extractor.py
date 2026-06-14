@@ -34,10 +34,41 @@ class ExtractedLine(BaseModel):
 
 class ExtractedInvoice(BaseModel):
     doc_type: str = Field(description="invoice or receipt")
-    invoice_number: Optional[str] = None
-    invoice_date: Optional[str] = Field(None, description="ISO date YYYY-MM-DD — always return the document/issue date")
-    due_date: Optional[str] = Field(None, description="ISO date YYYY-MM-DD — always return the payment due date (derive from terms if not stated)")
+    invoice_number: Optional[str] = Field(
+        None,
+        description=(
+            "The document reference number. Accept ANY of these labels: Invoice No, Bill No, "
+            "Tax Invoice No, Receipt No, Invoice Number, Ref, Reference No, Doc No — they all "
+            "map here. Always capture it; never leave null if a number is visible."
+        ),
+    )
+    invoice_date: Optional[str] = Field(
+        None,
+        description=(
+            "ISO date YYYY-MM-DD — always return the document/issue date (the date the document "
+            "was issued or printed). If the document shows a date range or statement period "
+            "(e.g. '01/04/2024 – 30/04/2024'), use the issue/document date (often the period "
+            "end or a separate 'Date' / 'Invoice Date' field), NOT the range start date."
+        ),
+    )
+    due_date: Optional[str] = Field(
+        None,
+        description=(
+            "ISO date YYYY-MM-DD — return the payment due date. If no explicit due date is "
+            "printed, derive it from stated payment terms (e.g. 'Net 30' adds 30 days to "
+            "invoice_date). Leave null only when neither a due date nor payment terms are "
+            "present — the exporter will then fall back to using invoice_date as *DueDate."
+        ),
+    )
     currency: Optional[str] = Field(None, description="ISO currency code, e.g. SGD/MYR/USD")
+    fx_rate: Optional[float] = Field(
+        None,
+        description=(
+            "If the document itself states an exchange rate to the ledger/base currency "
+            "(e.g. 'Exchange Rate: 1 USD = 1.35 SGD'), return it as a decimal multiplier "
+            "(e.g. 1.35). Otherwise return null — never invent a rate."
+        ),
+    )
     issuer_name: Optional[str] = Field(None, description="Supplier/seller — who issued the document")
     issuer_gst_regno: Optional[str] = Field(None, description="Issuer GST registration no. / UEN if shown")
     bill_to_name: Optional[str] = Field(None, description="Customer/buyer — who it is billed to")
@@ -87,23 +118,38 @@ How to choose the lines:
 Per line:
 - description = the category/summary label, e.g. 'Telecommunication services - standard rated',
   'International roaming - zero rated'.
-- net_amount = the ex-GST subtotal for that group.
-- gst_amount = GST for that group (0 for ZR/ES).
+- net_amount = the ex-GST subtotal for that group.  IMPORTANT: discount lines must use a
+  NEGATIVE net_amount (e.g. a Trip.com promotional discount of 84.06 → net_amount = -84.06).
+  Do NOT fold discounts into other lines or into the subtotal — keep them as separate lines
+  with negative net_amount so that Σ(all line net_amounts) == document subtotal.
+- gst_amount = GST on this line (0 for ZR/ES, and also negative when applied to a discount line).
 - tax_label normalized to one of SR (standard/GST/9%/G), ZR (zero-rated/0%/Z/international),
   ES (exempt/E), OS (out-of-scope), or NT (no tax). If only a single-letter code (G/Z/E) is
   printed, map G→SR, Z→ZR, E→ES.
 - Leave quantity and unit_amount null for summary lines.
+- Tax and service-charge lines (e.g. Agoda's "Tax and service charges", hotel service fee,
+  tourism levy) must be captured as their own lines with the correct net_amount. Do NOT drop
+  them — without these lines Σ(net_amounts) will not equal the document total.
 
 Document-level fields:
 - issuer_name = the supplier/seller (letterhead/"From"); bill_to_name = who it is addressed to.
 - issuer_gst_regno = the supplier's GST registration number / UEN if printed.
-- invoice_date = the document/issue date, always returned in ISO YYYY-MM-DD; currency as ISO code.
-- due_date = the payment due date, always returned in ISO YYYY-MM-DD; if no explicit due date is
-  printed, derive it from the stated payment terms (e.g. 'Net 30' from the invoice date). Leave
-  null only when neither a due date nor terms are present.
+- invoice_number = the document reference. Accept ANY label: Invoice No, Bill No, Tax Invoice No,
+  Receipt No, Ref, Reference No, Doc No — all map to invoice_number. Always capture it; do NOT
+  leave null if any reference number is visible on the document.
+- invoice_date = the document/issue date, always returned in ISO YYYY-MM-DD. If the document
+  shows a date range or statement period (e.g. '01/04/2024 – 30/04/2024'), use the issue date
+  or document date (often the period end or a separate 'Date'/'Invoice Date' field) — NOT the
+  range start date. currency as ISO code.
+- due_date = the payment due date, ISO YYYY-MM-DD; if no explicit due date is printed, derive it
+  from stated payment terms (e.g. 'Net 30' from the invoice date). Leave null only when neither a
+  due date nor terms are present (the export layer will then fall back to using invoice_date).
 - Always also return invoice-level subtotal, gst_total, total (the grand totals from the bill),
   used for reconciliation.
 
+- If the document explicitly states an exchange rate to the ledger/base currency (e.g.
+  'Exchange Rate: 1 USD = 1.35 SGD', 'Rate: 1.35'), return it as fx_rate (a decimal multiplier,
+  e.g. 1.35). Otherwise leave fx_rate null — never invent or estimate a rate.
 - Do not invent values; if the summary is unclear, return your best ledger-level grouping and
   ensure the line nets + GST reconcile to the document totals. Leave a field null if not visible."""
 
@@ -248,15 +294,26 @@ def to_normalized(
     direction: str,
     our_gst_registered: bool = True,
     client_country: str = "SG",
+    base_currency: str = "SGD",
+    fx_rate: Optional[float] = None,
 ) -> NormalizedInvoice:
     """Map an ExtractedInvoice to a NormalizedInvoice for the tax classifier + exporter.
 
     direction: 'purchase' (we are the buyer; counterparty = supplier=issuer) or
     'sales' (we are the seller; counterparty = customer=bill_to).
+
+    base_currency: the client's ledger currency (e.g. 'SGD').  When the document
+    currency differs, fx_rate must be supplied to convert amounts.  If not supplied
+    for a non-base currency document, the doc is flagged for human review
+    (needs_fx_review=True, reconciled=False) rather than silently booked at rate=1.
     """
     doc_type = "sales" if direction == "sales" else "purchase"
     supplier = PartyInfo(name=ex.issuer_name, gst_regno=ex.issuer_gst_regno)
     customer = PartyInfo(name=ex.bill_to_name)
+
+    doc_currency = (ex.currency or base_currency).upper()
+    is_foreign = doc_currency != base_currency.upper()
+
     lines = [
         InvoiceLine(
             description=l.description,
@@ -269,19 +326,121 @@ def to_normalized(
         for l in ex.lines
     ]
     ok, detail = reconcile(ex)
+
+    # ------------------------------------------------------------------ #
+    # FX conversion
+    # ------------------------------------------------------------------ #
+    needs_fx_review = False
+    resolved_fx_rate: Optional[float]
+    ledger_currency: str
+    doc_subtotal = ex.subtotal
+    doc_gst_total = ex.gst_total
+    doc_total = ex.total
+    original_currency: Optional[str] = None
+    original_total: Optional[float] = None
+
+    if not is_foreign:
+        # Same currency as ledger — no conversion needed.
+        resolved_fx_rate = 1.0
+        ledger_currency = doc_currency
+    elif fx_rate is not None:
+        # Rate provided: convert document-level amounts to base currency.
+        resolved_fx_rate = fx_rate
+        ledger_currency = base_currency.upper()
+        original_currency = doc_currency
+        original_total = ex.total
+        if doc_subtotal is not None:
+            doc_subtotal = round(doc_subtotal * fx_rate, 2)
+        if doc_gst_total is not None:
+            doc_gst_total = round(doc_gst_total * fx_rate, 2)
+        if doc_total is not None:
+            doc_total = round(doc_total * fx_rate, 2)
+        # Scale each line's amounts so per-line reconcile still passes.
+        scaled_lines = []
+        for line in lines:
+            scaled_lines.append(InvoiceLine(
+                description=line.description,
+                quantity=line.quantity,
+                unit_amount=round(line.unit_amount * fx_rate, 4) if line.unit_amount is not None else None,
+                net_amount=round(line.net_amount * fx_rate, 2) if line.net_amount is not None else None,
+                gst_amount=round(line.gst_amount * fx_rate, 2) if line.gst_amount is not None else None,
+                tax_keyword=line.tax_keyword,
+                account_code=line.account_code,
+                item_code=line.item_code,
+                tax_treatment=line.tax_treatment,
+                tax_confidence=line.tax_confidence,
+                tax_flagged=line.tax_flagged,
+                tax_reason=line.tax_reason,
+            ))
+        lines = scaled_lines
+    else:
+        # Non-base currency but no rate available — flag for review.
+        needs_fx_review = True
+        resolved_fx_rate = None
+        ledger_currency = doc_currency  # keep original currency; do not convert
+        original_currency = doc_currency
+        original_total = ex.total
+        ok = False
+        fx_note = (
+            f"needs fx review: document currency {doc_currency} differs from "
+            f"base currency {base_currency}; no exchange rate available"
+        )
+        detail = f"{detail}; {fx_note}" if detail else fx_note
+
     return NormalizedInvoice(
         doc_type=doc_type,
         invoice_number=ex.invoice_number,
         invoice_date=_parse_date(ex.invoice_date),
         due_date=_parse_date(ex.due_date),
-        currency=ex.currency or "SGD",
+        currency=ledger_currency,
         supplier=supplier,
         customer=customer,
         lines=lines,
-        doc_subtotal=ex.subtotal,
-        doc_gst_total=ex.gst_total,
-        doc_total=ex.total,
+        doc_subtotal=doc_subtotal,
+        doc_gst_total=doc_gst_total,
+        doc_total=doc_total,
         our_gst_registered=our_gst_registered,
         reconciled=ok,
         reconcile_note=detail,
+        fx_rate=resolved_fx_rate,
+        original_total=original_total,
+        original_currency=original_currency,
+        needs_fx_review=needs_fx_review,
     )
+
+
+def to_normalized_bundle(
+    bundle: ExtractedInvoiceBundle,
+    *,
+    direction: str,
+    our_gst_registered: bool = True,
+    client_country: str = "SG",
+    base_currency: str = "SGD",
+    fx_rates: Optional[dict] = None,
+) -> list[NormalizedInvoice]:
+    """Convert an ExtractedInvoiceBundle into a list of NormalizedInvoices.
+
+    Each entry in bundle.invoices becomes one NormalizedInvoice.  SOA cover pages
+    are already excluded by the model (they appear in bundle.skipped_pages, not in
+    bundle.invoices), so this function simply maps each ExtractedInvoice in order.
+
+    fx_rates: optional dict mapping ISO currency code -> exchange rate to base_currency,
+    e.g. {'USD': 1.35, 'IDR': 0.000085}.  When not provided and a document is in a
+    non-base currency, it is flagged for review (needs_fx_review=True).
+    """
+    if fx_rates is None:
+        fx_rates = {}
+    results: list[NormalizedInvoice] = []
+    for ex in bundle.invoices:
+        doc_currency = (ex.currency or base_currency).upper()
+        rate = fx_rates.get(doc_currency)
+        normalized = to_normalized(
+            ex,
+            direction=direction,
+            our_gst_registered=our_gst_registered,
+            client_country=client_country,
+            base_currency=base_currency,
+            fx_rate=rate,
+        )
+        results.append(normalized)
+    return results

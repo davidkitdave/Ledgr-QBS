@@ -68,6 +68,7 @@ class EntityMemoryEntry:
 class ClientContext:
     client_id: Optional[str] = None
     client_name: Optional[str] = None
+    client_uen: Optional[str] = None      # UEN / company registration number
     channel_id: Optional[str] = None
     slack_team_id: Optional[str] = None
     firm_id: Optional[str] = None
@@ -86,6 +87,8 @@ class ClientContext:
         """Serializable dict for ``session.state`` (basic types only)."""
         return {
             "client_id": self.client_id,
+            "client_name": self.client_name,
+            "client_uen": self.client_uen,
             "region": self.region,
             "tax_registered": self.tax_registered,
             "software": self.accounting_software,
@@ -293,6 +296,8 @@ def client_context_from_state(state: dict) -> ClientContext:
     """Rebuild a :class:`ClientContext` from a plain ``to_state()`` dict."""
     return ClientContext(
         client_id=state.get("client_id"),
+        client_name=state.get("client_name"),
+        client_uen=state.get("client_uen"),
         region=state.get("region") or "SINGAPORE",
         accounting_software=state.get("software") or "QBS Ledger",
         base_currency=state.get("base_currency") or "SGD",
@@ -369,6 +374,7 @@ class InMemoryClientStore:
         ctx = ClientContext(
             client_id=client_id,
             client_name=profile.get("client_name"),
+            client_uen=profile.get("client_uen"),
             channel_id=profile.get("channel_id"),
             slack_team_id=profile.get("slack_team_id"),
             firm_id=profile.get("firm_id"),
@@ -594,6 +600,7 @@ class FirestoreClientStore:
         ctx = ClientContext(
             client_id=client_id,
             client_name=data.get("client_name"),
+            client_uen=data.get("client_uen"),
             channel_id=data.get("channel_id"),
             slack_team_id=data.get("slack_team_id"),
             firm_id=data.get("firm_id"),

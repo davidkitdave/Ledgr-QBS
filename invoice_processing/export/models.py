@@ -79,6 +79,18 @@ class NormalizedInvoice:
     # The CLIENT's own GST registration status (from Client Setup TAX_REGISTERED).
     our_gst_registered: bool = True
 
+    # FX / multi-currency fields (set by to_normalized when currency != base_currency).
+    # fx_rate: exchange rate applied to convert doc amounts to base currency.
+    #   - 1.0 when doc currency == base currency (no conversion needed).
+    #   - None when currency != base currency and no rate was derivable — see needs_fx_review.
+    # original_currency / original_total: the raw doc currency + total BEFORE conversion.
+    # needs_fx_review: True when doc is non-base-currency and no fx_rate could be derived;
+    #   the doc must NOT be silently booked at rate=1 — it is flagged for human review.
+    fx_rate: Optional[float] = 1.0
+    original_total: Optional[float] = None
+    original_currency: Optional[str] = None
+    needs_fx_review: bool = False
+
     # Reconciliation of the ledger lines against the document totals (set in to_normalized).
     reconciled: bool = True
     reconcile_note: Optional[str] = None
