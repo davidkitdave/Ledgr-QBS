@@ -1192,21 +1192,30 @@ def build_async_app(
         # (matches the approve/reject convention in app/slack_app.py).
         op_id = view.get("private_metadata") or ""
         edits = _edits_from_view_state(view)
+        # ADR-0004: capture the PRE-edit proposal BEFORE resuming. resume runs
+        # apply_decision_node, which mutates ``invoices[0]['lines']`` in place to
+        # the edited values — so reading state AFTER resume would make every line
+        # look "unchanged" and persist nothing. We snapshot the paused session
+        # state here (original proposed account/tax + vendor) and diff the edits
+        # against it in _persist_corrections. Best-effort: a read failure must
+        # never abort the handler.
+        pre_state: dict = {}
+        if op_id:
+            try:
+                interrupt = read_interrupt(db, op_id) or {}
+                pre_state = await _read_session_state(runner, app_name, interrupt)
+            except Exception:  # noqa: BLE001 - snapshot is best-effort
+                logger.exception("failed to read pre-edit state for op_id %s", op_id)
+                pre_state = {}
         await handle_approval_action(
             runner=runner, ledger_store=ledger_store, db=db, slack_client=sync_client,
             op_id=op_id, decision="edit", edits=edits, app_name=app_name,
         )
-        # ADR-0004: re-read the now-resumed session state and persist each
-        # account/tax edit as a per-client vendor Correction so the next
-        # document from the same vendor auto-applies the human's mapping.
-        # Re-reading (not just reusing `edits`) reflects any downstream
-        # mutations the resume produced. Best-effort: a read failure or a
-        # missing client_store must never abort the handler.
+        # Persist each genuinely-changed account/tax edit as a per-client vendor
+        # Correction so the next document from the same vendor auto-applies it.
         if op_id:
             try:
-                interrupt = read_interrupt(db, op_id) or {}
-                state = await _read_session_state(runner, app_name, interrupt)
-                _persist_corrections(_DEFAULT_CLIENT_STORE, state, edits)
+                _persist_corrections(_DEFAULT_CLIENT_STORE, pre_state, edits)
             except Exception:  # noqa: BLE001 - persistence is best-effort
                 logger.exception(
                     "failed to persist corrections for op_id %s", op_id,
