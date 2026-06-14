@@ -248,15 +248,26 @@ def to_normalized(
     direction: str,
     our_gst_registered: bool = True,
     client_country: str = "SG",
+    base_currency: str = "SGD",
+    fx_rate: Optional[float] = None,
 ) -> NormalizedInvoice:
     """Map an ExtractedInvoice to a NormalizedInvoice for the tax classifier + exporter.
 
     direction: 'purchase' (we are the buyer; counterparty = supplier=issuer) or
     'sales' (we are the seller; counterparty = customer=bill_to).
+
+    base_currency: the client's ledger currency (e.g. 'SGD').  When the document
+    currency differs, fx_rate must be supplied to convert amounts.  If not supplied
+    for a non-base currency document, the doc is flagged for human review
+    (needs_fx_review=True, reconciled=False) rather than silently booked at rate=1.
     """
     doc_type = "sales" if direction == "sales" else "purchase"
     supplier = PartyInfo(name=ex.issuer_name, gst_regno=ex.issuer_gst_regno)
     customer = PartyInfo(name=ex.bill_to_name)
+
+    doc_currency = (ex.currency or base_currency).upper()
+    is_foreign = doc_currency != base_currency.upper()
+
     lines = [
         InvoiceLine(
             description=l.description,
@@ -269,19 +280,121 @@ def to_normalized(
         for l in ex.lines
     ]
     ok, detail = reconcile(ex)
+
+    # ------------------------------------------------------------------ #
+    # FX conversion
+    # ------------------------------------------------------------------ #
+    needs_fx_review = False
+    resolved_fx_rate: Optional[float]
+    ledger_currency: str
+    doc_subtotal = ex.subtotal
+    doc_gst_total = ex.gst_total
+    doc_total = ex.total
+    original_currency: Optional[str] = None
+    original_total: Optional[float] = None
+
+    if not is_foreign:
+        # Same currency as ledger — no conversion needed.
+        resolved_fx_rate = 1.0
+        ledger_currency = doc_currency
+    elif fx_rate is not None:
+        # Rate provided: convert document-level amounts to base currency.
+        resolved_fx_rate = fx_rate
+        ledger_currency = base_currency.upper()
+        original_currency = doc_currency
+        original_total = ex.total
+        if doc_subtotal is not None:
+            doc_subtotal = round(doc_subtotal * fx_rate, 2)
+        if doc_gst_total is not None:
+            doc_gst_total = round(doc_gst_total * fx_rate, 2)
+        if doc_total is not None:
+            doc_total = round(doc_total * fx_rate, 2)
+        # Scale each line's amounts so per-line reconcile still passes.
+        scaled_lines = []
+        for line in lines:
+            scaled_lines.append(InvoiceLine(
+                description=line.description,
+                quantity=line.quantity,
+                unit_amount=round(line.unit_amount * fx_rate, 4) if line.unit_amount is not None else None,
+                net_amount=round(line.net_amount * fx_rate, 2) if line.net_amount is not None else None,
+                gst_amount=round(line.gst_amount * fx_rate, 2) if line.gst_amount is not None else None,
+                tax_keyword=line.tax_keyword,
+                account_code=line.account_code,
+                item_code=line.item_code,
+                tax_treatment=line.tax_treatment,
+                tax_confidence=line.tax_confidence,
+                tax_flagged=line.tax_flagged,
+                tax_reason=line.tax_reason,
+            ))
+        lines = scaled_lines
+    else:
+        # Non-base currency but no rate available — flag for review.
+        needs_fx_review = True
+        resolved_fx_rate = None
+        ledger_currency = doc_currency  # keep original currency; do not convert
+        original_currency = doc_currency
+        original_total = ex.total
+        ok = False
+        fx_note = (
+            f"needs fx review: document currency {doc_currency} differs from "
+            f"base currency {base_currency}; no exchange rate available"
+        )
+        detail = f"{detail}; {fx_note}" if detail else fx_note
+
     return NormalizedInvoice(
         doc_type=doc_type,
         invoice_number=ex.invoice_number,
         invoice_date=_parse_date(ex.invoice_date),
         due_date=_parse_date(ex.due_date),
-        currency=ex.currency or "SGD",
+        currency=ledger_currency,
         supplier=supplier,
         customer=customer,
         lines=lines,
-        doc_subtotal=ex.subtotal,
-        doc_gst_total=ex.gst_total,
-        doc_total=ex.total,
+        doc_subtotal=doc_subtotal,
+        doc_gst_total=doc_gst_total,
+        doc_total=doc_total,
         our_gst_registered=our_gst_registered,
         reconciled=ok,
         reconcile_note=detail,
+        fx_rate=resolved_fx_rate,
+        original_total=original_total,
+        original_currency=original_currency,
+        needs_fx_review=needs_fx_review,
     )
+
+
+def to_normalized_bundle(
+    bundle: ExtractedInvoiceBundle,
+    *,
+    direction: str,
+    our_gst_registered: bool = True,
+    client_country: str = "SG",
+    base_currency: str = "SGD",
+    fx_rates: Optional[dict] = None,
+) -> list[NormalizedInvoice]:
+    """Convert an ExtractedInvoiceBundle into a list of NormalizedInvoices.
+
+    Each entry in bundle.invoices becomes one NormalizedInvoice.  SOA cover pages
+    are already excluded by the model (they appear in bundle.skipped_pages, not in
+    bundle.invoices), so this function simply maps each ExtractedInvoice in order.
+
+    fx_rates: optional dict mapping ISO currency code -> exchange rate to base_currency,
+    e.g. {'USD': 1.35, 'IDR': 0.000085}.  When not provided and a document is in a
+    non-base currency, it is flagged for review (needs_fx_review=True).
+    """
+    if fx_rates is None:
+        fx_rates = {}
+    results: list[NormalizedInvoice] = []
+    for ex in bundle.invoices:
+        doc_currency = (ex.currency or base_currency).upper()
+        rate = fx_rates.get(doc_currency)
+        normalized = to_normalized(
+            ex,
+            direction=direction,
+            our_gst_registered=our_gst_registered,
+            client_country=client_country,
+            base_currency=base_currency,
+            fx_rate=rate,
+        )
+        results.append(normalized)
+    return results
