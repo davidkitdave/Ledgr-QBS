@@ -453,19 +453,23 @@ def job_summary_text(
     duplicates: int = 0,
     software: str = "",
     fy: str = "",
+    kind: str = "",
 ) -> str:
     """One-line Job summary for a batch drop ([[Batch (Job)]] per ADR-0007).
 
     Posted up-front as the single top-level message for a multi-file drop; the
     per-doc status / approval cards go in-thread under it, then this summary
     is ``chat_update``-d with the final tally.
+
+    ``kind`` ("bank" / "invoice") picks the destination noun so a bank statement
+    is never mislabelled a "ledger".
     """
-    tgt = f" {software}" if software else ""
     fyl = f" FY{fy}" if fy else ""
+    noun = "bank statement" if kind == "bank" else "ledger"
 
     parts: list[str] = []
     if posted:
-        parts.append(f"{posted} posted to your{tgt}{fyl} ledger")
+        parts.append(f"{posted} posted to your{fyl} {noun}")
     if duplicates:
         parts.append(f"{duplicates} already recorded")
     if needs_review:

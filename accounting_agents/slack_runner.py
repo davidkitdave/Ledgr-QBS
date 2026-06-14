@@ -315,6 +315,11 @@ async def persist_and_deliver(
             kind=payload.get("kind") or "invoice",
             client_name=payload.get("client_name") or "",
         )
+        # Carry context forward so the batch tally can label the destination
+        # accurately (bank statement vs ledger) without re-reading the payload.
+        append_result.setdefault("kind", payload.get("kind") or "invoice")
+        append_result.setdefault("software", payload.get("software") or "")
+        append_result.setdefault("fy", str(payload.get("fy") or ""))
 
     # When every batch was deduped (already in seen_doc_keys), skip the
     # agent-generated summary ("Added Sep 2025 …") and explain the dedup in the
@@ -1400,6 +1405,7 @@ def build_async_app(
             duplicates = 0
             software_hint = ""
             fy_hint = ""
+            kind_hint = ""
 
             # COA-routing path A (ADR-0006): resolve once per batch whether
             # spreadsheets should be treated as COA uploads.  A channel with no
@@ -1439,6 +1445,8 @@ def build_async_app(
                                 software_hint = str(append["software"])
                             if not fy_hint and append.get("fy"):
                                 fy_hint = str(append["fy"])
+                            if not kind_hint and append.get("kind"):
+                                kind_hint = str(append["kind"])
                         elif status == "duplicate":
                             duplicates += 1
                         elif status == "paused":
@@ -1497,6 +1505,8 @@ def build_async_app(
                         software_hint = str(append["software"])
                     if not fy_hint and append.get("fy"):
                         fy_hint = str(append["fy"])
+                    if not kind_hint and append.get("kind"):
+                        kind_hint = str(append["kind"])
                 elif status == "duplicate":
                     duplicates += 1
                 elif status == "paused":
@@ -1515,6 +1525,7 @@ def build_async_app(
                         duplicates=duplicates,
                         software=software_hint,
                         fy=fy_hint,
+                        kind=kind_hint,
                     )
                     sync_client.chat_update(
                         channel=channel_id,

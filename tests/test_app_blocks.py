@@ -558,9 +558,20 @@ class TestInvoiceEditModal:
 
 class TestJobSummaryText:
 
-    def test_includes_total_posted_needs_review_software_fy(self):
+    def test_includes_total_posted_needs_review_fy(self):
         t = job_summary_text(total=10, posted=7, needs_review=3, software="Xero", fy="2026")
-        assert "10" in t and "7" in t and "3" in t and "Xero" in t and "FY2026" in t
+        assert "10" in t and "7" in t and "3" in t and "FY2026" in t
+
+    def test_bank_kind_says_bank_statement_not_ledger(self):
+        # A bank batch must say "bank statement", never "ledger" (F3 consistency).
+        t = job_summary_text(total=1, posted=1, fy="2025", kind="bank")
+        assert "bank statement" in t
+        assert "ledger" not in t
+
+    def test_invoice_kind_says_ledger(self):
+        t = job_summary_text(total=1, posted=1, fy="2026", kind="invoice")
+        assert "ledger" in t
+        assert "bank statement" not in t
 
     def test_singular_when_one_document(self):
         # No trailing 's' on "document" when total == 1.
