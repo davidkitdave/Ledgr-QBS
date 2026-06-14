@@ -34,9 +34,32 @@ class ExtractedLine(BaseModel):
 
 class ExtractedInvoice(BaseModel):
     doc_type: str = Field(description="invoice or receipt")
-    invoice_number: Optional[str] = None
-    invoice_date: Optional[str] = Field(None, description="ISO date YYYY-MM-DD — always return the document/issue date")
-    due_date: Optional[str] = Field(None, description="ISO date YYYY-MM-DD — always return the payment due date (derive from terms if not stated)")
+    invoice_number: Optional[str] = Field(
+        None,
+        description=(
+            "The document reference number. Accept ANY of these labels: Invoice No, Bill No, "
+            "Tax Invoice No, Receipt No, Invoice Number, Ref, Reference No, Doc No — they all "
+            "map here. Always capture it; never leave null if a number is visible."
+        ),
+    )
+    invoice_date: Optional[str] = Field(
+        None,
+        description=(
+            "ISO date YYYY-MM-DD — always return the document/issue date (the date the document "
+            "was issued or printed). If the document shows a date range or statement period "
+            "(e.g. '01/04/2024 – 30/04/2024'), use the issue/document date (often the period "
+            "end or a separate 'Date' / 'Invoice Date' field), NOT the range start date."
+        ),
+    )
+    due_date: Optional[str] = Field(
+        None,
+        description=(
+            "ISO date YYYY-MM-DD — return the payment due date. If no explicit due date is "
+            "printed, derive it from stated payment terms (e.g. 'Net 30' adds 30 days to "
+            "invoice_date). Leave null only when neither a due date nor payment terms are "
+            "present — the exporter will then fall back to using invoice_date as *DueDate."
+        ),
+    )
     currency: Optional[str] = Field(None, description="ISO currency code, e.g. SGD/MYR/USD")
     issuer_name: Optional[str] = Field(None, description="Supplier/seller — who issued the document")
     issuer_gst_regno: Optional[str] = Field(None, description="Issuer GST registration no. / UEN if shown")
@@ -103,10 +126,16 @@ Per line:
 Document-level fields:
 - issuer_name = the supplier/seller (letterhead/"From"); bill_to_name = who it is addressed to.
 - issuer_gst_regno = the supplier's GST registration number / UEN if printed.
-- invoice_date = the document/issue date, always returned in ISO YYYY-MM-DD; currency as ISO code.
-- due_date = the payment due date, always returned in ISO YYYY-MM-DD; if no explicit due date is
-  printed, derive it from the stated payment terms (e.g. 'Net 30' from the invoice date). Leave
-  null only when neither a due date nor terms are present.
+- invoice_number = the document reference. Accept ANY label: Invoice No, Bill No, Tax Invoice No,
+  Receipt No, Ref, Reference No, Doc No — all map to invoice_number. Always capture it; do NOT
+  leave null if any reference number is visible on the document.
+- invoice_date = the document/issue date, always returned in ISO YYYY-MM-DD. If the document
+  shows a date range or statement period (e.g. '01/04/2024 – 30/04/2024'), use the issue date
+  or document date (often the period end or a separate 'Date'/'Invoice Date' field) — NOT the
+  range start date. currency as ISO code.
+- due_date = the payment due date, ISO YYYY-MM-DD; if no explicit due date is printed, derive it
+  from stated payment terms (e.g. 'Net 30' from the invoice date). Leave null only when neither a
+  due date nor terms are present (the export layer will then fall back to using invoice_date).
 - Always also return invoice-level subtotal, gst_total, total (the grand totals from the bill),
   used for reconciliation.
 
