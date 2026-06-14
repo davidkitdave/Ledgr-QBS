@@ -710,3 +710,82 @@ def test_extract_node_needs_fx_review_routes_to_human_review():
     )
     assert len(reasons) >= 1, f"Expected at least one reason, got: {reasons!r}"
 
+
+# =========================================================================== #
+# ADK state-size guard (_guard_state_payload)
+# =========================================================================== #
+
+
+def test_guard_warns_on_count_exceeding_threshold(caplog):
+    """(a) A list with > _MAX_STATE_ITEMS items must log a WARNING mentioning the key
+    and the threshold."""
+    import logging
+
+    oversized = [{"i": i} for i in range(nodes._MAX_STATE_ITEMS + 1)]
+    with caplog.at_level(logging.WARNING, logger="accounting_agents.nodes"):
+        result = nodes._guard_state_payload(nodes.NORMALIZED_KEY, oversized)
+
+    assert result is oversized  # items returned unchanged
+    assert any(
+        nodes.NORMALIZED_KEY in r.message and str(nodes._MAX_STATE_ITEMS) in r.message
+        for r in caplog.records
+    ), f"Expected count-threshold WARNING for key={nodes.NORMALIZED_KEY!r}; records={[r.message for r in caplog.records]}"
+
+
+def test_guard_no_warning_below_thresholds(caplog):
+    """(b) A small payload (under both thresholds) must NOT warn, and the state
+    list must be stored unchanged through extract_invoice_node."""
+    import logging
+
+    nodes.EXTRACT_BUNDLE_FN = lambda data, mime, **kw: ExtractedInvoiceBundle(
+        invoices=[_ex_invoice("INV-GUARD")]
+    )
+    ctx = FakeContext(_base_state(**{nodes.DIRECTION_KEY: "purchase"}))
+    with caplog.at_level(logging.WARNING, logger="accounting_agents.nodes"):
+        asyncio.run(nodes.extract_invoice_node(ctx))
+
+    # No size-guard warnings should appear (filter to guard-specific messages only).
+    guard_warnings = [
+        r for r in caplog.records
+        if "state-size" in r.message.lower() or "_MAX_STATE" in r.message
+        or ("threshold" in r.message.lower() and nodes.NORMALIZED_KEY in r.message)
+    ]
+    assert guard_warnings == [], f"Unexpected guard warnings: {[r.message for r in guard_warnings]}"
+
+    stored = ctx.state[nodes.NORMALIZED_KEY]
+    assert len(stored) == 1
+    assert stored[0]["invoice_number"] == "INV-GUARD"
+
+
+def test_guard_never_raises_on_unserializable_item(caplog):
+    """(c) The guard must never raise even when json.dumps fails (e.g., monkeypatched
+    to raise). Items must be returned unchanged."""
+    import logging
+    from unittest.mock import patch
+
+    items = [{"key": "value"}, {"key": "other"}]
+    with patch("json.dumps", side_effect=TypeError("unserializable")):
+        with caplog.at_level(logging.WARNING, logger="accounting_agents.nodes"):
+            result = nodes._guard_state_payload(nodes.NORMALIZED_KEY, items)
+
+    assert result is items  # data returned unchanged — guard never raises
+
+
+def test_guard_warns_on_payload_size_exceeding_threshold(caplog):
+    """Size threshold: a serialized payload > _MAX_STATE_PAYLOAD_BYTES must warn."""
+    import logging
+
+    # Build a list whose JSON serialization exceeds 256 KB.
+    big_string = "x" * 1024  # 1 KB per item
+    # 300 items × 1 KB ~ 300 KB > 256 KB threshold
+    large_items = [{"data": big_string} for _ in range(300)]
+
+    with caplog.at_level(logging.WARNING, logger="accounting_agents.nodes"):
+        result = nodes._guard_state_payload(nodes.NORMALIZED_KEY, large_items)
+
+    assert result is large_items  # items unchanged
+    assert any(
+        nodes.NORMALIZED_KEY in r.message and str(nodes._MAX_STATE_PAYLOAD_BYTES) in r.message
+        for r in caplog.records
+    ), f"Expected payload-size WARNING; records={[r.message for r in caplog.records]}"
+

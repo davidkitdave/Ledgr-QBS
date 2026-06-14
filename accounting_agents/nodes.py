@@ -31,6 +31,7 @@ State-key / artifact-filename convention (hand this to the Slack + graph tasks):
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import date
 from typing import Any, Callable, Literal, Optional
@@ -71,6 +72,43 @@ from invoice_processing.extract.invoice_extractor import (
 from .config import MODEL_LITE, MODEL_STD
 
 logger = logging.getLogger(__name__)
+
+#: ADK state-size guard thresholds. Per-doc sessions keep these payloads small;
+#: these limits make unexpectedly large bundles visible instead of silently
+#: bloating the session (ADK guidance: large data → artifacts, not state).
+_MAX_STATE_ITEMS = 50
+_MAX_STATE_PAYLOAD_BYTES = 262144  # 256 KB
+
+
+def _guard_state_payload(key: str, items: list) -> list:
+    """ADK state-size guard. Per-doc sessions keep these lists small; if a
+    payload ever exceeds the count/size thresholds, WARN (ADK guidance:
+    large data belongs in artifacts, not session state — see
+    https://adk.dev/graphs/data-handling). We don't migrate here because the
+    Slack/HITL layer reads this from state; the warning makes an unexpectedly
+    large bundle visible instead of silently bloating the session. Returns
+    `items` unchanged so callers can wrap their assignment."""
+    if len(items) > _MAX_STATE_ITEMS:
+        logger.warning(
+            "ADK state-size guard: key=%r has %d items (threshold=%d) — "
+            "consider offloading to artifacts for large payloads",
+            key, len(items), _MAX_STATE_ITEMS,
+        )
+    try:
+        size = len(json.dumps(items, default=str).encode())
+        if size > _MAX_STATE_PAYLOAD_BYTES:
+            logger.warning(
+                "ADK state-size guard: key=%r serialized payload is %d bytes "
+                "(threshold=%d) — consider offloading to artifacts",
+                key, size, _MAX_STATE_PAYLOAD_BYTES,
+            )
+    except Exception:
+        logger.debug(
+            "ADK state-size guard: could not estimate serialized size for key=%r; skipping size check",
+            key,
+        )
+    return items
+
 
 # --------------------------------------------------------------------------- #
 # State-key + artifact-filename convention (shared with Slack + graph tasks)
@@ -276,7 +314,9 @@ async def extract_invoice_node(ctx) -> Event:
             )
         normalized.append(inv)
 
-    ctx.state[NORMALIZED_KEY] = [_inv_to_dict(i) for i in normalized]
+    ctx.state[NORMALIZED_KEY] = _guard_state_payload(
+        NORMALIZED_KEY, [_inv_to_dict(i) for i in normalized]
+    )
     return Event(output={"count": len(normalized)})
 
 
@@ -296,7 +336,9 @@ async def categorize_node(ctx) -> Event:
             model=MODEL_LITE,
         )
 
-    ctx.state[NORMALIZED_KEY] = [_inv_to_dict(i) for i in invoices]
+    ctx.state[NORMALIZED_KEY] = _guard_state_payload(
+        NORMALIZED_KEY, [_inv_to_dict(i) for i in invoices]
+    )
     return Event(output={"count": len(invoices)})
 
 
@@ -308,7 +350,9 @@ async def tax_node(ctx) -> Event:
         for line in inv.lines:
             clf.classify_line(line, inv)
 
-    ctx.state[NORMALIZED_KEY] = [_inv_to_dict(i) for i in invoices]
+    ctx.state[NORMALIZED_KEY] = _guard_state_payload(
+        NORMALIZED_KEY, [_inv_to_dict(i) for i in invoices]
+    )
     return Event(output={"count": len(invoices)})
 
 
@@ -324,7 +368,9 @@ async def extract_bank_node(ctx) -> Event:
         ex_bank, mode_used = result, None
 
     statements = to_bank_statements(ex_bank, mode_used=mode_used)
-    ctx.state[BANK_STATEMENTS_KEY] = [_bank_to_dict(s) for s in statements]
+    ctx.state[BANK_STATEMENTS_KEY] = _guard_state_payload(
+        BANK_STATEMENTS_KEY, [_bank_to_dict(s) for s in statements]
+    )
     return Event(output={"count": len(statements)})
 
 
@@ -390,7 +436,7 @@ async def apply_decision_node(ctx, node_input=None) -> Event:
                     for field in EDITABLE_LINE_FIELDS:
                         if e.get(field) is not None:
                             lines[i][field] = e[field]
-            ctx.state[NORMALIZED_KEY] = invoices
+            ctx.state[NORMALIZED_KEY] = _guard_state_payload(NORMALIZED_KEY, invoices)
     return Event(output={"decision": choice})
 
 
