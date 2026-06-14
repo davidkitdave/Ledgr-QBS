@@ -79,3 +79,32 @@ F3 + F4 (wording + naming, quick, high-signal) → F1 (bank Q&A tools) → F2 (d
 → F5 pragmatic status line → F6 voice polish → F5 aspirational thought-streaming (separate phase).
 
 Commit each via TDD; restart bot + live-verify after each batch (stale bot = old code).
+
+---
+
+## STATUS — shipped 2026-06-15 (branch `fix/ledgr-hitl-learning-and-qa`)
+
+All of F1–F6 implemented, unit-tested (860 pass), and live-verified in
+#akar-enterprises-pte-ltd. Commits: `f5d295a` (F3/F4), `32669c0` (F1),
+`01e1ce0` (F2), `11cd576` (F5/F6), `+` opening-balance + tally-noun follow-ups.
+
+- ✅ **F1 bank Q&A tool** — LIVE: "What is the total withdrawal for October 2025?"
+  → "The total withdrawal for October 2025 was SGD 4,221.14." (verified vs workbook).
+  Added `bank_totals` (withdrawals/deposits/net/opening/closing, month+year filter);
+  opening balance is per-period (Oct opens at Sep close), not the sheet's first B/F.
+- ✅ **F2 Sept duplication** — LIVE: live Akar FY2025 workbook cleaned 9→4 blocks
+  (one B/F per month Jul–Oct, 159→66 rows). `dedupe_blocks` guard added to the merge.
+- ✅ **F3 bank ≠ ledger wording** — LIVE: delivery now "Added Nov 2025 (10 transactions)
+  to your **Akar Enterprises Pte. Ltd. – Bank Statement FY2025**"; batch tally now
+  "posted to your FY2025 bank statement" (was "…QBS Ledger FY2025 ledger").
+- ✅ **F4 client-scoped filenames** — LIVE: "Akar Enterprises Pte. Ltd. - BankStatement_FY2025.xlsx".
+- ✅ **F5 specific status lines** — LIVE: "🔍 Taking a look at this document…",
+  "🏦 Looks like a bank statement — reading each transaction…", etc.
+- ✅ **F6 warm dedup voice** — names the month/doc + replace prompt (unit-tested;
+  re-upload to see live).
+
+### Still open / deferred
+- **F5 aspirational** — true model thought-streaming to Slack (ThinkingConfig +
+  chat_update). Deferred to a separate phase (Slack edit rate-limits, latency/cost).
+- The Q&A `qa_agent` runs `MODEL_LITE`; if bank-vs-invoice tool routing ever
+  misfires on edge phrasing, consider bumping the model or tightening the instruction.
