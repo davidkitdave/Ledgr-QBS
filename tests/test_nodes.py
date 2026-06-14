@@ -447,17 +447,45 @@ def test_apply_decision_node_edit_with_multi_invoice_logs_warning(caplog):
 # =========================================================================== #
 
 
-def test_deliver_echoes_software_target():
+def test_deliver_invoice_names_client_scoped_ledger():
+    """Invoice summary names the destination as '<Client> – Ledger FY<fy>'."""
     ctx = FakeContext({
         nodes.LEDGER_ROWS_KEY: {
             "fy": "2026", "kind": "invoice", "software": "Xero",
+            "client_name": "Auditair International Pte. Ltd.",
             "batches": [{"sheet": "Purchase", "rows": [{"Total Amount": 10}]}],
         }
     })
     asyncio.run(nodes.deliver_node(ctx))
     summary = ctx.state[nodes.DELIVER_SUMMARY_KEY]
-    assert "Xero" in summary
-    assert "FY2026" in summary
+    assert "Auditair International Pte. Ltd." in summary
+    assert "Ledger FY2026" in summary
+    # An invoice is a ledger, never a bank statement.
+    assert "Bank Statement" not in summary
+
+
+def test_deliver_bank_names_bank_statement_not_ledger():
+    """Bank summary says 'Bank Statement', never 'ledger' (F3)."""
+    ctx = FakeContext({
+        nodes.LEDGER_ROWS_KEY: {
+            "fy": "2025", "kind": "bank", "software": "QBS Ledger",
+            "client_name": "Akar Enterprises Pte. Ltd.",
+            "batches": [{
+                "sheet": "OCBC - 0001",
+                "rows": [
+                    {"Description": "BALANCE B/F", "Balance": 100.0, "Currency": "SGD"},
+                    {"Date": "01/10/2025", "Description": "FAST PAYMENT",
+                     "Withdrawal": 20.0, "Balance": 80.0, "Currency": "SGD"},
+                ],
+            }],
+        }
+    })
+    asyncio.run(nodes.deliver_node(ctx))
+    summary = ctx.state[nodes.DELIVER_SUMMARY_KEY]
+    assert "Akar Enterprises Pte. Ltd." in summary
+    assert "Bank Statement FY2025" in summary
+    # Must NOT mislabel a bank statement as a ledger.
+    assert "ledger" not in summary.lower()
 
 
 # =========================================================================== #

@@ -166,6 +166,42 @@ def test_first_append_starts_fresh_workbook():
     assert ptr["slack_file_id"] == result["slack_file_id"]
 
 
+def test_filename_is_client_scoped_bank_and_invoice():
+    """append_rows names files '<Client> - BankStatement_FY<fy>' / '- Ledger_FY<fy>' (F4)."""
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+
+    inv = store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        software="qbs", kind="invoice", client_name="Auditair International Pte. Ltd.",
+        batches=[{"sheet": "Purchase", "doc_key": "k1", "rows": [_row("first")]}],
+    )
+    assert inv["filename"] == "Auditair International Pte. Ltd. - Ledger_FY2026.xlsx"
+
+    bank = store.append_rows(
+        client_id="c2", fy="2025", slack_client=slack, channel_id="C2",
+        software="qbs", kind="bank", client_name="Akar Enterprises Pte. Ltd.",
+        batches=[{"sheet": "OCBC - 0001", "doc_key": "b1", "rows": [
+            {"Description": "BALANCE B/F", "Balance": 100.0, "Currency": "SGD"},
+            {"Date": "01/10/2025", "Description": "PAYMENT", "Withdrawal": 20.0,
+             "Balance": 80.0, "Currency": "SGD"},
+        ]}],
+    )
+    assert bank["filename"] == "Akar Enterprises Pte. Ltd. - BankStatement_FY2025.xlsx"
+
+
+def test_filename_falls_back_to_bare_name_without_client():
+    """No client_name → bare 'BankStatement_FY<fy>' / 'Ledger_FY<fy>' (back-compat)."""
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+    inv = store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        software="qbs", kind="invoice",
+        batches=[{"sheet": "Purchase", "doc_key": "k1", "rows": [_row("first")]}],
+    )
+    assert inv["filename"] == "Ledger_FY2026.xlsx"
+
+
 def test_second_append_fetches_and_adds_batch():
     slack = FakeSlackClient()
     store = _make_store(slack)

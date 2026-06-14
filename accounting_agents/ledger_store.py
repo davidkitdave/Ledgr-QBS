@@ -97,6 +97,19 @@ class SlackLedgerStore:
             return None
         return snap.to_dict()
 
+    def latest_fy(self, client_id: str) -> Optional[str]:
+        """Return the highest FY label that has a ledger pointer, or ``None``."""
+        coll = (
+            self._db.collection(_CLIENTS_COLLECTION)
+            .document(client_id)
+            .collection(_LEDGERS_SUBCOLLECTION)
+        )
+        fys = [snap.id for snap in coll.stream()]
+        if not fys:
+            return None
+        fys.sort()
+        return fys[-1]
+
     def _set_pointer(
         self,
         client_id: str,
@@ -392,6 +405,7 @@ class SlackLedgerStore:
         batches: list[dict],
         software: str = "qbs",
         kind: str = "invoice",
+        client_name: str = "",
     ) -> dict:
         """Append a run's rows to the channel FY workbook (fetch → append → upload).
 
@@ -421,6 +435,7 @@ class SlackLedgerStore:
                 batches=batches,
                 software=software,
                 kind=kind,
+                client_name=client_name,
             )
 
     def _append_rows_locked(
@@ -433,6 +448,7 @@ class SlackLedgerStore:
         batches: list[dict],
         software: str,
         kind: str,
+        client_name: str = "",
     ) -> dict:
         pointer = self.get_pointer(client_id, fy)
 
@@ -463,11 +479,15 @@ class SlackLedgerStore:
         else:
             wb = self._fresh_invoice_workbook(software)
 
+        # Client-scoped filename: "<Client> - BankStatement_FY<fy>.xlsx" /
+        # "<Client> - Ledger_FY<fy>.xlsx" (matches the reference workbook naming).
+        # Falls back to the bare name when the profile has no client_name.
+        prefix = f"{client_name.strip()} - " if client_name.strip() else ""
         if kind == "bank":
-            filename = f"BankStatement_FY{fy}.xlsx"
+            filename = f"{prefix}BankStatement_FY{fy}.xlsx"
             cols = list(BankStatementExporter.BANK_COLS)
         else:
-            filename = f"Ledger_FY{fy}.xlsx"
+            filename = f"{prefix}Ledger_FY{fy}.xlsx"
             exporter = self._exporter_for(software)
             sheet_cols = {
                 "Purchase": list(exporter.purchase_cols),

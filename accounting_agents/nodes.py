@@ -653,6 +653,7 @@ async def consolidate_node(ctx) -> Event:
 
     payload = {
         "client_id": client_id,
+        "client_name": state.get("client_name") or "",
         "fy": fy,
         "kind": kind,
         "software": software,
@@ -733,11 +734,17 @@ async def deliver_node(ctx) -> Event:
     batches = payload.get("batches") or []
     fy = payload.get("fy", "?")
     kind = payload.get("kind", "document")
-    software = payload.get("software") or ""
-    target = f"{software} " if software else ""
+    client_name = (payload.get("client_name") or "").strip()
+
+    # Destination workbook name — bank statements are NOT ledgers, so name them
+    # accordingly and never call a bank doc a "ledger". Mirrors the file naming in
+    # ledger_store.append_rows (``<Client> - BankStatement_FY<fy>`` / ``Ledger_FY<fy>``).
+    doc_label = "Bank Statement" if kind == "bank" else "Ledger"
+    prefix = f"{client_name} – " if client_name else ""
+    destination = f"**{prefix}{doc_label} FY{fy}**"
 
     if not batches:
-        state[DELIVER_SUMMARY_KEY] = "No ledger entries were produced for this document."
+        state[DELIVER_SUMMARY_KEY] = "No entries were produced for this document."
         state["delivered"] = True
         return Event(output={"delivered": True, "summary": state[DELIVER_SUMMARY_KEY]})
 
@@ -769,13 +776,13 @@ async def deliver_node(ctx) -> Event:
             )
             parts.append(f"{label} ({count_str}){bal_str}")
 
-        summary = f"📒 Added {'; '.join(parts)} to your {target}FY{fy} ledger."
+        summary = f"📒 Added {'; '.join(parts)} to your {destination}."
     else:
         n_rows = sum(len(b.get("rows") or []) for b in batches)
         summary = (
             f"📒 Added {n_rows} line{'s' if n_rows != 1 else ''} from "
             f"{len(batches)} document{'s' if len(batches) != 1 else ''} "
-            f"to your {target}FY{fy} ledger."
+            f"to your {destination}."
         )
 
     state[DELIVER_SUMMARY_KEY] = summary

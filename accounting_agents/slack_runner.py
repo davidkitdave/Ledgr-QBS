@@ -313,6 +313,7 @@ async def persist_and_deliver(
             batches=batches,
             software=payload.get("software") or "qbs",
             kind=payload.get("kind") or "invoice",
+            client_name=payload.get("client_name") or "",
         )
 
     # When every batch was deduped (already in seen_doc_keys), skip the
@@ -948,14 +949,15 @@ async def answer_question(
     channel_id: str,
     question: str,
     app_name: str,
+    client_store=None,
     message_ts: Optional[str] = None,
     thread_ts: Optional[str] = None,
 ) -> dict:
     """Run the coordinator with a text question; qa_agent answers from ledger state.
 
     Steps:
-    1. Resolve the client's current FY from session state (falls back to "unknown"
-       so the ledger tool still returns a graceful "not loaded" message).
+    1. Resolve the client profile and latest FY from Firestore so ``read_rows``
+       targets the correct workbook (instead of falling back to "unknown").
     2. Fetch ledger rows via :meth:`SlackLedgerStore.read_rows` and inject them
        into ``state["ledger_data"]`` via ``state_delta``.
     3. Run the coordinator via ``runner.run_async`` — the coordinator classifies
@@ -978,14 +980,20 @@ async def answer_question(
     async with _SEM:
         await _ensure_session(runner, app_name, channel_id, session_id)
 
-        # Best-effort: read FY from persisted session state so read_rows targets the
-        # right workbook.  Falls back gracefully when not set.
-        session = await runner.session_service.get_session(
-            app_name=app_name, user_id=channel_id, session_id=session_id
-        )
-        state_snapshot = dict(session.state) if session else {}
-        client_id = state_snapshot.get("client_id") or channel_id
-        fy = str(state_snapshot.get("fy") or state_snapshot.get("financial_year") or "unknown")
+        # Resolve client profile so we have client_id + fye_month.
+        profile_delta = _profile_state_delta(client_store, channel_id) if client_store else {}
+        client_id = profile_delta.get("client_id") or channel_id
+        fye_month = profile_delta.get("fye_month")
+
+        # Pick the best FY: latest pointer with data, else current FY from today.
+        fy: str = "unknown"
+        latest = await asyncio.to_thread(ledger_store.latest_fy, client_id)
+        if latest:
+            fy = latest
+        elif fye_month:
+            from datetime import date as _date
+            from invoice_processing.export.fy import fy_for_date
+            fy = str(fy_for_date(_date.today(), int(fye_month)))
 
         # Fetch ledger rows (returns [] if no workbook exists yet).
         try:
@@ -1002,10 +1010,8 @@ async def answer_question(
 
         state_delta = {
             "channel_id": channel_id,
+            **profile_delta,
             LEDGER_DATA_KEY: ledger_rows,
-            # qa_agent runs single_turn and only receives the router's
-            # {"intent": "question"} payload, so it can't see the user turn.
-            # Carry the raw question in state for its instruction provider.
             QUESTION_KEY: question,
         }
 
@@ -1527,6 +1533,7 @@ def build_async_app(
             channel_id=channel_id,
             question=text,
             app_name=app_name,
+            client_store=store,
             message_ts=message_ts,
             thread_ts=thread_ts,
         )
