@@ -32,6 +32,7 @@ from accounting_agents.slack_runner import (
     _derive_setup_prefill,
     _doc_label_from_state,
     _edits_from_view_state,
+    _persist_corrections,
     build_async_app,
     deslugify_channel_name,
     event_node_name,
@@ -675,6 +676,108 @@ def test_edit_submit_invokes_handle_approval_action_with_parsed_edits():
     }
 
 
+def test_edit_submit_persists_correction_after_resume(monkeypatch):
+    """E2E wiring: view_submission → handle_approval_action → _persist_corrections → add_correction.
+
+    Mirrors ``test_edit_submit_invokes_handle_approval_action_with_parsed_edits``'s
+    scaffold but additionally seeds:
+      - a ``FakeFirestore`` interrupt correlation doc keyed by op_id, AND
+      - a paused session state with ``client_id`` + ``normalized_invoices``
+        so ``_persist_corrections`` (called from the wiring at slack_runner.py:1090-1098)
+        has the inputs it needs to actually invoke ``add_correction``.
+    The module-level ``_DEFAULT_CLIENT_STORE`` is monkeypatched to a recorder so
+    we can assert the wiring reaches the persistence side without standing up
+    a real FirestoreClientStore.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from accounting_agents import slack_runner
+
+    db = FakeFirestore()
+
+    # Seed the interrupt correlation doc the wiring reads at slack_runner.py:1092.
+    # Explicit user_id=channel_id so the doc's user_id matches the session-svc
+    # lookup key (write_interrupt's default is session_id, which would not).
+    write_interrupt(
+        db, "OP-WIRE-1",
+        session_id="S-WIRE-1", channel_id="C-WIRE-1", user_id="C-WIRE-1",
+        slack_file_id="F-WIRE-1", message_ts="1.1",
+    )
+
+    # Seed a paused session whose state carries the ADR-0004 inputs
+    # (client_id + normalized_invoices) that _persist_corrections reads.
+    paused_state = {
+        "client_id": "CL-1",
+        nodes.NORMALIZED_KEY: [
+            {
+                "vendor_name": "Hotel Booking",
+                "lines": [
+                    {"description": "Room", "account_code": "6010", "tax_code": "ZR"},
+                ],
+            }
+        ],
+    }
+    paused_session = _FakeSession(paused_state)
+    session_svc = _FakeSessionSvc({("C-WIRE-1", "S-WIRE-1"): paused_session})
+
+    _, edit_submit_handler = _capture_hitl_handlers(
+        runner_mock=_FakeActionViewRunner(session_service=session_svc),
+        db_mock=db,
+    )
+
+    # view_submission body: one edited line, account_code + tax_code (amount
+    # omitted to mirror the natural UI path — _persist_corrections reads only
+    # account_code / tax_code).
+    body = {
+        "view": {
+            "callback_id": "ledgr_invoice_edit",
+            "private_metadata": "OP-WIRE-1",
+            "state": {
+                "values": {
+                    "acct_0": {"v": {"selected_option": {"value": "6010"}}},
+                    "tax_0":  {"v": {"selected_option": {"value": "ZR"}}},
+                }
+            },
+        }
+    }
+
+    # Recorder for handle_approval_action (mirrors Task 7's pattern).
+    approval_recorder = AsyncMock(return_value={"status": "resumed"})
+
+    # Recording fake for the default client store the wiring uses.
+    correction_calls = []
+
+    class _RecordingStore:
+        def add_correction(self, *, client_id, vendor, account_code=None, tax_code=None):
+            correction_calls.append(
+                {"client_id": client_id, "vendor": vendor,
+                 "account_code": account_code, "tax_code": tax_code}
+            )
+
+    monkeypatch.setattr(slack_runner, "_DEFAULT_CLIENT_STORE", _RecordingStore())
+
+    with patch.object(slack_runner, "handle_approval_action", approval_recorder):
+        ack = AsyncMock()
+        bolt_client = MagicMock()
+        asyncio.run(edit_submit_handler(ack=ack, body=body, client=bolt_client))
+
+    # 1. The view handler still acks + still drives handle_approval_action.
+    ack.assert_awaited_once()
+    approval_recorder.assert_called_once()
+    assert approval_recorder.call_args.kwargs["op_id"] == "OP-WIRE-1"
+    assert approval_recorder.call_args.kwargs["decision"] == "edit"
+
+    # 2. The wiring reached _persist_corrections → add_correction exactly once,
+    #    with the seeded vendor + account/tax codes from the edited line.
+    assert len(correction_calls) == 1
+    assert correction_calls[0] == {
+        "client_id": "CL-1",
+        "vendor": "Hotel Booking",
+        "account_code": "6010",
+        "tax_code": "ZR",
+    }
+
+
 # =========================================================================== #
 # Stage detection + live status message
 # =========================================================================== #
@@ -1251,8 +1354,6 @@ def test_persist_corrections_writes_vendor_mapping():
     ``add_correction`` call with the invoice's vendor (taken from the first
     normalized invoice's ``vendor_name``).
     """
-    from accounting_agents.slack_runner import _persist_corrections
-
     saved = []
 
     class _Store:
@@ -1277,8 +1378,6 @@ def test_persist_corrections_skips_lines_with_no_code_fields():
     Edits without either code field are not entity-memory worthy — the user's
     amount tweak is a one-off variance, not a vendor rule.
     """
-    from accounting_agents.slack_runner import _persist_corrections
-
     saved = []
 
     class _Store:
@@ -1296,8 +1395,6 @@ def test_persist_corrections_skips_lines_with_no_code_fields():
 
 def test_persist_corrections_uses_issuer_name_alias_when_vendor_missing():
     """``issuer_name`` (sales-direction alias) is the fallback vendor field."""
-    from accounting_agents.slack_runner import _persist_corrections
-
     saved = []
 
     class _Store:
@@ -1315,8 +1412,6 @@ def test_persist_corrections_uses_issuer_name_alias_when_vendor_missing():
 
 def test_persist_corrections_noop_without_client_id_or_invoice():
     """Defensive: missing client_id or empty invoice list ⇒ no writes (no crash)."""
-    from accounting_agents.slack_runner import _persist_corrections
-
     saved = []
 
     class _Store:
