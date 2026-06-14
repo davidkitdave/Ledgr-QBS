@@ -148,7 +148,22 @@ Status legend: [ ] pending · [~] in progress · [x] pass · [!] FAIL (file foll
 - Akar bank continuity: drop jun-2025 → running-balance continuity
 - Unreadable-file rejection: `/tmp/QA Unreadable Test.exe` staged → expect "❌ Couldn't read this file"
 
-## §8 Bank continuity FAIL (found 2026-06-14, NOT yet fixed)
+## ✅ Fixes 4–5 DONE + LIVE-VERIFIED (this session)
+- **Filename/validation** (`a5cf502`): `_resolve_file_name` threads the real Slack filename into
+  both file handlers. Live: re-dropped the `.exe` → bot replied "❌ Couldn't read this file …
+  got `.exe` … supported: .pdf/.png/…" (rejected BEFORE Gemini; real name shown). Was: silent
+  "Processed" + 400 error + `document.pdf` label.
+- **Bank recompute** (`d56259c`): `_is_formula_or_missing` now treats non-numeric balance cells
+  (currency strings) as untrusted. Live: re-dropped Akar jun-2025 → "Added Jun 2025 (39
+  transactions) to your QBS Ledger FY2025 ledger", no crash. Was: ValueError on `float('SGD')`.
+- **Pre-fill amount+tax (#6/feature) — DEFERRED:** investigation showed the whole edit pipeline
+  (modal → _edits_from_view_state → apply_decision → _dict_to_inv) is keyed on `tax_code`/`amount`,
+  but the model uses `tax_treatment`/`net_amount` (only `account_code` aligns). So "pre-fill" is
+  really "make tax/amount editing work end-to-end" — a HITL-path refactor with test churn.
+  Recommended approach: map edit keys→model fields in apply_decision + read net_amount/tax_treatment
+  in the modal pre-fill (blocks.py). NOT done now (rushing it at session-end risks the core HITL path).
+
+## §8 Bank continuity FAIL (found 2026-06-14 — FIXED, see above)
 - [!] Dropping a new month (Akar jun-2025) onto an existing FY bank ledger CRASHES:
   `ledger_store.py:296 _recompute_balances → running = float(bal) → ValueError: could not
   convert string to float: 'SGD'`. Month never posts (stuck "Finalising… 0 posted").
