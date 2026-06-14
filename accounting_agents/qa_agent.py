@@ -26,7 +26,6 @@ All tools are pure (no I/O, no randomness) so they are trivially testable.
 from __future__ import annotations
 
 import json
-from typing import Any
 
 from google.adk.agents import LlmAgent
 from google.adk.tools import ToolContext

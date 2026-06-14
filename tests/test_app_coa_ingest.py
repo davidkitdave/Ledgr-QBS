@@ -5,14 +5,11 @@ from __future__ import annotations
 import csv
 import os
 import tempfile
-from typing import Any
-from unittest.mock import patch
 
 import openpyxl
-import pytest
 
-from app.coa_ingest import CoaIngestOutcome, coa_rows_from_file, ingest_coa, standard_coa_rows
-from invoice_processing.export.client_context import ClientContext, InMemoryClientStore
+from app.coa_ingest import coa_rows_from_file, ingest_coa, standard_coa_rows
+from invoice_processing.export.client_context import InMemoryClientStore
 
 
 # --------------------------------------------------------------------------- #
@@ -356,141 +353,45 @@ class FakeClient:
         return "xoxb-fake"
 
 
-class TestHandleFileShareDisambiguation:
-    """Tests for file-type routing in handle_file_share."""
+class TestCoaUploadRouting:
+    """COA-upload routing decision in the LIVE graph runner (ADR-0006 path A).
 
-    def _run_share_calls(self):
-        return []
+    The old ``app.slack_app.handle_file_share`` discriminator was retired in the
+    ADK consolidation; the live runner (``build_async_app``) now decides routing
+    via ``accounting_agents.slack_runner._is_coa_upload``: a spreadsheet dropped
+    on a not-yet-onboarded / ``pending_coa`` channel is a Chart-of-Accounts
+    upload (→ ``run_coa_ingest``); everything else is a document
+    (→ ``process_file_event``). These tests exercise that production decision
+    directly. (The ``ingest_coa`` mechanics are covered by the COA-ingest tests
+    above; ``process_file_event`` doc handling by tests/test_slack_runner.py.)
+    """
 
-    def test_xlsx_routes_to_run_coa_ingest_not_run_share(self):
-        from app import slack_app
+    def test_xlsx_on_pending_channel_is_coa_upload(self):
+        from accounting_agents.slack_runner import _is_coa_upload
+        f = {"id": "F001", "filetype": "xlsx", "name": "coa.xlsx"}
+        assert _is_coa_upload(f, coa_pending=True) is True
 
-        coa_calls: list[dict] = []
-        share_calls: list[dict] = []
+    def test_pdf_is_not_coa_upload(self):
+        from accounting_agents.slack_runner import _is_coa_upload
+        f = {"id": "F002", "filetype": "pdf", "name": "invoice.pdf"}
+        assert _is_coa_upload(f, coa_pending=True) is False
 
-        def fake_run_coa(**kw):
-            coa_calls.append(kw)
-
-        def fake_run_share(**kw):
-            share_calls.append(kw)
-
-        event = {
-            "channel": "C-TEST",
-            "files": [{"id": "F001", "filetype": "xlsx", "name": "coa.xlsx"}],
-        }
-        client = FakeClient()
-        store = _pending_store("C-TEST")
-
-        with patch.object(slack_app, "run_coa_ingest", fake_run_coa), \
-             patch.object(slack_app, "run_share", fake_run_share), \
-             patch.object(slack_app, "slack_download_file", return_value="/tmp/coa.xlsx"), \
-             patch.object(slack_app._executor, "submit", lambda fn, *a, **kw: fn(*a, **kw)):
-            slack_app.handle_file_share(event, client, store)
-
-        assert len(coa_calls) == 1
-        assert len(share_calls) == 0
-
-    def test_pdf_routes_to_run_share_not_run_coa_ingest(self):
-        from app import slack_app
-
-        coa_calls: list[dict] = []
-        share_calls: list[dict] = []
-
-        def fake_run_coa(**kw):
-            coa_calls.append(kw)
-
-        def fake_run_share(**kw):
-            share_calls.append(kw)
-
-        event = {
-            "channel": "C-TEST",
-            "files": [{"id": "F002", "filetype": "pdf", "name": "invoice.pdf"}],
-        }
-        client = FakeClient()
-        store = _pending_store("C-TEST")
-
-        with patch.object(slack_app, "run_coa_ingest", fake_run_coa), \
-             patch.object(slack_app, "run_share", fake_run_share), \
-             patch.object(slack_app, "slack_download_file", return_value="/tmp/invoice.pdf"), \
-             patch.object(slack_app._executor, "submit", lambda fn, *a, **kw: fn(*a, **kw)):
-            slack_app.handle_file_share(event, client, store)
-
-        assert len(coa_calls) == 0
-        assert len(share_calls) == 1
-
-    def test_mixed_message_triggers_both(self):
-        from app import slack_app
-
-        coa_calls: list[dict] = []
-        share_calls: list[dict] = []
-
-        def fake_run_coa(**kw):
-            coa_calls.append(kw)
-
-        def fake_run_share(**kw):
-            share_calls.append(kw)
-
-        event = {
-            "channel": "C-TEST",
-            "files": [
-                {"id": "F003", "filetype": "xlsx", "name": "coa.xlsx"},
-                {"id": "F004", "filetype": "pdf", "name": "invoice.pdf"},
-            ],
-        }
-        client = FakeClient()
-        store = _pending_store("C-TEST")
-
-        with patch.object(slack_app, "run_coa_ingest", fake_run_coa), \
-             patch.object(slack_app, "run_share", fake_run_share), \
-             patch.object(slack_app, "slack_download_file", return_value="/tmp/file"), \
-             patch.object(slack_app._executor, "submit", lambda fn, *a, **kw: fn(*a, **kw)):
-            slack_app.handle_file_share(event, client, store)
-
-        assert len(coa_calls) == 1
-        assert len(share_calls) == 1
-
-    def test_bot_message_ignored(self):
-        from app import slack_app
-
-        coa_calls: list[dict] = []
-        share_calls: list[dict] = []
-
-        event = {
-            "channel": "C-TEST",
-            "bot_id": "B-BOT",
-            "files": [{"id": "F005", "filetype": "xlsx", "name": "coa.xlsx"}],
-        }
-        client = FakeClient()
-        store = _pending_store("C-TEST")
-
-        with patch.object(slack_app, "run_coa_ingest", lambda **kw: coa_calls.append(kw)), \
-             patch.object(slack_app, "run_share", lambda **kw: share_calls.append(kw)), \
-             patch.object(slack_app._executor, "submit", lambda fn, *a, **kw: fn(*a, **kw)):
-            slack_app.handle_file_share(event, client, store)
-
-        assert len(coa_calls) == 0
-        assert len(share_calls) == 0
-
-    def test_csv_by_name_extension_routes_to_coa(self):
+    def test_csv_by_name_extension_is_coa_upload(self):
         """filetype may be 'text' for CSV; extension fallback must catch it."""
-        from app import slack_app
+        from accounting_agents.slack_runner import _is_coa_upload
+        f = {"id": "F006", "filetype": "text", "name": "coa.csv"}
+        assert _is_coa_upload(f, coa_pending=True) is True
 
-        coa_calls: list[dict] = []
+    def test_spreadsheet_on_active_client_is_not_coa_upload(self):
+        """Once a client is active (not pending_coa), a dropped spreadsheet is a
+        document (e.g. a bank statement), NOT a COA upload."""
+        from accounting_agents.slack_runner import _is_coa_upload
+        f = {"id": "F007", "filetype": "xlsx", "name": "statement.xlsx"}
+        assert _is_coa_upload(f, coa_pending=False) is False
 
-        event = {
-            "channel": "C-TEST",
-            "files": [{"id": "F006", "filetype": "text", "name": "coa.csv"}],
-        }
-        client = FakeClient()
-        store = _pending_store("C-TEST")
-
-        with patch.object(slack_app, "run_coa_ingest", lambda **kw: coa_calls.append(kw)), \
-             patch.object(slack_app, "run_share", lambda **kw: None), \
-             patch.object(slack_app, "slack_download_file", return_value="/tmp/coa.csv"), \
-             patch.object(slack_app._executor, "submit", lambda fn, *a, **kw: fn(*a, **kw)):
-            slack_app.handle_file_share(event, client, store)
-
-        assert len(coa_calls) == 1
+    def test_non_dict_file_is_not_coa_upload(self):
+        from accounting_agents.slack_runner import _is_coa_upload
+        assert _is_coa_upload("not-a-dict", coa_pending=True) is False
 
 
 # --------------------------------------------------------------------------- #

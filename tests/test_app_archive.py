@@ -253,11 +253,10 @@ class TestGcsArchiveStore:
 
 
 # --------------------------------------------------------------------------- #
-# process_shared_files + archive wiring
+# /ledgr export helper stubs (used by TestLedgrExportCommand below)
 # --------------------------------------------------------------------------- #
 
 from invoice_processing.export.client_context import ClientContext, InMemoryClientStore
-from invoice_processing.pipeline import BatchResult, ProcessedDoc
 
 
 def _make_client(*, status: str = "active") -> ClientContext:
@@ -275,138 +274,6 @@ def _make_store(client: Optional[ClientContext] = None, channel_id: str = "C-ARC
     if client is not None:
         store.add(client, channel_id=channel_id)
     return store
-
-
-def _stub_route():
-    from invoice_processing.export.routing import DocRoute
-    return DocRoute(
-        fy=2025,
-        bucket="purchase",
-        archive_path="client-arc-1/FY2025/purchase/doc.pdf",
-        workbook="Ledger_FY2025.xlsx",
-        sheet="Purchase",
-    )
-
-
-class TestProcessSharedFilesArchive:
-    """Verify archive wiring in process_shared_files."""
-
-    def _run(
-        self,
-        *,
-        archive=None,
-        pipeline_fn=None,
-        upload_raises: bool = False,
-        archive_raises: bool = False,
-    ):
-        from app.processing import process_shared_files
-
-        client = _make_client()
-        store = _make_store(client)
-
-        # Write a real temp file so archive_source can read its bytes
-        fd, tmp_path = tempfile.mkstemp(suffix="_doc.pdf")
-        os.write(fd, b"pdfcontent")
-        os.close(fd)
-
-        try:
-            route = _stub_route()
-            doc = ProcessedDoc(
-                path=tmp_path,
-                doc_type="invoice",
-                direction="purchase",
-                normalized=None,
-                bank=None,
-                route=route,
-                reconciled=True,
-                note="ok",
-            )
-            batch = BatchResult(
-                workbooks={"Ledger_FY2025.xlsx": b"PK\x03\x04"},
-                docs=[doc],
-                errors=[],
-            )
-
-            if pipeline_fn is None:
-                pipeline_fn = lambda paths, c: batch
-
-            uploaded: list = []
-
-            def _upload(ch, fname, data, title):
-                if upload_raises:
-                    raise IOError("upload failed")
-                uploaded.append((ch, fname, data))
-
-            outcome = process_shared_files(
-                channel_id="C-ARC",
-                file_ids=["F001"],
-                store=store,
-                download_fn=lambda fid: tmp_path,
-                upload_fn=_upload,
-                say_fn=lambda **kw: None,
-                pipeline_fn=pipeline_fn,
-                archive=archive,
-            )
-            return outcome, uploaded
-        finally:
-            try:
-                os.unlink(tmp_path)
-            except FileNotFoundError:
-                pass
-
-    def test_source_archived_after_pipeline(self):
-        archive = InMemoryArchiveStore()
-        outcome, _ = self._run(archive=archive)
-        workbooks = archive.list_workbooks("client-arc-1")
-        # workbook archived
-        assert (2025, "Ledger_FY2025.xlsx") in workbooks
-        # source archived: client-arc-1/FY2025/purchase/{filename}
-        keys = list(archive._objects.keys())
-        source_keys = [k for k in keys if "/purchase/" in k]
-        assert len(source_keys) == 1
-
-    def test_workbook_archived_at_correct_path(self):
-        archive = InMemoryArchiveStore()
-        self._run(archive=archive)
-        data = archive.get_workbook("client-arc-1", 2025, "Ledger_FY2025.xlsx")
-        assert data == b"PK\x03\x04"
-
-    def test_archive_none_archives_nothing(self):
-        archive = InMemoryArchiveStore()
-        # Run without archive — the InMemoryArchiveStore should remain empty
-        self._run(archive=None)
-        # Nothing archived because we passed archive=None
-        assert archive._objects == {}
-
-    def test_archive_failure_does_not_prevent_upload(self):
-        """An archive that raises must not crash the pipeline or prevent upload."""
-
-        class RaisingArchive:
-            def archive_source(self, *a, **kw):
-                raise RuntimeError("GCS down")
-
-            def save_workbook(self, *a, **kw):
-                raise RuntimeError("GCS down")
-
-            def get_workbook(self, *a, **kw):
-                return None
-
-            def list_workbooks(self, *a, **kw):
-                return []
-
-        outcome, uploaded = self._run(archive=RaisingArchive())
-        # Upload still happened
-        assert len(uploaded) == 1
-        assert uploaded[0][1] == "Ledger_FY2025.xlsx"
-        # Errors recorded (archive failures), but outcome status is ok
-        assert outcome.status == "ok"
-        assert any("archive" in e for e in outcome.errors)
-
-    def test_no_archive_behavior_unchanged(self):
-        """archive=None: upload happens, outcome is ok, no side-effects."""
-        outcome, uploaded = self._run(archive=None)
-        assert outcome.status == "ok"
-        assert len(uploaded) == 1
 
 
 # --------------------------------------------------------------------------- #

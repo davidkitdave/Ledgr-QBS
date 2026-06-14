@@ -1,4 +1,4 @@
-"""Tests for app/config.py, app/main.py, slack/manifest.json, and app/socket_run.py."""
+"""Tests for app/config.py, app/main.py, and slack/manifest.json."""
 
 from __future__ import annotations
 
@@ -227,73 +227,3 @@ class TestManifest:
         assert bot["always_online"] is True
 
 
-# ---------------------------------------------------------------------------
-# app.socket_run.run — raises SystemExit when tokens are missing
-# ---------------------------------------------------------------------------
-
-class TestSocketRun:
-    def test_raises_systemexit_when_tokens_missing(self, monkeypatch):
-        """run() must raise SystemExit listing missing vars; must NOT connect."""
-        monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
-        monkeypatch.delenv("SLACK_APP_TOKEN", raising=False)
-        monkeypatch.delenv("SLACK_SIGNING_SECRET", raising=False)
-
-        # Patch SocketModeHandler to detect accidental connection attempts
-        import app.socket_run as sr
-
-        original_run = sr.run
-
-        sentinel_called = []
-
-        def _fake_handler(*args, **kwargs):
-            sentinel_called.append(True)
-            raise AssertionError("SocketModeHandler should not be instantiated when tokens are missing")
-
-        monkeypatch.setattr(
-            "slack_bolt.adapter.socket_mode.SocketModeHandler",
-            _fake_handler,
-            raising=False,
-        )
-
-        with pytest.raises(SystemExit) as exc_info:
-            sr.run()
-
-        msg = str(exc_info.value)
-        assert "SLACK_BOT_TOKEN" in msg
-        assert "SLACK_APP_TOKEN" in msg
-        assert not sentinel_called, "SocketModeHandler was instantiated unexpectedly"
-
-    def test_systemexit_message_mentions_docs(self, monkeypatch):
-        monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
-        monkeypatch.delenv("SLACK_APP_TOKEN", raising=False)
-
-        import app.socket_run as sr
-
-        with pytest.raises(SystemExit) as exc_info:
-            sr.run()
-
-        assert "slack-setup.md" in str(exc_info.value)
-
-    def test_no_systemexit_when_tokens_present(self, monkeypatch):
-        """When tokens are set, run() should NOT raise SystemExit at the validation step."""
-        monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-fake")
-        monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-fake")
-
-        import app.socket_run as sr
-
-        # Patch SocketModeHandler so we never open a real connection,
-        # but also stop execution after the guard passes.
-        class _StopHere(Exception):
-            pass
-
-        def _fake_handler(*args, **kwargs):
-            raise _StopHere("reached handler — guard passed")
-
-        monkeypatch.setattr(
-            "slack_bolt.adapter.socket_mode.SocketModeHandler",
-            _fake_handler,
-            raising=False,
-        )
-
-        with pytest.raises(_StopHere):
-            sr.run()

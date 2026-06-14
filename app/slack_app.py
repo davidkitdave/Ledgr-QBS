@@ -6,22 +6,14 @@ unit-tested without a running Bolt server or live Slack token.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import shutil
-import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Optional
-from uuid import uuid4
-
-from fastapi import FastAPI, Request, Response
-from slack_bolt import App
-from slack_bolt.oauth.oauth_settings import OAuthSettings
 
 from app.blocks import (
     coa_prompt_blocks,
@@ -33,12 +25,7 @@ from app.blocks import (
 )
 from app.commands import parse_ledgr_command, settings_prefill
 from app.coa_ingest import coa_rows_from_file, ingest_coa, standard_coa_rows
-from app.installation_store import (
-    FirestoreInstallationStore,
-    FirestoreOAuthStateStore,
-)
 from app.onboarding import parse_modal_state, profile_doc
-from invoice_processing.export.client_context import InMemoryClientStore
 
 logger = logging.getLogger(__name__)
 
@@ -57,9 +44,6 @@ BOT_SCOPES = [
     "app_mentions:read",
     "users:read",
 ]
-
-# Module-level executor for background file-share work (small pool — IO-bound)
-_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ledgr-share")
 
 # --------------------------------------------------------------------------- #
 # Download safety limits
@@ -215,34 +199,8 @@ def _is_spreadsheet(f: dict) -> bool:
 
 
 # --------------------------------------------------------------------------- #
-# File-share handler (pure function + background dispatch)
+# COA ingest dispatch helper
 # --------------------------------------------------------------------------- #
-
-def run_share(
-    *,
-    channel_id: str,
-    file_ids: list[str],
-    store,
-    download_fn: Callable,
-    upload_fn: Callable,
-    say_fn: Callable,
-    archive=None,
-) -> None:
-    """Run process_shared_files synchronously — called from the background worker.
-
-    Extracted as a named function so tests can monkeypatch it directly.
-    """
-    from app.processing import process_shared_files
-    process_shared_files(
-        channel_id=channel_id,
-        file_ids=file_ids,
-        store=store,
-        download_fn=download_fn,
-        upload_fn=upload_fn,
-        say_fn=say_fn,
-        archive=archive,
-    )
-
 
 def run_coa_ingest(
     *,
@@ -259,6 +217,15 @@ def run_coa_ingest(
     ingest_coa(channel_id=channel_id, store=store, rows=rows, say_fn=say_fn)
 
 
+# --------------------------------------------------------------------------- #
+# _event_id — idempotency key for Slack message events. Imported by the live
+# graph runner (accounting_agents/slack_runner) for file dedup. The old
+# build_app file-share dispatch (handle_file_share/run_share) was retired in the
+# ADK consolidation; the live runner routes file drops itself (COA-routing
+# path A — spreadsheets → run_coa_ingest, documents → process_file_event).
+# --------------------------------------------------------------------------- #
+
+
 def _event_id(body_or_event: dict, event: dict, files: list) -> str:
     """Best-effort idempotency key for a Slack message event.
 
@@ -273,130 +240,6 @@ def _event_id(body_or_event: dict, event: dict, files: list) -> str:
         return f"ts:{cmts}"
     file_ids = sorted(str(f.get("id", "")) for f in files)
     return "files:" + ",".join(file_ids)
-
-
-def handle_file_share(body_or_event: dict, client, store, archive=None) -> None:
-    """Guard, dedupe, and dispatch a Slack file-share message event.
-
-    Accepts the full Bolt envelope ``body`` (which carries ``event_id`` for
-    idempotency) and unwraps the inner ``event``. For backward compatibility it
-    also accepts a bare event dict (no ``event`` key) — common in tests.
-
-    Guards:
-    - Ignores duplicate deliveries (Slack retries) via :data:`_seen_events`.
-    - Ignores events from bots (including our own uploads — avoids infinite loop).
-    - Ignores subtypes other than None / "file_share" (e.g. message_changed,
-      message_deleted, bot_message).
-    - Ignores messages with no attached files.
-
-    Disambiguation:
-    - Spreadsheet files (.xlsx/.xls/.csv) are routed to COA ingest ONLY when the
-      channel's client is awaiting a COA (status ``pending_coa``) or has no
-      profile yet; an ``active`` client's spreadsheets go to the document pipeline.
-    - All other files are routed to ``run_share`` (document processing).
-
-    Each background task owns a dedicated temp dir and removes it in a ``finally``
-    block so client PDFs never leak on disk.
-
-    Heavy work is offloaded to the module-level ``_executor`` so the Bolt ack
-    happens within Slack's 3-second window.
-    """
-    # Unwrap the envelope: Bolt passes the full body, tests may pass a bare event.
-    event = body_or_event.get("event", body_or_event)
-
-    # Guard: bot's own message (infinite-loop prevention)
-    if event.get("bot_id"):
-        return
-    # Guard: irrelevant subtypes (message_changed/message_deleted/bot_message/…)
-    subtype = event.get("subtype")
-    if subtype not in (None, "file_share"):
-        return
-    # Guard: no files attached
-    files = event.get("files")
-    if not files:
-        return
-
-    # Guard: idempotency — skip if we've already handled this event (item 1).
-    eid = _event_id(body_or_event, event, files)
-    if _seen_events.seen_before(eid):
-        logger.info("skipping duplicate file-share event %s", eid)
-        return
-
-    channel_id: str = event["channel"]
-
-    def _upload(ch: str, fname: str, data: bytes, title: str) -> None:
-        slack_upload_workbook(client, ch, fname, data, title)
-
-    def _say(**kwargs) -> None:
-        client.chat_postMessage(channel=channel_id, **kwargs)
-
-    # Cap files-per-message; tell the user about the rest (item 5).
-    if len(files) > MAX_FILES_PER_BATCH:
-        skipped = len(files) - MAX_FILES_PER_BATCH
-        files = files[:MAX_FILES_PER_BATCH]
-        _say(
-            text=(
-                f"I received {len(files) + skipped} files but can only process "
-                f"{MAX_FILES_PER_BATCH} at once — the remaining {skipped} were "
-                "skipped. Please re-send them in a smaller batch."
-            )
-        )
-
-    # Decide whether spreadsheets are COA uploads or just documents (item 6).
-    resolved = store.get_by_channel(channel_id)
-    coa_pending = resolved is None or resolved.status == "pending_coa"
-
-    if coa_pending:
-        spreadsheets = [f for f in files if _is_spreadsheet(f)]
-        documents = [f for f in files if not _is_spreadsheet(f)]
-    else:
-        # Active client: a shared CSV/XLSX is a document, not a new COA.
-        spreadsheets = []
-        documents = list(files)
-
-    # Dispatch COA ingest for each spreadsheet (own tmp dir, cleaned in finally).
-    for f in spreadsheets:
-        fid = f["id"]
-
-        def _coa_task(file_id=fid):
-            task_dir = tempfile.mkdtemp(prefix="ledgr_coa_")
-            try:
-                local_path = slack_download_file(client, file_id, task_dir)
-                run_coa_ingest(
-                    channel_id=channel_id,
-                    file_path=local_path,
-                    store=store,
-                    say_fn=_say,
-                )
-            finally:
-                shutil.rmtree(task_dir, ignore_errors=True)
-
-        _executor.submit(_coa_task)
-
-    # Dispatch document processing for non-spreadsheet files (own tmp dir).
-    if documents:
-        doc_ids: list[str] = [f["id"] for f in documents]
-
-        def _doc_task(ids=doc_ids):
-            task_dir = tempfile.mkdtemp(prefix="ledgr_slack_")
-
-            def _download(fid: str) -> str:
-                return slack_download_file(client, fid, task_dir)
-
-            try:
-                run_share(
-                    channel_id=channel_id,
-                    file_ids=ids,
-                    store=store,
-                    download_fn=_download,
-                    upload_fn=_upload,
-                    say_fn=_say,
-                    archive=archive,
-                )
-            finally:
-                shutil.rmtree(task_dir, ignore_errors=True)
-
-        _executor.submit(_doc_task)
 
 
 # --------------------------------------------------------------------------- #
@@ -593,240 +436,3 @@ def handle_member_joined(body: dict, ack: Optional[Callable], client, bot_user_i
     channel_id = event.get("channel") or ""
     if channel_id:
         client.chat_postMessage(channel=channel_id, blocks=welcome_blocks())
-
-
-# --------------------------------------------------------------------------- #
-# Bolt App factory
-# --------------------------------------------------------------------------- #
-
-def build_oauth_settings(
-    *,
-    installation_store=None,
-    state_store=None,
-) -> Optional[OAuthSettings]:
-    """Build OAuthSettings for multi-workspace install, or None when not configured.
-
-    Reads :func:`app.config.get_settings`. When ``missing_slack_oauth()`` reports
-    any missing env var, OAuth is not configured and this returns ``None`` (the
-    caller falls back to single-workspace mode).
-
-    The Firestore stores are constructed lazily and never touch the network on
-    construction, so building OAuthSettings here is hermetic. Inject fakes via
-    ``installation_store`` / ``state_store`` in tests.
-    """
-    from app.config import get_settings, missing_slack_oauth
-
-    if missing_slack_oauth():
-        return None
-
-    settings = get_settings()
-    base_url = settings.base_url
-    redirect_uri = (
-        f"{base_url.rstrip('/')}/slack/oauth_redirect" if base_url else None
-    )
-    return OAuthSettings(
-        client_id=settings.slack_client_id,
-        client_secret=settings.slack_client_secret,
-        scopes=BOT_SCOPES,
-        installation_store=installation_store or FirestoreInstallationStore(),
-        state_store=state_store or FirestoreOAuthStateStore(),
-        install_path="/slack/install",
-        redirect_uri_path="/slack/oauth_redirect",
-        redirect_uri=redirect_uri,
-    )
-
-
-def build_app(
-    store=None,
-    *,
-    bot_token: str = "xoxb-test",
-    signing_secret: str = "test",
-    id_factory: Optional[Callable[[], str]] = None,
-    archive=None,
-    oauth_settings: Optional[OAuthSettings] = None,
-) -> App:
-    """Construct and wire a Slack Bolt App.
-
-    Args:
-        store: a ProfileStore-compatible object (defaults to InMemoryClientStore).
-        bot_token: Slack bot token (use a real one in production). Ignored in
-                   OAuth mode (per-team tokens are resolved by the install store).
-        signing_secret: Slack signing secret (use a real one in production).
-        id_factory: callable returning a new unique client_id string; defaults to
-                    ``lambda: "client-" + uuid4().hex[:12]``.
-        archive: optional ArchiveStore for GCS archiving and /ledgr export.
-                 Defaults to None (archiving disabled, export shows "no ledger" message).
-        oauth_settings: when provided, the app is built in multi-workspace OAuth
-                 mode (no fixed token; Bolt's InstallationStoreAuthorize resolves
-                 the per-team bot token from the install store on each request).
-    """
-    if store is None:
-        store = InMemoryClientStore()
-    if id_factory is None:
-        id_factory = lambda: "client-" + uuid4().hex[:12]  # noqa: E731
-
-    if oauth_settings is not None:
-        # Multi-workspace OAuth mode: no fixed token. Bolt resolves the per-team
-        # token via InstallationStoreAuthorize using the install store.
-        app = App(
-            signing_secret=signing_secret,
-            installation_store=oauth_settings.installation_store,
-            oauth_settings=oauth_settings,
-        )
-    else:
-        app = App(
-            token=bot_token,
-            signing_secret=signing_secret,
-            token_verification_enabled=False,
-        )
-
-    @app.action("ledgr_setup_open")
-    def _setup_open(body, ack, client):
-        handle_setup_open(body, ack, client)
-
-    @app.action("ledgr_use_standard_coa")
-    def _use_standard_coa(body, ack, client):
-        handle_use_standard_coa(body, ack, client, store)
-
-    @app.view("ledgr_onboarding")
-    def _onboarding_submit(body, ack, client):
-        handle_onboarding_submit(body, ack, client, store, id_factory)
-
-    # Resolve the bot user id. In OAuth mode Bolt populates a per-request
-    # ``context["bot_user_id"]`` (the right token per team), so we MUST prefer it
-    # and never call auth_test() at build time (app.client has no token then).
-    # In single-token mode we memoize a one-shot auth_test() as a fallback.
-    _bot_user_id_cache: dict[str, str] = {}
-
-    def _bot_user_id() -> str:
-        if "id" not in _bot_user_id_cache:
-            try:
-                _bot_user_id_cache["id"] = app.client.auth_test()["user_id"]
-            except Exception:
-                _bot_user_id_cache["id"] = ""
-        return _bot_user_id_cache["id"]
-
-    @app.event("member_joined_channel")
-    def _member_joined(body, client, context):
-        # Multi-tenant: Bolt resolves the bot user id per request into context.
-        # Fall back to a memoized auth_test() only in single-token mode.
-        bot_user_id = context.get("bot_user_id") or _bot_user_id()
-        handle_member_joined(body, None, client, bot_user_id)
-
-    @app.command("/ledgr")
-    def _ledgr_command(ack, body, client):
-        handle_ledgr_command(ack, body, client, store, archive=archive)
-
-    @app.event("message")
-    def _file_share(body, client):
-        # Pass the full envelope ``body`` (carries event_id for idempotency).
-        handle_file_share(body, client, store, archive=archive)
-
-    @app.event("file_shared")
-    def _file_shared_noop(body, logger):
-        # A file upload fires BOTH a ``message``/``file_share`` event (our processing
-        # trigger, above) AND a separate ``file_shared`` event. We process from the
-        # message event only; this no-op handler just marks ``file_shared`` as handled
-        # so Bolt doesn't log "Unhandled request" and we never double-process.
-        pass
-
-    return app
-
-
-# --------------------------------------------------------------------------- #
-# FastAPI wrapper
-# --------------------------------------------------------------------------- #
-
-def fastapi_app(store=None):
-    """Create a FastAPI app that mounts the Bolt handler at POST /slack/events.
-
-    Tokens are read from the environment via :func:`app.config.get_settings` at
-    call time (never at import time — Cloud Run sets env vars after import).
-    Placeholder values keep ``/healthz`` and CI working when env vars are unset;
-    real values are used when present.
-
-    A real FirestoreClientStore is constructed lazily (at first request) when
-    no store is injected — import-time never touches Firestore.
-    """
-    from slack_bolt.adapter.fastapi import SlackRequestHandler
-
-    from app.config import get_settings, missing_slack_http, missing_slack_oauth
-
-    settings = get_settings()
-
-    _store = store  # capture; real store created lazily below if needed
-
-    def _get_store():
-        nonlocal _store
-        if _store is None:
-            from invoice_processing.export.client_context import FirestoreClientStore
-            _store = FirestoreClientStore()
-        return _store
-
-    _archive = None  # capture; real archive created lazily below if needed
-
-    def _get_archive():
-        nonlocal _archive
-        if _archive is None:
-            from app.archive import GcsArchiveStore
-            _archive = GcsArchiveStore(settings.gcs_bucket or "ledgr-qbs-source-bucket")
-        return _archive
-
-    # Select mode: OAuth multi-workspace when fully configured, else single-workspace.
-    oauth = build_oauth_settings()
-    if oauth is not None:
-        logger.info("Slack app: OAuth multi-workspace mode")
-        bolt_app = build_app(
-            store=_get_store(),
-            signing_secret=settings.slack_signing_secret or "test",
-            archive=_get_archive(),
-            oauth_settings=oauth,
-        )
-    else:
-        # Loud warning at construction when HTTP-mode env vars are missing (item 9).
-        _missing_at_build = missing_slack_http()
-        if _missing_at_build:
-            logger.warning(
-                "Slack HTTP mode is misconfigured — missing env vars: %s. "
-                "/healthz will report 503 until these are set.",
-                ", ".join(_missing_at_build),
-            )
-        bolt_app = build_app(
-            store=_get_store(),
-            bot_token=settings.slack_bot_token or "xoxb-test",
-            signing_secret=settings.slack_signing_secret or "test",
-            archive=_get_archive(),
-        )
-
-    handler = SlackRequestHandler(bolt_app)
-
-    api = FastAPI(title="Ledgr Slack Bot")
-
-    @api.get("/healthz")
-    async def healthz():
-        # Re-check at request time (env may be set after construction). Healthy
-        # when EITHER single-workspace HTTP OR multi-workspace OAuth is usable.
-        http_missing = missing_slack_http()
-        oauth_missing = missing_slack_oauth()
-        if http_missing and oauth_missing:
-            return Response(
-                content=json.dumps({"ok": False, "missing": http_missing}),
-                media_type="application/json",
-                status_code=503,
-            )
-        return {"ok": True}
-
-    @api.post("/slack/events")
-    async def slack_events(req: Request):
-        return await handler.handle(req)
-
-    if oauth is not None:
-        @api.get("/slack/install")
-        async def slack_install(req: Request):
-            return await handler.handle(req)
-
-        @api.get("/slack/oauth_redirect")
-        async def slack_oauth_redirect(req: Request):
-            return await handler.handle(req)
-
-    return api

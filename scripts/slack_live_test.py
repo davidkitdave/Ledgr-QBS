@@ -3,7 +3,7 @@
 Prereqs:
   1. A Slack app created from `slack/manifest.json`, installed to your workspace.
   2. `.env` has SLACK_BOT_TOKEN (xoxb-…), SLACK_SIGNING_SECRET, SLACK_APP_TOKEN (xapp-…).
-  3. The bot is RUNNING (in another terminal):  uv run python -m app.socket_run
+  3. The bot is RUNNING (in another terminal):  uv run python -m python -m accounting_agents.slack_runner
   4. The bot is invited to a test channel; set its id in LEDGR_TEST_CHANNEL.
   5. (First time in that channel) run /ledgr settings + add a COA, or tap
      "Use standard SG SME COA", so the client is active.
@@ -33,7 +33,7 @@ def main() -> int:
     if not token or not channel or not pdf:
         print(
             "Set SLACK_BOT_TOKEN (.env), LEDGR_TEST_CHANNEL, and LEDGR_TEST_PDF (path to a "
-            "sample bill PDF), and make sure the bot is running:  uv run python -m app.socket_run"
+            "sample bill PDF), and make sure the bot is running:  uv run python -m python -m accounting_agents.slack_runner"
         )
         return 2
 
@@ -68,7 +68,7 @@ def main() -> int:
         return 0
     print(
         "⏱️ LIVE_TIMEOUT — no .xlsx reply within "
-        f"{timeout_s}s. Check: bot running (app.socket_run), bot invited to the channel, "
+        f"{timeout_s}s. Check: bot running (python -m accounting_agents.slack_runner), bot invited to the channel, "
         "and the client is set up + active (/ledgr settings + COA)."
     )
     return 1

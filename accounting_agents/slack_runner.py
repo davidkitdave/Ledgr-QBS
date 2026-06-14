@@ -42,6 +42,10 @@ import os
 import tempfile
 from typing import Any, Optional
 
+# FastAPI Request/Response imported at module level so FastAPI can resolve
+# the string annotations produced by `from __future__ import annotations`.
+from fastapi import Request, Response
+
 from accounting_agents.qa_agent import LEDGER_DATA_KEY
 
 from google.genai import types
@@ -58,7 +62,7 @@ from accounting_agents.hitl import (
 from accounting_agents.ledger_store import SlackLedgerStore
 from accounting_agents.nodes import ApproveDecision
 from app.blocks import approval_card_blocks, approval_outcome_blocks, invoice_edit_modal
-from app.slack_app import _SeenEvents, _event_id as _slack_event_id
+from app.slack_app import _SeenEvents
 from invoice_processing.export.client_context import FirestoreClientStore
 
 # One shared dedup set for all handlers in this module (process-local; see
@@ -138,6 +142,21 @@ _SEM = asyncio.Semaphore(_max_concurrency())
 def _per_doc_session_id(channel_id: str, file_id: str) -> str:
     """Unique session id per dropped document so concurrent drops never collide."""
     return f"{channel_id}:{file_id}"
+
+
+def _is_coa_upload(f: object, *, coa_pending: bool) -> bool:
+    """COA-routing decision (ADR-0006 path A) for a dropped Slack file.
+
+    A spreadsheet (xlsx/csv) dropped on a channel that is not yet onboarded or is
+    ``pending_coa`` is a Chart-of-Accounts upload → route to ``run_coa_ingest``.
+    Everything else (any file on an active client, or any non-spreadsheet) is an
+    ordinary document → route to ``process_file_event``. This is the live
+    replacement for the retired ``app.slack_app.handle_file_share`` discriminator.
+    """
+    if not coa_pending or not isinstance(f, dict):
+        return False
+    from app.slack_app import _is_spreadsheet
+    return bool(_is_spreadsheet(f))
 
 
 def _per_question_session_id(channel_id: str, message_ts: str) -> str:
@@ -1262,6 +1281,19 @@ def build_async_app(
             software_hint = ""
             fy_hint = ""
 
+            # COA-routing path A (ADR-0006): resolve once per batch whether
+            # spreadsheets should be treated as COA uploads.  A channel with no
+            # profile or status==pending_coa routes xlsx/csv to run_coa_ingest;
+            # an active client's spreadsheets fall through to process_file_event
+            # (they are treated as ordinary documents, e.g. bank statements).
+            from app.slack_app import run_coa_ingest as _run_coa_ingest
+
+            _resolved = store.get_by_channel(channel_id)
+            _coa_pending = _resolved is None or getattr(_resolved, "status", None) == "pending_coa"
+
+            def _say_in_channel(**kwargs):
+                sync_client.chat_postMessage(channel=channel_id, **kwargs)
+
             for f in files:
                 file_id = f.get("id") if isinstance(f, dict) else None
                 if not file_id:
@@ -1275,6 +1307,30 @@ def build_async_app(
                     "file upload received via message: file=%s channel=%s",
                     file_id, channel_id,
                 )
+
+                # COA-routing path A (ADR-0006): a spreadsheet dropped on a
+                # not-yet-onboarded / pending_coa channel is a Chart-of-Accounts
+                # upload, not a document to process.
+                if _is_coa_upload(f, coa_pending=_coa_pending):
+                    logger.info("routing spreadsheet %s to COA ingest for channel %s", file_id, channel_id)
+                    import shutil as _shutil
+                    import tempfile as _tempfile
+
+                    from app.slack_app import slack_download_file as _dl
+                    task_dir = _tempfile.mkdtemp(prefix="ledgr_coa_")
+                    try:
+                        local_path = await asyncio.to_thread(_dl, sync_client, file_id, task_dir)
+                        await asyncio.to_thread(
+                            _run_coa_ingest,
+                            channel_id=channel_id,
+                            file_path=local_path,
+                            store=store,
+                            say_fn=_say_in_channel,
+                        )
+                    finally:
+                        _shutil.rmtree(task_dir, ignore_errors=True)
+                    continue
+
                 result = await process_file_event(
                     runner=runner,
                     ledger_store=ledger_store,
@@ -1342,6 +1398,76 @@ def build_async_app(
         )
 
     return async_app
+
+
+# --------------------------------------------------------------------------- #
+# FastAPI / Cloud Run entrypoint (HTTP, multi-workspace OAuth)
+# --------------------------------------------------------------------------- #
+
+
+def build_fastapi_app():
+    """Build a FastAPI app that delegates POST /slack/events to the ADK graph.
+
+    Mirrors ``_main_async`` wiring (runner + db + ledger_store + build_async_app
+    + FirestoreClientStore) but for the HTTP path used by Cloud Run production.
+    Does NOT strip OAuth env vars (that is socket-mode only); production uses
+    multi-workspace OAuth via Bolt's OAuthSettings.
+
+    All network/store construction is LAZY (deferred to first request via
+    _get_handler) so importing this module never touches the network.
+
+    Route annotations use the module-level ``Request`` / ``Response`` names
+    (imported at the top of this file) so FastAPI can resolve them even under
+    ``from __future__ import annotations`` (PEP 563 stringifies all annotations;
+    FastAPI resolves them against the module globals at decoration time).
+    """
+    from fastapi import FastAPI
+    from slack_bolt.adapter.fastapi.async_handler import AsyncSlackRequestHandler
+
+    # All heavyweight objects are deferred to first request. Imports happen
+    # inside _get_handler so that test patches applied to the source modules
+    # (e.g. accounting_agents.sessions.FirestoreSessionService) are still active
+    # at call time — the closure references the source by name, not a captured
+    # value that was already resolved at build_fastapi_app() call time.
+    _state: dict = {}
+
+    def _get_handler():
+        if "handler" not in _state:
+            from accounting_agents.sessions import FirestoreSessionService
+            from invoice_processing.export.client_context import FirestoreClientStore
+            db = FirestoreSessionService().client
+            runner = build_runner()
+            ledger_store = SlackLedgerStore(db)
+            async_app = build_async_app(
+                runner=runner,
+                ledger_store=ledger_store,
+                db=db,
+                store=FirestoreClientStore(),
+            )
+            _state["handler"] = AsyncSlackRequestHandler(async_app)
+        return _state["handler"]
+
+    api = FastAPI(title="Ledgr Slack Bot")
+
+    @api.get("/healthz")
+    async def healthz():
+        import json
+        from app.config import missing_slack_http, missing_slack_oauth
+        http_missing = missing_slack_http()
+        oauth_missing = missing_slack_oauth()
+        if http_missing and oauth_missing:
+            return Response(
+                content=json.dumps({"ok": False, "missing": http_missing}),
+                media_type="application/json",
+                status_code=503,
+            )
+        return {"ok": True}
+
+    @api.post("/slack/events")
+    async def slack_events(req: Request):
+        return await _get_handler().handle(req)
+
+    return api
 
 
 # --------------------------------------------------------------------------- #

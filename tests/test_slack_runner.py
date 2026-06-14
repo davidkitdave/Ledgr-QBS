@@ -1741,3 +1741,84 @@ def test_process_file_event_accepted_pdf_still_processes():
 
     assert result["status"] == "delivered"
     assert len(slack.uploads) == 1
+
+
+# =========================================================================== #
+# build_fastapi_app — prod wiring test (Task 4)
+# =========================================================================== #
+
+def test_build_fastapi_app_wires_adk_graph(monkeypatch):
+    """build_fastapi_app() returns a FastAPI app with POST /slack/events.
+
+    Asserts (without any network/Slack calls) that the factory:
+    1. Builds the runner via build_runner() (which binds accounting_agents.agent.app).
+    2. Builds the async Bolt app via build_async_app().
+    3. Wraps it in AsyncSlackRequestHandler.
+    4. Exposes POST /slack/events.
+    5. Exposes GET /healthz.
+
+    Uses monkeypatch.setattr (not with-patch) so patches stay active during the
+    lazy _get_handler() call triggered by tc.post("/slack/events").
+    FirestoreSessionService and FirestoreClientStore are function-local imports
+    inside _get_handler, so we patch the SOURCE modules.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    import accounting_agents.sessions as _sessions_mod
+    import accounting_agents.slack_runner as _runner_mod
+    import invoice_processing.export.client_context as _ctx_mod
+    import slack_bolt.adapter.fastapi.async_handler as _handler_mod
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    runner_calls: list = []
+    app_calls: list = []
+    fake_async_app = MagicMock()
+    fake_handler = MagicMock()
+    fake_handler.handle = AsyncMock(return_value=MagicMock(status_code=401))
+
+    def _fake_build_runner(**kw):
+        runner_calls.append(kw)
+        return MagicMock(name="runner")
+
+    def _fake_build_async_app(*, runner, ledger_store, db, store=None, bot_token=None):
+        app_calls.append({"runner": runner, "store": store})
+        return fake_async_app
+
+    # Patch module-level names in slack_runner (build_runner/build_async_app/
+    # SlackLedgerStore are module attributes so this works directly).
+    monkeypatch.setattr(_runner_mod, "build_runner", _fake_build_runner)
+    monkeypatch.setattr(_runner_mod, "build_async_app", _fake_build_async_app)
+    monkeypatch.setattr(_runner_mod, "SlackLedgerStore", MagicMock(return_value=MagicMock()))
+
+    # FirestoreSessionService/FirestoreClientStore are imported locally inside
+    # _get_handler, so patch the SOURCE class in the source modules.
+    monkeypatch.setattr(_sessions_mod, "FirestoreSessionService", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr(_ctx_mod, "FirestoreClientStore", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr(_handler_mod, "AsyncSlackRequestHandler", MagicMock(return_value=fake_handler))
+
+    from accounting_agents.slack_runner import build_fastapi_app
+    api = build_fastapi_app()
+
+    # Must return a FastAPI instance.
+    assert isinstance(api, FastAPI)
+
+    # POST /slack/events and GET /healthz must be registered.
+    paths = {r.path for r in api.routes}
+    assert "/slack/events" in paths
+    assert "/healthz" in paths
+
+    # Trigger lazy construction by hitting /slack/events — patches still active.
+    tc = TestClient(api, raise_server_exceptions=False)
+    tc.post("/slack/events")
+
+    # build_runner was called exactly once (lazy construction happened once).
+    assert len(runner_calls) == 1
+
+    # build_async_app was called with a runner (proves graph is wired).
+    assert len(app_calls) == 1
+    assert app_calls[0]["runner"] is not None
+
+    # A FirestoreClientStore was passed as the `store` (not InMemory).
+    assert app_calls[0]["store"] is not None
