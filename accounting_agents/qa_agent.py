@@ -216,38 +216,62 @@ def bank_totals(tool_context: ToolContext, month: str = "", year: str = "") -> s
             want_month = int(m)
     want_year: int | None = int(year) if (year or "").strip().isdigit() else None
 
+    filtering = want_month is not None or want_year is not None
     withdrawals = deposits = 0.0
     txn_count = 0
     opening_balance: float | None = None
     closing_balance: float | None = None
     currency = "SGD"
+    # Running balance seen so far (B/F or any prior row), so a filtered period's
+    # opening balance is the balance immediately BEFORE its first transaction —
+    # not the first B/F in the whole sheet.
+    prev_balance: float | None = None
+
+    def _bal(r):
+        b = r.get("Balance")
+        return _to_float(b) if b is not None and str(b).strip() != "" else None
 
     for row in rows:
         desc = str(row.get("Description") or "").strip().upper()
         if row.get("Currency"):
             currency = row["Currency"]
 
-        # Opening balance comes from the BALANCE B/F marker; skip it from sums.
+        # BALANCE B/F marks a block opening; never summed.
         if desc == "BALANCE B/F":
-            if opening_balance is None:
-                opening_balance = _to_float(row.get("Balance"))
+            bf = _bal(row)
+            prev_balance = bf if bf is not None else prev_balance
+            if not filtering and opening_balance is None:
+                opening_balance = bf
             continue
         if desc == "TOTALS":
             continue
 
-        if want_month is not None or want_year is not None:
+        in_period = True
+        if filtering:
             mth, yr = _month_year_of(row.get("Date"))
             if want_month is not None and mth != want_month:
-                continue
+                in_period = False
             if want_year is not None and yr != want_year:
-                continue
+                in_period = False
+        if not in_period:
+            # Advance the running balance so the next in-period opening is correct.
+            b = _bal(row)
+            if b is not None:
+                prev_balance = b
+            continue
+
+        # In-period transaction. For a filtered query, the opening balance is the
+        # balance just before the first matching row.
+        if filtering and opening_balance is None:
+            opening_balance = prev_balance
 
         withdrawals += _to_float(row.get("Withdrawal"))
         deposits += _to_float(row.get("Deposit"))
         txn_count += 1
-        bal = row.get("Balance")
-        if bal is not None and str(bal).strip() != "":
-            closing_balance = _to_float(bal)
+        b = _bal(row)
+        if b is not None:
+            closing_balance = b
+            prev_balance = b
 
     if txn_count == 0 and (want_month is not None or want_year is not None):
         return json.dumps(

@@ -127,6 +127,17 @@ class TestBankTotals:
         data = json.loads(bank_totals(_ctx(_bank_rows()), month="January", year="2025"))
         assert data["transaction_count"] == 0
 
+    def test_filtered_opening_balance_is_period_not_first_bf(self):
+        # October's opening should be the balance just before its first txn
+        # (Sept closing 1300.0), NOT the sheet's first B/F (1000.0).
+        data = json.loads(bank_totals(_ctx(_bank_rows()), month="October", year="2025"))
+        assert data["opening_balance"] == pytest.approx(1300.0)
+        assert data["closing_balance"] == pytest.approx(800.0)
+
+    def test_unfiltered_opening_balance_is_first_bf(self):
+        data = json.loads(bank_totals(_ctx(_bank_rows())))
+        assert data["opening_balance"] == pytest.approx(1000.0)
+
 
 # --------------------------------------------------------------------------- #
 # summarize_by_category
