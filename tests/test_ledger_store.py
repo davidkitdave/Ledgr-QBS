@@ -454,6 +454,43 @@ def _bank_batch(exporter, stmt, doc_key):
     return {"sheet": stmt.bank_name, "doc_key": doc_key, "rows": exporter.bank_rows(stmt)}
 
 
+def test_duplicate_statement_collapses_even_under_different_doc_keys():
+    """Same statement appended under two different doc_keys → one block (F2).
+
+    Reproduces the Akar September duplication: the doc_key format transition let
+    the SAME statement through twice (old F<id>:... key vs new content key). The
+    block-level dedup in _merge_bank_statement must collapse them so the sheet
+    has a single BALANCE B/F + one copy of each transaction.
+    """
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+    exporter = BankStatementExporter()
+
+    stmt = _bank_stmt(
+        "OCBC - 0001", 1000.0,
+        [("FAST PAYMENT", 200.0, None, 800.0), ("SALARY", None, 500.0, 1300.0)],
+        1300.0,
+        txn_date=date(2025, 9, 15),
+    )
+    # First upload (old-style doc_key).
+    store.append_rows(
+        client_id="c1", fy="2025", slack_client=slack, channel_id="C1", kind="bank",
+        batches=[_bank_batch(exporter, stmt, "Fold123:OCBC - 0001:acct")],
+    )
+    # Same statement again under the NEW content key (dedup bypassed at Firestore).
+    result = store.append_rows(
+        client_id="c1", fy="2025", slack_client=slack, channel_id="C1", kind="bank",
+        batches=[_bank_batch(exporter, stmt, "OCBC - 0001:acct:01 SEP 2025 - 30 SEP 2025")],
+    )
+
+    rows = _read_sheet_rows(slack.files[result["slack_file_id"]], "OCBC - 0001")
+    descs = [r[1] for r in rows]  # Description column
+    # Exactly one B/F and one copy of each txn — NOT duplicated.
+    assert descs.count("BALANCE B/F") == 1
+    assert descs.count("FAST PAYMENT") == 1
+    assert descs.count("SALARY") == 1
+
+
 def test_bank_export_no_legacy_columns():
     exporter = BankStatementExporter()
     header = exporter.BANK_COLS

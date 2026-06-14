@@ -383,11 +383,27 @@ class SlackLedgerStore:
         existing_blocks = self._read_bank_blocks(sheet, cols)
 
         new_blocks = BankStatementExporter.rows_to_blocks(rows)
-        added = 0
-        for block in new_blocks:
-            added += len(block["transactions"]) + 1  # +1 for BALANCE B/F row
 
-        all_blocks = BankStatementExporter.sort_blocks(existing_blocks + new_blocks)
+        # Collapse duplicate statement blocks (safety net + one-shot cleanup of
+        # any pre-existing duplication already in the sheet, e.g. the doc_key
+        # format transition that duplicated September in the Akar workbook).
+        before = len(existing_blocks) + len(new_blocks)
+        deduped_blocks = BankStatementExporter.dedupe_blocks(existing_blocks + new_blocks)
+        existing_sig = {
+            BankStatementExporter._block_signature(b) for b in existing_blocks
+        }
+        # "Added" = value rows in genuinely new (not-already-present) blocks.
+        added = 0
+        for block in deduped_blocks:
+            if BankStatementExporter._block_signature(block) not in existing_sig:
+                added += len(block["transactions"]) + 1  # +1 for BALANCE B/F row
+        if len(deduped_blocks) < before:
+            logger.info(
+                "bank merge: collapsed %d duplicate statement block(s) on %s",
+                before - len(deduped_blocks), sheet.title,
+            )
+
+        all_blocks = BankStatementExporter.sort_blocks(deduped_blocks)
         BankStatementExporter.rebuild_account_sheet(sheet, all_blocks, cols)
         return added
 

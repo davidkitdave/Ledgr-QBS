@@ -464,6 +464,56 @@ class BankStatementExporter:
         return (0, min(dates)) if dates else (1, datetime.max)
 
     @classmethod
+    def _block_signature(cls, block: dict):
+        """Identity of a statement block for dedup: opening balance + its txns.
+
+        Two blocks with the same opening balance and the same ordered list of
+        ``(Date, Description, Withdrawal, Deposit)`` transactions are the SAME
+        statement re-uploaded (Balance is excluded — it is recomputed). Used to
+        collapse statements that were appended more than once (e.g. during the
+        doc_key format transition that duplicated months in the Akar sheet).
+        """
+        def _norm(v):
+            if v is None:
+                return ""
+            s = str(v).strip()
+            if not s:
+                return ""
+            # Normalise numerics so 200 / 200.0 / "200.00" compare equal across
+            # the fresh-block vs read-back-from-xlsx round trip.
+            try:
+                return f"{float(s):.2f}"
+            except (TypeError, ValueError):
+                return s
+
+        txns = tuple(
+            (_norm(t.get("Date")), _norm(t.get("Description")),
+             _norm(t.get("Withdrawal")), _norm(t.get("Deposit")))
+            for t in block.get("transactions", [])
+        )
+        return (_norm(block.get("stated_bf")), _norm(block.get("currency")), txns)
+
+    @classmethod
+    def dedupe_blocks(cls, blocks: list[dict]) -> list[dict]:
+        """Drop blocks that are byte-for-byte duplicate statements (keep the first).
+
+        Safety net for re-merges: an identical statement appended N times yields N
+        identical blocks; this keeps one. Distinct months never collide (their txn
+        dates differ), and duplicate transactions WITHIN one statement are kept
+        (they live in the same block). Preserves input order.
+        """
+        seen: set = set()
+        unique: list[dict] = []
+        for block in blocks:
+            sig = cls._block_signature(block)
+            # A truly empty block (no bf, no txns) carries no data — keep at most one.
+            if sig in seen:
+                continue
+            seen.add(sig)
+            unique.append(block)
+        return unique
+
+    @classmethod
     def sort_blocks(cls, blocks: list[dict]) -> list[dict]:
         """Return month-blocks sorted ascending by date, txns sorted within each.
 
