@@ -586,17 +586,17 @@ async def approval_gate(ctx):
     )
 
 
-def _doc_key(state: dict, sheet: str, identity: str, index: int) -> str:
-    """Stable per-document dedupe key (re-processing re-emits the same key).
+def _doc_key(state: dict, sheet: str, identity: str, index: int, *, period: str = "") -> str:
+    """Content-based per-document dedupe key (re-uploading re-emits the same key).
 
-    Built from the Slack file id (the document's stable identity within a
-    channel) + the destination sheet + the document's own identity (invoice
-    number / account number) and its index in the run, so the same drop never
-    double-appends but two genuinely different documents never collide.
+    Does NOT include the Slack file id (which changes on every upload).
+    Bank statements include the statement period so different months are
+    distinct; invoices use the invoice number.
     """
-    file_id = state.get("file_id") or state.get("source_filename") or "doc"
     ident = (identity or "").strip() or f"i{index}"
-    return f"{file_id}:{sheet}:{ident}"
+    if period:
+        return f"{sheet}:{ident}:{period}"
+    return f"{sheet}:{ident}"
 
 
 async def consolidate_node(ctx) -> Event:
@@ -630,7 +630,8 @@ async def consolidate_node(ctx) -> Event:
             batches.append(
                 {
                     "sheet": sheet,
-                    "doc_key": _doc_key(state, sheet, stmt.account_number or stmt.bank_name, idx),
+                    "doc_key": _doc_key(state, sheet, stmt.account_number or stmt.bank_name, idx,
+                                       period=stmt.statement_period or ""),
                     "rows": rows,
                 }
             )

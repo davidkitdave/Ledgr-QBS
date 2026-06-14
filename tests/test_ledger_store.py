@@ -333,6 +333,47 @@ def test_first_append_does_not_delete_any_file():
     assert slack.deleted_file_ids == []
 
 
+def test_file_deleted_from_slack_starts_fresh_and_clears_dedup():
+    """If the previous workbook was deleted from Slack, start a fresh one
+    and clear seen_doc_keys so previously-processed docs can be re-uploaded."""
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+
+    result1 = store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        software="qbs", kind="invoice",
+        batches=[{"sheet": "Purchase", "doc_key": "F1:Purchase:INV-1", "rows": [_row("first")]}],
+    )
+    first_file_id = result1["slack_file_id"]
+    assert result1["appended"] == 1
+
+    # Simulate Slack deleting the file (free-tier cleanup / manual deletion).
+    original_files_info = slack.files_info
+    def _raise_file_deleted(*, file):
+        if file == first_file_id:
+            raise Exception(
+                "The request to the Slack API failed. "
+                "The server responded with: {'ok': False, 'error': 'file_deleted'}"
+            )
+        return original_files_info(file=file)
+    slack.files_info = _raise_file_deleted
+
+    # Re-uploading the SAME doc_key should succeed (not dedup) because
+    # seen_doc_keys was cleared when the workbook was found to be gone.
+    result2 = store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        software="qbs", kind="invoice",
+        batches=[{"sheet": "Purchase", "doc_key": "F1:Purchase:INV-1", "rows": [_row("first-redo")]}],
+    )
+    assert result2["appended"] == 1
+    assert result2["deduped"] == 0
+
+    # Pointer updated to the new file.
+    ptr = store.get_pointer("c1", "2026")
+    assert ptr["slack_file_id"] == result2["slack_file_id"]
+    assert ptr["slack_file_id"] != first_file_id
+
+
 # --------------------------------------------------------------------------- #
 # Accountant-grade bank export: live formulas, no legacy columns
 # --------------------------------------------------------------------------- #

@@ -69,6 +69,10 @@ from invoice_processing.export.client_context import FirestoreClientStore
 # app.slack_app._SeenEvents for the Cloud Run note about multi-instance gaps).
 _seen = _SeenEvents()
 
+# Futures for process_file_event results so the batch tally loop can await
+# files already being processed by the file_shared handler.
+_file_futures: dict[str, asyncio.Future] = {}
+
 #: Default client store for profile seeding (overridable in tests).
 _DEFAULT_CLIENT_STORE = FirestoreClientStore()
 
@@ -310,6 +314,19 @@ async def persist_and_deliver(
             software=payload.get("software") or "qbs",
             kind=payload.get("kind") or "invoice",
         )
+
+    # When every batch was deduped (already in seen_doc_keys), skip the
+    # agent-generated summary ("Added Sep 2025 …") and explain the dedup.
+    if append_result.get("deduped", 0) > 0 and append_result.get("appended", 0) == 0:
+        _post_message(
+            slack_client, channel_id,
+            "📋 This document was already recorded in your ledger — nothing new to add.\n"
+            "If you need to re-process it, upload the file again with a message like "
+            '"re-process this".',
+            thread_ts=thread_ts,
+        )
+        append_result["all_deduped"] = True
+        return append_result
 
     summary = state.get(nodes.DELIVER_SUMMARY_KEY) or "Document processed."
     _post_message(slack_client, channel_id, summary, thread_ts=thread_ts)
@@ -623,6 +640,13 @@ async def process_file_event(
             user_id=channel_id,
             thread_ts=thread_ts,
         )
+
+        if append_result.get("all_deduped"):
+            _update_status(slack_client, channel_id, status_ts, "📋 Already recorded")
+            _remove_reaction(slack_client, channel_id, upload_msg_ts, "eyes")
+            _add_reaction(slack_client, channel_id, upload_msg_ts, "ballot_box_with_check")
+            return {"status": "duplicate", "append": append_result}
+
         # Final state: collapse the evolving status to a terminal ✅. The full
         # delivery summary is posted by persist_and_deliver, so keep this short
         # to avoid double-posting the same detail.
@@ -1147,17 +1171,24 @@ def build_async_app(
         if _seen.seen_before(f"file:{file_id}"):
             logger.debug("dedup: file %s already being processed", file_id)
             return
-        await process_file_event(
-            runner=runner,
-            ledger_store=ledger_store,
-            db=db,
-            slack_client=sync_client,
-            channel_id=channel_id,
-            file_id=file_id,
-            app_name=app_name,
-            download_fn=download_pdf_bytes,
-            source_filename=_resolve_file_name(sync_client, file_id, event.get("file")),
-        )
+        fut: asyncio.Future = asyncio.get_event_loop().create_future()
+        _file_futures[file_id] = fut
+        try:
+            result = await process_file_event(
+                runner=runner,
+                ledger_store=ledger_store,
+                db=db,
+                slack_client=sync_client,
+                channel_id=channel_id,
+                file_id=file_id,
+                app_name=app_name,
+                download_fn=download_pdf_bytes,
+                source_filename=_resolve_file_name(sync_client, file_id, event.get("file")),
+            )
+            fut.set_result(result)
+        except Exception as exc:
+            fut.set_exception(exc)
+            raise
 
     async def _run_action(ack, body, client, decision):
         await ack()
@@ -1349,6 +1380,8 @@ def build_async_app(
 
             posted = 0
             needs_review = 0
+            rejected = 0
+            duplicates = 0
             software_hint = ""
             fy_hint = ""
 
@@ -1373,6 +1406,29 @@ def build_async_app(
                 # one upload; guard on the file id so it's processed exactly once.
                 if _seen.seen_before(f"file:{file_id}"):
                     logger.debug("dedup: file %s already being processed", file_id)
+                    # Await the Future from the file_shared handler so the batch
+                    # tally counts this file's outcome.
+                    fut = _file_futures.pop(file_id, None)
+                    if fut is not None:
+                        try:
+                            result = await fut
+                        except Exception:
+                            logger.debug("file_shared processing failed for %s", file_id)
+                            result = None
+                        status = (result or {}).get("status")
+                        if status == "delivered":
+                            posted += 1
+                            append = (result or {}).get("append") or {}
+                            if not software_hint and append.get("software"):
+                                software_hint = str(append["software"])
+                            if not fy_hint and append.get("fy"):
+                                fy_hint = str(append["fy"])
+                        elif status == "duplicate":
+                            duplicates += 1
+                        elif status == "paused":
+                            needs_review += 1
+                        elif status == "rejected_unreadable":
+                            rejected += 1
                     continue
                 logger.info(
                     "file upload received via message: file=%s channel=%s",
@@ -1425,8 +1481,12 @@ def build_async_app(
                         software_hint = str(append["software"])
                     if not fy_hint and append.get("fy"):
                         fy_hint = str(append["fy"])
+                elif status == "duplicate":
+                    duplicates += 1
                 elif status == "paused":
                     needs_review += 1
+                elif status == "rejected_unreadable":
+                    rejected += 1
 
             # Edit the summary in-place with the final tally (ADR-0007).
             if summary_ts:
@@ -1435,6 +1495,8 @@ def build_async_app(
                         total=total,
                         posted=posted,
                         needs_review=needs_review,
+                        rejected=rejected,
+                        duplicates=duplicates,
                         software=software_hint,
                         fy=fy_hint,
                     )

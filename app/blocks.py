@@ -448,7 +448,9 @@ def job_summary_text(
     *,
     total: int,
     posted: int,
-    needs_review: int,
+    needs_review: int = 0,
+    rejected: int = 0,
+    duplicates: int = 0,
     software: str = "",
     fy: str = "",
 ) -> str:
@@ -457,22 +459,30 @@ def job_summary_text(
     Posted up-front as the single top-level message for a multi-file drop; the
     per-doc status / approval cards go in-thread under it, then this summary
     is ``chat_update``-d with the final tally.
-
-    Args:
-        total:        N files dropped in the batch.
-        posted:       count with ``status == "delivered"`` (no review needed).
-        needs_review: count with ``status == "paused"`` (HITL review card).
-        software:     optional accounting software label (Xero / QBS Ledger) —
-                      passed through when the batch targets a single FY + target.
-        fy:           optional financial year string — only shown when the
-                      batch has a single FY (mixed-FY drops leave it blank).
     """
     tgt = f" {software}" if software else ""
     fyl = f" FY{fy}" if fy else ""
-    head = f"📥 Processed {total} document{'s' if total != 1 else ''}"
-    body = f" — {posted} posted to your{tgt}{fyl} ledger"
-    tail = f", {needs_review} need your review" if needs_review else ""
-    return head + body + tail
+
+    parts: list[str] = []
+    if posted:
+        parts.append(f"{posted} posted to your{tgt}{fyl} ledger")
+    if duplicates:
+        parts.append(f"{duplicates} already recorded")
+    if needs_review:
+        parts.append(f"{needs_review} need{'s' if needs_review == 1 else ''} your review")
+    if rejected:
+        parts.append(f"{rejected} rejected")
+
+    processed = total - rejected
+    head = f"📥 Received {total} file{'s' if total != 1 else ''}"
+    if rejected and processed:
+        head += f" · {processed} processed"
+    elif not rejected:
+        head = f"📥 Processed {total} document{'s' if total != 1 else ''}"
+
+    if parts:
+        return head + " — " + ", ".join(parts)
+    return head + " — nothing new to add"
 
 
 def approval_card_blocks(summary: str, op_id: str, doc_label: str | None = None) -> list:

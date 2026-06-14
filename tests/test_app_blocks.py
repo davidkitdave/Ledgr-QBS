@@ -580,3 +580,34 @@ class TestJobSummaryText:
         assert "to your  " not in t
         assert " FY" not in t
 
+    def test_rejected_appears_in_summary(self):
+        t = job_summary_text(total=3, posted=1, needs_review=0, rejected=2)
+        assert "1 posted" in t
+        assert "2 rejected" in t
+        assert "Received 3" in t
+
+    def test_all_rejected_shows_nothing_new(self):
+        t = job_summary_text(total=1, posted=0, needs_review=0, rejected=1)
+        assert "1 rejected" in t
+        assert "0 posted" not in t
+
+    def test_zero_posted_zero_rejected_says_nothing_new(self):
+        t = job_summary_text(total=1, posted=0, needs_review=0, rejected=0)
+        assert "nothing new" in t
+
+    def test_duplicates_appears_in_summary(self):
+        t = job_summary_text(total=3, posted=1, needs_review=0, duplicates=2)
+        assert "1 posted" in t
+        assert "2 already recorded" in t
+
+    def test_all_duplicates_no_posted(self):
+        t = job_summary_text(total=2, posted=0, needs_review=0, duplicates=2)
+        assert "2 already recorded" in t
+        assert "posted" not in t
+
+    def test_mixed_posted_duplicates_rejected(self):
+        t = job_summary_text(total=5, posted=2, needs_review=0, rejected=1, duplicates=2)
+        assert "2 posted" in t
+        assert "2 already recorded" in t
+        assert "1 rejected" in t
+

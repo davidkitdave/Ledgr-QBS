@@ -372,9 +372,7 @@ class SlackLedgerStore:
         new_blocks = BankStatementExporter.rows_to_blocks(rows)
         added = 0
         for block in new_blocks:
-            for _txn in block["transactions"]:
-                added += 1
-            added += 1  # the BALANCE B/F marker row
+            added += len(block["transactions"]) + 1  # +1 for BALANCE B/F row
 
         all_blocks = BankStatementExporter.sort_blocks(existing_blocks + new_blocks)
         BankStatementExporter.rebuild_account_sheet(sheet, all_blocks, cols)
@@ -445,8 +443,21 @@ class SlackLedgerStore:
         seen_doc_keys: set = self._get_seen_doc_keys(pointer)
 
         if prev_file_id:
-            data = self._download_workbook(slack_client, prev_file_id)
-            wb = self._load_workbook(data)
+            try:
+                data = self._download_workbook(slack_client, prev_file_id)
+                wb = self._load_workbook(data)
+            except Exception as exc:
+                err_str = str(exc)
+                if "file_deleted" in err_str or "file_not_found" in err_str:
+                    logger.warning(
+                        "Previous workbook %s gone from Slack — starting fresh FY%s.",
+                        prev_file_id, fy,
+                    )
+                    prev_file_id = None
+                    seen_doc_keys = set()
+                    wb = self._fresh_bank_workbook() if kind == "bank" else self._fresh_invoice_workbook(software)
+                else:
+                    raise
         elif kind == "bank":
             wb = self._fresh_bank_workbook()
         else:
@@ -471,6 +482,7 @@ class SlackLedgerStore:
             rows = batch.get("rows") or []
 
             # Firestore-side dedupe: skip entirely if this doc was already processed.
+            logger.debug("append_rows: doc_key=%r match=%s", doc_key, doc_key in seen_doc_keys)
             if doc_key in seen_doc_keys:
                 deduped += 1
                 continue
@@ -490,6 +502,16 @@ class SlackLedgerStore:
             else:
                 appended += n
                 seen_doc_keys.add(doc_key)
+
+        # Skip the expensive download→re-upload cycle when nothing was appended
+        # (every batch was already in seen_doc_keys).
+        if appended == 0:
+            return {
+                "slack_file_id": prev_file_id or "",
+                "appended": 0,
+                "deduped": deduped,
+                "filename": filename,
+            }
 
         new_bytes = self._to_bytes(wb)
         result = slack_client.files_upload_v2(
