@@ -202,15 +202,15 @@ def find_interrupt_id(event: Any) -> Optional[str]:
 #: (e.g. ``"document_workflow@1/classify_node@1"``); :func:`event_node_name`
 #: pulls the trailing node name and we look it up here to drive the live status.
 _STAGE_LABELS: dict[str, str] = {
-    "classify_node": "🔍 Classifying…",
-    "extract_invoice_node": "📊 Extracting (invoice)…",
-    "extract_bank_node": "📊 Extracting (bank statement)…",
-    "categorize_node": "🗂️ Categorising…",
-    "tax_node": "🧮 Reconciling…",
-    "approval_gate": "🧮 Reconciling…",
-    "route_node": "🧾 Routing…",
-    "consolidate_node": "📒 Building ledger…",
-    "deliver_node": "📦 Finalising…",
+    "classify_node": "🔍 Taking a look at this document…",
+    "extract_invoice_node": "🧾 Looks like an invoice — reading the line items…",
+    "extract_bank_node": "🏦 Looks like a bank statement — reading each transaction…",
+    "categorize_node": "🗂️ Matching each line to your chart of accounts…",
+    "tax_node": "🧮 Checking the tax treatment and reconciling…",
+    "approval_gate": "🧮 Checking the tax treatment and reconciling…",
+    "route_node": "🧭 Working out where this belongs…",
+    "consolidate_node": "📒 Writing it into your workbook…",
+    "deliver_node": "📦 Wrapping up…",
 }
 
 
@@ -317,13 +317,23 @@ async def persist_and_deliver(
         )
 
     # When every batch was deduped (already in seen_doc_keys), skip the
-    # agent-generated summary ("Added Sep 2025 …") and explain the dedup.
+    # agent-generated summary ("Added Sep 2025 …") and explain the dedup in the
+    # same warm voice — naming WHAT is already recorded (month / invoice no.).
     if append_result.get("deduped", 0) > 0 and append_result.get("appended", 0) == 0:
+        kind = payload.get("kind") or "invoice"
+        if kind == "bank":
+            where = "bank statement"
+            all_rows = [r for b in batches for r in (b.get("rows") or [])]
+            label = nodes._month_label(all_rows)
+        else:
+            where = "ledger"
+            dk = str(batches[0].get("doc_key") or "") if batches else ""
+            label = dk.split(":")[-1] if ":" in dk else ""
+        named = f"**{label}** " if label else "this document "
         _post_message(
             slack_client, channel_id,
-            "📋 This document was already recorded in your ledger — nothing new to add.\n"
-            "If you need to re-process it, upload the file again with a message like "
-            '"re-process this".',
+            f"📋 I already have {named}in your {where} — nothing new to add.\n"
+            'Want me to replace it? Re-upload the file with a note like "re-process this".',
             thread_ts=thread_ts,
         )
         append_result["all_deduped"] = True

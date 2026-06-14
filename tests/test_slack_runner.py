@@ -812,7 +812,9 @@ def test_event_node_name_parses_trailing_node():
 
 
 def test_event_stage_label_maps_known_nodes():
-    assert "Classifying" in event_stage_label(_node_event("classify_node"))
+    # Classify announces it's looking at the document (warmer, not "Classifying").
+    assert "document" in event_stage_label(_node_event("classify_node")).lower()
+    # Extract labels name WHAT the doc was identified as.
     assert "bank statement" in event_stage_label(_node_event("extract_bank_node"))
     assert "invoice" in event_stage_label(_node_event("extract_invoice_node"))
     # Unmapped / untagged events do not trigger a status change.
@@ -862,9 +864,10 @@ def test_process_file_event_posts_status_once_and_updates_per_stage():
     # returned ts is "1.000" (FakeSlackClient numbers posts 1-based).
     status_ts = "1.000"
     update_texts = [u["text"] for u in slack.updates]
-    assert any("Classifying" in t for t in update_texts)
-    assert any("Extracting" in t for t in update_texts)
-    assert any("Reconciling" in t for t in update_texts)
+    lowered = [t.lower() for t in update_texts]
+    assert any("taking a look" in t for t in lowered)            # classify
+    assert any("reading the line items" in t for t in lowered)   # extract (invoice)
+    assert any("reconciling" in t for t in lowered)              # tax/approval
     assert update_texts[-1] == "✅ Processed"
     # Every update targeted the single status message ts.
     assert all(u["ts"] == status_ts for u in slack.updates)
