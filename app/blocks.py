@@ -444,6 +444,37 @@ def export_unavailable_blocks() -> list:
     ]
 
 
+def job_summary_text(
+    *,
+    total: int,
+    posted: int,
+    needs_review: int,
+    software: str = "",
+    fy: str = "",
+) -> str:
+    """One-line Job summary for a batch drop ([[Batch (Job)]] per ADR-0007).
+
+    Posted up-front as the single top-level message for a multi-file drop; the
+    per-doc status / approval cards go in-thread under it, then this summary
+    is ``chat_update``-d with the final tally.
+
+    Args:
+        total:        N files dropped in the batch.
+        posted:       count with ``status == "delivered"`` (no review needed).
+        needs_review: count with ``status == "paused"`` (HITL review card).
+        software:     optional accounting software label (Xero / QBS Ledger) —
+                      passed through when the batch targets a single FY + target.
+        fy:           optional financial year string — only shown when the
+                      batch has a single FY (mixed-FY drops leave it blank).
+    """
+    tgt = f" {software}" if software else ""
+    fyl = f" FY{fy}" if fy else ""
+    head = f"📥 Processed {total} document{'s' if total != 1 else ''}"
+    body = f" — {posted} posted to your{tgt}{fyl} ledger"
+    tail = f", {needs_review} need your review" if needs_review else ""
+    return head + body + tail
+
+
 def approval_card_blocks(summary: str, op_id: str, doc_label: str | None = None) -> list:
     """HITL Approve / Edit / Reject card for a document that needs human review.
 

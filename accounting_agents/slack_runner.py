@@ -1176,6 +1176,34 @@ def build_async_app(
         # event_id is redelivered.
         files = event.get("files") or []
         if subtype == "file_share" or files:
+            # ADR-0007: one Job summary message per batch drop, threaded.
+            # Post the summary up-front (initial text), pass its ``ts`` as
+            # ``thread_ts`` into each ``process_file_event`` so every per-doc
+            # status / approval / delivery card lands under it, then edit the
+            # summary in-place with the final tally once the loop finishes.
+            from app.blocks import job_summary_text
+
+            total = len(files)
+            # Post the placeholder summary (top-level, no thread_ts).
+            try:
+                resp = sync_client.chat_postMessage(
+                    channel=channel_id,
+                    text=f"📥 Processing {total} document{'s' if total != 1 else ''}…",
+                )
+            except Exception:  # noqa: BLE001 - cosmetic; never abort the upload
+                logger.exception("failed to post Job summary in %s", channel_id)
+                resp = None
+            summary_ts: Optional[str] = None
+            if resp is not None:
+                data = resp.data if hasattr(resp, "data") else resp
+                if isinstance(data, dict):
+                    summary_ts = data.get("ts")
+
+            posted = 0
+            needs_review = 0
+            software_hint = ""
+            fy_hint = ""
+
             for f in files:
                 file_id = f.get("id") if isinstance(f, dict) else None
                 if not file_id:
@@ -1189,7 +1217,7 @@ def build_async_app(
                     "file upload received via message: file=%s channel=%s",
                     file_id, channel_id,
                 )
-                await process_file_event(
+                result = await process_file_event(
                     runner=runner,
                     ledger_store=ledger_store,
                     db=db,
@@ -1198,7 +1226,40 @@ def build_async_app(
                     file_id=file_id,
                     app_name=app_name,
                     download_fn=download_pdf_bytes,
+                    thread_ts=summary_ts,
                 )
+                # Aggregate per-doc outcomes for the final tally edit.
+                status = (result or {}).get("status")
+                if status == "delivered":
+                    posted += 1
+                    # Borrow the first delivered doc's software + fy for the tally
+                    # (mixed-FY drops are rare and ambiguous — first wins).
+                    append = (result or {}).get("append") or {}
+                    if not software_hint and append.get("software"):
+                        software_hint = str(append["software"])
+                    if not fy_hint and append.get("fy"):
+                        fy_hint = str(append["fy"])
+                elif status == "paused":
+                    needs_review += 1
+
+            # Edit the summary in-place with the final tally (ADR-0007).
+            if summary_ts:
+                try:
+                    final_text = job_summary_text(
+                        total=total,
+                        posted=posted,
+                        needs_review=needs_review,
+                        software=software_hint,
+                        fy=fy_hint,
+                    )
+                    sync_client.chat_update(
+                        channel=channel_id,
+                        ts=summary_ts,
+                        text=final_text,
+                    )
+                except Exception:  # noqa: BLE001 - cosmetic
+                    logger.exception("failed to update Job summary in %s", channel_id)
+
             return
 
         # Text-question path: plain user message with no files.

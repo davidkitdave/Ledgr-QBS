@@ -10,6 +10,7 @@ from app.blocks import (
     approval_card_blocks,
     coa_prompt_blocks,
     invoice_edit_modal,
+    job_summary_text,
     onboarding_modal,
     profile_summary_blocks,
     result_card,
@@ -528,4 +529,34 @@ class TestInvoiceEditModal:
             "acct_0", "tax_0", "amt_0",
             "acct_1", "tax_1", "amt_1",
         ]
+
+
+# --------------------------------------------------------------------------- #
+# Job summary line for a batch drop (Task 9 / ADR-0007)
+# --------------------------------------------------------------------------- #
+
+
+class TestJobSummaryText:
+
+    def test_includes_total_posted_needs_review_software_fy(self):
+        t = job_summary_text(total=10, posted=7, needs_review=3, software="Xero", fy="2026")
+        assert "10" in t and "7" in t and "3" in t and "Xero" in t and "FY2026" in t
+
+    def test_singular_when_one_document(self):
+        # No trailing 's' on "document" when total == 1.
+        t = job_summary_text(total=1, posted=1, needs_review=0, software="Xero", fy="2026")
+        assert "document " in t or "document." in t or "document—" in t or "1 document" in t
+        assert "documents" not in t
+
+    def test_omits_needs_review_suffix_when_zero(self):
+        t = job_summary_text(total=2, posted=2, needs_review=0, software="Xero", fy="2026")
+        assert "need your review" not in t
+
+    def test_blank_software_and_fy_omitted(self):
+        # No extra "to your  ledger" / " FY" tokens when software/fy are blank.
+        t = job_summary_text(total=3, posted=2, needs_review=1, software="", fy="")
+        assert "your ledger" in t or "ledger" in t  # headline still mentions the ledger
+        # No double-space artefacts from the dropped prefixes.
+        assert "to your  " not in t
+        assert " FY" not in t
 

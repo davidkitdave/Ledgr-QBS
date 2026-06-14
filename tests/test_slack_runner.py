@@ -1191,6 +1191,161 @@ def test_message_text_only_routes_to_question_not_file():
 
 
 # =========================================================================== #
+# Task 9: One Job summary per batch drop (collapse per-doc spam into 1 thread)
+# =========================================================================== #
+
+
+def _capture_message_handler_with_slack_client(injected_slack: FakeSlackClient):
+    """Same as ``_capture_message_handler`` but injects ``injected_slack`` as the
+    sync WebClient so we can read its recorded ``chat_postMessage`` /
+    ``chat_update`` calls — the outer handler must post ONE summary + edit it.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from app.slack_app import _SeenEvents
+    from accounting_agents import slack_runner
+
+    registered = {}
+    fake_app = MagicMock()
+
+    def event_decorator(name):
+        def decorator(fn):
+            registered[name] = fn
+            return fn
+        return decorator
+
+    fake_app.event = event_decorator
+    fake_app.action = lambda *a, **k: (lambda fn: fn)
+    fake_app.view = lambda *a, **k: (lambda fn: fn)
+    fake_app.command = lambda *a, **k: (lambda fn: fn)
+
+    fresh_seen = _SeenEvents()
+    rm = MagicMock()
+    rm.app_name = "acc"
+
+    with patch.object(slack_runner, "_seen", fresh_seen), \
+         patch("slack_bolt.async_app.AsyncApp", return_value=fake_app), \
+         patch("slack_sdk.WebClient", return_value=injected_slack), \
+         patch("invoice_processing.export.client_context.InMemoryClientStore"):
+        build_async_app(
+            runner=rm,
+            ledger_store=MagicMock(),
+            db=MagicMock(),
+        )
+
+    return registered["message"], fresh_seen
+
+
+def test_batch_drop_posts_one_job_summary_then_threads_per_doc():
+    """3 files dropped → exactly ONE top-level chat_postMessage + 3 process_file_event
+    calls each carrying thread_ts=<summary_ts> + ONE chat_update editing the summary
+    with the final tally (ADR-0007).
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from accounting_agents import slack_runner
+    from app.slack_app import _SeenEvents
+
+    # The handler reads ``_seen`` from the module globals at CALL time (not at
+    # build time), so reset it here to a fresh instance for hermetic dedup.
+    slack_runner._seen = _SeenEvents()
+    slack = FakeSlackClient()
+    handler, _ = _capture_message_handler_with_slack_client(slack)
+
+    body = {"event_id": "Ev-batch-1"}
+    event = {
+        "type": "message",
+        "subtype": "file_share",
+        "ts": "222.001",
+        "channel": "C-batch",
+        "files": [{"id": "FA1"}, {"id": "FA2"}, {"id": "FA3"}],
+    }
+    fake_client = MagicMock()
+    # Mix of delivered + paused per doc → drives the needs_review tail.
+    mock_pfe = AsyncMock(side_effect=[
+        {"status": "delivered", "append": {"appended": 1, "software": "Xero", "fy": "2026"}},
+        {"status": "delivered", "append": {"appended": 1, "software": "Xero", "fy": "2026"}},
+        {"status": "paused", "op_id": "OP1"},
+    ])
+
+    with patch.object(slack_runner, "process_file_event", mock_pfe), \
+         patch.object(slack_runner, "download_pdf_bytes", return_value=b"%PDF fake"):
+        asyncio.run(handler(event=event, body=body, client=fake_client))
+
+    # --- ONE top-level summary message posted by the outer handler ---
+    top_level = [p for p in slack._posts if not p.get("thread_ts")]
+    assert len(top_level) == 1, f"expected 1 top-level summary, got {len(top_level)}: {top_level}"
+    summary_text = top_level[0].get("text", "")
+    assert "3" in summary_text  # total count surfaced in the placeholder
+    assert "Processing" in summary_text  # initial placeholder
+
+    summary_ts = top_level[0].get("ts")  # e.g. "1.000"
+    assert summary_ts, "summary message must carry a ts"
+
+    # --- each process_file_event was called with thread_ts=<summary_ts> ---
+    assert mock_pfe.call_count == 3
+    for c in mock_pfe.call_args_list:
+        assert c.kwargs.get("thread_ts") == summary_ts, (
+            f"per-doc call must carry thread_ts={summary_ts}, got {c.kwargs}"
+        )
+
+    # --- after the loop: ONE chat_update edits the summary with the final tally ---
+    assert len(slack.updates) == 1
+    upd = slack.updates[0]
+    assert upd.get("channel") == "C-batch"
+    assert upd.get("ts") == summary_ts
+    final_text = upd.get("text", "")
+    assert "Processed" in final_text  # tally uses the helper's template
+    assert "2" in final_text  # posted count
+    assert "1" in final_text  # needs_review count
+    assert "Xero" in final_text or "FY2026" in final_text
+
+
+def test_single_file_drop_still_posts_summary_then_thread():
+    """A 1-file drop also collapses to one summary message + one threaded doc card.
+
+    Behaviour parity with multi-file drops — the user always sees ONE Job summary
+    per upload event, regardless of file count (ADR-0007).
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from accounting_agents import slack_runner
+    from app.slack_app import _SeenEvents
+
+    slack_runner._seen = _SeenEvents()
+    slack = FakeSlackClient()
+    handler, _ = _capture_message_handler_with_slack_client(slack)
+
+    body = {"event_id": "Ev-batch-2"}
+    event = {
+        "type": "message",
+        "subtype": "file_share",
+        "ts": "222.002",
+        "channel": "C-single",
+        "files": [{"id": "FS1"}],
+    }
+    fake_client = MagicMock()
+    mock_pfe = AsyncMock(return_value={
+        "status": "delivered",
+        "append": {"appended": 1, "software": "QBS Ledger", "fy": "2026"},
+    })
+
+    with patch.object(slack_runner, "process_file_event", mock_pfe), \
+         patch.object(slack_runner, "download_pdf_bytes", return_value=b"%PDF fake"):
+        asyncio.run(handler(event=event, body=body, client=fake_client))
+
+    top_level = [p for p in slack._posts if not p.get("thread_ts")]
+    assert len(top_level) == 1
+    assert "Processing" in top_level[0].get("text", "")
+    assert mock_pfe.call_count == 1
+    assert mock_pfe.call_args.kwargs.get("thread_ts") == top_level[0].get("ts")
+    # After-loop edit happens once (single delivered doc → 1 posted, 0 needs review).
+    assert len(slack.updates) == 1
+    assert "Processed" in slack.updates[0].get("text", "")
+    assert "1" in slack.updates[0].get("text", "")
+
+
+# =========================================================================== #
 # Task 5: doc_label built from run state, posted on card, persisted on interrupt
 # =========================================================================== #
 
