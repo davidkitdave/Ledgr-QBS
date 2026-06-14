@@ -624,6 +624,38 @@ def _doc_label_from_state(state: dict) -> str:
     return f"📄 {fname}"
 
 
+def _persist_corrections(client_store, state: dict, edits: dict) -> None:
+    """Persist each account/tax edit as a per-client vendor Correction (ADR-0004).
+
+    For every line edit that carries ``account_code`` or ``tax_code``, write a
+    Correction keyed by the invoice's vendor so the next document from the same
+    vendor auto-applies the human's mapping. Lines whose only change was
+    ``amount`` (a one-off variance, not a vendor rule) are skipped. Reads the
+    canonical vendor from the first normalized invoice's ``vendor_name`` with
+    ``issuer_name`` as the sales-direction alias. No-ops cleanly when
+    ``client_id`` is missing or the invoice list is empty so callers never
+    crash on partial state.
+    """
+    client_id = state.get("client_id") if isinstance(state, dict) else None
+    invs = (state.get(nodes.NORMALIZED_KEY) or []) if isinstance(state, dict) else []
+    if not client_id or not invs:
+        return
+    first = invs[0] if isinstance(invs[0], dict) else {}
+    vendor = first.get("vendor_name") or first.get("issuer_name")
+    if not vendor:
+        return
+    for e in (edits.get("lines") or []):
+        if not isinstance(e, dict):
+            continue
+        if e.get("account_code") or e.get("tax_code"):
+            client_store.add_correction(
+                client_id=client_id,
+                vendor=vendor,
+                account_code=e.get("account_code"),
+                tax_code=e.get("tax_code"),
+            )
+
+
 def _edits_from_view_state(view: dict) -> dict:
     """Convert a ``view_submission`` state into the line-edits dict.
 
@@ -1049,6 +1081,21 @@ def build_async_app(
             runner=runner, ledger_store=ledger_store, db=db, slack_client=sync_client,
             op_id=op_id, decision="edit", edits=edits, app_name=app_name,
         )
+        # ADR-0004: re-read the now-resumed session state and persist each
+        # account/tax edit as a per-client vendor Correction so the next
+        # document from the same vendor auto-applies the human's mapping.
+        # Re-reading (not just reusing `edits`) reflects any downstream
+        # mutations the resume produced. Best-effort: a read failure or a
+        # missing client_store must never abort the handler.
+        if op_id:
+            try:
+                interrupt = read_interrupt(db, op_id) or {}
+                state = await _read_session_state(runner, app_name, interrupt)
+                _persist_corrections(_DEFAULT_CLIENT_STORE, state, edits)
+            except Exception:  # noqa: BLE001 - persistence is best-effort
+                logger.exception(
+                    "failed to persist corrections for op_id %s", op_id,
+                )
 
     @async_app.action("reject")
     async def _reject(ack, body, client):

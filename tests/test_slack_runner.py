@@ -1237,3 +1237,94 @@ def test_edits_from_view_state_builds_line_edits():
     edits = _edits_from_view_state(view)
     assert edits == {"lines": [{"index": 0, "account_code": "6010",
                                 "tax_code": "ZR", "amount": 44.74}]}
+
+
+# =========================================================================== #
+# Task 8: an edit becomes a per-client Correction (ADR-0004)
+# =========================================================================== #
+
+
+def test_persist_corrections_writes_vendor_mapping():
+    """One Correction per edited line that carries account_code / tax_code.
+
+    Mirrors the spec test verbatim: a single line with both fields produces one
+    ``add_correction`` call with the invoice's vendor (taken from the first
+    normalized invoice's ``vendor_name``).
+    """
+    from accounting_agents.slack_runner import _persist_corrections
+
+    saved = []
+
+    class _Store:
+        def add_correction(self, *, client_id, vendor, account_code=None, tax_code=None):
+            saved.append((client_id, vendor, account_code, tax_code))
+
+    state = {
+        "client_id": "CL-1",
+        nodes.NORMALIZED_KEY: [
+            {"vendor_name": "Hotel Booking",
+             "lines": [{"description": "Room", "account_code": "6010", "tax_code": "ZR"}]}
+        ],
+    }
+    edits = {"lines": [{"index": 0, "account_code": "6010", "tax_code": "ZR"}]}
+    _persist_corrections(_Store(), state, edits)
+    assert saved == [("CL-1", "Hotel Booking", "6010", "ZR")]
+
+
+def test_persist_corrections_skips_lines_with_no_code_fields():
+    """A line that only changed ``amount`` (no account_code, no tax_code) is skipped.
+
+    Edits without either code field are not entity-memory worthy — the user's
+    amount tweak is a one-off variance, not a vendor rule.
+    """
+    from accounting_agents.slack_runner import _persist_corrections
+
+    saved = []
+
+    class _Store:
+        def add_correction(self, *, client_id, vendor, account_code=None, tax_code=None):
+            saved.append((client_id, vendor, account_code, tax_code))
+
+    state = {
+        "client_id": "CL-1",
+        nodes.NORMALIZED_KEY: [{"vendor_name": "Acme"}],
+    }
+    edits = {"lines": [{"index": 0, "amount": 12.34}]}
+    _persist_corrections(_Store(), state, edits)
+    assert saved == []
+
+
+def test_persist_corrections_uses_issuer_name_alias_when_vendor_missing():
+    """``issuer_name`` (sales-direction alias) is the fallback vendor field."""
+    from accounting_agents.slack_runner import _persist_corrections
+
+    saved = []
+
+    class _Store:
+        def add_correction(self, *, client_id, vendor, account_code=None, tax_code=None):
+            saved.append((client_id, vendor, account_code, tax_code))
+
+    state = {
+        "client_id": "CL-1",
+        nodes.NORMALIZED_KEY: [{"issuer_name": "BigBuyer Ltd"}],
+    }
+    edits = {"lines": [{"index": 0, "account_code": "5000"}]}
+    _persist_corrections(_Store(), state, edits)
+    assert saved == [("CL-1", "BigBuyer Ltd", "5000", None)]
+
+
+def test_persist_corrections_noop_without_client_id_or_invoice():
+    """Defensive: missing client_id or empty invoice list ⇒ no writes (no crash)."""
+    from accounting_agents.slack_runner import _persist_corrections
+
+    saved = []
+
+    class _Store:
+        def add_correction(self, *, client_id, vendor, account_code=None, tax_code=None):
+            saved.append((client_id, vendor, account_code, tax_code))
+
+    _persist_corrections(_Store(), {}, {"lines": [{"index": 0, "account_code": "6010"}]})
+    _persist_corrections(_Store(), {"client_id": "X"}, {"lines": [{"index": 0, "account_code": "6010"}]})
+    _persist_corrections(_Store(), {"client_id": "X", nodes.NORMALIZED_KEY: []},
+                         {"lines": [{"index": 0, "account_code": "6010"}]})
+    assert saved == []
