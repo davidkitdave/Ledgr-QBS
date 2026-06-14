@@ -87,12 +87,18 @@ How to choose the lines:
 Per line:
 - description = the category/summary label, e.g. 'Telecommunication services - standard rated',
   'International roaming - zero rated'.
-- net_amount = the ex-GST subtotal for that group.
-- gst_amount = GST for that group (0 for ZR/ES).
+- net_amount = the ex-GST subtotal for that group.  IMPORTANT: discount lines must use a
+  NEGATIVE net_amount (e.g. a Trip.com promotional discount of 84.06 → net_amount = -84.06).
+  Do NOT fold discounts into other lines or into the subtotal — keep them as separate lines
+  with negative net_amount so that Σ(all line net_amounts) == document subtotal.
+- gst_amount = GST on this line (0 for ZR/ES, and also negative when applied to a discount line).
 - tax_label normalized to one of SR (standard/GST/9%/G), ZR (zero-rated/0%/Z/international),
   ES (exempt/E), OS (out-of-scope), or NT (no tax). If only a single-letter code (G/Z/E) is
   printed, map G→SR, Z→ZR, E→ES.
 - Leave quantity and unit_amount null for summary lines.
+- Tax and service-charge lines (e.g. Agoda's "Tax and service charges", hotel service fee,
+  tourism levy) must be captured as their own lines with the correct net_amount. Do NOT drop
+  them — without these lines Σ(net_amounts) will not equal the document total.
 
 Document-level fields:
 - issuer_name = the supplier/seller (letterhead/"From"); bill_to_name = who it is addressed to.
