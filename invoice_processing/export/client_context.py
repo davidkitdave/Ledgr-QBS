@@ -409,6 +409,32 @@ class InMemoryClientStore:
         if ctx is not None:
             ctx.status = status
 
+    def add_correction(self, *, client_id: str, vendor: str,
+                       account_code: Optional[str] = None,
+                       tax_code: Optional[str] = None) -> None:
+        """Upsert a per-client vendor -> {account_code, tax_code} Correction.
+
+        Mirrors :meth:`FirestoreClientStore.add_correction` for the in-process
+        store so tests / local dev can exercise the HITL learning hook
+        without touching GCP. Merges into the existing ``entity_memory`` entry
+        for the same vendor, or appends a new one.
+        """
+        if not (client_id and vendor):
+            return
+        ctx = self._by_id.get(client_id)
+        if ctx is None:
+            return
+        for e in ctx.entity_memory:
+            if e.name == vendor:
+                if account_code:
+                    e.mapping_code = account_code
+                if tax_code:
+                    e.tax_code = tax_code
+                return
+        ctx.entity_memory.append(EntityMemoryEntry(
+            name=vendor, mapping_code=account_code, tax_code=tax_code,
+        ))
+
     @classmethod
     def from_setup_dir(cls, directory: str | Path) -> "InMemoryClientStore":
         """Load every ``*Client Setup*.xlsx`` under ``directory`` (recursively),
@@ -661,3 +687,31 @@ class FirestoreClientStore:
         """Merge-update the status field on ``clients/{client_id}``."""
         db = self._firestore()
         db.collection(self._collection).document(client_id).set({"status": status}, merge=True)
+
+    def add_correction(self, *, client_id: str, vendor: str,
+                       account_code: Optional[str] = None,
+                       tax_code: Optional[str] = None) -> None:
+        """Upsert a per-client vendor -> {account_code, tax_code} Correction.
+
+        ADR-0004: when a human edits an extracted invoice's account_code or
+        tax_code, that mapping is persisted as a Correction under
+        ``clients/{client_id}/entity_memory/{vendor}`` so the next document
+        from the same vendor auto-applies it. ``entity_memory`` is the
+        spec-defined learning collection (already wired into categorizer
+        ``vendor_name`` resolution).
+        """
+        if not (client_id and vendor):
+            return
+        db = self._firestore()
+        ref = (
+            db.collection(self._collection)
+            .document(client_id)
+            .collection("entity_memory")
+            .document(vendor)
+        )
+        patch: dict[str, str] = {"name": vendor}
+        if account_code:
+            patch["mapping_code"] = account_code
+        if tax_code:
+            patch["tax_code"] = tax_code
+        ref.set(patch, merge=True)

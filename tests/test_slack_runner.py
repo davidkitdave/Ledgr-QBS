@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 
 from types import SimpleNamespace
-
 from google.adk.apps import App, ResumabilityConfig
 from google.adk.events.event import Event
 from google.adk.runners import Runner
@@ -31,6 +30,9 @@ from accounting_agents.nodes import ApproveDecision, approval_gate
 from accounting_agents.sessions import FirestoreSessionService
 from accounting_agents.slack_runner import (
     _derive_setup_prefill,
+    _doc_label_from_state,
+    _edits_from_view_state,
+    _persist_corrections,
     build_async_app,
     deslugify_channel_name,
     event_node_name,
@@ -145,6 +147,95 @@ def _ledger_payload(sheet="Purchase", doc_key="F1:Purchase:INV-1"):
     }
 
 
+# --------------------------------------------------------------------------- #
+# Test fixture: a Firestore-backed client store with a known QBS profile so
+# process_file_event's soft-gate lets the run proceed.
+# --------------------------------------------------------------------------- #
+_TEST_PROFILE: dict = {
+    "client_id": "c1",
+    "client_name": "Test Client",
+    "fye_month": 12,
+    "accounting_software": "QBS Ledger",
+    "gst_registered": True,
+    "region": "SINGAPORE",
+    "base_currency": "SGD",
+    "status": "active",
+}
+
+
+def _seeded_client_store(db: FakeFirestore, channel_id: str = "C1",
+                        client_id: str = "c1") -> "FirestoreClientStore":
+    """Write a minimal QBS client profile + channel reverse-index into ``db``
+    and return a :class:`FirestoreClientStore` bound to that fake. The default
+    channel/client ids match the rest of this test module.
+    """
+    from invoice_processing.export.client_context import FirestoreClientStore
+
+    profile = dict(_TEST_PROFILE, client_id=client_id)
+    db.collection("clients").document(client_id).set(profile)
+    db.collection("channels").document(channel_id).set({"client_id": client_id})
+    return FirestoreClientStore(client=db)
+
+
+def test_profile_state_delta_includes_software_and_coa():
+    from accounting_agents.slack_runner import _profile_state_delta
+    from invoice_processing.export.client_context import ClientContext, CoaAccount
+
+    class _Store:
+        def get_by_channel(self, channel_id):
+            assert channel_id == "C1"
+            return ClientContext(
+                client_id="CL-1",
+                client_name="Auditair International Pte. Ltd.",
+                accounting_software="Xero",
+                fye_month=10,
+                coa=[CoaAccount(code="6010", description="Travel",
+                                account_type="Expense", financial_statement="P&L",
+                                nature="Dr", keywords="travel")],
+            )
+
+    delta = _profile_state_delta(_Store(), "C1")
+    assert delta["software"] == "Xero"
+    assert delta["client_id"] == "CL-1"
+    assert len(delta["coa"]) == 1
+    # Each COA entry exposes its `key` (the export-stable identifier) — verifies
+    # the helper preserves what the categorizer needs downstream.
+    assert delta["coa"][0]["key"] == "6010"
+    assert delta["coa"][0]["keywords"] == "travel"
+
+
+def test_profile_state_delta_empty_when_no_profile():
+    from accounting_agents.slack_runner import _profile_state_delta
+
+    class _Store:
+        def get_by_channel(self, channel_id):
+            return None
+
+    assert _profile_state_delta(_Store(), "C1") == {}
+
+
+def test_process_file_event_softgates_when_no_profile():
+    slack = FakeSlackClient()
+    db = FakeFirestore()
+    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+
+    class _NoProfileStore:
+        def get_by_channel(self, channel_id):
+            return None
+
+    runner = _FakeRunner([], _ledger_payload())  # should never run
+    result = asyncio.run(
+        process_file_event(
+            runner=runner, ledger_store=store, db=db, slack_client=slack,
+            channel_id="C1", file_id="F1", app_name="acc",
+            download_fn=lambda c, f: b"%PDF-1.4 fake",
+            source_filename="invoice.pdf", client_store=_NoProfileStore(),
+        )
+    )
+    assert result["status"] == "no_profile"
+    assert any("this client set up" in t.lower() for t in _posted_texts(slack))
+
+
 def test_process_file_event_completion_appends_ledger_once():
     slack = FakeSlackClient()
     db = FakeFirestore()
@@ -173,6 +264,7 @@ def test_process_file_event_completion_appends_ledger_once():
             app_name="acc",
             download_fn=fake_download,
             source_filename="invoice.pdf",
+            client_store=_seeded_client_store(db),
         )
     )
 
@@ -208,6 +300,7 @@ def test_process_file_event_interrupt_posts_card_and_writes_doc():
             file_id="F1",
             app_name="acc",
             download_fn=lambda c, f: b"%PDF fake",
+            client_store=_seeded_client_store(db),
         )
     )
 
@@ -386,6 +479,306 @@ def test_reject_action_resumes_without_appending():
 
 
 # =========================================================================== #
+# Task 7: Edit action + view_submission handlers (modal-based per-line edits)
+# =========================================================================== #
+
+
+class _FakeActionViewRunner:
+    """Minimal Runner for Edit-modal tests: app_name + session_service stub."""
+
+    def __init__(self, app_name="acc", session_service=None):
+        self.app_name = app_name
+        self.session_service = session_service
+
+
+class _FakeSessionSvc:
+    """In-memory session service stub keyed by (user_id, session_id)."""
+
+    def __init__(self, sessions):
+        self._sessions = sessions
+
+    async def get_session(self, *, app_name, user_id, session_id):
+        return self._sessions.get((user_id, session_id))
+
+
+def _capture_hitl_handlers(runner_mock=None, ledger_store_mock=None, db_mock=None):
+    """Build the Bolt app with fakes and capture the ``edit`` action + ``ledgr_invoice_edit`` view.
+
+    Mirrors ``_capture_message_handler`` but for the action/view decorators. The
+    fake app records registered actions/views in a dict keyed by their first
+    positional argument (the action_id or callback_id), so callers can retrieve
+    the actual coroutine that ``build_async_app`` registered.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from app.slack_app import _SeenEvents
+    from accounting_agents import slack_runner
+
+    registered = {"actions": {}, "views": {}}
+
+    def action_decorator(action_id, *a, **k):
+        def decorator(fn):
+            registered["actions"][action_id] = fn
+            return fn
+        return decorator
+
+    def view_decorator(callback_id, *a, **k):
+        def decorator(fn):
+            registered["views"][callback_id] = fn
+            return fn
+        return decorator
+
+    fake_app = MagicMock()
+    fake_app.event = lambda *a, **k: (lambda fn: fn)
+    fake_app.action = action_decorator
+    fake_app.view = view_decorator
+    fake_app.command = lambda *a, **k: (lambda fn: fn)
+
+    fresh_seen = _SeenEvents()
+    rm = runner_mock or _FakeActionViewRunner()
+
+    with patch.object(slack_runner, "_seen", fresh_seen), \
+         patch("slack_bolt.async_app.AsyncApp", return_value=fake_app), \
+         patch("invoice_processing.export.client_context.InMemoryClientStore"):
+        build_async_app(
+            runner=rm,
+            ledger_store=ledger_store_mock or MagicMock(),
+            db=db_mock or MagicMock(),
+        )
+
+    return registered["actions"]["edit"], registered["views"]["ledgr_invoice_edit"]
+
+
+def test_edit_action_opens_invoice_modal_with_proposed_lines():
+    """Clicking Edit MUST call views_open with a well-formed modal (callback_id + op_id).
+
+    The modal body is pre-filled from the paused session's normalized invoice
+    lines + COA, so the user can correct the fields in-place before resubmitting.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from accounting_agents import slack_runner
+
+    db = FakeFirestore()
+    # Seed the HITL interrupt correlation doc so the handler can read session state.
+    write_interrupt(
+        db, "OP1", session_id="S-OP1", channel_id="C-OP1", slack_file_id="F-OP1", message_ts="1.1",
+    )
+
+    # Seed a paused session whose state the Edit modal reads to pre-fill lines.
+    paused_session = _FakeSession({
+        nodes.NORMALIZED_KEY: [
+            {
+                "lines": [
+                    {"description": "Room", "account_code": "6010", "tax_code": "SR", "amount": 51.49},
+                    {"description": "Tax", "account_code": None, "tax_code": "ZR", "amount": 3.60},
+                ]
+            }
+        ],
+        "coa": [{"code": "6010", "description": "Travel"}],
+    })
+    session_svc = _FakeSessionSvc({("C-OP1", "S-OP1"): paused_session})
+
+    # Recording fake for the sync WebClient that build_async_app instantiates.
+    sync_client = MagicMock()
+    with patch("slack_sdk.WebClient", return_value=sync_client):
+        edit_handler, _ = _capture_hitl_handlers(
+            runner_mock=_FakeActionViewRunner(session_service=session_svc),
+            db_mock=db,
+        )
+
+    body = {
+        "actions": [{"action_id": "edit", "value": "OP1"}],
+        "trigger_id": "T-EDIT-1",
+        "channel": {"id": "C-OP1"},
+    }
+
+    with patch.object(slack_runner, "read_interrupt") as mock_read, \
+         patch.object(slack_runner, "_read_session_state", AsyncMock(return_value=paused_session.state)):
+        # Make read_interrupt return our seeded doc.
+        mock_read.return_value = {
+            "op_id": "OP1", "user_id": "C-OP1", "session_id": "S-OP1", "channel_id": "C-OP1",
+        }
+        ack = AsyncMock()
+        bolt_client = MagicMock()
+        asyncio.run(edit_handler(ack=ack, body=body, client=bolt_client))
+
+    # The handler MUST ack (within Bolt's 3s window) before opening the modal.
+    ack.assert_awaited_once()
+
+    # views_open was called with trigger_id + a modal carrying the right IDs.
+    sync_client.views_open.assert_called_once()
+    kwargs = sync_client.views_open.call_args.kwargs
+    assert kwargs["trigger_id"] == "T-EDIT-1"
+    view = kwargs["view"]
+    assert view["callback_id"] == "ledgr_invoice_edit"
+    assert view["private_metadata"] == "OP1"
+    # The modal blocks must include the proposed-line prefill (one input group per line).
+    inputs = [b for b in view["blocks"] if b.get("type") == "input"]
+    assert len(inputs) == 6  # 2 lines × (acct + tax + amt)
+
+
+def test_edit_submit_invokes_handle_approval_action_with_parsed_edits():
+    """Submitting the Edit modal MUST call handle_approval_action(decision="edit", edits=...).
+
+    Seats a recorder on ``handle_approval_action``, drives the view handler with
+    a realistic ``view_submission`` body (private_metadata + state.values), and
+    asserts the recorder was called with op_id, decision="edit", and edits
+    parsed from the ``acct_<i>`` / ``tax_<i>`` / ``amt_<i>`` block_ids.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from accounting_agents import slack_runner
+
+    db = FakeFirestore()
+
+    edit_handler, edit_submit_handler = _capture_hitl_handlers(db_mock=db)
+
+    # Build a view_submission body with two edited lines.
+    body = {
+        "view": {
+            "callback_id": "ledgr_invoice_edit",
+            "private_metadata": "OP-SUBMIT-1",
+            "state": {
+                "values": {
+                    "acct_0": {"v": {"selected_option": {"value": "6200"}}},
+                    "tax_0": {"v": {"selected_option": {"value": "ZR"}}},
+                    "amt_0": {"v": {"value": "99.95"}},
+                    "acct_1": {"v": {"selected_option": {"value": "6010"}}},
+                    "tax_1": {"v": {"selected_option": {"value": "SR"}}},
+                    "amt_1": {"v": {"value": "12.00"}},
+                }
+            },
+        }
+    }
+
+    # Record calls to handle_approval_action without actually resuming a workflow.
+    # AsyncMock auto-awaits when patched over an `async def` function.
+    recorder = AsyncMock(return_value={"status": "resumed"})
+
+    with patch.object(slack_runner, "handle_approval_action", recorder):
+        ack = AsyncMock()
+        bolt_client = MagicMock()
+        asyncio.run(edit_submit_handler(ack=ack, body=body, client=bolt_client))
+
+    # Bolt ack must be called within 3s.
+    ack.assert_awaited_once()
+    recorder.assert_called_once()
+    call = recorder.call_args
+    assert call.kwargs["op_id"] == "OP-SUBMIT-1"
+    assert call.kwargs["decision"] == "edit"
+    edits = call.kwargs["edits"]
+    assert edits == {
+        "lines": [
+            {"index": 0, "account_code": "6200", "tax_code": "ZR", "amount": 99.95},
+            {"index": 1, "account_code": "6010", "tax_code": "SR", "amount": 12.0},
+        ]
+    }
+
+
+def test_edit_submit_persists_correction_after_resume(monkeypatch):
+    """E2E wiring: view_submission → handle_approval_action → _persist_corrections → add_correction.
+
+    Mirrors ``test_edit_submit_invokes_handle_approval_action_with_parsed_edits``'s
+    scaffold but additionally seeds:
+      - a ``FakeFirestore`` interrupt correlation doc keyed by op_id, AND
+      - a paused session state with ``client_id`` + ``normalized_invoices``
+        so ``_persist_corrections`` (called from the wiring at slack_runner.py:1090-1098)
+        has the inputs it needs to actually invoke ``add_correction``.
+    The module-level ``_DEFAULT_CLIENT_STORE`` is monkeypatched to a recorder so
+    we can assert the wiring reaches the persistence side without standing up
+    a real FirestoreClientStore.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from accounting_agents import slack_runner
+
+    db = FakeFirestore()
+
+    # Seed the interrupt correlation doc the wiring reads at slack_runner.py:1092.
+    # Explicit user_id=channel_id so the doc's user_id matches the session-svc
+    # lookup key (write_interrupt's default is session_id, which would not).
+    write_interrupt(
+        db, "OP-WIRE-1",
+        session_id="S-WIRE-1", channel_id="C-WIRE-1", user_id="C-WIRE-1",
+        slack_file_id="F-WIRE-1", message_ts="1.1",
+    )
+
+    # Seed a paused session whose state carries the ADR-0004 inputs
+    # (client_id + normalized_invoices) that _persist_corrections reads.
+    paused_state = {
+        "client_id": "CL-1",
+        nodes.NORMALIZED_KEY: [
+            {
+                "vendor_name": "Hotel Booking",
+                "lines": [
+                    {"description": "Room", "account_code": "6010", "tax_code": "ZR"},
+                ],
+            }
+        ],
+    }
+    paused_session = _FakeSession(paused_state)
+    session_svc = _FakeSessionSvc({("C-WIRE-1", "S-WIRE-1"): paused_session})
+
+    _, edit_submit_handler = _capture_hitl_handlers(
+        runner_mock=_FakeActionViewRunner(session_service=session_svc),
+        db_mock=db,
+    )
+
+    # view_submission body: one edited line, account_code + tax_code (amount
+    # omitted to mirror the natural UI path — _persist_corrections reads only
+    # account_code / tax_code).
+    body = {
+        "view": {
+            "callback_id": "ledgr_invoice_edit",
+            "private_metadata": "OP-WIRE-1",
+            "state": {
+                "values": {
+                    "acct_0": {"v": {"selected_option": {"value": "6010"}}},
+                    "tax_0":  {"v": {"selected_option": {"value": "ZR"}}},
+                }
+            },
+        }
+    }
+
+    # Recorder for handle_approval_action (mirrors Task 7's pattern).
+    approval_recorder = AsyncMock(return_value={"status": "resumed"})
+
+    # Recording fake for the default client store the wiring uses.
+    correction_calls = []
+
+    class _RecordingStore:
+        def add_correction(self, *, client_id, vendor, account_code=None, tax_code=None):
+            correction_calls.append(
+                {"client_id": client_id, "vendor": vendor,
+                 "account_code": account_code, "tax_code": tax_code}
+            )
+
+    monkeypatch.setattr(slack_runner, "_DEFAULT_CLIENT_STORE", _RecordingStore())
+
+    with patch.object(slack_runner, "handle_approval_action", approval_recorder):
+        ack = AsyncMock()
+        bolt_client = MagicMock()
+        asyncio.run(edit_submit_handler(ack=ack, body=body, client=bolt_client))
+
+    # 1. The view handler still acks + still drives handle_approval_action.
+    ack.assert_awaited_once()
+    approval_recorder.assert_called_once()
+    assert approval_recorder.call_args.kwargs["op_id"] == "OP-WIRE-1"
+    assert approval_recorder.call_args.kwargs["decision"] == "edit"
+
+    # 2. The wiring reached _persist_corrections → add_correction exactly once,
+    #    with the seeded vendor + account/tax codes from the edited line.
+    assert len(correction_calls) == 1
+    assert correction_calls[0] == {
+        "client_id": "CL-1",
+        "vendor": "Hotel Booking",
+        "account_code": "6010",
+        "tax_code": "ZR",
+    }
+
+
+# =========================================================================== #
 # Stage detection + live status message
 # =========================================================================== #
 
@@ -444,6 +837,7 @@ def test_process_file_event_posts_status_once_and_updates_per_stage():
             app_name="acc",
             download_fn=lambda c, f: b"%PDF fake",
             source_filename="invoice.pdf",
+            client_store=_seeded_client_store(db),
         )
     )
     assert result["status"] == "delivered"
@@ -513,6 +907,7 @@ def test_instant_ack_reaction_and_status_before_semaphore_heavy_work():
             app_name="acc",
             download_fn=blocking_download,
             source_filename="invoice.pdf",
+            client_store=_seeded_client_store(db),
         )
         result_holder.append(r)
 
@@ -564,6 +959,7 @@ def test_process_file_event_status_update_failure_does_not_crash_run():
             file_id="F1",
             app_name="acc",
             download_fn=lambda c, f: b"%PDF fake",
+            client_store=_seeded_client_store(db),
         )
     )
     assert result["status"] == "delivered"
@@ -591,6 +987,7 @@ def test_process_file_event_interrupt_sets_needs_review_status():
             file_id="F1",
             app_name="acc",
             download_fn=lambda c, f: b"%PDF fake",
+            client_store=_seeded_client_store(db),
         )
     )
     assert result["status"] == "paused"
@@ -791,3 +1188,393 @@ def test_message_text_only_routes_to_question_not_file():
     mock_aq.assert_called_once()
     assert mock_aq.call_args.kwargs["question"] == "What is my GST balance?"
     assert mock_aq.call_args.kwargs["channel_id"] == "C-qa"
+
+
+# =========================================================================== #
+# Task 9: One Job summary per batch drop (collapse per-doc spam into 1 thread)
+# =========================================================================== #
+
+
+def _capture_message_handler_with_slack_client(injected_slack: FakeSlackClient):
+    """Same as ``_capture_message_handler`` but injects ``injected_slack`` as the
+    sync WebClient so we can read its recorded ``chat_postMessage`` /
+    ``chat_update`` calls — the outer handler must post ONE summary + edit it.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from app.slack_app import _SeenEvents
+    from accounting_agents import slack_runner
+
+    registered = {}
+    fake_app = MagicMock()
+
+    def event_decorator(name):
+        def decorator(fn):
+            registered[name] = fn
+            return fn
+        return decorator
+
+    fake_app.event = event_decorator
+    fake_app.action = lambda *a, **k: (lambda fn: fn)
+    fake_app.view = lambda *a, **k: (lambda fn: fn)
+    fake_app.command = lambda *a, **k: (lambda fn: fn)
+
+    fresh_seen = _SeenEvents()
+    rm = MagicMock()
+    rm.app_name = "acc"
+
+    with patch.object(slack_runner, "_seen", fresh_seen), \
+         patch("slack_bolt.async_app.AsyncApp", return_value=fake_app), \
+         patch("slack_sdk.WebClient", return_value=injected_slack), \
+         patch("invoice_processing.export.client_context.InMemoryClientStore"):
+        build_async_app(
+            runner=rm,
+            ledger_store=MagicMock(),
+            db=MagicMock(),
+        )
+
+    return registered["message"], fresh_seen
+
+
+def test_batch_drop_posts_one_job_summary_then_threads_per_doc():
+    """3 files dropped → exactly ONE top-level chat_postMessage + 3 process_file_event
+    calls each carrying thread_ts=<summary_ts> + ONE chat_update editing the summary
+    with the final tally (ADR-0007).
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from accounting_agents import slack_runner
+    from app.slack_app import _SeenEvents
+
+    # The handler reads ``_seen`` from the module globals at CALL time (not at
+    # build time), so reset it here to a fresh instance for hermetic dedup.
+    slack_runner._seen = _SeenEvents()
+    slack = FakeSlackClient()
+    handler, _ = _capture_message_handler_with_slack_client(slack)
+
+    body = {"event_id": "Ev-batch-1"}
+    event = {
+        "type": "message",
+        "subtype": "file_share",
+        "ts": "222.001",
+        "channel": "C-batch",
+        "files": [{"id": "FA1"}, {"id": "FA2"}, {"id": "FA3"}],
+    }
+    fake_client = MagicMock()
+    # Mix of delivered + paused per doc → drives the needs_review tail.
+    mock_pfe = AsyncMock(side_effect=[
+        {"status": "delivered", "append": {"appended": 1, "software": "Xero", "fy": "2026"}},
+        {"status": "delivered", "append": {"appended": 1, "software": "Xero", "fy": "2026"}},
+        {"status": "paused", "op_id": "OP1"},
+    ])
+
+    with patch.object(slack_runner, "process_file_event", mock_pfe), \
+         patch.object(slack_runner, "download_pdf_bytes", return_value=b"%PDF fake"):
+        asyncio.run(handler(event=event, body=body, client=fake_client))
+
+    # --- ONE top-level summary message posted by the outer handler ---
+    top_level = [p for p in slack._posts if not p.get("thread_ts")]
+    assert len(top_level) == 1, f"expected 1 top-level summary, got {len(top_level)}: {top_level}"
+    summary_text = top_level[0].get("text", "")
+    assert "3" in summary_text  # total count surfaced in the placeholder
+    assert "Processing" in summary_text  # initial placeholder
+
+    summary_ts = top_level[0].get("ts")  # e.g. "1.000"
+    assert summary_ts, "summary message must carry a ts"
+
+    # --- each process_file_event was called with thread_ts=<summary_ts> ---
+    assert mock_pfe.call_count == 3
+    for c in mock_pfe.call_args_list:
+        assert c.kwargs.get("thread_ts") == summary_ts, (
+            f"per-doc call must carry thread_ts={summary_ts}, got {c.kwargs}"
+        )
+
+    # --- after the loop: ONE chat_update edits the summary with the final tally ---
+    assert len(slack.updates) == 1
+    upd = slack.updates[0]
+    assert upd.get("channel") == "C-batch"
+    assert upd.get("ts") == summary_ts
+    final_text = upd.get("text", "")
+    assert "Processed" in final_text  # tally uses the helper's template
+    assert "2" in final_text  # posted count
+    assert "1" in final_text  # needs_review count
+    assert "Xero" in final_text or "FY2026" in final_text
+
+
+def test_single_file_drop_still_posts_summary_then_thread():
+    """A 1-file drop also collapses to one summary message + one threaded doc card.
+
+    Behaviour parity with multi-file drops — the user always sees ONE Job summary
+    per upload event, regardless of file count (ADR-0007).
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from accounting_agents import slack_runner
+    from app.slack_app import _SeenEvents
+
+    slack_runner._seen = _SeenEvents()
+    slack = FakeSlackClient()
+    handler, _ = _capture_message_handler_with_slack_client(slack)
+
+    body = {"event_id": "Ev-batch-2"}
+    event = {
+        "type": "message",
+        "subtype": "file_share",
+        "ts": "222.002",
+        "channel": "C-single",
+        "files": [{"id": "FS1"}],
+    }
+    fake_client = MagicMock()
+    mock_pfe = AsyncMock(return_value={
+        "status": "delivered",
+        "append": {"appended": 1, "software": "QBS Ledger", "fy": "2026"},
+    })
+
+    with patch.object(slack_runner, "process_file_event", mock_pfe), \
+         patch.object(slack_runner, "download_pdf_bytes", return_value=b"%PDF fake"):
+        asyncio.run(handler(event=event, body=body, client=fake_client))
+
+    top_level = [p for p in slack._posts if not p.get("thread_ts")]
+    assert len(top_level) == 1
+    assert "Processing" in top_level[0].get("text", "")
+    assert mock_pfe.call_count == 1
+    assert mock_pfe.call_args.kwargs.get("thread_ts") == top_level[0].get("ts")
+    # After-loop edit happens once (single delivered doc → 1 posted, 0 needs review).
+    assert len(slack.updates) == 1
+    assert "Processed" in slack.updates[0].get("text", "")
+    assert "1" in slack.updates[0].get("text", "")
+
+
+# =========================================================================== #
+# Task 5: doc_label built from run state, posted on card, persisted on interrupt
+# =========================================================================== #
+
+
+def test_doc_label_from_state():
+    """First invoice vendor + total formatted as a per-document label."""
+    state = {
+        "source_filename": "Receipt-Hotel.pdf",
+        nodes.NORMALIZED_KEY: [
+            {
+                "vendor_name": "Hotel Booking",
+                "total_amount": 51.49,
+                "currency": "SGD",
+            }
+        ],
+    }
+    label = _doc_label_from_state(state)
+    assert "Receipt-Hotel.pdf" in label
+    assert "Hotel Booking" in label
+    assert "51.49" in label
+
+
+def test_doc_label_from_state_falls_back_on_missing_invoice():
+    """No normalized invoices yet → label is just the filename."""
+    label = _doc_label_from_state({"source_filename": "mystery.pdf"})
+    assert "mystery.pdf" in label
+    # No vendor / total noise when the invoice is absent.
+    assert "·" not in label.split("mystery.pdf", 1)[1]
+
+
+def test_doc_label_from_state_uses_issuer_name_alias():
+    """``issuer_name`` is the sales-direction alias for ``vendor_name``."""
+    state = {
+        "source_filename": "INV-1001.pdf",
+        nodes.NORMALIZED_KEY: [
+            {"issuer_name": "BigBuyer Ltd", "total_amount": 100.0, "currency": "SGD"}
+        ],
+    }
+    label = _doc_label_from_state(state)
+    assert "BigBuyer Ltd" in label
+    assert "100.00" in label
+
+
+def test_doc_label_from_state_skips_money_when_total_missing():
+    """No numeric total → no trailing currency block."""
+    state = {
+        "source_filename": "INV-1001.pdf",
+        nodes.NORMALIZED_KEY: [
+            {"vendor_name": "Acme", "currency": "SGD"}  # no total_amount
+        ],
+    }
+    label = _doc_label_from_state(state)
+    assert "Acme" in label
+    assert "SGD" not in label
+
+
+def test_doc_label_from_state_default_filename():
+    """Empty state still produces a non-empty label (so the card never looks bare)."""
+    label = _doc_label_from_state({})
+    assert "document" in label
+
+
+def test_process_file_event_interrupt_persists_doc_label_and_renders_it():
+    """Approval card header names the document; interrupt doc carries the same label.
+
+    Patches ``_read_interrupt_summary`` to return a known summary, seeds the
+    session state with a normalized invoice so the label is rich, and asserts
+    the resulting card text + Firestore doc both carry the label.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    slack = FakeSlackClient()
+    db = FakeFirestore()
+    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+
+    # Seed a profile whose channel_id matches the run we drive below so the
+    # soft-gate at process_file_event lets the run proceed.
+    seeded = _seeded_client_store(db, channel_id="C5", client_id="c5")
+
+    interrupt_event = SimpleNamespace(
+        content=SimpleNamespace(parts=[]),
+        get_function_calls=lambda: [SimpleNamespace(name="adk_request_input", id="C5:F5")],
+    )
+    # Pre-seed the final-state view with a normalized invoice so the label is
+    # built from the same shape the real graph produces.
+    final_state = {
+        "approval_message": "needs review: line X",
+        "source_filename": "Receipt-Hotel.pdf",
+        nodes.NORMALIZED_KEY: [
+            {"vendor_name": "Hotel Booking", "total_amount": 51.49, "currency": "SGD"}
+        ],
+    }
+    runner = _FakeRunner([interrupt_event], final_state)
+
+    with patch(
+        "accounting_agents.slack_runner._read_interrupt_summary",
+        new=AsyncMock(return_value="needs review: line X"),
+    ):
+        result = asyncio.run(
+            process_file_event(
+                runner=runner,
+                ledger_store=store,
+                db=db,
+                slack_client=slack,
+                channel_id="C5",
+                file_id="F5",
+                app_name="acc",
+                download_fn=lambda c, f: b"%PDF fake",
+                source_filename="Receipt-Hotel.pdf",
+                client_store=seeded,
+            )
+        )
+
+    assert result["status"] == "paused"
+
+    # Card text names the document above the review header.
+    card = _last_blocks(slack)
+    head = next(
+        b["text"]["text"] for b in card
+        if b.get("type") == "section" and b.get("text", {}).get("type") == "mrkdwn"
+    )
+    assert "Receipt-Hotel.pdf" in head
+    assert "Hotel Booking" in head
+    assert "51.49" in head
+    # And the label sits ABOVE the standard review-needed header line.
+    assert head.index("Receipt-Hotel.pdf") < head.index("Review needed")
+
+    # Interrupt correlation doc persists the label alongside the summary.
+    snap = db.collection("interrupts").document("C5:F5").get()
+    assert snap.exists
+    doc = snap.to_dict()
+    assert doc.get("doc_label")
+    assert "Receipt-Hotel.pdf" in doc["doc_label"]
+
+
+# =========================================================================== #
+# Task 7: edits-from-view-state parser (Slack view_submission → line edits DTO)
+# =========================================================================== #
+
+
+def test_edits_from_view_state_builds_line_edits():
+    view = {"state": {"values": {
+        "acct_0": {"v": {"selected_option": {"value": "6010"}}},
+        "tax_0":  {"v": {"selected_option": {"value": "ZR"}}},
+        "amt_0":  {"v": {"value": "44.74"}},
+    }}}
+    edits = _edits_from_view_state(view)
+    assert edits == {"lines": [{"index": 0, "account_code": "6010",
+                                "tax_code": "ZR", "amount": 44.74}]}
+
+
+# =========================================================================== #
+# Task 8: an edit becomes a per-client Correction (ADR-0004)
+# =========================================================================== #
+
+
+def test_persist_corrections_writes_vendor_mapping():
+    """One Correction per edited line that carries account_code / tax_code.
+
+    Mirrors the spec test verbatim: a single line with both fields produces one
+    ``add_correction`` call with the invoice's vendor (taken from the first
+    normalized invoice's ``vendor_name``).
+    """
+    saved = []
+
+    class _Store:
+        def add_correction(self, *, client_id, vendor, account_code=None, tax_code=None):
+            saved.append((client_id, vendor, account_code, tax_code))
+
+    state = {
+        "client_id": "CL-1",
+        nodes.NORMALIZED_KEY: [
+            {"vendor_name": "Hotel Booking",
+             "lines": [{"description": "Room", "account_code": "6010", "tax_code": "ZR"}]}
+        ],
+    }
+    edits = {"lines": [{"index": 0, "account_code": "6010", "tax_code": "ZR"}]}
+    _persist_corrections(_Store(), state, edits)
+    assert saved == [("CL-1", "Hotel Booking", "6010", "ZR")]
+
+
+def test_persist_corrections_skips_lines_with_no_code_fields():
+    """A line that only changed ``amount`` (no account_code, no tax_code) is skipped.
+
+    Edits without either code field are not entity-memory worthy — the user's
+    amount tweak is a one-off variance, not a vendor rule.
+    """
+    saved = []
+
+    class _Store:
+        def add_correction(self, *, client_id, vendor, account_code=None, tax_code=None):
+            saved.append((client_id, vendor, account_code, tax_code))
+
+    state = {
+        "client_id": "CL-1",
+        nodes.NORMALIZED_KEY: [{"vendor_name": "Acme"}],
+    }
+    edits = {"lines": [{"index": 0, "amount": 12.34}]}
+    _persist_corrections(_Store(), state, edits)
+    assert saved == []
+
+
+def test_persist_corrections_uses_issuer_name_alias_when_vendor_missing():
+    """``issuer_name`` (sales-direction alias) is the fallback vendor field."""
+    saved = []
+
+    class _Store:
+        def add_correction(self, *, client_id, vendor, account_code=None, tax_code=None):
+            saved.append((client_id, vendor, account_code, tax_code))
+
+    state = {
+        "client_id": "CL-1",
+        nodes.NORMALIZED_KEY: [{"issuer_name": "BigBuyer Ltd"}],
+    }
+    edits = {"lines": [{"index": 0, "account_code": "5000"}]}
+    _persist_corrections(_Store(), state, edits)
+    assert saved == [("CL-1", "BigBuyer Ltd", "5000", None)]
+
+
+def test_persist_corrections_noop_without_client_id_or_invoice():
+    """Defensive: missing client_id or empty invoice list ⇒ no writes (no crash)."""
+    saved = []
+
+    class _Store:
+        def add_correction(self, *, client_id, vendor, account_code=None, tax_code=None):
+            saved.append((client_id, vendor, account_code, tax_code))
+
+    _persist_corrections(_Store(), {}, {"lines": [{"index": 0, "account_code": "6010"}]})
+    _persist_corrections(_Store(), {"client_id": "X"}, {"lines": [{"index": 0, "account_code": "6010"}]})
+    _persist_corrections(_Store(), {"client_id": "X", nodes.NORMALIZED_KEY: []},
+                         {"lines": [{"index": 0, "account_code": "6010"}]})
+    assert saved == []

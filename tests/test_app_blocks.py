@@ -6,7 +6,16 @@ from datetime import date
 
 import pytest
 
-from app.blocks import coa_prompt_blocks, onboarding_modal, result_card, welcome_blocks
+from app.blocks import (
+    approval_card_blocks,
+    coa_prompt_blocks,
+    invoice_edit_modal,
+    job_summary_text,
+    onboarding_modal,
+    profile_summary_blocks,
+    result_card,
+    welcome_blocks,
+)
 from invoice_processing.export.models import NormalizedInvoice, PartyInfo
 from invoice_processing.export.routing import DocRoute
 from invoice_processing.pipeline import ProcessedDoc
@@ -351,3 +360,223 @@ class TestResultCardPerDoc:
         )
         blocks = result_card(n_files=1, n_processed=1, workbooks=[], errors=[], docs=[doc])
         assert "0 transactions" in _all_block_text(blocks)
+
+
+# --------------------------------------------------------------------------- #
+# Profile summary card (Task 3)
+# --------------------------------------------------------------------------- #
+
+
+def _flat_text(blocks):
+    return " ".join(
+        b.get("text", {}).get("text", "")
+        for b in blocks if isinstance(b.get("text"), dict)
+    )
+
+
+def test_profile_summary_shows_all_registered_fields():
+    blocks = profile_summary_blocks({
+        "client_name": "Auditair International Pte. Ltd.",
+        "accounting_software": "Xero",
+        "fye_month": 10,
+        "gst_registered": False,
+    })
+    text = _flat_text(blocks)
+    assert "Auditair International Pte. Ltd." in text
+    assert "Xero" in text
+    assert "October" in text          # fye_month 10 -> month name
+    assert "Not GST-registered" in text
+
+
+def test_profile_summary_positive_gst_case():
+    blocks = profile_summary_blocks({
+        "client_name": "X Ltd",
+        "accounting_software": "QBS Ledger",
+        "fye_month": 12,
+        "gst_registered": True,
+    })
+    text = _flat_text(blocks)
+    assert "GST-registered" in text
+    assert "Not GST-registered" not in text
+    assert "December" in text
+
+
+def test_profile_summary_falls_back_for_missing_fields():
+    blocks = profile_summary_blocks({})
+    text = _flat_text(blocks)
+    assert "(unnamed client)" in text
+    assert "—" in text  # software + FYE both fall back
+    assert "Not GST-registered" in text  # falsy default
+
+
+def test_profile_summary_accepts_string_fye_month():
+    blocks = profile_summary_blocks({
+        "client_name": "X Ltd",
+        "accounting_software": "Xero",
+        "fye_month": "10",  # string variant
+        "gst_registered": False,
+    })
+    text = _flat_text(blocks)
+    assert "October" in text
+
+
+# --------------------------------------------------------------------------- #
+# HITL approval card (Task 5)
+# --------------------------------------------------------------------------- #
+
+
+class TestApprovalCardBlocks:
+
+    def _head_text(self, blocks: list) -> str:
+        """First section's mrkdwn text — the visible header on the card."""
+        for b in blocks:
+            if b.get("type") == "section":
+                return b.get("text", {}).get("text", "")
+        return ""
+
+    def _action_ids(self, blocks: list) -> set:
+        ids: set = set()
+        for b in blocks:
+            if b.get("type") == "actions":
+                for el in b.get("elements", []):
+                    if el.get("action_id"):
+                        ids.add(el["action_id"])
+        return ids
+
+    def test_approval_card_names_the_document(self):
+        # Task 5: passing doc_label renders it above the existing header line.
+        blocks = approval_card_blocks(
+            summary="not reconciled (lines $51.49 vs $44.74 + GST)",
+            op_id="OP1",
+            doc_label="📄 Receipt-Hotel.pdf · Hotel Booking · $51.49",
+        )
+        head = self._head_text(blocks)
+        assert "Receipt-Hotel.pdf" in head
+
+    def test_approval_card_label_appears_above_summary(self):
+        # The doc label is a leading line, not appended after the header.
+        blocks = approval_card_blocks(
+            summary="needs review",
+            op_id="OP2",
+            doc_label="📄 INV-1001.pdf",
+        )
+        head = self._head_text(blocks)
+        assert head.index("INV-1001.pdf") < head.index("Review needed")
+
+    def test_approval_card_keeps_existing_three_action_buttons(self):
+        # Backward-compat: action set must NOT change when a doc_label is added.
+        blocks = approval_card_blocks(
+            summary="x", op_id="OP3", doc_label="📄 foo.pdf"
+        )
+        assert self._action_ids(blocks) == {"approve", "edit", "reject"}
+
+    def test_approval_card_no_label_does_not_break(self):
+        # No label → behaves like before (backward-compatible default).
+        blocks = approval_card_blocks(summary="x", op_id="OP4")
+        head = self._head_text(blocks)
+        assert "Review needed" in head
+        assert "📄" not in head  # no document emoji when no label given
+
+    def test_approval_card_label_does_not_drop_summary(self):
+        # The summary must still be present when a label is supplied.
+        blocks = approval_card_blocks(
+            summary="lines $51.49 vs $44.74",
+            op_id="OP5",
+            doc_label="📄 foo.pdf",
+        )
+        head = self._head_text(blocks)
+        assert "lines $51.49 vs $44.74" in head
+
+
+# --------------------------------------------------------------------------- #
+# Invoice edit modal (Task 7)
+# --------------------------------------------------------------------------- #
+
+
+class TestInvoiceEditModal:
+
+    def test_callback_id_and_private_metadata(self):
+        view = invoice_edit_modal(
+            op_id="OP1",
+            lines=[{"description": "Room", "account_code": "6010", "tax_code": "SR", "amount": 51.49}],
+            coa_options=[("6010", "6010 — Travel"), ("6200", "6200 — Office")],
+        )
+        assert view["callback_id"] == "ledgr_invoice_edit"
+        assert view["private_metadata"] == "OP1"
+
+    def test_one_input_group_per_line_min_three(self):
+        # One input group per line (account + tax + amount) → at least 3 input blocks.
+        view = invoice_edit_modal(
+            op_id="OP1",
+            lines=[{"description": "Room", "account_code": "6010", "tax_code": "SR", "amount": 51.49}],
+            coa_options=[("6010", "6010 — Travel"), ("6200", "6200 — Office")],
+        )
+        inputs = [b for b in view["blocks"] if b.get("type") == "input"]
+        assert len(inputs) >= 3
+
+    def test_empty_coa_omits_account_select(self):
+        """A client with accounting software but no COA must not produce a
+        ``static_select`` with empty ``options`` — Slack rejects that and the
+        whole modal fails to open. The account-code block is dropped; tax and
+        amount stay editable so the modal still opens and works.
+        """
+        view = invoice_edit_modal(
+            op_id="OP1",
+            lines=[{"description": "Room", "account_code": None, "tax_code": "SR", "amount": 51.49}],
+            coa_options=[],
+        )
+        # No empty-options static_select anywhere.
+        for b in view["blocks"]:
+            el = b.get("element", {})
+            if el.get("type") == "static_select":
+                assert el["options"], "static_select must never have empty options"
+        input_block_ids = [b["block_id"] for b in view["blocks"] if b.get("type") == "input"]
+        assert "acct_0" not in input_block_ids   # account block omitted
+        assert input_block_ids == ["tax_0", "amt_0"]
+
+    def test_block_id_encoding_uses_acct_tax_amt_prefixes(self):
+        """Lock the block_id encoding so the modal builder and ``_edits_from_view_state`` stay in sync."""
+        view = invoice_edit_modal(
+            op_id="OP1",
+            lines=[
+                {"description": "Room", "account_code": "6010", "tax_code": "SR", "amount": 51.49},
+                {"description": "Tax", "account_code": None, "tax_code": "ZR", "amount": 3.60},
+            ],
+            coa_options=[("6010", "6010 — Travel")],
+        )
+        input_block_ids = [b["block_id"] for b in view["blocks"] if b.get("type") == "input"]
+        assert input_block_ids == [
+            "acct_0", "tax_0", "amt_0",
+            "acct_1", "tax_1", "amt_1",
+        ]
+
+
+# --------------------------------------------------------------------------- #
+# Job summary line for a batch drop (Task 9 / ADR-0007)
+# --------------------------------------------------------------------------- #
+
+
+class TestJobSummaryText:
+
+    def test_includes_total_posted_needs_review_software_fy(self):
+        t = job_summary_text(total=10, posted=7, needs_review=3, software="Xero", fy="2026")
+        assert "10" in t and "7" in t and "3" in t and "Xero" in t and "FY2026" in t
+
+    def test_singular_when_one_document(self):
+        # No trailing 's' on "document" when total == 1.
+        t = job_summary_text(total=1, posted=1, needs_review=0, software="Xero", fy="2026")
+        assert "document " in t or "document." in t or "document—" in t or "1 document" in t
+        assert "documents" not in t
+
+    def test_omits_needs_review_suffix_when_zero(self):
+        t = job_summary_text(total=2, posted=2, needs_review=0, software="Xero", fy="2026")
+        assert "need your review" not in t
+
+    def test_blank_software_and_fy_omitted(self):
+        # No extra "to your  ledger" / " FY" tokens when software/fy are blank.
+        t = job_summary_text(total=3, posted=2, needs_review=1, software="", fy="")
+        assert "your ledger" in t or "ledger" in t  # headline still mentions the ledger
+        # No double-space artefacts from the dropped prefixes.
+        assert "to your  " not in t
+        assert " FY" not in t
+

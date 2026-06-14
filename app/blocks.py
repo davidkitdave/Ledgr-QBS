@@ -419,6 +419,7 @@ def ledgr_help_blocks() -> list:
                 "text": (
                     "*Ledgr slash commands*\n"
                     "*/ledgr settings* — edit this client's profile\n"
+                    "*/ledgr profile* — show this client's registered profile\n"
                     "*/ledgr export* — re-send the latest ledger\n"
                     "*/ledgr help* — show this message"
                 ),
@@ -443,7 +444,38 @@ def export_unavailable_blocks() -> list:
     ]
 
 
-def approval_card_blocks(summary: str, op_id: str) -> list:
+def job_summary_text(
+    *,
+    total: int,
+    posted: int,
+    needs_review: int,
+    software: str = "",
+    fy: str = "",
+) -> str:
+    """One-line Job summary for a batch drop ([[Batch (Job)]] per ADR-0007).
+
+    Posted up-front as the single top-level message for a multi-file drop; the
+    per-doc status / approval cards go in-thread under it, then this summary
+    is ``chat_update``-d with the final tally.
+
+    Args:
+        total:        N files dropped in the batch.
+        posted:       count with ``status == "delivered"`` (no review needed).
+        needs_review: count with ``status == "paused"`` (HITL review card).
+        software:     optional accounting software label (Xero / QBS Ledger) —
+                      passed through when the batch targets a single FY + target.
+        fy:           optional financial year string — only shown when the
+                      batch has a single FY (mixed-FY drops leave it blank).
+    """
+    tgt = f" {software}" if software else ""
+    fyl = f" FY{fy}" if fy else ""
+    head = f"📥 Processed {total} document{'s' if total != 1 else ''}"
+    body = f" — {posted} posted to your{tgt}{fyl} ledger"
+    tail = f", {needs_review} need your review" if needs_review else ""
+    return head + body + tail
+
+
+def approval_card_blocks(summary: str, op_id: str, doc_label: str | None = None) -> list:
     """HITL Approve / Edit / Reject card for a document that needs human review.
 
     Args:
@@ -452,13 +484,21 @@ def approval_card_blocks(summary: str, op_id: str) -> list:
         op_id:   The interrupt id correlating this card with the paused workflow;
                  carried as each button's ``value`` so the action handler can
                  resume the right session.
+        doc_label: Optional human label tying this card to the uploaded document
+                 (e.g. ``"📄 Receipt-Hotel.pdf · Hotel Booking · $51.49"``). When
+                 supplied, it is rendered as the leading line of the header so a
+                 user dropping many documents can tell the cards apart. None (or
+                 absent) preserves the original card layout for backward compat.
     """
+    header = ":mag: *Review needed before adding to the ledger*"
+    if doc_label:
+        header = f"{doc_label}\n{header}"
     return [
         {
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f":mag: *Review needed before adding to the ledger*\n{summary}",
+                "text": f"{header}\n{summary}",
             },
         },
         {
@@ -529,4 +569,81 @@ def coa_prompt_blocks() -> list:
                 }
             ],
         },
+    ]
+
+
+def invoice_edit_modal(op_id: str, lines: list[dict], coa_options: list[tuple[str, str]]) -> dict:
+    """Modal to correct each flagged line's account code / tax code / amount.
+
+    ``coa_options`` is a list of (code, label) for the static_select; ``lines`` is
+    the proposed extraction. ``block_id`` encodes the line index: ``acct_<i>`` etc.
+    """
+    coa = [{"text": {"type": "plain_text", "text": lbl[:75]}, "value": code}
+           for code, lbl in coa_options]
+    tax_opts = [{"text": {"type": "plain_text", "text": t}, "value": t}
+                for t in ("SR", "ZR", "ES", "TX", "OS")]
+    blocks: list = []
+    # Modal exposes the subset of nodes.EDITABLE_LINE_FIELDS that users can
+    # actually correct in-place (account_code/tax_code/amount). The line
+    # description is shown read-only as the section header above each group.
+    for i, ln in enumerate(lines):
+        blocks.append({"type": "section",
+                       "text": {"type": "mrkdwn", "text": f"*Line {i + 1}: {ln.get('description', '')}*"}})
+        # Slack rejects a static_select with empty options, which would make the
+        # whole modal fail to open. When the client has no COA, omit the
+        # account-code block entirely — tax and amount stay editable.
+        if coa:
+            acct_initial = next((o for o in coa if o["value"] == ln.get("account_code")), None)
+            blocks.append({
+                "type": "input", "block_id": f"acct_{i}", "optional": True,
+                "label": {"type": "plain_text", "text": "Account code"},
+                "element": {"type": "static_select", "action_id": "v", "options": coa,
+                            **({"initial_option": acct_initial} if acct_initial else {})},
+            })
+        tax_initial = next((o for o in tax_opts if o["value"] == ln.get("tax_code")), None)
+        blocks.append({
+            "type": "input", "block_id": f"tax_{i}", "optional": True,
+            "label": {"type": "plain_text", "text": "Tax code"},
+            "element": {"type": "static_select", "action_id": "v", "options": tax_opts,
+                        **({"initial_option": tax_initial} if tax_initial else {})},
+        })
+        blocks.append({
+            "type": "input", "block_id": f"amt_{i}", "optional": True,
+            "label": {"type": "plain_text", "text": "Amount"},
+            "element": {"type": "number_input", "action_id": "v", "is_decimal_allowed": True,
+                        **({"initial_value": str(ln["amount"])} if ln.get("amount") is not None else {})},
+        })
+    return {
+        "type": "modal", "callback_id": "ledgr_invoice_edit", "private_metadata": op_id,
+        "title": {"type": "plain_text", "text": "Review invoice"},
+        "submit": {"type": "plain_text", "text": "Post to ledger"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": blocks,
+    }
+
+
+def profile_summary_blocks(profile: dict) -> list:
+    """Confirmation card summarising the client profile that was just registered."""
+    name = profile.get("client_name") or "(unnamed client)"
+    software = profile.get("accounting_software") or "—"
+    raw = profile.get("fye_month")
+    try:
+        fye_num = int(raw) if raw not in (None, "") else None
+    except (TypeError, ValueError):
+        fye_num = None
+    fye = next((n for num, n in _MONTHS if num == fye_num), "—")
+    gst = "GST-registered" if profile.get("gst_registered") else "Not GST-registered"
+    return [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f"✅ *Client registered: {name}*\n"
+                    f"• Accounting software: *{software}*\n"
+                    f"• Financial year-end: *{fye}*\n"
+                    f"• GST status: *{gst}*"
+                ),
+            },
+        }
     ]

@@ -57,12 +57,30 @@ from accounting_agents.hitl import (
 )
 from accounting_agents.ledger_store import SlackLedgerStore
 from accounting_agents.nodes import ApproveDecision
-from app.blocks import approval_card_blocks, approval_outcome_blocks
+from app.blocks import approval_card_blocks, approval_outcome_blocks, invoice_edit_modal
 from app.slack_app import _SeenEvents, _event_id as _slack_event_id
+from invoice_processing.export.client_context import FirestoreClientStore
 
 # One shared dedup set for all handlers in this module (process-local; see
 # app.slack_app._SeenEvents for the Cloud Run note about multi-instance gaps).
 _seen = _SeenEvents()
+
+#: Default client store for profile seeding (overridable in tests).
+_DEFAULT_CLIENT_STORE = FirestoreClientStore()
+
+
+def _profile_state_delta(client_store, channel_id: str) -> dict:
+    """Return the client's ``to_state()`` keys for seeding the run, or ``{}``.
+
+    The coordinator's ``before_agent_callback`` does not reliably propagate the
+    profile into the document lane, so the runner seeds it directly at run start
+    (alongside ``channel_id``). Empty dict means "no profile for this channel" —
+    callers soft-gate on that. See ADR-0005 (2026-06-14 addendum).
+    """
+    ctx = client_store.get_by_channel(channel_id)
+    if ctx is None:
+        return {}
+    return ctx.to_state()
 
 logger = logging.getLogger(__name__)
 
@@ -360,6 +378,7 @@ async def process_file_event(
     download_fn,
     source_filename: str = "document.pdf",
     thread_ts: Optional[str] = None,
+    client_store=None,
 ) -> dict:
     """Download the dropped PDF, run the workflow, and persist OR pause for HITL.
 
@@ -385,6 +404,19 @@ async def process_file_event(
     # Per-document session id so concurrent drops never share a session; user_id
     # stays channel_id (the before_agent_callback resolves the client by channel).
     session_id = _per_doc_session_id(channel_id, file_id)
+
+    # Soft-gate on client profile: if this channel has not been onboarded yet,
+    # there is no software target and no COA — the run would silently default
+    # to QBS and write the wrong columns. Tell the user how to set up first.
+    client_store = client_store or _DEFAULT_CLIENT_STORE
+    profile_delta = _profile_state_delta(client_store, channel_id)
+    if not profile_delta or not profile_delta.get("software"):
+        _post_message(
+            slack_client, channel_id,
+            "I don't have this client set up yet — run */ledgr settings* to choose "
+            "the accounting software and financial year, then re-drop the document.",
+        )
+        return {"status": "no_profile", "channel_id": channel_id, "file_id": file_id}
 
     # ── INSTANT ACK (before semaphore, before download) ──────────────────────
     # Resolve the user's upload-message ts so we can react to it immediately.
@@ -421,6 +453,7 @@ async def process_file_event(
             "file_id": file_id,
             "source_filename": source_filename,
             nodes.ARTIFACT_NAME_KEY: artifact_name,
+            **profile_delta,
         }
 
         interrupt_id: Optional[str] = None
@@ -455,7 +488,19 @@ async def process_file_event(
             summary = await _read_interrupt_summary(
                 runner, app_name, channel_id, session_id, last_text
             )
-            posted = _post_approval_card(slack_client, channel_id, summary, interrupt_id, thread_ts)
+            # Enrich the card with a per-document label so a user dropping
+            # many files can tell the review cards apart. Read the paused
+            # session state (the same fetch that backs the summary helper)
+            # to derive filename + first invoice vendor / total.
+            paused_state = await _read_session_state(
+                runner, app_name,
+                {"user_id": channel_id, "session_id": session_id},
+            )
+            doc_label = _doc_label_from_state(paused_state)
+            posted = _post_approval_card(
+                slack_client, channel_id, summary, interrupt_id,
+                thread_ts=thread_ts, doc_label=doc_label,
+            )
             write_interrupt(
                 db,
                 interrupt_id,
@@ -464,7 +509,7 @@ async def process_file_event(
                 slack_file_id=file_id,
                 message_ts=posted,
                 user_id=channel_id,
-                extra={"summary": summary},
+                extra={"summary": summary, "doc_label": doc_label},
             )
             return {"status": "paused", "op_id": interrupt_id, "message_ts": posted}
 
@@ -527,12 +572,123 @@ async def _read_interrupt_summary(
     return fallback or "This document needs your review before it is added to the ledger."
 
 
+async def _read_session_state(
+    runner: Any, app_name: str, interrupt: dict
+) -> dict:
+    """Best-effort: return the paused session's state dict (empty if unavailable).
+
+    Reads the per-document session identified by the HITL interrupt correlation
+    doc (its ``user_id`` / ``session_id``). Used at the HITL pause site to
+    enrich the approval card with the uploaded document's identity, AND by the
+    Edit-modal opener to pre-fill the per-line account / tax / amount fields.
+    Returns an empty dict on any failure so callers can fall back gracefully
+    — both call sites are best-effort.
+    """
+    user_id = interrupt.get("user_id") or interrupt.get("session_id")
+    session_id = interrupt.get("session_id")
+    if not session_id or not user_id:
+        return {}
+    try:
+        session = await runner.session_service.get_session(
+            app_name=app_name, user_id=user_id, session_id=session_id
+        )
+        if session and getattr(session, "state", None):
+            return dict(session.state)
+    except Exception:  # noqa: BLE001 - best-effort reader
+        logger.debug("get_session failed for %s/%s; falling back to empty state",
+                     user_id, session_id)
+    return {}
+
+
+def _doc_label_from_state(state: dict) -> str:
+    """Human label tying a review card to its uploaded document.
+
+    Builds a one-line string that lets a user pick the right card out of N
+    concurrent drops. Format:
+    ``📄 <filename>[ · <vendor>][ · <CUR> <total>]``
+    Vendor is taken from the first normalized invoice's ``vendor_name`` (with
+    ``issuer_name`` as the sales-direction alias); total is shown only when
+    it's a real number. When the state is empty (no invoice yet, or the
+    session fetch failed) the label degrades to ``📄 document``.
+    """
+    fname = (state or {}).get("source_filename") or "document"
+    invs = (state or {}).get(nodes.NORMALIZED_KEY) or []
+    if invs:
+        first = invs[0] if isinstance(invs[0], dict) else {}
+        vendor = first.get("vendor_name") or first.get("issuer_name") or ""
+        total = first.get("total_amount")
+        cur = first.get("currency") or ""
+        money = f" · {cur} {total:,.2f}" if isinstance(total, (int, float)) else ""
+        vend = f" · {vendor}" if vendor else ""
+        return f"📄 {fname}{vend}{money}"
+    return f"📄 {fname}"
+
+
+def _persist_corrections(client_store, state: dict, edits: dict) -> None:
+    """Persist each account/tax edit as a per-client vendor Correction (ADR-0004).
+
+    For every line edit that carries ``account_code`` or ``tax_code``, write a
+    Correction keyed by the invoice's vendor so the next document from the same
+    vendor auto-applies the human's mapping. Lines whose only change was
+    ``amount`` (a one-off variance, not a vendor rule) are skipped. Reads the
+    canonical vendor from the first normalized invoice's ``vendor_name`` with
+    ``issuer_name`` as the sales-direction alias. No-ops cleanly when
+    ``client_id`` is missing or the invoice list is empty so callers never
+    crash on partial state.
+    """
+    client_id = state.get("client_id") if isinstance(state, dict) else None
+    invs = (state.get(nodes.NORMALIZED_KEY) or []) if isinstance(state, dict) else []
+    if not client_id or not invs:
+        return
+    first = invs[0] if isinstance(invs[0], dict) else {}
+    vendor = first.get("vendor_name") or first.get("issuer_name")
+    if not vendor:
+        return
+    for e in (edits.get("lines") or []):
+        if not isinstance(e, dict):
+            continue
+        if e.get("account_code") or e.get("tax_code"):
+            client_store.add_correction(
+                client_id=client_id,
+                vendor=vendor,
+                account_code=e.get("account_code"),
+                tax_code=e.get("tax_code"),
+            )
+
+
+def _edits_from_view_state(view: dict) -> dict:
+    """Convert a ``view_submission`` state into the line-edits dict.
+
+    Maps each ``block_id`` of the form ``<prefix>_<i>`` (where ``<prefix>`` is
+    ``acct`` / ``tax`` / ``amt``) into a field on the edits line at index ``i``.
+    Lines are returned in ascending index order. The shape matches what
+    ``apply_decision_node`` expects in ``ApproveDecision.edits["lines"]``.
+    """
+    values = (view.get("state") or {}).get("values") or {}
+    by_index: dict[int, dict] = {}
+    for block_id, payload in values.items():
+        prefix, _, idx_s = block_id.partition("_")
+        if not idx_s.isdigit():
+            continue
+        i = int(idx_s)
+        el = payload.get("v") or {}
+        if prefix == "acct" and el.get("selected_option"):
+            by_index.setdefault(i, {})["account_code"] = el["selected_option"]["value"]
+        elif prefix == "tax" and el.get("selected_option"):
+            by_index.setdefault(i, {})["tax_code"] = el["selected_option"]["value"]
+        elif prefix == "amt" and el.get("value"):
+            by_index.setdefault(i, {})["amount"] = float(el["value"])
+    lines = [{"index": i, **fields} for i, fields in sorted(by_index.items())]
+    return {"lines": lines}
+
+
 def _post_approval_card(
-    slack_client: Any, channel_id: str, summary: str, op_id: str, thread_ts=None
+    slack_client: Any, channel_id: str, summary: str, op_id: str, thread_ts=None,
+    doc_label: Optional[str] = None,
 ) -> Optional[str]:
     kwargs = {
         "channel": channel_id,
-        "blocks": approval_card_blocks(summary, op_id),
+        "blocks": approval_card_blocks(summary, op_id, doc_label=doc_label),
         "text": "Review needed before adding to the ledger.",
     }
     if thread_ts:
@@ -886,7 +1042,60 @@ def build_async_app(
 
     @async_app.action("edit")
     async def _edit(ack, body, client):
-        await _run_action(ack, body, client, "edit")
+        # The gate's RequestInput only accepts the schema-validated ApproveDecision;
+        # per-line edits require a Block-Kit modal where the user can correct fields.
+        # Edit opens a per-line modal pre-filled with the proposed extraction.
+        # We must ack() immediately (<3s) and then synchronously call views_open
+        # with the trigger_id (Slack invalidates it after a few seconds).
+        await ack()
+        op_id = (body.get("actions") or [{}])[0].get("value")
+        if not op_id:
+            return
+        interrupt = read_interrupt(db, op_id)
+        state = (
+            await _read_session_state(runner, app_name, interrupt)
+            if interrupt else {}
+        )
+        # Single-invoice assumption (Task 6's apply_decision_node logs a WARNING
+        # when len(invs) > 1 — modal mirrors the same per-doc-session contract).
+        invs = state.get(nodes.NORMALIZED_KEY) or [{}]
+        lines = invs[0].get("lines") or []
+        coa_options = [
+            (c.get("code"), f"{c.get('code')} — {c.get('description')}")
+            for c in (state.get("coa") or [])
+        ]
+        sync_client.views_open(
+            trigger_id=body["trigger_id"],
+            view=invoice_edit_modal(op_id, lines, coa_options),
+        )
+
+    @async_app.view("ledgr_invoice_edit")
+    async def _edit_submit(ack, body, client):
+        await ack()
+        view = body["view"]
+        # Empty op_id falls through to handle_approval_action which logs and no-ops
+        # (matches the approve/reject convention in app/slack_app.py).
+        op_id = view.get("private_metadata") or ""
+        edits = _edits_from_view_state(view)
+        await handle_approval_action(
+            runner=runner, ledger_store=ledger_store, db=db, slack_client=sync_client,
+            op_id=op_id, decision="edit", edits=edits, app_name=app_name,
+        )
+        # ADR-0004: re-read the now-resumed session state and persist each
+        # account/tax edit as a per-client vendor Correction so the next
+        # document from the same vendor auto-applies the human's mapping.
+        # Re-reading (not just reusing `edits`) reflects any downstream
+        # mutations the resume produced. Best-effort: a read failure or a
+        # missing client_store must never abort the handler.
+        if op_id:
+            try:
+                interrupt = read_interrupt(db, op_id) or {}
+                state = await _read_session_state(runner, app_name, interrupt)
+                _persist_corrections(_DEFAULT_CLIENT_STORE, state, edits)
+            except Exception:  # noqa: BLE001 - persistence is best-effort
+                logger.exception(
+                    "failed to persist corrections for op_id %s", op_id,
+                )
 
     @async_app.action("reject")
     async def _reject(ack, body, client):
@@ -967,6 +1176,34 @@ def build_async_app(
         # event_id is redelivered.
         files = event.get("files") or []
         if subtype == "file_share" or files:
+            # ADR-0007: one Job summary message per batch drop, threaded.
+            # Post the summary up-front (initial text), pass its ``ts`` as
+            # ``thread_ts`` into each ``process_file_event`` so every per-doc
+            # status / approval / delivery card lands under it, then edit the
+            # summary in-place with the final tally once the loop finishes.
+            from app.blocks import job_summary_text
+
+            total = len(files)
+            # Post the placeholder summary (top-level, no thread_ts).
+            try:
+                resp = sync_client.chat_postMessage(
+                    channel=channel_id,
+                    text=f"📥 Processing {total} document{'s' if total != 1 else ''}…",
+                )
+            except Exception:  # noqa: BLE001 - cosmetic; never abort the upload
+                logger.exception("failed to post Job summary in %s", channel_id)
+                resp = None
+            summary_ts: Optional[str] = None
+            if resp is not None:
+                data = resp.data if hasattr(resp, "data") else resp
+                if isinstance(data, dict):
+                    summary_ts = data.get("ts")
+
+            posted = 0
+            needs_review = 0
+            software_hint = ""
+            fy_hint = ""
+
             for f in files:
                 file_id = f.get("id") if isinstance(f, dict) else None
                 if not file_id:
@@ -980,7 +1217,7 @@ def build_async_app(
                     "file upload received via message: file=%s channel=%s",
                     file_id, channel_id,
                 )
-                await process_file_event(
+                result = await process_file_event(
                     runner=runner,
                     ledger_store=ledger_store,
                     db=db,
@@ -989,7 +1226,40 @@ def build_async_app(
                     file_id=file_id,
                     app_name=app_name,
                     download_fn=download_pdf_bytes,
+                    thread_ts=summary_ts,
                 )
+                # Aggregate per-doc outcomes for the final tally edit.
+                status = (result or {}).get("status")
+                if status == "delivered":
+                    posted += 1
+                    # Borrow the first delivered doc's software + fy for the tally
+                    # (mixed-FY drops are rare and ambiguous — first wins).
+                    append = (result or {}).get("append") or {}
+                    if not software_hint and append.get("software"):
+                        software_hint = str(append["software"])
+                    if not fy_hint and append.get("fy"):
+                        fy_hint = str(append["fy"])
+                elif status == "paused":
+                    needs_review += 1
+
+            # Edit the summary in-place with the final tally (ADR-0007).
+            if summary_ts:
+                try:
+                    final_text = job_summary_text(
+                        total=total,
+                        posted=posted,
+                        needs_review=needs_review,
+                        software=software_hint,
+                        fy=fy_hint,
+                    )
+                    sync_client.chat_update(
+                        channel=channel_id,
+                        ts=summary_ts,
+                        text=final_text,
+                    )
+                except Exception:  # noqa: BLE001 - cosmetic
+                    logger.exception("failed to update Job summary in %s", channel_id)
+
             return
 
         # Text-question path: plain user message with no files.

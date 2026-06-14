@@ -152,6 +152,33 @@ def _slack():
     return SimpleNamespace(chat_postMessage=lambda **k: posts.append(k) or {"ts": "1"}, _posts=posts)
 
 
+class _FakeProfileStore:
+    """A channel → ClientContext shim that always returns a minimal QBS profile.
+
+    The local _FakeDb shim above doesn't implement the full
+    :class:`FirestoreClientStore` API (``document().get()``, subcollection
+    ``.stream()``), so we short-circuit with a plain object that satisfies the
+    single ``get_by_channel`` call the runner makes. Concurrency tests only
+    care that the soft-gate lets the run proceed.
+    """
+    def __init__(self, software: str = "QBS Ledger", client_id: str = "c1"):
+        from invoice_processing.export.client_context import ClientContext
+        self._ctx = ClientContext(
+            client_id=client_id,
+            accounting_software=software,
+            fye_month=12,
+        )
+
+    def get_by_channel(self, channel_id):
+        assert channel_id
+        return self._ctx
+
+
+def _profile_store(**kwargs):
+    """A drop-in `client_store` for `process_file_event` (seeds QBS by default)."""
+    return _FakeProfileStore(**kwargs)
+
+
 # --------------------------------------------------------------------------- #
 # (a) distinct per-doc session ids for concurrent drops
 # --------------------------------------------------------------------------- #
@@ -169,11 +196,13 @@ def test_concurrent_file_events_use_distinct_session_ids():
                 runner=runner, ledger_store=store, db=db, slack_client=slack,
                 channel_id="C1", file_id="F1", app_name="acc",
                 download_fn=lambda c, f: b"%PDF a",
+                client_store=_profile_store(),
             ),
             process_file_event(
                 runner=runner, ledger_store=store, db=db, slack_client=slack,
                 channel_id="C1", file_id="F2", app_name="acc",
                 download_fn=lambda c, f: b"%PDF b",
+                client_store=_profile_store(),
             ),
         )
 
@@ -208,6 +237,7 @@ def test_semaphore_caps_concurrent_runs(monkeypatch):
                 runner=runner, ledger_store=store, db=db, slack_client=slack,
                 channel_id="C1", file_id=f"F{i}", app_name="acc",
                 download_fn=lambda c, f: b"%PDF",
+                client_store=_profile_store(),
             )
             for i in range(6)
         ])
@@ -245,6 +275,7 @@ def test_append_rows_is_offloaded_to_thread(monkeypatch):
             runner=runner, ledger_store=store, db=db, slack_client=slack,
             channel_id="C1", file_id="F1", app_name="acc",
             download_fn=lambda c, f: b"%PDF",
+            client_store=_profile_store(),
         )
     )
 

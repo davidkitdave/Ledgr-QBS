@@ -117,6 +117,7 @@ def test_document_workflow_nodes_present():
         "tax_node",
         "extract_bank_node",
         "approval_gate",
+        "apply_decision_node",
         "route_node",
         "consolidate_node",
         "deliver_node",
@@ -146,7 +147,8 @@ def test_document_workflow_branches_converge_on_approval_gate():
 
 def test_document_workflow_post_approval_spine_to_terminal():
     edges = _edges(document_workflow)
-    assert ("approval_gate", "route_node", None) in edges
+    assert ("approval_gate", "apply_decision_node", None) in edges
+    assert ("apply_decision_node", "route_node", None) in edges
     assert ("route_node", "consolidate_node", None) in edges
     assert ("consolidate_node", "deliver_node", None) in edges
     # deliver_node is terminal (no outgoing edges).
@@ -183,14 +185,20 @@ def test_dynamic_router_maps_each_intent():
 
 
 def test_placeholder_spine_invoice_pass_reaches_deliver():
-    """Drive approval_gate -> route_node -> consolidate_node -> deliver_node with a
-    fake Context carrying one normalized invoice, proving the spine is runnable and
-    terminates at deliver_node (no Gemini / artifact / Firestore)."""
+    """Drive approval_gate -> apply_decision_node -> route_node -> consolidate_node
+    -> deliver_node with a fake Context carrying one normalized invoice, proving
+    the spine is runnable and terminates at deliver_node (no Gemini / artifact /
+    Firestore)."""
     state = {
         nodes.DOC_TYPE_KEY: "invoice",
         nodes.DIRECTION_KEY: "purchase",
         "client_id": "test-client",
         "fye_month": 3,
+        # consolidate_node no longer falls back silently to "qbs" when software
+        # is missing — the runner seeds it from the per-channel client profile
+        # in production. This unit test drives consolidate_node directly, so we
+        # seed the state explicitly to keep it self-contained.
+        "software": "qbs",
         nodes.NORMALIZED_KEY: [
             {
                 "doc_type": "purchase",
@@ -212,6 +220,9 @@ def test_placeholder_spine_invoice_pass_reaches_deliver():
     interrupts = _drain_gate(ctx)
     assert interrupts == []
     assert ctx.state["approval_status"] == "auto_approved"
+
+    # apply_decision_node sees no resume input (auto-approve) -> passthrough.
+    asyncio.run(nodes.apply_decision_node(ctx, None))
 
     asyncio.run(nodes.route_node(ctx))
     assert len(ctx.state[nodes.ROUTES_KEY]) == 1
@@ -247,6 +258,8 @@ def test_placeholder_spine_bank_pass_reaches_deliver():
     # Bank lane has no normalized invoices to inspect -> gate auto-approves.
     assert _drain_gate(ctx) == []
     assert ctx.state["approval_status"] == "auto_approved"
+    # apply_decision_node sees no resume input (auto-approve) -> passthrough.
+    asyncio.run(nodes.apply_decision_node(ctx, None))
     asyncio.run(nodes.route_node(ctx))
     assert len(ctx.state[nodes.ROUTES_KEY]) == 1
     assert asyncio.run(nodes.consolidate_node(ctx)).output["consolidated"] == 1

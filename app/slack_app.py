@@ -28,6 +28,7 @@ from app.blocks import (
     export_unavailable_blocks,
     ledgr_help_blocks,
     onboarding_modal,
+    profile_summary_blocks,
     welcome_blocks,
 )
 from app.commands import parse_ledgr_command, settings_prefill
@@ -461,6 +462,7 @@ def handle_onboarding_submit(
     store.save_profile(doc)
     store.set_channel(channel_id, client_id)
 
+    client.chat_postMessage(channel=channel_id, blocks=profile_summary_blocks(doc))
     client.chat_postMessage(channel=channel_id, blocks=coa_prompt_blocks())
 
 
@@ -507,6 +509,22 @@ def handle_ledgr_command(ack: Callable, body: dict, client, store, archive=None)
 
     elif cmd.subcommand == "export":
         _handle_export(channel_id=channel_id, client=client, store=store, archive=archive)
+
+    elif cmd.subcommand == "profile":
+        existing = store.get_by_channel(channel_id)
+        if existing is None:
+            client.chat_postMessage(
+                channel=channel_id,
+                text="No client is set up in this channel yet — run */ledgr settings*.",
+            )
+        else:
+            profile = {
+                "client_name": existing.client_name,
+                "accounting_software": existing.accounting_software,
+                "fye_month": existing.fye_month,
+                "gst_registered": existing.tax_registered,
+            }
+            client.chat_postMessage(channel=channel_id, blocks=profile_summary_blocks(profile))
 
     else:  # "help" or unknown
         client.chat_postMessage(channel=channel_id, blocks=ledgr_help_blocks())

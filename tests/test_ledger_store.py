@@ -69,8 +69,13 @@ class FakeSlackClient:
         self.deleted_file_ids: list[str] = []
 
     def chat_postMessage(self, **kwargs):
+        ts = f"{len(self._posts) + 1}.000"
+        # Stash the returned ts back on the call kwargs so tests can resolve
+        # the message timestamp of a previously-posted top-level message (the
+        # batch-summary flow in test_slack_runner needs this for thread_ts).
+        kwargs.setdefault("ts", ts)
         self._posts.append(kwargs)
-        return {"ok": True, "ts": f"{len(self._posts)}.000"}
+        return {"ok": True, "ts": ts}
 
     def chat_update(self, **kwargs):
         self.updates.append(kwargs)
