@@ -720,18 +720,23 @@ def _doc_label_from_state(state: dict) -> str:
 def _persist_corrections(client_store, state: dict, edits: dict) -> None:
     """Persist each account/tax edit as a per-client vendor Correction (ADR-0004).
 
-    For every line edit that carries ``account_code`` or ``tax_code``, write a
-    Correction keyed by the invoice's vendor so the next document from the same
-    vendor auto-applies the human's mapping. Lines whose only change was
-    ``amount`` (a one-off variance, not a vendor rule) are skipped. Reads the
-    canonical vendor the SAME way the categorizer resolves it: the counterparty
-    party name — ``supplier.name`` for purchases, ``customer.name`` for sales
-    (mirrors ``NormalizedInvoice.counterparty``). The serialized invoice
-    (``_inv_to_dict`` = ``asdict``) carries these as nested party dicts, never a
-    flat ``vendor_name`` key — reading the flat key silently dropped every
-    correction. Legacy flat keys are kept as a defensive fallback. No-ops
-    cleanly when ``client_id`` is missing or the invoice list is empty so
-    callers never crash on partial state.
+    Write a Correction keyed by the invoice's vendor ONLY for fields the human
+    actually CHANGED — i.e. where the submitted ``account_code`` / ``tax_code``
+    differs from the value the pipeline proposed for that line (read from the
+    normalized invoice's ``lines[index]`` in state: ``account_code`` and the
+    canonical ``tax_treatment``). The Block-Kit modal re-submits EVERY line's
+    current selection, changed or not; without this diff a multi-line invoice
+    would write one Correction per line — all under the same vendor — and the
+    last (unchanged) line would clobber the line the user really edited. Lines
+    whose only change was ``amount`` (a one-off variance, not a vendor rule) are
+    skipped. Reads the canonical vendor the SAME way the categorizer resolves
+    it: the counterparty party name — ``supplier.name`` for purchases,
+    ``customer.name`` for sales (mirrors ``NormalizedInvoice.counterparty``).
+    The serialized invoice (``_inv_to_dict`` = ``asdict``) carries these as
+    nested party dicts, never a flat ``vendor_name`` key — reading the flat key
+    silently dropped every correction. Legacy flat keys are kept as a defensive
+    fallback. No-ops cleanly when ``client_id`` is missing or the invoice list
+    is empty so callers never crash on partial state.
     """
     client_id = state.get("client_id") if isinstance(state, dict) else None
     invs = (state.get(nodes.NORMALIZED_KEY) or []) if isinstance(state, dict) else []
@@ -741,15 +746,24 @@ def _persist_corrections(client_store, state: dict, edits: dict) -> None:
     vendor = _vendor_from_inv_dict(first)
     if not vendor:
         return
+    proposed_lines = first.get("lines") or []
     for e in (edits.get("lines") or []):
         if not isinstance(e, dict):
             continue
-        if e.get("account_code") or e.get("tax_code"):
+        idx = e.get("index")
+        prop = proposed_lines[idx] if isinstance(idx, int) and 0 <= idx < len(proposed_lines) else {}
+        if not isinstance(prop, dict):
+            prop = {}
+        acct = e.get("account_code")
+        tax = e.get("tax_code")
+        acct_changed = bool(acct) and acct != prop.get("account_code")
+        tax_changed = bool(tax) and tax != prop.get("tax_treatment")
+        if acct_changed or tax_changed:
             client_store.add_correction(
                 client_id=client_id,
                 vendor=vendor,
-                account_code=e.get("account_code"),
-                tax_code=e.get("tax_code"),
+                account_code=acct if acct_changed else None,
+                tax_code=tax if tax_changed else None,
             )
 
 

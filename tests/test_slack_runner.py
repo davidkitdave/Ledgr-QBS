@@ -717,8 +717,10 @@ def test_edit_submit_persists_correction_after_resume(monkeypatch):
                 "doc_type": "purchase",
                 "supplier": {"name": "Hotel Booking"},
                 "customer": {"name": None},
+                # Proposed line is uncategorized, so the submitted 6010/ZR are
+                # genuine human changes (only-changed-lines become Corrections).
                 "lines": [
-                    {"description": "Room", "account_code": "6010", "tax_code": "ZR"},
+                    {"description": "Room"},
                 ],
             }
         ],
@@ -1525,7 +1527,7 @@ def test_persist_corrections_writes_vendor_mapping():
         "client_id": "CL-1",
         nodes.NORMALIZED_KEY: [
             {"vendor_name": "Hotel Booking",
-             "lines": [{"description": "Room", "account_code": "6010", "tax_code": "ZR"}]}
+             "lines": [{"description": "Room"}]}  # uncategorized → edits are real changes
         ],
     }
     edits = {"lines": [{"index": 0, "account_code": "6010", "tax_code": "ZR"}]}
@@ -1548,20 +1550,21 @@ def test_persist_corrections_reads_nested_party_real_serialized_shape():
         def add_correction(self, *, client_id, vendor, account_code=None, tax_code=None):
             saved.append((client_id, vendor, account_code, tax_code))
 
-    # Purchase → supplier.name
+    # Purchase → supplier.name; proposed 6-3000, human changes to 5-1000.
     purchase_state = {
         "client_id": "CL-1",
         nodes.NORMALIZED_KEY: [
             {"doc_type": "purchase",
              "supplier": {"name": "Darrell Podaima"},
              "customer": {"name": "Auditair International Pte. Ltd."},
-             "lines": [{"description": "audit", "account_code": "5-1000"}]}
+             "lines": [{"description": "audit", "account_code": "6-3000"}]}
         ],
     }
-    _persist_corrections(_Store(), purchase_state, {"lines": [{"account_code": "5-1000"}]})
+    _persist_corrections(_Store(), purchase_state,
+                         {"lines": [{"index": 0, "account_code": "5-1000"}]})
     assert saved == [("CL-1", "Darrell Podaima", "5-1000", None)]
 
-    # Sales → customer.name
+    # Sales → customer.name; proposed line untaxed, human sets SR.
     saved.clear()
     sales_state = {
         "client_id": "CL-1",
@@ -1569,11 +1572,65 @@ def test_persist_corrections_reads_nested_party_real_serialized_shape():
             {"doc_type": "sales",
              "supplier": {"name": "Auditair International Pte. Ltd."},
              "customer": {"name": "PTTEP"},
-             "lines": [{"description": "svc", "tax_code": "SR"}]}
+             "lines": [{"description": "svc"}]}
         ],
     }
-    _persist_corrections(_Store(), sales_state, {"lines": [{"tax_code": "SR"}]})
+    _persist_corrections(_Store(), sales_state,
+                         {"lines": [{"index": 0, "tax_code": "SR"}]})
     assert saved == [("CL-1", "PTTEP", None, "SR")]
+
+
+def test_persist_corrections_only_changed_line_no_collision_multi_line():
+    """Multi-line invoice: only the line the human CHANGED becomes a Correction.
+
+    Regression for the collision bug — the modal re-submits every line, so an
+    unchanged line (same code as proposed) must NOT overwrite the edited line's
+    vendor mapping. Here line 0 is changed 6-3000→5-1000; line 1 is left at the
+    proposed 6-3000. Exactly one Correction (5-1000) must be written.
+    """
+    saved = []
+
+    class _Store:
+        def add_correction(self, *, client_id, vendor, account_code=None, tax_code=None):
+            saved.append((client_id, vendor, account_code, tax_code))
+
+    state = {
+        "client_id": "CL-1",
+        nodes.NORMALIZED_KEY: [
+            {"doc_type": "purchase",
+             "supplier": {"name": "Darrell Podaima"},
+             "lines": [
+                 {"description": "audit", "account_code": "6-3000"},
+                 {"description": "report", "account_code": "6-3000"},
+             ]}
+        ],
+    }
+    edits = {"lines": [
+        {"index": 0, "account_code": "5-1000"},   # changed
+        {"index": 1, "account_code": "6-3000"},   # unchanged (== proposal)
+    ]}
+    _persist_corrections(_Store(), state, edits)
+    assert saved == [("CL-1", "Darrell Podaima", "5-1000", None)]
+
+
+def test_persist_corrections_skips_unchanged_lines():
+    """A line resubmitted at its proposed value is NOT a Correction."""
+    saved = []
+
+    class _Store:
+        def add_correction(self, *, client_id, vendor, account_code=None, tax_code=None):
+            saved.append((client_id, vendor, account_code, tax_code))
+
+    state = {
+        "client_id": "CL-1",
+        nodes.NORMALIZED_KEY: [
+            {"doc_type": "purchase",
+             "supplier": {"name": "Acme"},
+             "lines": [{"description": "x", "account_code": "6-3000"}]}
+        ],
+    }
+    _persist_corrections(_Store(), state, {"lines": [{"index": 0, "account_code": "6-3000"}]})
+    assert saved == []
 
 
 def test_persist_corrections_skips_lines_with_no_code_fields():
