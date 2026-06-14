@@ -25,23 +25,23 @@ removed once its only consumers (dead code) are gone.
 ---
 
 ## Task 0 — Branch + baseline
-- [ ] Create branch `refactor/adk-consolidation`; confirm full suite green as baseline.
+- [x] Create branch `refactor/adk-consolidation`; confirm full suite green as baseline.
 
 ## Task 1 — Delete zero-importer orphaned agents
 **Why:** dead, confusing parallel ADK definitions; zero importers (verified).
 - Files: `accounting_agents/invoice_agent.py`, `accounting_agents/bank_feed_agent.py`,
   `accounting_agents/bank_statement_extractor_agent.py`, `invoice_processing/agent.py`,
   and any tests that import them.
-- [ ] `grep` each module path → confirm zero non-test importers, delete file(s).
-- [ ] Remove/trim tests that target only these (`test_*agent*` for the deleted ones).
-- [ ] Gate: suite green; `grep` proves no remaining references.
+- [x] `grep` each module path → confirm zero non-test importers, delete file(s).
+- [x] Remove/trim tests that target only these (`test_*agent*` for the deleted ones).
+- [x] Gate: suite green; `grep` proves no remaining references.
 
 ## Task 2 — Delete the second ADK root: `ledgr_coordinator/`
 **Why:** redundant second App root (ADR-0001 "DELETE whole").
 - Files: `ledgr_coordinator/` (whole dir incl. `agent.py`, `tools.py`, `prompt.py`,
   `fast_api_app.py`), `tests/test_coordinator_tools.py`, `tests/integration/test_agent.py`.
-- [ ] Delete the package + its tests. Confirm nothing live imports `ledgr_coordinator`.
-- [ ] Gate: suite green; no `ledgr_coordinator` references remain.
+- [x] Delete the package + its tests. Confirm nothing live imports `ledgr_coordinator`.
+- [x] Gate: suite green; no `ledgr_coordinator` references remain.
 
 ## Task 3 — Retire the dead Slack/`process_batch` path
 **Why:** `app/processing.py` (`process_batch`) is unreachable from the live runner
@@ -53,10 +53,10 @@ removed once its only consumers (dead code) are gone.
   `handle_ledgr_command`, dedupe/redirect guards, and anything `slack_runner` imports),
   tests `test_app_processing.py`, `test_app_archive.py` (trim process_batch parts),
   `test_app_config.py` (socket_run import).
-- [ ] Verify exactly which symbols `accounting_agents/slack_runner.py` imports from
+- [x] Verify exactly which symbols `accounting_agents/slack_runner.py` imports from
   `app.slack_app` / `app.blocks` / `app.commands` — those MUST survive untouched.
-- [ ] Remove the dead path + adapt/remove its tests. Do NOT break the live handlers.
-- [ ] Gate: suite green; `grep` proves no live reference to `app.processing` /
+- [x] Remove the dead path + adapt/remove its tests. Do NOT break the live handlers.
+- [x] Gate: suite green; `grep` proves no live reference to `app.processing` /
   `process_shared_files` / `app.socket_run`.
 
 ## Task 4 — Unify prod onto the live graph (CRITICAL, do last)
@@ -69,22 +69,22 @@ HITL). Prod must drive the SAME graph as the socket runner.
   `build_async_app`.
 - Files: a new prod entry (e.g. `accounting_agents/fastapi_app.py` or rework
   `app/main.py`), `app/main.py` (point to it), tests.
-- [ ] Implement the FastAPI-over-AsyncApp serving; reuse `build_runner` + `build_async_app`.
-- [ ] Test: prod entry builds a Runner whose app is `accounting_agents.agent.app`
+- [x] Implement the FastAPI-over-AsyncApp serving; reuse `build_runner` + `build_async_app`.
+- [x] Test: prod entry builds a Runner whose app is `accounting_agents.agent.app`
   (the graph), wires the async handlers, and exposes `POST /slack/events` (assert with
   fakes/monkeypatch — no live Slack/network).
-- [ ] Gate: suite green; prod and local provably share one runtime/graph.
+- [x] Gate: suite green; prod and local provably share one runtime/graph.
 
 ## Task 5 — Tidy `pipeline.py` + docs
-- [ ] If `process_batch` has no remaining consumers after Tasks 2–3, remove it (keep
+- [x] If `process_batch` has no remaining consumers after Tasks 2–3, remove it (keep
   `process_document`); otherwise keep + add a module docstring note: *"engine/eval
   harness — NOT the live runtime; live = accounting_agents graph."*
-- [ ] Update ADR-0001 status → consolidated (date), and ROADMAP consolidation row.
-- [ ] Gate: suite green; `ruff check accounting_agents app invoice_processing eval` clean.
+- [x] Update ADR-0001 status → consolidated (date), and ROADMAP consolidation row.
+- [x] Gate: suite green; `ruff check accounting_agents app invoice_processing eval` clean.
 
 ## Final verification
-- [ ] `.venv/bin/pytest -q` green.
-- [ ] `ruff check accounting_agents app invoice_processing eval` clean.
-- [ ] `grep` proof: no importers of deleted modules; only ONE App root
+- [x] `.venv/bin/pytest -q` green.
+- [x] `ruff check accounting_agents app invoice_processing eval` clean.
+- [x] `grep` proof: no importers of deleted modules; only ONE App root
   (`accounting_agents/agent.py`); prod + local both route through `build_async_app`.
-- [ ] End state matches ADR-0001: one Engine, one ADK root, one Slack runtime.
+- [x] End state matches ADR-0001: one Engine, one ADK root, one Slack runtime.

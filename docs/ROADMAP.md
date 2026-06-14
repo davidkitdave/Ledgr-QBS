@@ -25,7 +25,8 @@ Deep spec: `.agents-cli-spec.md`. Why we want it: **HITL** (`RequestInput`), **p
 |---|---|
 | 1 — decouple `__init__` (lazy `root_agent`) | ✅ done in worktree (`757b703`) |
 | 2 — bump to google-adk 2.2.0 | ✅ done in worktree (`6cc1c55`), 478 green |
-| 3 — re-architect `pipeline.py` → dynamic `@node` Workflow + `RequestInput` HITL + `ResumabilityConfig` + idempotent writes | ⏳ not started |
+| 3a — **consolidate** ("consolidate first"): retire dead duplicate (orphan agents, `ledgr_coordinator/`, `process_batch`/`app.processing`, old `build_app`/`fastapi_app`) + unify prod onto the live graph (`build_fastapi_app`, shared with socket) | ✅ done 2026-06-14 (ADR-0001 impl) |
+| 3b — deeper re-architect `pipeline.py` → engine as a single `@node` (pipeline.py kept as engine/eval harness for now) | ⏳ not started |
 | 4 — eval guard (`agents-cli eval`, ≥0.9) | ⏳ |
 | 5 — deploy (Cloud Run, asia-southeast1) | ⏳ |
 
