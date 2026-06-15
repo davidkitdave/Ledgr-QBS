@@ -77,7 +77,21 @@ class TaxClassifier:
         return line
 
     def _classify_purchase(self, line: InvoiceLine, inv: NormalizedInvoice):
-        """§6.1 PURCHASES — first match wins."""
+        """§6.1 PURCHASES — first match wins.
+
+        Master gate: if OUR client is NOT GST-registered, every purchase line
+        is ``NT`` regardless of what the supplier's invoice says. A
+        non-registered Ledgr client cannot reclaim input GST — any GST shown
+        on a received invoice becomes part of the cost, not a recoverable
+        input. This overrides explicit tax_keyword and signal matches because
+        the legal effect on OUR books is the same in either case.
+        See memory ``sg-gst-tax-rule-and-xero-codes``.
+        """
+        if not inv.our_gst_registered:
+            return "NT", 0.95, False, (
+                "NT: client not GST-registered — input GST treated as cost"
+            )
+
         desc = line.description or ""
         supplier = inv.supplier
         gst = line.gst_amount
@@ -163,7 +177,17 @@ class TaxClassifier:
         return "SR", 0.4, True, "SR(default): indeterminate — review"
 
     def _classify_sales(self, line: InvoiceLine, inv: NormalizedInvoice):
-        """§6.2 SALES — first match wins."""
+        """§6.2 SALES — first match wins.
+
+        Master gate: if OUR client is NOT GST-registered they cannot legally
+        charge GST on sales. Every sales line is ``NT`` regardless of what's
+        written on the invoice. Hoisted above the tax_keyword block so an
+        accidental ``"SR"`` keyword on a non-registered client's invoice does
+        not bypass this rule. See memory ``sg-gst-tax-rule-and-xero-codes``.
+        """
+        if not inv.our_gst_registered:
+            return "NT", 0.95, False, "NT: client not GST-registered"
+
         desc = line.description or ""
         customer = inv.customer
 
@@ -203,9 +227,6 @@ class TaxClassifier:
             if kw == "g" or kw == "gst" or kw.startswith("sr") or kw.startswith("tx") or "9%" in kw or "8%" in kw or "7%" in kw or "standard" in kw:
                 return "SR", 0.95, False, f"SR: explicit tax_keyword '{line.tax_keyword}'"
 
-        # 5. We are not GST-registered -> cannot charge GST.
-        if not inv.our_gst_registered:
-            return "NT", 0.95, False, "NT: client not GST-registered"
         # 2. Export / international service -> zero-rated (verify §21(3) fit).
         if self._matches(desc, "zero_rated") or customer.is_overseas:
             conf = 0.85 if self._matches(desc, "zero_rated") else 0.6

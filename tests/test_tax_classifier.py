@@ -28,6 +28,7 @@ def _purchase(
     is_overseas: bool | None = None,
     tax_kw: str | None = None,
     inv_date: date | None = date(2024, 6, 1),
+    our_gst_registered: bool = True,
 ) -> tuple[InvoiceLine, NormalizedInvoice]:
     country = None if is_overseas is None else ("MY" if is_overseas else "SG")
     line = InvoiceLine(
@@ -39,6 +40,7 @@ def _purchase(
     inv = NormalizedInvoice(
         doc_type="purchase",
         invoice_date=inv_date,
+        our_gst_registered=our_gst_registered,
         supplier=PartyInfo(name="Test Supplier", gst_regno=gst_regno, country=country),
     )
     inv.lines.append(line)
@@ -353,6 +355,70 @@ class TestExistingRulesUnchanged:
         result = CLF.classify_line(line, inv)
         assert result.tax_treatment == "NT"
         assert not result.tax_flagged
+
+    # ----- master-gate regressions (1.5c, user-confirmed SG GST rule) -----
+    # Non-GST-registered Ledgr client: ALL lines = NT regardless of doc.
+    # See memory ``sg-gst-tax-rule-and-xero-codes``.
+
+    def test_purchase_non_registered_client_overrides_supplier_gst(self):
+        """Non-reg client + supplier shows 9% GST → NT (input GST = cost).
+
+        Pre-fix this returned SR (supplier registered + GST shown) — the
+        live-QA-caught wrong-number bug for non-registered Ledgr clients.
+        """
+        line, inv = _purchase(
+            desc="Office supplies", net=1000.0, gst=90.0,
+            gst_regno="M12345678X", our_gst_registered=False,
+        )
+        result = CLF.classify_line(line, inv)
+        assert result.tax_treatment == "NT"
+        assert not result.tax_flagged
+        assert "not GST-registered" in (result.tax_reason or "")
+
+    def test_purchase_non_registered_client_overrides_zr_signal(self):
+        """Non-reg client + zero-rated signal (telco/freight/export) → still NT."""
+        line, inv = _purchase(
+            desc="International freight charge", our_gst_registered=False,
+        )
+        result = CLF.classify_line(line, inv)
+        assert result.tax_treatment == "NT"
+
+    def test_purchase_non_registered_client_overrides_explicit_tax_keyword(self):
+        """Non-reg client + extractor found tax_keyword='ZR' → still NT.
+
+        The legal effect on a non-registered client's books does not change
+        with what the invoice writes — they cannot claim input GST.
+        """
+        line, inv = _purchase(
+            desc="Service", tax_kw="ZR", our_gst_registered=False,
+        )
+        result = CLF.classify_line(line, inv)
+        assert result.tax_treatment == "NT"
+
+    def test_sales_non_registered_client_overrides_sr_keyword(self):
+        """Non-reg client + accidental 'SR' keyword on sales → still NT.
+
+        A non-GST-registered client cannot legally charge GST. The master gate
+        is hoisted ABOVE the tax_keyword block to enforce this.
+        """
+        line, inv = _sales(desc="Service", tax_kw="SR", our_gst_registered=False)
+        result = CLF.classify_line(line, inv)
+        assert result.tax_treatment == "NT"
+
+    def test_purchase_registered_client_unchanged_sr(self):
+        """Registered client + 9% supplier → SR (regression: pre-fix behaviour preserved)."""
+        line, inv = _purchase(
+            desc="Office supplies", net=1000.0, gst=90.0,
+            gst_regno="M12345678X", our_gst_registered=True,
+        )
+        result = CLF.classify_line(line, inv)
+        assert result.tax_treatment == "SR"
+        assert not result.tax_flagged
+
+    def test_xero_code_map_for_NT_is_no_gst(self):
+        """Confirm Xero target maps NT → "No GST" for both purchase and sales."""
+        assert CLF.tax_code("NT", "purchase", "xero") == "No GST"
+        assert CLF.tax_code("NT", "sales", "xero") == "No GST"
 
     def test_rate_mismatch_flags(self):
         """Correct SR path but GST amount doesn't reconcile to 9% → flag."""
