@@ -334,7 +334,18 @@ async def categorize_node(ctx) -> Event:
     coa = coa_from_state(ctx.state)
     cat_map = category_mapping_from_state(ctx.state)
     ent_mem = entity_memory_from_state(ctx.state)
+    # tax_registered seeds the LLM prompt with GST context so the model knows
+    # not to fight the deterministic tax master gate (§0.5-C).
+    # None default is deliberate: signals "unknown" to the LLM prompt branch so
+    # the model hedges rather than assuming registered.  Distinct from tax_node's
+    # `True` default, which drives the classifier's safe fallback for registered clients.
+    tax_registered: bool | None = ctx.state.get("tax_registered")
 
+    # ADR-0004: LLM guesses are PROVISIONAL — they flow into the invoice and
+    # then through the HITL approval gate.  Auto-persisting them into
+    # entity_memory / category_mapping / Corrections here would bypass the
+    # human-approve-with-edit path that is the ONLY sanctioned learning path
+    # (slack_runner._persist_corrections).  Do NOT add persistence here.
     for inv in invoices:
         CATEGORIZE_FN(
             inv,
@@ -342,6 +353,8 @@ async def categorize_node(ctx) -> Event:
             category_mapping=cat_map,
             entity_memory=ent_mem,
             model=MODEL_LITE,
+            use_llm=True,
+            tax_registered=tax_registered,
         )
 
     ctx.state[NORMALIZED_KEY] = _guard_state_payload(

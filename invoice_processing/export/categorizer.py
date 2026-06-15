@@ -121,6 +121,8 @@ def _llm_match_lines(
     unresolved: list[tuple[int, str, str]],   # (line_index, description, vendor)
     coa: list[CoaAccount],
     model: Optional[str],
+    *,
+    tax_registered: Optional[bool] = None,
 ) -> dict[int, dict]:
     """Return {line_index: {account_key, reason, confidence}} from one Gemini call.
 
@@ -161,11 +163,24 @@ def _llm_match_lines(
         "required": ["results"],
     }
 
+    if tax_registered is True:
+        gst_ctx = "yes"
+    elif tax_registered is False:
+        gst_ctx = "no"
+    else:
+        gst_ctx = "unknown"
+
     prompt = (
         "You are an accounting assistant categorizing invoice/receipt lines to a client's "
         "Chart of Accounts (COA). For each line, pick the single best-matching COA account by "
         "its exact `key`, or null if no account is a reasonable fit. Prefer Profit & Loss expense "
         "accounts for purchase costs. Return a short reason and a confidence in [0,1].\n\n"
+        "IMPORTANT — your task is ONLY to assign an account_code from the COA list below. "
+        "Do NOT choose or infer a tax treatment or GST code (SR/ZR/ES/OS etc.); that is "
+        "decided separately by a deterministic master gate and is outside your scope.\n\n"
+        f"Client GST-registered: {gst_ctx}\n\n"
+        "You MUST return the JSON results object for every line provided. "
+        "Never reply empty or omit the results array.\n\n"
         "COA (choose key from these only):\n"
         f"{json.dumps(coa_for_prompt, ensure_ascii=False)}\n\n"
         "Lines to categorize:\n"
@@ -212,6 +227,7 @@ def categorize_invoice(
     entity_memory: list[EntityMemoryEntry],
     use_llm: bool = True,
     model: Optional[str] = None,
+    tax_registered: Optional[bool] = None,
 ) -> NormalizedInvoice:
     """Fill ``InvoiceLine.account_code`` for every line. Never crashes; returns ``inv``."""
     party = inv.counterparty
@@ -237,7 +253,7 @@ def categorize_invoice(
             unresolved.append((i, line.description or "", vendor_name or ""))
 
     if unresolved and use_llm and coa:
-        matches = _llm_match_lines(unresolved, coa, model)
+        matches = _llm_match_lines(unresolved, coa, model, tax_registered=tax_registered)
         for idx, m in matches.items():
             if idx < 0 or idx >= len(resolutions):
                 continue
