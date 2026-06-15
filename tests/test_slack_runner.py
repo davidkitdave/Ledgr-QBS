@@ -3721,3 +3721,86 @@ def test_proactive_redo_view_submit_noop_without_hint():
 
     ack.assert_awaited_once()
     assert pfe.calls == []
+
+
+# --------------------------------------------------------------------------- #
+# _StageState tests
+# --------------------------------------------------------------------------- #
+
+
+class TestStageState:
+
+    def _make(self):
+        from accounting_agents.slack_runner import _StageState
+        return _StageState()
+
+    def test_initial_all_pending(self):
+        state = self._make()
+        snap = state.snapshot()
+        assert all(s["status"] == "pending" for s in snap)
+        assert len(snap) == 5
+
+    def test_advance_sets_in_progress_and_completes_prior(self):
+        state = self._make()
+        state.advance("extract")
+        snap = state.snapshot()
+        assert snap[0]["status"] == "complete"   # classify
+        assert snap[1]["status"] == "in_progress"  # extract
+        assert snap[2]["status"] == "pending"    # categorize
+
+    def test_advance_attaches_output_to_previous_stage(self):
+        state = self._make()
+        state.advance("extract", output="Recognized as invoice")
+        snap = state.snapshot()
+        assert snap[0]["output"] == "Recognized as invoice"
+        assert snap[1]["output"] is None
+
+    def test_advance_sequential_preserves_order(self):
+        state = self._make()
+        state.advance("classify")
+        state.advance("extract")
+        state.advance("categorize")
+        snap = state.snapshot()
+        assert snap[0]["status"] == "complete"
+        assert snap[1]["status"] == "complete"
+        assert snap[2]["status"] == "in_progress"
+        assert snap[3]["status"] == "pending"
+
+    def test_advance_same_stage_twice_is_idempotent(self):
+        state = self._make()
+        state.advance("tax")
+        state.advance("tax")
+        snap = state.snapshot()
+        tax = next(s for s in snap if s["task_id"] == "tax")
+        assert tax["status"] == "in_progress"
+
+    def test_mark_complete_sets_all_stages(self):
+        state = self._make()
+        state.advance("categorize")
+        state.mark_complete()
+        snap = state.snapshot()
+        assert all(s["status"] == "complete" for s in snap)
+
+    def test_mark_complete_attaches_output_to_last(self):
+        state = self._make()
+        state.mark_complete(output="Done")
+        snap = state.snapshot()
+        assert snap[-1]["output"] == "Done"
+
+    def test_mark_failed_keeps_subsequent_pending(self):
+        state = self._make()
+        state.advance("extract")
+        state.mark_failed("extract", "parse error")
+        snap = state.snapshot()
+        extract = next(s for s in snap if s["task_id"] == "extract")
+        assert extract["status"] == "failed"
+        assert extract["output"] == "parse error"
+        categorize = next(s for s in snap if s["task_id"] == "categorize")
+        assert categorize["status"] == "pending"
+
+    def test_snapshot_returns_independent_copy(self):
+        state = self._make()
+        snap1 = state.snapshot()
+        snap1[0]["status"] = "complete"
+        snap2 = state.snapshot()
+        assert snap2[0]["status"] == "pending"

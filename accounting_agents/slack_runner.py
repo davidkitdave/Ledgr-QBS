@@ -68,11 +68,14 @@ from accounting_agents.hitl import (
 from accounting_agents.ledger_store import SlackLedgerStore
 from accounting_agents.nodes import ApproveDecision, ReviewClarifyDecision
 from app.blocks import (
+    PIPELINE_STAGES,
+    _STAGE_TITLES,
     approval_card_blocks,
     approval_outcome_blocks,
     invoice_edit_modal,
     proactive_redo_blocks,
     proactive_redo_modal,
+    processing_plan_blocks,
     review_card_blocks,
     review_hint_modal,
     review_outcome_blocks,
@@ -476,6 +479,86 @@ def event_stage_label(event: Any) -> Optional[str]:
     return _STAGE_LABELS.get(name)
 
 
+#: Maps graph node name → canonical pipeline stage key used by _StageState.
+_STAGE_KEY_MAP: dict[str, str] = {
+    "classify_node": "classify",
+    "extract_invoice_node": "extract",
+    "extract_bank_node": "extract",
+    "categorize_node": "categorize",
+    "tax_node": "tax",
+    "approval_gate": "approve",
+}
+
+
+def event_stage_key(event: Any) -> Optional[str]:
+    """Return the canonical pipeline stage key for ``event``'s node, or ``None``."""
+    name = event_node_name(event)
+    if name is None:
+        return None
+    return _STAGE_KEY_MAP.get(name)
+
+
+class _StageState:
+    """Tracks ordered per-stage status for a single document run."""
+
+    def __init__(self) -> None:
+        self._stages: list[dict] = [
+            {
+                "task_id": key,
+                "title": _STAGE_TITLES[key],
+                "status": "pending",
+                "output": None,
+            }
+            for key in PIPELINE_STAGES
+        ]
+
+    def _index(self, stage_key: str) -> Optional[int]:
+        for i, s in enumerate(self._stages):
+            if s["task_id"] == stage_key:
+                return i
+        return None
+
+    def advance(self, stage_key: str, *, output: str | None = None) -> None:
+        """Mark stages before stage_key complete, stage_key in_progress, rest pending.
+
+        When output is provided, it is attached to the stage immediately before
+        stage_key (the stage that just finished).
+        """
+        idx = self._index(stage_key)
+        if idx is None:
+            return
+        for i, s in enumerate(self._stages):
+            if i < idx:
+                s["status"] = "complete"
+            elif i == idx:
+                s["status"] = "in_progress"
+            else:
+                s["status"] = "pending"
+        if output is not None and idx > 0:
+            self._stages[idx - 1]["output"] = output
+
+    def mark_complete(self, *, output: str | None = None) -> None:
+        """Mark all stages complete."""
+        for s in self._stages:
+            s["status"] = "complete"
+        if output is not None and self._stages:
+            self._stages[-1]["output"] = output
+
+    def mark_failed(self, stage_key: str, error: str) -> None:
+        """Mark stage_key failed; stages after it remain pending."""
+        idx = self._index(stage_key)
+        for i, s in enumerate(self._stages):
+            if i < idx if idx is not None else False:
+                s["status"] = "complete"
+            elif i == idx:
+                s["status"] = "failed"
+                s["output"] = error
+
+    def snapshot(self) -> list[dict]:
+        """Return a copy of the current stage list."""
+        return [dict(s) for s in self._stages]
+
+
 def deslugify_channel_name(name: str) -> str:
     """Turn a Slack channel slug into a human client name for modal pre-fill.
 
@@ -716,16 +799,23 @@ def _remove_reaction(slack_client: Any, channel_id: str, ts: Optional[str], name
 
 
 def _post_status(
-    slack_client: Any, channel_id: str, text: str, thread_ts=None
+    slack_client: Any,
+    channel_id: str,
+    text: str,
+    thread_ts: Optional[str] = None,
+    *,
+    blocks: Optional[list] = None,
 ) -> Optional[str]:
     """Post the initial live-status message and return its ``ts`` (or ``None``).
 
     Cosmetic-only: a failure here must never abort document processing, so any
     Slack error is logged and swallowed (the run continues silently).
     """
-    kwargs = {"channel": channel_id, "text": text}
+    kwargs: dict = {"channel": channel_id, "text": text}
     if thread_ts:
         kwargs["thread_ts"] = thread_ts
+    if blocks:
+        kwargs["blocks"] = blocks
     try:
         resp = slack_client.chat_postMessage(**kwargs)
     except Exception:  # noqa: BLE001 - status post is cosmetic
@@ -737,7 +827,14 @@ def _post_status(
     return None
 
 
-def _update_status(slack_client: Any, channel_id: str, ts: Optional[str], text: str) -> None:
+def _update_status(
+    slack_client: Any,
+    channel_id: str,
+    ts: Optional[str],
+    text: str,
+    *,
+    blocks: Optional[list] = None,
+) -> None:
     """Edit the live-status message in place. No-op when ``ts`` is missing.
 
     Cosmetic-only: a failed ``chat_update`` is logged and swallowed so it can
@@ -745,8 +842,11 @@ def _update_status(slack_client: Any, channel_id: str, ts: Optional[str], text: 
     """
     if not ts:
         return
+    kwargs: dict = {"channel": channel_id, "ts": ts, "text": text}
+    if blocks:
+        kwargs["blocks"] = blocks
     try:
-        slack_client.chat_update(channel=channel_id, ts=ts, text=text)
+        slack_client.chat_update(**kwargs)
     except Exception:  # noqa: BLE001 - status update is cosmetic
         logger.exception("failed to update status message in %s", channel_id)
 
@@ -820,8 +920,17 @@ async def process_file_event(
     # working, then edit it in place through the run (see _update_status). Both
     # the reaction and this post are OUTSIDE the semaphore so even a queued drop
     # that is waiting on _SEM still shows an instant "on it" signal to the user.
+    _stage_state = _StageState()
     status_ts = _post_status(
-        slack_client, channel_id, f"📥 Received `{source_filename}` — on it…", thread_ts
+        slack_client,
+        channel_id,
+        f"📥 Received `{source_filename}` — on it…",
+        thread_ts,
+        blocks=processing_plan_blocks(
+            source_filename,
+            stages=_stage_state.snapshot(),
+            channel_id=channel_id,
+        ),
     )
 
     async with _SEM:
@@ -836,7 +945,18 @@ async def process_file_event(
                 "rejected unreadable upload: file=%s channel=%s reason=%s",
                 file_id, channel_id, rejection_reason,
             )
-            _update_status(slack_client, channel_id, status_ts, "❌ Couldn't read this file")
+            _stage_state.mark_failed("classify", "Couldn't read this file")
+            _update_status(
+                slack_client,
+                channel_id,
+                status_ts,
+                "❌ Couldn't read this file",
+                blocks=processing_plan_blocks(
+                    source_filename,
+                    stages=_stage_state.snapshot(),
+                    channel_id=channel_id,
+                ),
+            )
             _post_message(
                 slack_client, channel_id,
                 f"Sorry, I couldn't read `{source_filename}` — {rejection_reason}. "
@@ -895,9 +1015,22 @@ async def process_file_event(
             # events with node_info.path → friendly stage label. Only edit on an
             # actual stage change to avoid redundant chat_update calls.
             stage = event_stage_label(event)
+            stage_key = event_stage_key(event)
             if stage is not None and stage != last_stage:
                 last_stage = stage
-                _update_status(slack_client, channel_id, status_ts, stage)
+                if stage_key is not None:
+                    _stage_state.advance(stage_key)
+                _update_status(
+                    slack_client,
+                    channel_id,
+                    status_ts,
+                    stage,
+                    blocks=processing_plan_blocks(
+                        source_filename,
+                        stages=_stage_state.snapshot(),
+                        channel_id=channel_id,
+                    ),
+                )
             iid = find_interrupt_id(event)
             if iid is not None:
                 interrupt_id = iid
@@ -923,15 +1056,35 @@ async def process_file_event(
         )
 
         if outcome["status"] == "paused":
+            _stage_state.advance("approve")
             _update_status(
-                slack_client, channel_id, status_ts, "⏳ Needs your review"
+                slack_client,
+                channel_id,
+                status_ts,
+                "⏳ Needs your review",
+                blocks=processing_plan_blocks(
+                    source_filename,
+                    stages=_stage_state.snapshot(),
+                    channel_id=channel_id,
+                ),
             )
             return outcome
 
         # Delivery branch — decorate the status line and reactions.
         append_result = outcome.get("append", {})
         if append_result.get("all_deduped"):
-            _update_status(slack_client, channel_id, status_ts, "📋 Already recorded")
+            _stage_state.mark_complete()
+            _update_status(
+                slack_client,
+                channel_id,
+                status_ts,
+                "📋 Already recorded",
+                blocks=processing_plan_blocks(
+                    source_filename,
+                    stages=_stage_state.snapshot(),
+                    channel_id=channel_id,
+                ),
+            )
             _remove_reaction(slack_client, channel_id, upload_msg_ts, "eyes")
             _add_reaction(slack_client, channel_id, upload_msg_ts, "ballot_box_with_check")
             return {"status": "duplicate", "append": append_result}
@@ -939,7 +1092,18 @@ async def process_file_event(
         # Final state: collapse the evolving status to a terminal ✅. The full
         # delivery summary is posted by persist_and_deliver, so keep this short
         # to avoid double-posting the same detail.
-        _update_status(slack_client, channel_id, status_ts, "✅ Processed")
+        _stage_state.mark_complete()
+        _update_status(
+            slack_client,
+            channel_id,
+            status_ts,
+            "✅ Processed",
+            blocks=processing_plan_blocks(
+                source_filename,
+                stages=_stage_state.snapshot(),
+                channel_id=channel_id,
+            ),
+        )
         # Swap the 👀 reaction for ✅ on the user's original upload message.
         _remove_reaction(slack_client, channel_id, upload_msg_ts, "eyes")
         _add_reaction(slack_client, channel_id, upload_msg_ts, "white_check_mark")

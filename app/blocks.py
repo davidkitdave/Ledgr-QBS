@@ -2,6 +2,109 @@
 
 from __future__ import annotations
 
+from app.native_blocks_compat import supports_native_blocks
+
+# Ordered pipeline stage keys and their display titles.
+PIPELINE_STAGES: tuple[str, ...] = (
+    "classify",
+    "extract",
+    "categorize",
+    "tax",
+    "approve",
+)
+
+_STAGE_TITLES: dict[str, str] = {
+    "classify": "Classifying",
+    "extract": "Extracting",
+    "categorize": "Categorizing",
+    "tax": "Applying tax",
+    "approve": "Awaiting approval",
+}
+
+_STATUS_MARKER: dict[str, str] = {
+    "complete": ":white_check_mark:",
+    "in_progress": ":large_blue_circle:",
+    "pending": ":white_circle:",
+    "failed": ":x:",
+}
+
+
+def _rich_text_from_string(text: str) -> dict:
+    return {
+        "type": "rich_text",
+        "elements": [
+            {
+                "type": "rich_text_section",
+                "elements": [{"type": "text", "text": text}],
+            }
+        ],
+    }
+
+
+def processing_plan_blocks(
+    file_label: str,
+    *,
+    stages: list[dict],
+    channel_id: str | None = None,
+) -> list[dict]:
+    """Build a live processing-status block for a document run.
+
+    When supports_native_blocks is True, emits a single ``plan`` block with
+    per-task status cards. Falls back to section+context with emoji markers.
+
+    Args:
+        file_label: Human label for the file being processed (e.g. filename).
+        stages: Ordered list of stage dicts with keys:
+            task_id, title, status (pending|in_progress|complete|failed),
+            output (str or None).
+        channel_id: Used by supports_native_blocks() for per-channel probe.
+    """
+    if supports_native_blocks(channel_id):
+        tasks = []
+        for s in stages:
+            status = s["status"]
+            title = s["title"]
+            if status == "failed":
+                status = "complete"
+                title = f":x: {title}"
+            task: dict = {
+                "task_id": s["task_id"],
+                "title": title,
+                "status": status,
+            }
+            if s.get("output") is not None:
+                task["output"] = _rich_text_from_string(s["output"])
+            tasks.append(task)
+        return [
+            {
+                "type": "plan",
+                "title": f"Processing {file_label}",
+                "tasks": tasks,
+            }
+        ]
+
+    # Fallback: section header + context line with emoji markers per stage.
+    markers = []
+    for s in stages:
+        marker = _STATUS_MARKER.get(s["status"], ":white_circle:")
+        markers.append(f"{marker} {s['title']}")
+    return [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Processing {file_label}*",
+            },
+        },
+        {
+            "type": "context",
+            "elements": [
+                {"type": "mrkdwn", "text": " · ".join(markers)},
+            ],
+        },
+    ]
+
+
 _MONTHS = [
     (1, "January"), (2, "February"), (3, "March"), (4, "April"),
     (5, "May"), (6, "June"), (7, "July"), (8, "August"),
