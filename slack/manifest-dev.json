@@ -1,0 +1,55 @@
+{
+  "_comment": "Template for the Ledgr (dev) Slack app used for local socket-mode testing. Do not install this in customer workspaces.",
+  "display_information": {
+    "name": "Ledgr (dev)",
+    "description": "Accounting document processor — drop a PDF or invoice and get a QBS Ledger import file back.",
+    "background_color": "#1a1a2e"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "Ledgr-dev",
+      "always_online": true
+    },
+    "slash_commands": [
+      {
+        "command": "/ledgr",
+        "description": "Ledgr settings & export",
+        "usage_hint": "settings | export",
+        "should_escape": false
+      }
+    ]
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "chat:write",
+        "files:read",
+        "files:write",
+        "channels:history",
+        "groups:history",
+        "im:history",
+        "channels:read",
+        "groups:read",
+        "commands",
+        "app_mentions:read",
+        "users:read"
+      ]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "bot_events": [
+        "member_joined_channel",
+        "message.channels",
+        "message.groups",
+        "file_shared"
+      ]
+    },
+    "interactivity": {
+      "is_enabled": true
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": true,
+    "token_rotation_enabled": false
+  }
+}

@@ -79,7 +79,8 @@ class FirestoreInstallationStore(InstallationStore):
     """
 
     def __init__(self, *, collection: str = "workspaces", client=None, logger=None):
-        self._collection = collection
+        from accounting_agents.config import _ns
+        self._collection = _ns(collection)
         self._injected_client = client  # test seam: if set, _db() returns it directly
         self._client = None  # lazy real client
         self._logger = logger
@@ -209,7 +210,8 @@ class FirestoreOAuthStateStore(OAuthStateStore):
         expiration_seconds: int = 600,
         client=None,
     ):
-        self._collection = collection
+        from accounting_agents.config import _ns
+        self._collection = _ns(collection)
         self._expiration_seconds = expiration_seconds
         self._injected_client = client  # test seam: if set, _db() returns it directly
         self._client = None  # lazy real client

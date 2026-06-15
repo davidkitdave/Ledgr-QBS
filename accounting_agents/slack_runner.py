@@ -54,6 +54,7 @@ from accounting_agents.assistant import (
     PENDING_REEXTRACT_KEY,
     PENDING_WRITE_KEY,
 )
+from accounting_agents.config import _env_prefix
 
 from google.genai import types
 
@@ -1048,13 +1049,16 @@ async def process_file_event(
     # the reaction and this post are OUTSIDE the semaphore so even a queued drop
     # that is waiting on _SEM still shows an instant "on it" signal to the user.
     _stage_state = _StageState()
+    # plan_label is used for ALL processing_plan_blocks calls in this run so the
+    # plan block title stays consistent as the status message is edited in place.
+    plan_label = f"{_env_prefix()}{source_filename}"
     status_ts = _post_status(
         slack_client,
         channel_id,
-        f"📥 Received `{source_filename}` — on it…",
+        f"{_env_prefix()}📥 Received `{source_filename}` — on it…",
         thread_ts,
         blocks=processing_plan_blocks(
-            source_filename,
+            plan_label,
             stages=_stage_state.snapshot(),
             channel_id=channel_id,
         ),
@@ -1079,7 +1083,7 @@ async def process_file_event(
                 status_ts,
                 "❌ Couldn't read this file",
                 blocks=processing_plan_blocks(
-                    source_filename,
+                    plan_label,
                     stages=_stage_state.snapshot(),
                     channel_id=channel_id,
                 ),
@@ -1153,7 +1157,7 @@ async def process_file_event(
                     status_ts,
                     stage,
                     blocks=processing_plan_blocks(
-                        source_filename,
+                        plan_label,
                         stages=_stage_state.snapshot(),
                         channel_id=channel_id,
                     ),
@@ -1190,7 +1194,7 @@ async def process_file_event(
                 status_ts,
                 "⏳ Needs your review",
                 blocks=processing_plan_blocks(
-                    source_filename,
+                    plan_label,
                     stages=_stage_state.snapshot(),
                     channel_id=channel_id,
                 ),
@@ -1207,7 +1211,7 @@ async def process_file_event(
                 status_ts,
                 "📋 Already recorded",
                 blocks=processing_plan_blocks(
-                    source_filename,
+                    plan_label,
                     stages=_stage_state.snapshot(),
                     channel_id=channel_id,
                 ),
@@ -1226,7 +1230,7 @@ async def process_file_event(
             status_ts,
             "✅ Processed",
             blocks=processing_plan_blocks(
-                source_filename,
+                plan_label,
                 stages=_stage_state.snapshot(),
                 channel_id=channel_id,
             ),

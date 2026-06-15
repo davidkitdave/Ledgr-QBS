@@ -553,9 +553,11 @@ class FirestoreClientStore:
 
     def __init__(self, project: Optional[str] = None, database: Optional[str] = None,
                  collection: str = "clients", client=None):
+        from accounting_agents.config import _ns
         self._project = project
         self._database = database
-        self._collection = collection
+        self._collection = _ns(collection)
+        self._channels_collection = _ns("channels")
         self._injected_client = client  # test seam: if set, _firestore() returns it directly
         self._client = None  # lazy real client
 
@@ -652,7 +654,7 @@ class FirestoreClientStore:
         if not channel_id:
             return None
         db = self._firestore()
-        snap = db.collection("channels").document(channel_id).get()
+        snap = db.collection(self._channels_collection).document(channel_id).get()
         if not snap.exists:
             return None
         data = snap.to_dict() or {}
@@ -671,7 +673,7 @@ class FirestoreClientStore:
     def set_channel(self, channel_id: str, client_id: str) -> None:
         """Write the reverse-index ``channels/{channel_id}`` doc."""
         db = self._firestore()
-        db.collection("channels").document(channel_id).set({"client_id": client_id})
+        db.collection(self._channels_collection).document(channel_id).set({"client_id": client_id})
 
     def save_coa(self, client_id: str, coa_rows: list[dict]) -> None:
         """REPLACE the COA: delete every existing ``coa/{n}`` doc, then write the

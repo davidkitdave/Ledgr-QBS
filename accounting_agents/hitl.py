@@ -29,15 +29,16 @@ from typing import Any, Optional
 from google.adk.runners import Runner
 from google.genai import types
 
+from .config import _ns
 from .nodes import ApproveDecision
 
 logger = logging.getLogger(__name__)
 
 #: Firestore collection for pending-approval correlation docs.
-INTERRUPTS_COLLECTION = "interrupts"
+INTERRUPTS_COLLECTION = _ns("interrupts")
 
 #: Firestore collection for idempotency markers.
-PROCESSED_COLLECTION = "processed"
+PROCESSED_COLLECTION = _ns("processed")
 
 #: The ADK function-call name a ``RequestInput`` surfaces as (ground truth from
 #: ``google/adk/workflow/utils/_workflow_hitl_utils.py``).
