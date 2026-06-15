@@ -206,8 +206,16 @@ document_workflow = Workflow(
                 nodes.ROUTE_BANK: nodes.extract_bank_node,
             },
         ),
-        # Invoice lane chain.
-        (nodes.extract_invoice_node, nodes.categorize_node, nodes.tax_node),
+        # Invoice lane chain. The extract reviewer ("smart inspector") sits
+        # between extraction and categorization: a deterministic pass-through on
+        # the happy path (ZERO extra LLM), it only spends a critic call / asks
+        # the human mid-flow when the reader struggled (Step 2 engine half).
+        (
+            nodes.extract_invoice_node,
+            nodes.review_extraction_node,
+            nodes.categorize_node,
+            nodes.tax_node,
+        ),
         # Convergence: both lane tails edge into the shared approval gate. Only
         # one lane fires per document (classify emits a single route), so the
         # gate runs exactly once.

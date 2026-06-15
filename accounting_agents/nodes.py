@@ -38,6 +38,7 @@ from typing import Any, Callable, Literal, Optional
 
 from google.adk.events import RequestInput
 from google.adk.events.event import Event
+from google.adk.workflow import node
 from pydantic import BaseModel, Field
 
 from invoice_processing.classify.document_classifier import (
@@ -144,6 +145,29 @@ APPROVAL_CONFIDENCE_THRESHOLD = 0.7
 #: State key recording the gate's outcome ("auto_approved" | the human decision).
 APPROVAL_STATUS_KEY = "approval_status"
 
+#: State key carrying classify_node's confidence (feeds the extract reviewer's
+#: low-confidence signal — see ``detect_struggle``).
+CLASSIFY_CONFIDENCE_KEY = "classify_confidence"
+
+#: A classify confidence strictly below this trips the reviewer's
+#: ``low_classify_confidence`` signal.
+CLASSIFY_CONFIDENCE_FLOOR = 0.60
+
+#: Extract-reviewer state keys + verdict vocabulary (mid-flow "smart inspector"
+#: between extraction and categorization). The reviewer only spends an LLM call
+#: when cheap deterministic signals say the reader struggled (``detect_struggle``);
+#: the happy path writes ``REVIEW_VERDICT_OK`` and never calls ``REVIEWER_FN``.
+REVIEW_VERDICT_KEY = "review_verdict"
+REVIEW_REASON_KEY = "review_reason"
+REVIEW_VERDICT_OK = "ok"
+REVIEW_VERDICT_HINTS = "hints_needed"
+REVIEW_VERDICT_CLARIFY = "user_clarify"
+
+#: §9.3 ceiling — bounded IN-NODE loop (NOT a graph cycle): at most this many
+#: reviewer calls and re-extracts before circuit-breaking to a human (§9.5).
+REVIEW_MAX_REVIEWS = 2
+REVIEW_MAX_REEXTRACTS = 1
+
 #: Fields on an invoice line that the HITL Edit flow may overwrite. These MUST
 #: match the canonical ``InvoiceLine`` model field names (``invoice_processing/
 #: export/models.py``) — the exporter reads ``line.tax_treatment`` /
@@ -173,6 +197,32 @@ class ApproveDecision(BaseModel):
         description="Optional structured corrections to apply when decision=='edit'.",
     )
 
+
+class ReviewClarifyDecision(BaseModel):
+    """The human's response to a MID-FLOW extract-review clarification request.
+
+    Fed back into the paused workflow as the ``review_extraction_node``'s
+    ``RequestInput`` response when the deterministic reviewer circuit-breaks to a
+    human (§9.5). Distinct from :class:`ApproveDecision` (the terminal gate):
+    this one steers the *re-extraction*, the terminal gate steers *posting*.
+
+    Canonical field names only (§0.5-D):
+    * ``reextract_as`` — re-run extraction with ``hint`` appended.
+    * ``confirm_as_is`` — wave the current extraction through unchanged.
+    * ``reject`` — drop the document (empties the normalized payload).
+    """
+
+    action: Literal["reextract_as", "confirm_as_is", "reject"] = Field(
+        default="confirm_as_is",
+        description="reextract_as = re-extract with the supplied hint; "
+        "confirm_as_is = accept the current extraction; reject = drop the document.",
+    )
+    hint: Optional[str] = Field(
+        default=None,
+        description="Free-text steering hint appended to the extraction prompt "
+        "when action=='reextract_as'.",
+    )
+
 # --------------------------------------------------------------------------- #
 # Injectable brain seams (tests override these module attributes)
 # --------------------------------------------------------------------------- #
@@ -182,6 +232,12 @@ DIRECTION_FN: Callable[..., str] = resolve_direction
 EXTRACT_BUNDLE_FN: Callable[..., ExtractedInvoiceBundle] = extract_invoice_bundle
 EXTRACT_BANK_FN: Callable[..., Any] = extract_bank_statement
 CATEGORIZE_FN: Callable[..., NormalizedInvoice] = categorize_invoice
+#: The mid-flow extract critic. Defaults to a small Gemini reader on MODEL_LITE;
+#: tests swap a fake critic so NO network is touched. Signature mirrors the other
+#: seams: ``REVIEWER_FN(state, reasons, *, model) -> dict`` with a ``verdict`` key
+#: (one of REVIEW_VERDICT_OK / _HINTS / _CLARIFY) plus optional ``hint`` /
+#: ``question``. Assigned below once ``_reviewer_llm`` is defined.
+REVIEWER_FN: Callable[..., dict]
 
 # --------------------------------------------------------------------------- #
 # Artifact recovery
@@ -242,6 +298,9 @@ async def classify_node(ctx) -> Event:
     data, mime_type = await _load_pdf_bytes(ctx)
     cls: ClassificationResult = CLASSIFY_FN(data, mime_type, model=MODEL_LITE)
     doc_type = (cls.doc_type or "other").strip().lower()
+    # Persist the classifier's confidence so the extract reviewer's
+    # ``low_classify_confidence`` signal (#5) can read it cheaply downstream.
+    ctx.state[CLASSIFY_CONFIDENCE_KEY] = cls.confidence
 
     if doc_type == "bank_statement":
         ctx.state[DOC_TYPE_KEY] = "bank_statement"
@@ -271,6 +330,22 @@ async def extract_invoice_node(ctx) -> Event:
     data, mime_type = await _load_pdf_bytes(ctx)
     bundle: ExtractedInvoiceBundle = EXTRACT_BUNDLE_FN(data, mime_type, model=MODEL_LITE)
 
+    normalized = _normalize_bundle(ctx, bundle)
+    ctx.state[NORMALIZED_KEY] = _guard_state_payload(
+        NORMALIZED_KEY, [_inv_to_dict(i) for i in normalized]
+    )
+    return Event(output={"count": len(normalized)})
+
+
+def _normalize_bundle(ctx, bundle: ExtractedInvoiceBundle) -> list[NormalizedInvoice]:
+    """Reconcile + normalize every invoice in ``bundle`` into NormalizedInvoices.
+
+    Shared by ``extract_invoice_node`` (first pass) and the extract reviewer's
+    re-extract path (``_run_reviewer_loop``) so the normalization logic — totals
+    reconcile, FX flag preservation, and the self-referential / unknown-direction
+    review guards — lives in exactly one place. Reads direction / GST / base
+    currency from ``ctx.state``; does NOT write state (the caller does).
+    """
     direction = ctx.state.get(DIRECTION_KEY)
     # Structural direction for to_normalized must be "purchase" or "sales".
     # "self_referential" and "unknown" both default to "purchase" for row
@@ -279,7 +354,6 @@ async def extract_invoice_node(ctx) -> Event:
     # routed without a confirmed side (unknown case).
     effective_direction = direction if direction in ("purchase", "sales") else "purchase"
     our_gst = bool(ctx.state.get("tax_registered", True))
-
     base_currency: str = ctx.state.get("base_currency") or "SGD"
 
     normalized: list[NormalizedInvoice] = []
@@ -321,11 +395,7 @@ async def extract_invoice_node(ctx) -> Event:
                 else review_note
             )
         normalized.append(inv)
-
-    ctx.state[NORMALIZED_KEY] = _guard_state_payload(
-        NORMALIZED_KEY, [_inv_to_dict(i) for i in normalized]
-    )
-    return Event(output={"count": len(normalized)})
+    return normalized
 
 
 async def categorize_node(ctx) -> Event:
@@ -375,6 +445,315 @@ async def tax_node(ctx) -> Event:
         NORMALIZED_KEY, [_inv_to_dict(i) for i in invoices]
     )
     return Event(output={"count": len(invoices)})
+
+
+# --------------------------------------------------------------------------- #
+# Extract reviewer — the "smart inspector" between extraction and categorization
+#
+# Design: the happy path spends ZERO extra LLM. ``review_extraction_node`` runs
+# the cheap deterministic ``detect_struggle``; if nothing tripped it waves the
+# document straight through to categorize (``REVIEWER_FN`` is NOT called). Only
+# when a signal fires does it spend a bounded number of critic calls (§9.3) to
+# either re-extract with a hint or — on circuit-break (§9.5) — ask the human
+# mid-flow via a SECOND ``RequestInput`` (distinct ``:review`` interrupt id).
+# --------------------------------------------------------------------------- #
+
+
+def detect_struggle(state: dict) -> tuple[bool, list[str]]:
+    """Pure, deterministic struggle detector — NO LLM, NO network.
+
+    Returns ``(tripped, reasons)`` where ``reasons`` is a list of STABLE machine
+    reason strings (used to steer the critic and for audit). A clean extraction
+    returns ``(False, [])`` so the happy path never invokes ``REVIEWER_FN``.
+
+    §0.5-C GUARD: when an invoice's ``our_gst_registered`` is False, ALL
+    tax/GST-shaped signals are skipped for that invoice (a None/0 ``gst_amount``
+    is NORMAL for a non-registered client, not a struggle) — so a non-registered
+    client's "missing tax" never trips the reviewer.
+    """
+    invoices = _normalized_from_state(state)
+
+    reasons: list[str] = []
+
+    # Signal #1: bundle_empty — extraction produced zero invoices.
+    if not invoices:
+        reasons.append("bundle_empty")
+
+    # Signal #4: doc_type_other — classifier could not place the document.
+    doc_type = (state.get(DOC_TYPE_KEY) or "").strip().lower()
+    if doc_type == "other":
+        reasons.append("doc_type_other")
+
+    # Signal #5: low_classify_confidence — classifier hedged.
+    conf = state.get(CLASSIFY_CONFIDENCE_KEY)
+    if conf is not None and conf < CLASSIFY_CONFIDENCE_FLOOR:
+        reasons.append("low_classify_confidence")
+
+    for idx, inv in enumerate(invoices):
+        label = inv.invoice_number or f"invoice #{idx + 1}"
+
+        # Signal #2: lines_empty — an invoice with no ledger lines.
+        if not inv.lines:
+            reasons.append(f"lines_empty: {label}")
+
+        # Signal #3: unreconciled — totals/FX/direction reconcile failed
+        # (already computed upstream; carry the note for the critic).
+        if not inv.reconciled:
+            note = inv.reconcile_note or "totals do not reconcile"
+            reasons.append(f"unreconciled: {label} ({note})")
+
+        # Signal #6: missing_required — a core identifier/total is absent.
+        # §0.5-C: doc_total is a tax/GST-shaped total only insofar as a
+        # non-registered client's bill may legitimately omit a GST-inclusive
+        # grand total; we still require invoice_number + invoice_date for ALL
+        # clients (identity), but skip the doc_total requirement for a
+        # non-registered client so a "missing tax total" never trips it.
+        missing: list[str] = []
+        if not inv.invoice_number:
+            missing.append("invoice_number")
+        if not inv.invoice_date:
+            missing.append("invoice_date")
+        if inv.our_gst_registered and inv.doc_total is None:
+            missing.append("doc_total")
+        if missing:
+            reasons.append(f"missing_required: {label} ({', '.join(missing)})")
+
+    return (bool(reasons), reasons)
+
+
+def _reviewer_llm(state: dict, reasons: list[str], *, model: str) -> dict:
+    """Default extract critic — a small Gemini reader on ``model`` (MODEL_LITE).
+
+    Re-reads the same PDF + the current extraction and returns a STRUCTURED
+    verdict dict. §0.5-B: the instruction REQUIRES an explicit verdict ("never
+    end with only a tool call / always return the verdict"); an empty or
+    unparseable response degrades to ``user_clarify`` (safe human escalation),
+    never a crash.
+
+    Returns a dict with keys: ``verdict`` (one of REVIEW_VERDICT_OK / _HINTS /
+    _CLARIFY), ``hint`` (re-extract steering when verdict==hints_needed),
+    ``question`` (human-facing prompt when verdict==user_clarify).
+
+    NOTE: this default talks to Gemini; unit tests swap ``REVIEWER_FN`` for a
+    fake so no network is touched. Kept intentionally small — the bounded loop
+    in ``_run_reviewer_loop`` owns retry/ceiling policy, not this callable.
+    """
+    from google.genai import types as _genai_types
+
+    from invoice_processing.shared_libraries.genai_client import make_client
+
+    instruction = (
+        "You are a meticulous bookkeeping QA reviewer. An automated reader "
+        "extracted an invoice/receipt and a deterministic checker flagged these "
+        "concerns:\n"
+        + "\n".join(f"- {r}" for r in reasons)
+        + "\n\nDecide ONE verdict and ALWAYS return it explicitly — never end "
+        "with only a tool call and never reply with empty text:\n"
+        f"- '{REVIEW_VERDICT_OK}': the extraction is acceptable as-is.\n"
+        f"- '{REVIEW_VERDICT_HINTS}': a re-extraction with a specific hint would "
+        "likely fix it; provide a short 'hint'.\n"
+        f"- '{REVIEW_VERDICT_CLARIFY}': only a human can resolve it; provide a "
+        "short 'question' for the accountant.\n"
+        "Respond as JSON with keys: verdict, hint, question."
+    )
+
+    class _ReviewVerdict(BaseModel):
+        verdict: str = Field(description="ok | hints_needed | user_clarify")
+        hint: Optional[str] = None
+        question: Optional[str] = None
+
+    try:
+        client = make_client()
+        resp = client.models.generate_content(
+            model=model,
+            contents=[instruction, json.dumps(state.get(NORMALIZED_KEY) or [], default=str)],
+            config=_genai_types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=_ReviewVerdict,
+            ),
+        )
+        parsed = getattr(resp, "parsed", None)
+        if parsed is None:
+            text = (getattr(resp, "text", None) or "").strip()
+            if not text:
+                raise ValueError("empty reviewer response")
+            parsed = _ReviewVerdict(**json.loads(text))
+        verdict = (parsed.verdict or "").strip()
+        if verdict not in (REVIEW_VERDICT_OK, REVIEW_VERDICT_HINTS, REVIEW_VERDICT_CLARIFY):
+            raise ValueError(f"unrecognized reviewer verdict {verdict!r}")
+        return {"verdict": verdict, "hint": parsed.hint, "question": parsed.question}
+    except Exception as exc:  # noqa: BLE001 — degrade to safe human escalation (§0.5-B)
+        logger.warning("extract reviewer degraded to user_clarify: %s", exc)
+        return {"verdict": REVIEW_VERDICT_CLARIFY, "hint": None, "question": None}
+
+
+REVIEWER_FN = _reviewer_llm
+
+
+def _run_reviewer_loop(ctx, reasons: list[str], pdf_bytes: bytes) -> str:
+    """Bounded IN-NODE reviewer loop (NOT a graph cycle). Returns a verdict.
+
+    §9.3 ceiling: at most ``REVIEW_MAX_REVIEWS`` critic calls +
+    ``REVIEW_MAX_REEXTRACTS`` re-extract. ``hints_needed`` (within the re-extract
+    cap) re-runs ``EXTRACT_BUNDLE_FN`` with the hint appended + ``_normalize_bundle``,
+    re-detects, and continues. Ceiling hit / hints exhausted / two reviews still
+    bad → ``user_clarify`` (circuit-break to a human, §9.5). On ``ok`` the loop
+    returns immediately. Tracks ``review_attempts`` (≤2) and
+    ``review_reextract_count`` (≤1) in state for audit.
+    """
+    attempts = 0
+    reextracts = 0
+    question: Optional[str] = None
+
+    while attempts < REVIEW_MAX_REVIEWS:
+        attempts += 1
+        ctx.state["review_attempts"] = attempts
+        result = REVIEWER_FN(ctx.state, reasons, model=MODEL_LITE) or {}
+        verdict = result.get("verdict") or REVIEW_VERDICT_CLARIFY
+
+        if verdict == REVIEW_VERDICT_OK:
+            return REVIEW_VERDICT_OK
+
+        if verdict == REVIEW_VERDICT_HINTS and reextracts < REVIEW_MAX_REEXTRACTS:
+            hint = result.get("hint") or ""
+            _reextract_with_hint(ctx, hint, pdf_bytes)
+            reextracts += 1
+            ctx.state["review_reextract_count"] = reextracts
+            # Re-detect on the fresh extraction; if it's now clean we still loop
+            # once more so the critic can confirm (bounded by REVIEW_MAX_REVIEWS).
+            tripped, reasons = detect_struggle(ctx.state)
+            if not tripped:
+                return REVIEW_VERDICT_OK
+            continue
+
+        # verdict == user_clarify, OR hints_needed with the re-extract cap hit:
+        # circuit-break to a human (§9.5).
+        question = result.get("question")
+        break
+
+    # Ceiling / hints exhausted / two reviews still bad → human.
+    ctx.state["review_question"] = question or _review_clarify_question(reasons)
+    return REVIEW_VERDICT_CLARIFY
+
+
+def _reextract_with_hint(ctx, hint: str, pdf_bytes: bytes) -> None:
+    """Re-run extraction with ``hint`` appended, re-normalize, rewrite state.
+
+    Reuses ``_normalize_bundle`` (shared with ``extract_invoice_node``) so the
+    re-extract path never duplicates normalization logic. ``review_hint`` is
+    stored for audit; the real extractor receives ``hint`` as a kwarg.
+    """
+    ctx.state["review_hint"] = hint
+    bundle: ExtractedInvoiceBundle = EXTRACT_BUNDLE_FN(
+        pdf_bytes, "application/pdf", model=MODEL_LITE, hint=hint,
+    )
+    normalized = _normalize_bundle(ctx, bundle)
+    ctx.state[NORMALIZED_KEY] = _guard_state_payload(
+        NORMALIZED_KEY, [_inv_to_dict(i) for i in normalized]
+    )
+
+
+def _review_clarify_question(reasons: list[str]) -> str:
+    """Human-facing prompt summarizing why the extraction needs clarification."""
+    header = (
+        "I had trouble reading this document confidently. Could you confirm or "
+        "re-extract it? The reader flagged:"
+    )
+    bullets = "\n".join(f"  • {r}" for r in reasons)
+    return f"{header}\n{bullets}"
+
+
+@node(rerun_on_resume=True)
+async def review_extraction_node(ctx):
+    """Mid-flow extract reviewer (async generator — mirrors ``approval_gate``).
+
+    ``rerun_on_resume=True`` (unlike the auto-wrapped default of False) so that,
+    on the human's resume, ADK RE-RUNS this node with the response in
+    ``ctx.resume_inputs`` (keyed by interrupt id) — letting the SAME node apply
+    the ``ReviewClarifyDecision`` and then fall through to categorize. (The
+    terminal ``approval_gate`` keeps the default fast-forward behavior, handing
+    its decision to the separate ``apply_decision_node``.)
+
+    Runs the deterministic ``detect_struggle`` and ALWAYS records its reasons in
+    ``state[REVIEW_REASON_KEY]``. If nothing tripped → writes
+    ``state[REVIEW_VERDICT_KEY]=REVIEW_VERDICT_OK`` and returns (happy path: ZERO
+    LLM, ``REVIEWER_FN`` NOT called), falling through to ``categorize_node``.
+
+    If tripped → runs the bounded ``_run_reviewer_loop``. On ``user_clarify`` it
+    ``yield``s a SECOND ``RequestInput`` whose interrupt id is the terminal gate's
+    id suffixed ``:review`` (so the two pauses are distinct and ``hitl.py`` resume
+    works unchanged); on resume it applies the human's :class:`ReviewClarifyDecision`
+    (``reextract_as`` re-extracts with the hint; ``reject`` empties
+    ``NORMALIZED_KEY``; ``confirm_as_is`` waves through). Either way the document
+    then falls through to ``categorize_node``.
+    """
+    review_interrupt_id = f"{_approval_interrupt_id(ctx.state)}:review"
+
+    # RESUME PATH: ADK re-runs this WAITING node with the human's response in
+    # ``ctx.resume_inputs`` (keyed by interrupt id — the same mechanism the auth
+    # gate uses). Apply the ReviewClarifyDecision and fall through to categorize
+    # WITHOUT re-running the (LLM) reviewer loop or re-yielding the interrupt.
+    resume = getattr(ctx, "resume_inputs", None) or {}
+    if review_interrupt_id in resume:
+        # Only re-read the source PDF when the human actually asked for a
+        # re-extract — the happy/confirm/reject paths never touch the artifact.
+        pdf_bytes = await _maybe_load_pdf(ctx, resume[review_interrupt_id])
+        _apply_review_clarify(ctx, resume[review_interrupt_id], pdf_bytes)
+        ctx.state[REVIEW_VERDICT_KEY] = REVIEW_VERDICT_CLARIFY
+        return
+
+    tripped, reasons = detect_struggle(ctx.state)
+    ctx.state[REVIEW_REASON_KEY] = reasons
+
+    if not tripped:
+        # Happy path: ZERO extra LLM, and we never even touch the artifact.
+        ctx.state[REVIEW_VERDICT_KEY] = REVIEW_VERDICT_OK
+        return
+
+    # Tripped: the bounded loop may re-extract, so load the source PDF now.
+    pdf_bytes, _mime = await _load_pdf_bytes(ctx)
+    verdict = _run_reviewer_loop(ctx, reasons, pdf_bytes)
+    ctx.state[REVIEW_VERDICT_KEY] = verdict
+
+    if verdict != REVIEW_VERDICT_CLARIFY:
+        return
+
+    # Circuit-break to the human mid-flow (§9.5). Distinct ``:review`` interrupt
+    # id keeps this pause separate from the terminal ``approval_gate`` pause.
+    yield RequestInput(
+        interrupt_id=review_interrupt_id,
+        message=ctx.state.get("review_question") or _review_clarify_question(reasons),
+        response_schema=ReviewClarifyDecision,
+    )
+
+
+async def _maybe_load_pdf(ctx, decision) -> bytes:
+    """Load the source PDF bytes only when the resume action is a re-extract.
+
+    ``reject`` / ``confirm_as_is`` never re-read the artifact, so resuming those
+    must not require an artifact service to be present.
+    """
+    data = decision if isinstance(decision, dict) else {}
+    if data.get("action") == "reextract_as":
+        pdf_bytes, _mime = await _load_pdf_bytes(ctx)
+        return pdf_bytes
+    return b""
+
+
+def _apply_review_clarify(ctx, decision, pdf_bytes: bytes) -> None:
+    """Apply the human's ReviewClarifyDecision resume payload to the run state."""
+    data = decision if isinstance(decision, dict) else {}
+    action = data.get("action")
+    ctx.state["review_clarify_action"] = action
+
+    if action == "reject":
+        ctx.state[NORMALIZED_KEY] = []
+        return
+    if action == "reextract_as":
+        _reextract_with_hint(ctx, data.get("hint") or "", pdf_bytes)
+        return
+    # confirm_as_is (or missing/unknown action): wave the current extraction
+    # through unchanged.
 
 
 async def extract_bank_node(ctx) -> Event:

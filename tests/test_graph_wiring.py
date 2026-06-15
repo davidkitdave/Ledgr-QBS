@@ -135,6 +135,7 @@ def test_document_workflow_nodes_present():
         "__START__",
         "classify_node",
         "extract_invoice_node",
+        "review_extraction_node",
         "categorize_node",
         "tax_node",
         "extract_bank_node",
@@ -156,7 +157,9 @@ def test_document_workflow_classify_fanout_routes():
 
 def test_document_workflow_invoice_lane_chain():
     edges = _edges(document_workflow)
-    assert ("extract_invoice_node", "categorize_node", None) in edges
+    # The extract reviewer sits between extraction and categorization.
+    assert ("extract_invoice_node", "review_extraction_node", None) in edges
+    assert ("review_extraction_node", "categorize_node", None) in edges
     assert ("categorize_node", "tax_node", None) in edges
 
 
