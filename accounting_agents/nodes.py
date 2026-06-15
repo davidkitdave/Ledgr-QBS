@@ -980,10 +980,21 @@ async def approval_gate(ctx):
     ``except`` — that would trap the framework's interrupt handling and break
     HITL resume.
     """
+    invoices = _normalized_from_state(ctx.state)
     needs_review, reasons = _needs_review(ctx.state)
-    if not needs_review:
+    is_multi = len(invoices) > 1
+
+    if not needs_review and not is_multi:
         ctx.state[APPROVAL_STATUS_KEY] = "auto_approved"
         return
+
+    # Multi-entity bundles get a bundle-level reason when no per-doc flags fired.
+    if is_multi and not reasons:
+        total_lines = sum(len(getattr(inv, "lines", [])) for inv in invoices)
+        reasons = [
+            f"{len(invoices)} sub-documents extracted, {total_lines} total lines"
+            " — review before posting."
+        ]
 
     summary = _approval_summary(reasons)
     # Stash the summary in state so the (Slack-owning) runner can render the

@@ -770,6 +770,93 @@ def test_extract_node_needs_fx_review_routes_to_human_review():
 
 
 # =========================================================================== #
+# approval_gate — multi-entity predicate (P1-3)
+# =========================================================================== #
+
+
+def _clean_invoice_dict(number: str, n_lines: int = 2) -> dict:
+    """A fully reconciled, high-confidence invoice dict (no review flags)."""
+    from invoice_processing.export.models import InvoiceLine, NormalizedInvoice
+
+    inv = NormalizedInvoice(
+        invoice_number=number,
+        reconciled=True,
+        lines=[
+            InvoiceLine(description=f"Line {i}", tax_confidence=0.99, tax_flagged=False)
+            for i in range(n_lines)
+        ],
+    )
+    return nodes._inv_to_dict(inv)
+
+
+async def _collect_gate_events(state: dict) -> list:
+    """Run approval_gate and collect all yielded events."""
+    from accounting_agents.nodes import approval_gate as _ag
+
+    ctx = FakeContext(state)
+    events = []
+    async for event in _ag(ctx):
+        events.append(event)
+    return events, ctx
+
+
+def test_multi_entity_clean_bundle_emits_approval_card():
+    """A bundle with 3 clean invoices must yield a RequestInput even though
+    every individual sub-doc passes deterministic checks (P1-3 fix)."""
+    from google.adk.events import RequestInput
+
+    from accounting_agents.nodes import APPROVAL_STATUS_KEY
+
+    state = _base_state()
+    state[nodes.NORMALIZED_KEY] = [
+        _clean_invoice_dict("SOA-001"),
+        _clean_invoice_dict("SOA-002"),
+        _clean_invoice_dict("SOA-003"),
+    ]
+    events, ctx = asyncio.run(_collect_gate_events(state))
+
+    assert len(events) == 1, f"Expected exactly 1 RequestInput, got {events!r}"
+    assert isinstance(events[0], RequestInput), f"Expected RequestInput, got {type(events[0])}"
+    assert ctx.state.get("approval_message"), "approval_message must be set in state"
+    assert ctx.state.get(APPROVAL_STATUS_KEY) != "auto_approved", (
+        "Multi-entity bundle must NOT be auto-approved"
+    )
+
+
+def test_single_entity_clean_bundle_still_auto_passes():
+    """Regression: N==1 clean invoice still auto-approves (no yield)."""
+    from accounting_agents.nodes import APPROVAL_STATUS_KEY
+
+    state = _base_state()
+    state[nodes.NORMALIZED_KEY] = [_clean_invoice_dict("INV-SINGLE")]
+    events, ctx = asyncio.run(_collect_gate_events(state))
+
+    assert events == [], f"Single clean invoice must NOT yield any event, got {events!r}"
+    assert ctx.state.get(APPROVAL_STATUS_KEY) == "auto_approved"
+
+
+def test_single_entity_flagged_still_emits_card():
+    """Regression: N==1 but _needs_review returns True → RequestInput still yielded."""
+    from google.adk.events import RequestInput
+
+    from accounting_agents.nodes import APPROVAL_STATUS_KEY
+    from invoice_processing.export.models import InvoiceLine, NormalizedInvoice
+
+    inv = NormalizedInvoice(
+        invoice_number="INV-FLAG",
+        reconciled=True,
+        lines=[InvoiceLine(description="Ambiguous", tax_confidence=0.30, tax_flagged=False)],
+    )
+    state = _base_state()
+    state[nodes.NORMALIZED_KEY] = [nodes._inv_to_dict(inv)]
+    events, ctx = asyncio.run(_collect_gate_events(state))
+
+    assert len(events) == 1, f"Flagged single invoice must yield 1 RequestInput, got {events!r}"
+    assert isinstance(events[0], RequestInput)
+    assert ctx.state.get(APPROVAL_STATUS_KEY) != "auto_approved"
+
+
+# =========================================================================== #
 # ADK state-size guard (_guard_state_payload)
 # =========================================================================== #
 
