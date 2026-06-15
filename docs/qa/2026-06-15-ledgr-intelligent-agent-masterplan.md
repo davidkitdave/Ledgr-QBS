@@ -165,8 +165,89 @@ biggest single intelligence win on the engine.
   loaded incrementally to save context. Use in Step 6+ if the toolset grows large.
 - **agents/routing** — `RoutedAgent` is TypeScript-only today; Python uses coordinator+sub_agents.
 - **graphs/human-input** — `RequestInput(message, payload, response_schema)` for graph HITL nodes.
+- **evaluate** — trajectory + output eval; `tool_trajectory_avg_score` (catches wandering),
+  `final_response_match_v2`, `hallucinations_v1`, `multi_turn_trajectory_quality_v1`; `.test.json`
+  /`.evalset.json`; run via `pytest` (`AgentEvaluator.evaluate`), `adk eval` CLI, or `adk web`
+  Trace view. (Backs §10.)
 
-## 9. Anti-goals (what this plan is NOT)
+## 9. Cost & reliability guardrails (why this is NOT a token-burning random-walker)
+
+A prior exploration used a single autonomous LLM agent in an open reasoning loop. It wandered on
+hard invoices and burned tokens because **the LLM was driving the control loop with no bounds**.
+This design removes that failure mode by construction. The mechanisms, explicitly:
+
+1. **Code orchestrates; the LLM is a tool, not the driver.** Order of steps is decided by a
+   deterministic `@node` function (or the existing graph wiring), not by an LLM choosing its next
+   move. An LLM that doesn't drive the loop cannot wander the loop. (Ref: `agent-pattern-
+   deterministic-spine`.)
+2. **The happy path spends ~zero reasoning.** Clean doc: classify (1 structured call) → extract
+   (1 structured call) → categorize (learned-map / keyword = 0 LLM) → tax (rules = 0 LLM) → write.
+   That is essentially today's cost. Smart edges only spend on genuinely hard docs.
+3. **Every smart edge is hard-capped.** Reviewer/refiner loops use `LoopAgent(max_iterations=2)` +
+   `escalate=True`. Worst case for a hard doc = today + ~2 small reviewer calls + ≤1 re-extract.
+   A known, bounded ceiling — never open-ended.
+4. **Cheapest model, tightest prompt.** Reviewers + hybrid categorizer run on `MODEL_LITE`
+   (flash-lite). Inputs are narrow (one line + COA + entity_memory), not whole documents.
+5. **Circuit breaker → human.** Trip the retry ceiling → stop spending, post a HITL card. A human
+   answer is far cheaper than agent thrashing. Cost has a hard stop, always.
+6. **One app, one coordinator, no A2A.** No agent-to-agent chatter, no parallel ADKs. (Ref:
+   `model-tiering-and-no-a2a`.)
+7. **Token budget is a tracked metric, not a hope.** Per-document and per-chat-turn token spend is
+   measured and gated in eval (see §10). A regression that increases spend fails the gate.
+
+Net: per-document cost on the common path stays ≈ today; the marginal cost of intelligence is a
+small, bounded, measured number that only the long-tail docs incur — and it is provably bounded,
+not merely intended to be.
+
+## 10. Verification & QA plan (runs AFTER each build phase — a quality gate)
+
+Each roadmap step (§7) is followed by a verification gate before the next step starts. Grounded in
+ADK's eval framework (`adk.dev/evaluate/`), which exists precisely because LLM behaviour needs
+trajectory + output checks, not just pass/fail unit tests.
+
+**A. Golden eval sets (the ground truth we already have).**
+- Build `.test.json` / `.evalset.json` from the Cast Unity test docs + their ground truth, and the
+  Rosebery reference workbook. Cover: clean invoice, clean bank statement, AND the adversarial
+  long-tail that broke us before (credit note, multi-currency, multi-invoice PDF, blurry scan,
+  missing balance).
+- Run via `pytest` (`AgentEvaluator.evaluate`) in CI and `adk eval` from the CLI.
+
+**B. The anti-random-walk metric (the direct answer to the cost worry).**
+- `tool_trajectory_avg_score` (target 1.0 on the engine path) — asserts the agent/engine took the
+  EXPECTED sequence of tool calls. If it wanders or adds spurious steps, the gate FAILS. This is
+  the mechanism that turns "random walking" into a caught regression instead of a surprise bill.
+- `multi_turn_trajectory_quality_v1` — for chat, scores the efficiency/logic of the conversation
+  steps (did it solve it directly, or thrash?).
+
+**C. Correctness metrics.**
+- `final_response_match_v2` / `response_match_score` — answers match the ground-truth values
+  (e.g. "Oct withdrawals = SGD 4,221.14").
+- `hallucinations_v1` — every figure the agent states must be grounded in a tool output; flags
+  any invented number. Critical for accounting.
+- Domain assertions (our own, deterministic): categorization accuracy vs ground truth, tax-code
+  accuracy, balance/Math_Check correctness, dedup correctness.
+
+**D. Cost regression gate (our own metric on top of ADK).**
+- Record tokens-per-document and tokens-per-chat-turn for each eval case. Set a ceiling per case.
+  A phase that raises spend beyond budget fails the gate — so "more intelligent" can never quietly
+  become "more expensive" without us seeing it.
+- Track the happy-path doc separately: it must stay at ≈ today's cost (the smart edges must not
+  fire on clean docs).
+
+**E. Regression safety net.**
+- The existing 860 unit tests must stay green every phase.
+- Live Slack QA session per phase (the computer-use QA we've been running), against real Cast
+  Unity docs — the final human check.
+- `adk web` Trace view for debugging any eval failure (shows the exact request/response/tool graph
+  per step).
+
+**F. Definition of "better" (so the QA has a target).**
+- A phase ships only if: trajectory gate passes (no wandering), correctness ≥ the deterministic
+  baseline it replaces, hallucinations = 0 on the golden set, cost within budget, 860 tests green,
+  and the live QA session confirms it on real docs. "Better" = more correct on the long tail at
+  bounded, measured cost — not just "feels smarter".
+
+## 11. Anti-goals (what this plan is NOT)
 
 - **Not** a rewrite of the deterministic engine. The happy path stays fast, cheap, auditable.
 - **Not** an LLM in every edge — only where a deterministic rule is failing or accreting band-aids.
@@ -177,7 +258,7 @@ biggest single intelligence win on the engine.
 - **Not** breaking the system-of-record contract: `SlackLedgerStore.append_rows` and the Slack-
   hosted FY workbook remain the record.
 
-## 10. Decisions needed before the build session
+## 12. Decisions needed before the build session
 
 1. **Buy the unified vision?** One agent, two surfaces (chat + smart-edged engine), shared
    knowledge and tools — not a rewrite, not two separate products.
