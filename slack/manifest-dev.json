@@ -1,5 +1,4 @@
 {
-  "_comment": "Template for the Ledgr (dev) Slack app used for local socket-mode testing. Do not install this in customer workspaces.",
   "display_information": {
     "name": "Ledgr (dev)",
     "description": "Accounting document processor — drop a PDF or invoice and get a QBS Ledger import file back.",
