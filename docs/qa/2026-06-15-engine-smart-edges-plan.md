@@ -1,3 +1,7 @@
+> **⚠️ SUPERSEDED — merged into [`2026-06-15-ledgr-intelligent-agent-masterplan.md`](2026-06-15-ledgr-intelligent-agent-masterplan.md).**
+> This was the engine-side half. The master plan unifies it with the chat-agent plan into one
+> roadmap. Kept for detail/reference only; follow the master plan.
+
 # Plan: Smart edges for the engine (honest assessment + ADK-grounded direction)
 
 **Companion to:** `2026-06-15-accounting-agent-plan.md` (the chat-side agent). That plan reshapes

@@ -1,3 +1,7 @@
+> **⚠️ SUPERSEDED — merged into [`2026-06-15-ledgr-intelligent-agent-masterplan.md`](2026-06-15-ledgr-intelligent-agent-masterplan.md).**
+> This was the chat-side half. The master plan unifies it with the engine smart-edges plan into
+> one roadmap. Kept for detail/reference only; follow the master plan.
+
 # Plan: Reshape Q&A as a general Accounting Agent (engine-as-tools)
 
 **Status:** planning, no code yet. Grounded in `adk-docs` MCP queries (see §10 for citations).
