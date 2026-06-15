@@ -328,9 +328,11 @@ def test_list_recent_documents_respects_limit():
 # --------------------------------------------------------------------------- #
 
 
-def test_assistant_agent_has_twelve_tools():
+def test_assistant_agent_has_fourteen_tools():
+    # Step 3 added the 12 read tools; Step 4 (ADR-0009) adds the two gated
+    # write tools (amend_ledger_row / remove_ledger_row), taking the total to 14.
     assert assistant_agent.mode is None
-    assert len(assistant_agent.tools) == 12
+    assert len(assistant_agent.tools) == 14
 
 
 def test_assistant_instruction_mentions_new_tools():

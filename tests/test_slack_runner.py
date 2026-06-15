@@ -2437,3 +2437,394 @@ def test_ensure_session_is_idempotent_for_chat_reuse():
     asyncio.run(_ensure_session(runner, "app", "U1", "S1"))
     asyncio.run(_ensure_session(runner, "app", "U1", "S1"))  # must not raise
     assert svc.created == [("U1", "S1")]
+
+
+# =========================================================================== #
+# Chat-lane write confirm bridge (Step 4 / ADR-0009)
+# =========================================================================== #
+
+
+def test_classify_confirmation_reply():
+    from accounting_agents.slack_runner import classify_confirmation_reply
+
+    for yes in ("yes", "Yes.", "confirm", "go ahead", "ok", "do it", "please do"):
+        assert classify_confirmation_reply(yes) is True, yes
+    for no in ("no", "cancel", "stop", "don't", "nope"):
+        assert classify_confirmation_reply(no) is False, no
+    for ambiguous in ("what does it change?", "tell me more", ""):
+        assert classify_confirmation_reply(ambiguous) is None, ambiguous
+
+
+def _confirm_session_with_pending(fc_id="adk-confirm-1", payload=None):
+    """Build a session whose last event has an UNANSWERED adk_request_confirmation."""
+    from google.adk.events.event_actions import EventActions
+    from google.adk.tools.tool_confirmation import ToolConfirmation
+
+    payload = payload or {"op": "amend", "sheet": "Purchase", "row": 2,
+                          "updates": {"Account Code / COA": "6010"}}
+    ev = Event(
+        author="assistant",
+        content=types.Content(
+            parts=[types.Part(function_call=types.FunctionCall(
+                name="adk_request_confirmation", id=fc_id, args={}))]
+        ),
+        long_running_tool_ids=[fc_id],
+        actions=EventActions(
+            requested_tool_confirmations={
+                fc_id: ToolConfirmation(hint="change account?", payload=payload)
+            }
+        ),
+    )
+    return SimpleNamespace(events=[ev])
+
+
+def test_find_pending_confirmation_detects_unanswered():
+    from accounting_agents.slack_runner import find_pending_confirmation
+
+    session = _confirm_session_with_pending()
+    found = find_pending_confirmation(session)
+    assert found is not None
+    fc_id, confirmation = found
+    assert fc_id == "adk-confirm-1"
+    assert confirmation.payload["updates"]["Account Code / COA"] == "6010"
+
+
+def test_find_pending_confirmation_none_when_answered():
+    from accounting_agents.slack_runner import find_pending_confirmation
+
+    session = _confirm_session_with_pending(fc_id="fc-9")
+    # Append a function_response answering fc-9 → no longer pending.
+    answer = Event(
+        author="user",
+        content=types.Content(
+            parts=[types.Part(function_response=types.FunctionResponse(
+                id="fc-9", name="adk_request_confirmation", response={"confirmed": True}))]
+        ),
+    )
+    session.events.append(answer)
+    assert find_pending_confirmation(session) is None
+
+
+def test_synthesize_confirmation_message_matches_id_and_payload():
+    from accounting_agents.slack_runner import (
+        _synthesize_confirmation_message,
+        find_pending_confirmation,
+    )
+
+    session = _confirm_session_with_pending(fc_id="fc-77")
+    fc_id, confirmation = find_pending_confirmation(session)
+    msg = _synthesize_confirmation_message(fc_id, confirmation, confirmed=True)
+
+    part = msg.parts[0]
+    fr = part.function_response
+    assert fr.id == "fc-77"
+    assert fr.name == "adk_request_confirmation"
+    assert fr.response["confirmed"] is True
+    # Original requested payload is echoed back so the re-run tool sees its spec.
+    assert fr.response["payload"]["updates"]["Account Code / COA"] == "6010"
+
+
+def test_synthesize_confirmation_message_negative():
+    from accounting_agents.slack_runner import (
+        _synthesize_confirmation_message,
+        find_pending_confirmation,
+    )
+
+    session = _confirm_session_with_pending()
+    fc_id, confirmation = find_pending_confirmation(session)
+    msg = _synthesize_confirmation_message(fc_id, confirmation, confirmed=False)
+    assert msg.parts[0].function_response.response["confirmed"] is False
+
+
+# =========================================================================== #
+# Post-run write execution (_execute_pending_writes)
+# =========================================================================== #
+
+
+def _seed_two_row_ledger():
+    """Seed a real two-row QBS Purchase ledger; return (slack, store)."""
+    slack = FakeSlackClient()
+    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+    store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        software="qbs", kind="invoice",
+        batches=[
+            {"sheet": "Purchase", "doc_key": "k1", "rows": [
+                {"Invoice Number": "INV-1", "Description": "AWS", "Source Amount": 1000.0,
+                 "Account Code / COA": "6090", "Tax Amount": 90.0},
+                {"Invoice Number": "INV-2", "Description": "Rent", "Source Amount": 2000.0,
+                 "Account Code / COA": "6200", "Tax Amount": 0.0},
+            ]},
+        ],
+    )
+    return slack, store
+
+
+def test_execute_pending_writes_amend_posts_audits_and_refreshes():
+    from accounting_agents.slack_runner import _execute_pending_writes
+
+    slack, store = _seed_two_row_ledger()
+    state = {
+        "pending_ledger_write": [
+            {"op": "amend", "sheet": "Purchase", "row": 2,
+             "updates": {"Account Code / COA": "6010"}, "tax_treatment": "SR"},
+        ],
+    }
+    committed = asyncio.run(_execute_pending_writes(
+        state=state, ledger_store=store, slack_client=slack, channel_id="C1",
+        client_id="c1", fy="2026", session_id="S1", fc_id="fc-1",
+    ))
+    assert committed is True
+    # Workbook actually mutated.
+    rows = store.read_rows("c1", "2026", slack, "C1")
+    assert rows[0]["Account Code / COA"] == "6010"
+    # Pending list cleared + idempotency marker set.
+    assert state["pending_ledger_write"] == []
+    assert "fc-1" in state["committed_confirmations"]
+    # A confirmation message was posted.
+    assert any("Updated" in m["text"] for m in slack._posts)
+
+
+def test_execute_pending_writes_remove():
+    from accounting_agents.slack_runner import _execute_pending_writes
+
+    slack, store = _seed_two_row_ledger()
+    state = {"pending_ledger_write": [
+        {"op": "remove", "sheet": "Purchase", "row": 2}]}
+    asyncio.run(_execute_pending_writes(
+        state=state, ledger_store=store, slack_client=slack, channel_id="C1",
+        client_id="c1", fy="2026", session_id="S1", fc_id="fc-rm",
+    ))
+    rows = store.read_rows("c1", "2026", slack, "C1")
+    # Row 2 (AWS) gone; only Rent remains.
+    assert len(rows) == 1
+    assert rows[0]["Description"] == "Rent"
+    assert any("Removed" in m["text"] for m in slack._posts)
+
+
+def test_execute_pending_writes_idempotent_double_yes():
+    from accounting_agents.slack_runner import _execute_pending_writes
+
+    slack, store = _seed_two_row_ledger()
+    spec = {"op": "amend", "sheet": "Purchase", "row": 2,
+            "updates": {"Account Code / COA": "6010"}, "tax_treatment": "SR"}
+
+    state = {"pending_ledger_write": [spec]}
+    asyncio.run(_execute_pending_writes(
+        state=state, ledger_store=store, slack_client=slack, channel_id="C1",
+        client_id="c1", fy="2026", session_id="S1", fc_id="fc-dup",
+    ))
+    posts_after_first = len([m for m in slack._posts if "Updated" in m["text"]])
+
+    # Second "yes" for the SAME fc_id: re-queue the spec, but it must NOT re-apply.
+    state["pending_ledger_write"] = [spec]
+    committed2 = asyncio.run(_execute_pending_writes(
+        state=state, ledger_store=store, slack_client=slack, channel_id="C1",
+        client_id="c1", fy="2026", session_id="S1", fc_id="fc-dup",
+    ))
+    assert committed2 is False
+    posts_after_second = len([m for m in slack._posts if "Updated" in m["text"]])
+    assert posts_after_second == posts_after_first  # no duplicate write/post
+    assert state["pending_ledger_write"] == []
+
+
+# =========================================================================== #
+# MEDIUM-2 — improved classify_confirmation_reply
+# =========================================================================== #
+
+
+def test_classify_confirmation_improved():
+    from accounting_agents.slack_runner import classify_confirmation_reply
+
+    # Leading-token affirmative + trailing words
+    assert classify_confirmation_reply("yes please") is True
+    assert classify_confirmation_reply("yes do it") is True
+    assert classify_confirmation_reply("ok great") is True
+    assert classify_confirmation_reply("sure thing") is True
+    # Phrase contains
+    assert classify_confirmation_reply("go ahead and change it") is True
+    assert classify_confirmation_reply("please do that") is True
+    # Negative precedence — "no" wins even if "yes" also present
+    assert classify_confirmation_reply("no thanks") is False
+    assert classify_confirmation_reply("no, not yet") is False
+    assert classify_confirmation_reply("don't do it") is False
+    assert classify_confirmation_reply("cancel that please") is False
+    assert classify_confirmation_reply("wait, hold on") is False
+    # Ambiguous — bare unrelated question
+    assert classify_confirmation_reply("what does this change?") is None
+    assert classify_confirmation_reply("tell me more") is None
+    assert classify_confirmation_reply("maybe") is None
+    assert classify_confirmation_reply("") is None
+
+
+# =========================================================================== #
+# MEDIUM-3 — staleness bound in find_pending_confirmation
+# =========================================================================== #
+
+
+def _make_stale_session(fc_id="stale-fc", n_extra_events=10):
+    """Build a session where the adk_request_confirmation is older than the window."""
+    from google.adk.events.event_actions import EventActions
+    from google.adk.tools.tool_confirmation import ToolConfirmation
+
+    confirm_event = Event(
+        author="assistant",
+        content=types.Content(
+            parts=[types.Part(function_call=types.FunctionCall(
+                name="adk_request_confirmation", id=fc_id, args={}))]
+        ),
+        long_running_tool_ids=[fc_id],
+        actions=EventActions(
+            requested_tool_confirmations={
+                fc_id: ToolConfirmation(hint="change something?", payload={"op": "amend"})
+            }
+        ),
+    )
+    # Pad with unrelated events to push the confirmation outside the window.
+    filler = [
+        Event(
+            author="user",
+            content=types.Content(parts=[types.Part(text=f"question {i}")]),
+        )
+        for i in range(n_extra_events)
+    ]
+    return SimpleNamespace(events=[confirm_event] + filler)
+
+
+def test_find_pending_confirmation_ignores_stale():
+    from accounting_agents.slack_runner import find_pending_confirmation
+
+    # With 10 extra events after the confirmation, it is outside the 6-event window.
+    session = _make_stale_session(n_extra_events=10)
+    assert find_pending_confirmation(session) is None
+
+
+def test_find_pending_confirmation_within_window():
+    from accounting_agents.slack_runner import find_pending_confirmation
+
+    # With only 2 extra events, the confirmation is still within the window.
+    session = _make_stale_session(n_extra_events=2)
+    result = find_pending_confirmation(session)
+    assert result is not None
+    fc_id, _ = result
+    assert fc_id == "stale-fc"
+
+
+def test_find_pending_confirmation_custom_window():
+    from accounting_agents.slack_runner import find_pending_confirmation
+
+    # Large custom window sees the stale event.
+    session = _make_stale_session(n_extra_events=10)
+    result = find_pending_confirmation(session, staleness_window=20)
+    assert result is not None
+
+
+# =========================================================================== #
+# HIGH-2 — signature mismatch refuses the write
+# =========================================================================== #
+
+
+def _seed_two_row_ledger_sig():
+    """Seed a two-row QBS Purchase ledger; return (slack, store)."""
+    slack = FakeSlackClient()
+    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+    store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        software="qbs", kind="invoice",
+        batches=[
+            {"sheet": "Purchase", "doc_key": "k1", "rows": [
+                {"Invoice Number": "INV-1", "Description": "AWS hosting",
+                 "Source Amount": 1000.0, "Account Code / COA": "6090",
+                 "Tax Amount": 90.0},
+                {"Invoice Number": "INV-2", "Description": "Rent",
+                 "Source Amount": 2000.0, "Account Code / COA": "6200",
+                 "Tax Amount": 0.0},
+            ]},
+        ],
+    )
+    return slack, store
+
+
+def test_execute_pending_writes_refuses_on_signature_mismatch():
+    """A stale or replayed remove that targets a shifted row is refused."""
+    from accounting_agents.slack_runner import _execute_pending_writes
+
+    slack, store = _seed_two_row_ledger_sig()
+    # Simulate: the first row was already deleted before the "yes" arrived,
+    # shifting row numbers. We give a signature that now matches nothing.
+    state = {
+        "pending_ledger_write": [
+            {"op": "remove", "sheet": "Purchase", "row": 2,
+             "row_signature": "deadbeefdeadbeef"},  # wrong sig
+        ],
+    }
+    committed = asyncio.run(_execute_pending_writes(
+        state=state, ledger_store=store, slack_client=slack, channel_id="C1",
+        client_id="c1", fy="2026", session_id="S1", fc_id="fc-sig",
+    ))
+    # Nothing was committed.
+    assert committed is False
+    # Both rows still intact.
+    rows = store.read_rows("c1", "2026", slack, "C1")
+    assert len(rows) == 2
+    # A warning message was posted.
+    assert any("⚠️" in m["text"] for m in slack._posts)
+
+
+def test_execute_pending_writes_correct_signature_succeeds():
+    """A write with the correct row signature goes through normally."""
+    from accounting_agents.assistant import _row_signature
+    from accounting_agents.slack_runner import _execute_pending_writes
+
+    slack, store = _seed_two_row_ledger_sig()
+    rows = store.read_rows("c1", "2026", slack, "C1")
+    row0 = rows[0]
+    sig = _row_signature(row0)
+
+    state = {
+        "pending_ledger_write": [
+            {"op": "amend", "sheet": "Purchase", "row": 2,
+             "updates": {"Account Code / COA": "6010"}, "tax_treatment": "SR",
+             "row_signature": sig},
+        ],
+    }
+    committed = asyncio.run(_execute_pending_writes(
+        state=state, ledger_store=store, slack_client=slack, channel_id="C1",
+        client_id="c1", fy="2026", session_id="S1", fc_id="fc-ok",
+    ))
+    assert committed is True
+    updated = store.read_rows("c1", "2026", slack, "C1")
+    assert updated[0]["Account Code / COA"] == "6010"
+
+
+def test_execute_pending_writes_remove_replay_after_marker_failure():
+    """Double-replay of a remove: second attempt hits wrong sig (row already gone)."""
+    from accounting_agents.assistant import _row_signature
+    from accounting_agents.slack_runner import _execute_pending_writes
+
+    slack, store = _seed_two_row_ledger_sig()
+    rows = store.read_rows("c1", "2026", slack, "C1")
+    sig = _row_signature(rows[0])
+
+    spec = {"op": "remove", "sheet": "Purchase", "row": 2, "row_signature": sig}
+
+    # First application — succeeds and removes row 2.
+    state1 = {"pending_ledger_write": [spec]}
+    asyncio.run(_execute_pending_writes(
+        state=state1, ledger_store=store, slack_client=slack, channel_id="C1",
+        client_id="c1", fy="2026", session_id="S1", fc_id="fc-replay",
+    ))
+    assert len(store.read_rows("c1", "2026", slack, "C1")) == 1
+
+    # Simulated replay (marker persist failed): same spec again WITHOUT fc_id guard.
+    # The row at position 2 is now "Rent" (shifted up) — signature mismatch → refuse.
+    state2 = {"pending_ledger_write": [spec]}
+    committed2 = asyncio.run(_execute_pending_writes(
+        state=state2, ledger_store=store, slack_client=slack, channel_id="C1",
+        client_id="c1", fy="2026", session_id="S1", fc_id=None,  # no marker
+    ))
+    assert committed2 is False
+    # "Rent" row still intact — the wrong row was NOT deleted.
+    remaining = store.read_rows("c1", "2026", slack, "C1")
+    assert len(remaining) == 1
+    assert remaining[0]["Description"] == "Rent"

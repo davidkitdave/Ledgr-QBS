@@ -47,7 +47,7 @@ from typing import Any, Optional
 # the string annotations produced by `from __future__ import annotations`.
 from fastapi import Request, Response
 
-from accounting_agents.assistant import LEDGER_DATA_KEY
+from accounting_agents.assistant import LEDGER_DATA_KEY, PENDING_WRITE_KEY
 
 from google.genai import types
 
@@ -256,6 +256,165 @@ def find_interrupt_id(event: Any) -> Optional[str]:
         if getattr(fc, "name", None) == REQUEST_INPUT_FUNCTION_CALL_NAME:
             return fc.id
     return None
+
+
+#: The long-running function-call name ADK yields when a tool requests
+#: confirmation (``functions.REQUEST_CONFIRMATION_FUNCTION_CALL_NAME``). Pinned
+#: here so the chat-lane confirm bridge does not import experimental internals.
+REQUEST_CONFIRMATION_FUNCTION_CALL_NAME = "adk_request_confirmation"
+
+#: Affirmative leading tokens / phrases for the chat-lane confirm bridge.
+_AFFIRMATIVE_TOKENS: frozenset[str] = frozenset(
+    {"yes", "y", "yeah", "yep", "yup", "confirm", "confirmed", "ok", "okay",
+     "sure", "approve", "approved", "proceed"}
+)
+_AFFIRMATIVE_PHRASES: tuple[str, ...] = (
+    "go ahead", "do it", "please do", "please proceed", "sounds good",
+)
+#: Negative tokens / phrases — checked FIRST (negative precedence).
+_NEGATIVE_TOKENS: frozenset[str] = frozenset(
+    {"no", "n", "nope", "cancel", "cancelled", "stop", "dont", "nevermind"}
+)
+_NEGATIVE_PHRASES: tuple[str, ...] = (
+    "don't", "do not", "never mind", "leave it", "no thanks",
+    "cancel that", "not yet", "hold on", "wait",
+)
+
+
+def classify_confirmation_reply(text: str) -> Optional[bool]:
+    """Classify a free-text reply as confirm (True) / deny (False) / ambiguous (None).
+
+    Matching rules (evaluated in order):
+    1. NEGATIVE PRECEDENCE — if any negative token or phrase appears anywhere
+       in the normalised text, return False.  Catches "no thanks", "no, not yet",
+       "yes but actually no", etc.
+    2. AFFIRMATIVE — leading token matches an affirmative word, or the text
+       contains an affirmative phrase.
+    3. Ambiguous (None) — neither matched.
+
+    The fail-safe is ambiguous-as-None: an unrecognised reply passes through
+    to the model rather than accidentally committing or refusing a write.
+    """
+    t = (text or "").strip().lower()
+    # Strip trailing punctuation so "yes!" / "yes." match.
+    t_stripped = t.rstrip(".!?,")
+    if not t_stripped:
+        return None
+
+    # --- 1. Negative precedence ---
+    for phrase in _NEGATIVE_PHRASES:
+        if phrase in t:
+            return False
+    first_token = t_stripped.split()[0] if t_stripped.split() else ""
+    if first_token in _NEGATIVE_TOKENS:
+        return False
+    # Full-string negative (e.g. bare "no", "cancel")
+    if t_stripped in _NEGATIVE_TOKENS:
+        return False
+
+    # --- 2. Affirmative ---
+    if first_token in _AFFIRMATIVE_TOKENS:
+        return True
+    if t_stripped in _AFFIRMATIVE_TOKENS:
+        return True
+    for phrase in _AFFIRMATIVE_PHRASES:
+        if t.startswith(phrase) or phrase in t:
+            return True
+
+    return None
+
+
+#: How many events back we look for an unanswered adk_request_confirmation.
+#: A pending confirmation older than this window is treated as stale and ignored
+#: — a "yes" typed days later to an unrelated question cannot commit a write
+#: that the user has long since forgotten about (MEDIUM-3).
+_CONFIRM_STALENESS_WINDOW: int = 6
+
+
+def find_pending_confirmation(
+    session: Any, *, staleness_window: int = _CONFIRM_STALENESS_WINDOW
+) -> Optional[tuple[str, Any]]:
+    """Return ``(fc_id, ToolConfirmation)`` for the MOST RECENT unanswered confirm.
+
+    Scans the session's events newest-first for an ``adk_request_confirmation``
+    long-running call whose ``id`` has not yet been answered by a later
+    ``FunctionResponse`` of the same name+id.  Only events within the last
+    ``staleness_window`` positions are checked — a confirmation older than that
+    is treated as stale and ignored so an accidental "yes" in a later unrelated
+    turn cannot trigger a write the user has forgotten about (MEDIUM-3).
+
+    Returns ``None`` when there is no actionable pending confirmation.  The
+    original requested payload is read from
+    ``event.actions.requested_tool_confirmations`` so the synthesized response
+    can echo it back faithfully.
+    """
+    events = list(getattr(session, "events", None) or [])
+    # Only look within the staleness window (newest events first).
+    window = events[-staleness_window:] if staleness_window > 0 else events
+    answered: set[str] = set()
+    for ev in reversed(window):
+        # Collect already-answered confirmation ids (function responses).
+        getter = getattr(ev, "get_function_responses", None)
+        for fr in (getter() if callable(getter) else []) or []:
+            if getattr(fr, "name", None) == REQUEST_CONFIRMATION_FUNCTION_CALL_NAME:
+                fid = getattr(fr, "id", None)
+                if fid:
+                    answered.add(fid)
+
+        getcalls = getattr(ev, "get_function_calls", None)
+        for fc in (getcalls() if callable(getcalls) else []) or []:
+            if getattr(fc, "name", None) != REQUEST_CONFIRMATION_FUNCTION_CALL_NAME:
+                continue
+            fc_id = getattr(fc, "id", None)
+            if not fc_id or fc_id in answered:
+                continue
+            # Try two sources for the ToolConfirmation object:
+            # 1. event.actions.requested_tool_confirmations[fc_id] — set by our
+            #    smoke-test / manual event construction (also what the ADK
+            #    function_response event carries before the synthetic event is built).
+            # 2. fc.args["toolConfirmation"] — the real ADK flow stores the
+            #    ToolConfirmation dict here on the synthetic adk_request_confirmation
+            #    FunctionCall emitted by generate_request_confirmation_event.
+            actions = getattr(ev, "actions", None)
+            requested = getattr(actions, "requested_tool_confirmations", None) or {}
+            confirmation = requested.get(fc_id)
+            if confirmation is None:
+                args = getattr(fc, "args", None) or {}
+                tc_dict = args.get("toolConfirmation")
+                if tc_dict:
+                    try:
+                        from google.adk.tools.tool_confirmation import ToolConfirmation
+                        confirmation = ToolConfirmation.model_validate(tc_dict)
+                    except Exception:  # noqa: BLE001
+                        pass
+            return fc_id, confirmation
+    return None
+
+
+def _synthesize_confirmation_message(fc_id: str, confirmation: Any, *, confirmed: bool):
+    """Build the ``Content`` that answers a pending ``adk_request_confirmation``.
+
+    ADK expects a ``FunctionResponse`` (name+matching id) whose ``response`` is a
+    ``ToolConfirmation`` dumped with ``by_alias=True``, echoing the originally
+    requested payload so the re-executed tool sees its own write spec.
+    """
+    from google.adk.tools.tool_confirmation import ToolConfirmation
+
+    payload = getattr(confirmation, "payload", None)
+    hint = getattr(confirmation, "hint", None)
+    answer = ToolConfirmation(hint=hint, confirmed=confirmed, payload=payload)
+    return types.Content(
+        role="user",
+        parts=[
+            types.Part(
+                function_response=types.FunctionResponse(
+                    id=fc_id,
+                    name=REQUEST_CONFIRMATION_FUNCTION_CALL_NAME,
+                    response=answer.model_dump(by_alias=True),
+                )
+            )
+        ],
+    )
 
 
 #: Maps a graph node name to the friendly status label shown while it runs. The
@@ -756,6 +915,36 @@ async def _ensure_session(
         pass
 
 
+async def _apply_state_delta(
+    runner: Any, app_name: str, user_id: str, session_id: str, state_delta: dict
+) -> None:
+    """Merge ``state_delta`` into the live session by appending a state-only event.
+
+    Used by the chat-lane confirm flow to persist the cleared ``pending_ledger_write``
+    list, the idempotency marker, and the refreshed ``ledger_data`` AFTER the
+    write tools have run — so the next turn sees the post-write state. Best-effort:
+    a persistence failure must not crash the chat lane (the workbook write already
+    succeeded).
+    """
+    if not state_delta:
+        return
+    try:
+        from google.adk.events.event import Event
+        from google.adk.events.event_actions import EventActions
+
+        session = await runner.session_service.get_session(
+            app_name=app_name, user_id=user_id, session_id=session_id
+        )
+        if session is None:
+            return
+        await runner.session_service.append_event(
+            session,
+            Event(author="assistant", actions=EventActions(state_delta=state_delta)),
+        )
+    except Exception:  # noqa: BLE001 — state persistence is best-effort
+        logger.exception("failed to persist post-write chat state delta")
+
+
 async def _read_interrupt_summary(
     runner: Any, app_name: str, user_id: str, session_id: str, fallback: str
 ) -> str:
@@ -1024,6 +1213,199 @@ def _update_card(slack_client: Any, interrupt: dict, summary: str, decision: str
 # --------------------------------------------------------------------------- #
 
 
+def _verify_row_signature(
+    ledger_store: SlackLedgerStore,
+    slack_client: Any,
+    client_id: str,
+    fy: str,
+    channel_id: str,
+    sheet: str,
+    row: int,
+    expected_sig: str,
+) -> Optional[str]:
+    """Read the live workbook row and compare it against the proposal-time signature.
+
+    Returns ``None`` when the content matches (safe to write), or a human-readable
+    reason string when the content has shifted — row deletion upstream shifts all
+    subsequent row numbers, so writing to the original row number would corrupt a
+    different line.  Called synchronously (inside ``asyncio.to_thread``).
+    """
+    from accounting_agents.assistant import _row_signature  # local import avoids circular at module level
+
+    try:
+        all_rows = ledger_store.read_rows(
+            client_id=client_id, fy=fy,
+            slack_client=slack_client, channel_id=channel_id,
+        )
+    except Exception:  # noqa: BLE001
+        return "Could not re-read the workbook to verify the row — write aborted."
+
+    # Find the row at (sheet, row) coordinate.
+    live_row = next(
+        (r for r in all_rows if r.get("_sheet") == sheet and r.get("_row") == row),
+        None,
+    )
+    if live_row is None:
+        return (
+            f"Row {row} on sheet {sheet!r} no longer exists — it may have been "
+            "deleted or shifted since you saw the proposal. Please look up the "
+            "row again with `lookup_row` and re-propose the change."
+        )
+
+    live_sig = _row_signature(live_row)
+    if live_sig != expected_sig:
+        live_desc = live_row.get("Description") or "(unknown)"
+        return (
+            f"The content of {sheet} row {row} changed since you approved the edit "
+            f"(now: {live_desc!r}). The write was aborted to prevent corrupting "
+            "the wrong line. Please use `lookup_row` to find the row again and "
+            "re-propose the change."
+        )
+    return None
+
+
+async def _execute_pending_writes(
+    *,
+    state: dict,
+    ledger_store: SlackLedgerStore,
+    slack_client: Any,
+    channel_id: str,
+    client_id: str,
+    fy: str,
+    session_id: str,
+    fc_id: Optional[str],
+    thread_ts: Optional[str] = None,
+) -> bool:
+    """Drain ``state["pending_ledger_write"]`` → mutate the workbook + post + audit.
+
+    Executes each confirmed write spec (``amend`` / ``remove``) against the FY
+    workbook in a thread pool (the blocking download/upload, mirroring
+    :func:`persist_and_deliver`). Posts a confirmation message, appends an audit
+    log line, and clears the pending list. Returns ``True`` when at least one
+    write was committed (so the caller refreshes ``ledger_data``).
+
+    Idempotency: guarded by an in-state ``committed_confirmations`` marker keyed
+    by the answering ``fc_id`` so a double "yes" commits the batch exactly once.
+
+    Replay-safety (HIGH-2): BEFORE each write, re-reads the live workbook row and
+    verifies its signature matches the one captured at Turn-1. A mismatch means
+    the row shifted (upstream deletion) or was edited since the proposal — the
+    write is refused and the user is told to re-propose rather than silently
+    corrupting a different row.
+    """
+    pending = state.get(PENDING_WRITE_KEY)
+    if not isinstance(pending, list) or not pending:
+        return False
+
+    committed = state.get("committed_confirmations")
+    if not isinstance(committed, list):
+        committed = []
+    if fc_id and fc_id in committed:
+        # Already applied for this confirmation — clear and skip (double "yes").
+        state[PENDING_WRITE_KEY] = []
+        return False
+
+    any_committed = False
+    for spec in pending:
+        if not isinstance(spec, dict):
+            continue
+        op = spec.get("op")
+        sheet = spec.get("sheet")
+        row = spec.get("row")
+        expected_sig = spec.get("row_signature")
+
+        # ---- Signature check (HIGH-2) — verify row before mutating ----
+        if expected_sig and sheet and row:
+            sig_error = await asyncio.to_thread(
+                _verify_row_signature,
+                ledger_store, slack_client,
+                client_id, fy, channel_id,
+                sheet, row, expected_sig,
+            )
+            if sig_error:
+                logger.warning(
+                    "CHAT_WRITE_ABORTED sig_mismatch op=%s sheet=%s row=%s "
+                    "session=%s client=%s: %s",
+                    op, sheet, row, session_id, client_id, sig_error,
+                )
+                _post_message(
+                    slack_client, channel_id,
+                    f"⚠️ {sig_error}",
+                    thread_ts=thread_ts,
+                )
+                continue  # skip this spec; don't mark any_committed
+
+        try:
+            if op == "amend":
+                result = await asyncio.to_thread(
+                    ledger_store.amend_row,
+                    client_id=client_id,
+                    fy=fy,
+                    slack_client=slack_client,
+                    channel_id=channel_id,
+                    sheet=sheet,
+                    row=row,
+                    updates=spec.get("updates") or {},
+                )
+                changes = ", ".join(
+                    f"{col}: {result['before'].get(col)!r} → {new!r}"
+                    for col, new in (result.get("after") or {}).items()
+                )
+                _post_message(
+                    slack_client, channel_id,
+                    f"✅ Updated {sheet} row {row} — {changes}.",
+                    thread_ts=thread_ts,
+                )
+                logger.info(
+                    "CHAT_WRITE_AUDIT op=amend session=%s channel=%s client=%s fy=%s "
+                    "sheet=%s row=%s before=%r after=%r tax=%r",
+                    session_id, channel_id, client_id, fy, sheet, row,
+                    result.get("before"), result.get("after"),
+                    spec.get("tax_treatment"),
+                )
+                any_committed = True
+            elif op == "remove":
+                result = await asyncio.to_thread(
+                    ledger_store.remove_row,
+                    client_id=client_id,
+                    fy=fy,
+                    slack_client=slack_client,
+                    channel_id=channel_id,
+                    sheet=sheet,
+                    row=row,
+                )
+                _post_message(
+                    slack_client, channel_id,
+                    f"🗑️ Removed {sheet} row {row} from your ledger.",
+                    thread_ts=thread_ts,
+                )
+                logger.info(
+                    "CHAT_WRITE_AUDIT op=remove session=%s channel=%s client=%s fy=%s "
+                    "sheet=%s row=%s removed=%r",
+                    session_id, channel_id, client_id, fy, sheet, row,
+                    result.get("removed"),
+                )
+                any_committed = True
+        except Exception:  # noqa: BLE001 — a failed write must not crash the lane
+            logger.exception(
+                "chat write failed: op=%s sheet=%s row=%s channel=%s",
+                op, sheet, row, channel_id,
+            )
+            _post_message(
+                slack_client, channel_id,
+                f"⚠️ I couldn't apply that change to {sheet} row {row}. "
+                "Nothing was modified.",
+                thread_ts=thread_ts,
+            )
+
+    # Mark this confirmation committed + clear the pending list (idempotency).
+    if fc_id:
+        committed.append(fc_id)
+        state["committed_confirmations"] = committed
+    state[PENDING_WRITE_KEY] = []
+    return any_committed
+
+
 async def answer_question(
     *,
     runner: Any,
@@ -1115,14 +1497,36 @@ async def answer_question(
             get_session_config=GetSessionConfig(num_recent_events=20)
         )
 
+        # Chat-lane confirm bridge (ADR-0009): the user's "yes" arrives as plain
+        # Slack text, not a FunctionResponse. If the session has an unanswered
+        # ``adk_request_confirmation`` and this message is clearly affirmative /
+        # negative, synthesize the FunctionResponse so ADK re-runs the gated tool;
+        # otherwise pass the raw text through (the model handles ambiguity).
+        new_message = types.Content(
+            role="user", parts=[types.Part(text=question)]
+        )
+        fc_id: Optional[str] = None
+        try:
+            pre_session = await runner.session_service.get_session(
+                app_name=app_name, user_id=channel_id, session_id=session_id
+            )
+        except Exception:  # noqa: BLE001 — a session read failure must not block chat
+            pre_session = None
+        pending_confirm = find_pending_confirmation(pre_session) if pre_session else None
+        if pending_confirm is not None:
+            verdict = classify_confirmation_reply(question)
+            if verdict is not None:
+                fc_id, confirmation = pending_confirm
+                new_message = _synthesize_confirmation_message(
+                    fc_id, confirmation, confirmed=verdict
+                )
+
         answer_text = ""
         last_tool_text = ""
         async for event in runner.run_async(
             user_id=channel_id,
             session_id=session_id,
-            new_message=types.Content(
-                role="user", parts=[types.Part(text=question)]
-            ),
+            new_message=new_message,
             state_delta=state_delta,
             run_config=run_config,
         ):
@@ -1132,6 +1536,50 @@ async def answer_question(
             tool_text = extract_tool_response_text(event)
             if tool_text:
                 last_tool_text = tool_text
+
+        # Post-run: apply any confirmed writes the tool queued in state, then
+        # refresh ``ledger_data`` so the rest of the chat reflects the change.
+        try:
+            post_session = await runner.session_service.get_session(
+                app_name=app_name, user_id=channel_id, session_id=session_id
+            )
+            post_state = dict(post_session.state) if post_session else {}
+        except Exception:  # noqa: BLE001
+            post_state = {}
+
+        if post_state.get(PENDING_WRITE_KEY):
+            committed = await _execute_pending_writes(
+                state=post_state,
+                ledger_store=ledger_store,
+                slack_client=slack_client,
+                channel_id=channel_id,
+                client_id=client_id,
+                fy=fy,
+                session_id=session_id,
+                fc_id=fc_id,
+                thread_ts=thread_ts,
+            )
+            # Persist the cleared pending list + idempotency marker, and refresh
+            # the loaded ledger rows so subsequent turns see the new state.
+            write_back = {
+                PENDING_WRITE_KEY: [],
+                "committed_confirmations": post_state.get("committed_confirmations", []),
+            }
+            if committed:
+                try:
+                    refreshed = await asyncio.to_thread(
+                        ledger_store.read_rows,
+                        client_id=client_id,
+                        fy=fy,
+                        slack_client=slack_client,
+                        channel_id=channel_id,
+                    )
+                    write_back[LEDGER_DATA_KEY] = refreshed
+                except Exception:  # noqa: BLE001
+                    logger.exception("ledger refresh after chat write failed")
+            await _apply_state_delta(
+                runner, app_name, channel_id, session_id, write_back
+            )
 
     if not answer_text:
         # Safety net: model went silent after a tool call. Show the user the

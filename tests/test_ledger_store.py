@@ -1097,3 +1097,459 @@ def test_legacy_8col_header_is_migrated_on_read():
     # New B/F opening must also be correct.
     second_bf_bal = ws2.cell(row=bf_rows[1], column=bi2).value
     assert second_bf_bal == 800.0, f"Apr B/F opening wrong: {second_bf_bal}"
+
+
+# --------------------------------------------------------------------------- #
+# Step 4 — row coordinate + workbook mutation (amend_row / remove_row)
+# --------------------------------------------------------------------------- #
+
+def _make_invoice_store_with_two_rows() -> tuple["FakeSlackClient", "SlackLedgerStore", str]:
+    """Seed a two-row invoice ledger and return (slack, store, file_id)."""
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+    store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        software="qbs", kind="invoice",
+        batches=[
+            {"sheet": "Purchase", "doc_key": "k1", "rows": [
+                {"Invoice Number": "INV-1", "Description": "Alpha", "Source Amount": 100.0, "Account Code / COA": "6000"},
+                {"Invoice Number": "INV-2", "Description": "Beta",  "Source Amount": 200.0, "Account Code / COA": "6001"},
+            ]},
+        ],
+    )
+    ptr = store.get_pointer("c1", "2026")
+    return slack, store, ptr["slack_file_id"]
+
+
+# ---- read_rows: _row coordinate -----------------------------------------
+
+def test_read_rows_stamps_row_number():
+    """read_rows must stamp _row=2 on the first data row, _row=3 on the second."""
+    slack, store, _ = _make_invoice_store_with_two_rows()
+    rows = store.read_rows("c1", "2026", slack, "C1")
+    assert len(rows) == 2
+    assert rows[0]["_row"] == 2
+    assert rows[1]["_row"] == 3
+
+
+def test_read_rows_row_matches_sheet():
+    """_row is consistent with _sheet across a two-sheet invoice workbook."""
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+    store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        software="qbs", kind="invoice",
+        batches=[
+            {"sheet": "Purchase", "doc_key": "p1", "rows": [
+                {"Invoice Number": "P1", "Description": "P-alpha", "Source Amount": 10.0, "Account Code / COA": "6000"},
+            ]},
+            {"sheet": "Sales", "doc_key": "s1", "rows": [
+                {"Invoice Number": "S1", "Description": "S-alpha", "Source Amount": 20.0, "Account Code / COA": "4000"},
+                {"Invoice Number": "S2", "Description": "S-beta",  "Source Amount": 30.0, "Account Code / COA": "4001"},
+            ]},
+        ],
+    )
+    rows = store.read_rows("c1", "2026", slack, "C1")
+    purchase = [r for r in rows if r["_sheet"] == "Purchase"]
+    sales    = [r for r in rows if r["_sheet"] == "Sales"]
+    # Purchase has 1 data row → _row 2.
+    assert purchase[0]["_row"] == 2
+    # Sales has 2 data rows → rows 2 and 3.
+    assert sales[0]["_row"] == 2
+    assert sales[1]["_row"] == 3
+
+
+def test_read_rows_existing_keys_intact():
+    """_row addition must not disturb _sheet or column-header values."""
+    slack, store, _ = _make_invoice_store_with_two_rows()
+    rows = store.read_rows("c1", "2026", slack, "C1")
+    assert rows[0]["_sheet"] == "Purchase"
+    assert rows[0]["Description"] == "Alpha"
+    assert rows[1]["Description"] == "Beta"
+
+
+def test_read_rows_empty_ledger():
+    """read_rows on a missing pointer returns [] (unchanged behaviour)."""
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+    assert store.read_rows("no-such-client", "2026", slack, "C1") == []
+
+
+# ---- amend_row: happy path -----------------------------------------------
+
+def test_amend_row_changes_targeted_cell():
+    """amend_row updates exactly the targeted cell and leaves others intact."""
+    slack, store, _ = _make_invoice_store_with_two_rows()
+
+    result = store.amend_row(
+        "c1", "2026", slack, "C1",
+        sheet="Purchase", row=2,
+        updates={"Description": "Alpha-edited"},
+    )
+
+    assert result["sheet"] == "Purchase"
+    assert result["row"] == 2
+    # before/after tracking.
+    assert result["before"]["Description"] == "Alpha"
+    assert result["after"]["Description"] == "Alpha-edited"
+
+    # Read back and verify.
+    rows = store.read_rows("c1", "2026", slack, "C1")
+    assert rows[0]["Description"] == "Alpha-edited"
+    # Second row untouched.
+    assert rows[1]["Description"] == "Beta"
+
+
+def test_amend_row_multi_column_update():
+    """amend_row with two column updates changes both, leaves unlisted columns alone."""
+    slack, store, _ = _make_invoice_store_with_two_rows()
+
+    store.amend_row(
+        "c1", "2026", slack, "C1",
+        sheet="Purchase", row=2,
+        updates={"Description": "X", "Source Amount": 999.0},
+    )
+
+    rows = store.read_rows("c1", "2026", slack, "C1")
+    assert rows[0]["Description"] == "X"
+    assert rows[0]["Source Amount"] == 999.0
+    assert rows[0]["Account Code / COA"] == "6000"  # untouched
+
+
+def test_amend_row_uploads_new_version_and_updates_pointer():
+    """amend_row uploads a new Slack file and updates the Firestore pointer."""
+    slack, store, old_file_id = _make_invoice_store_with_two_rows()
+
+    store.amend_row(
+        "c1", "2026", slack, "C1",
+        sheet="Purchase", row=2,
+        updates={"Description": "Changed"},
+    )
+
+    ptr = store.get_pointer("c1", "2026")
+    new_file_id = ptr["slack_file_id"]
+    assert new_file_id != old_file_id
+    assert new_file_id in slack.files
+
+
+def test_amend_row_leaves_seen_doc_keys_intact():
+    """amend_row must not modify the seen_doc_keys field on the pointer."""
+    slack, store, _ = _make_invoice_store_with_two_rows()
+    ptr_before = store.get_pointer("c1", "2026")
+    keys_before = set(ptr_before.get("seen_doc_keys") or [])
+
+    store.amend_row(
+        "c1", "2026", slack, "C1",
+        sheet="Purchase", row=2,
+        updates={"Description": "Y"},
+    )
+
+    ptr_after = store.get_pointer("c1", "2026")
+    keys_after = set(ptr_after.get("seen_doc_keys") or [])
+    assert keys_before == keys_after
+
+
+def test_amend_row_second_row_unchanged():
+    """amend_row on row 2 must leave row 3 completely untouched."""
+    slack, store, _ = _make_invoice_store_with_two_rows()
+    before_rows = store.read_rows("c1", "2026", slack, "C1")
+    beta_before = {k: v for k, v in before_rows[1].items() if not k.startswith("_")}
+
+    store.amend_row(
+        "c1", "2026", slack, "C1",
+        sheet="Purchase", row=2,
+        updates={"Description": "Changed"},
+    )
+
+    after_rows = store.read_rows("c1", "2026", slack, "C1")
+    beta_after = {k: v for k, v in after_rows[1].items() if not k.startswith("_")}
+    assert beta_before == beta_after
+
+
+# ---- amend_row: error guards ---------------------------------------------
+
+def test_amend_row_raises_on_missing_pointer():
+    """amend_row raises ValueError when no ledger pointer exists."""
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match="no ledger pointer"):
+        store.amend_row(
+            "nonexistent", "2026", slack, "C1",
+            sheet="Purchase", row=2,
+            updates={"Description": "X"},
+        )
+
+
+def test_amend_row_raises_on_unknown_sheet():
+    """amend_row raises ValueError when the sheet name is not in the workbook."""
+    slack, store, _ = _make_invoice_store_with_two_rows()
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match="sheet not found"):
+        store.amend_row(
+            "c1", "2026", slack, "C1",
+            sheet="NonExistentSheet", row=2,
+            updates={"Description": "X"},
+        )
+
+
+def test_amend_row_raises_on_row_below_range():
+    """amend_row raises ValueError when row < 2 (header row or above)."""
+    slack, store, _ = _make_invoice_store_with_two_rows()
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match="row.*out of range"):
+        store.amend_row(
+            "c1", "2026", slack, "C1",
+            sheet="Purchase", row=1,
+            updates={"Description": "X"},
+        )
+
+
+def test_amend_row_raises_on_row_above_range():
+    """amend_row raises ValueError when row > max_row."""
+    slack, store, _ = _make_invoice_store_with_two_rows()
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match="row.*out of range"):
+        store.amend_row(
+            "c1", "2026", slack, "C1",
+            sheet="Purchase", row=999,
+            updates={"Description": "X"},
+        )
+
+
+def test_amend_row_raises_on_unknown_column():
+    """amend_row raises ValueError when an updates key is not a known column header."""
+    slack, store, _ = _make_invoice_store_with_two_rows()
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match="unknown column"):
+        store.amend_row(
+            "c1", "2026", slack, "C1",
+            sheet="Purchase", row=2,
+            updates={"NoSuchColumn": "X"},
+        )
+
+
+# ---- amend_row / remove_row: bank-sheet safety ---------------------------
+
+def _make_bank_store_with_one_row() -> tuple["FakeSlackClient", "SlackLedgerStore"]:
+    """Seed a bank ledger (OCBC - 0001) and return (slack, store)."""
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+    store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        kind="bank",
+        batches=[{"sheet": "OCBC - 0001", "doc_key": "b1", "rows": [
+            {"Description": "BALANCE B/F", "Balance": 1000.0, "Currency": "SGD"},
+            {"Date": "01/02/2026", "Description": "PAYMENT", "Withdrawal": 100.0,
+             "Balance": 900.0, "Currency": "SGD"},
+        ]}],
+    )
+    return slack, store
+
+
+def test_amend_row_refuses_bank_sheet():
+    """amend_row on a bank/account sheet must raise ValueError (balances are derived)."""
+    slack, store = _make_bank_store_with_one_row()
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match="bank-statement rows are read-only"):
+        store.amend_row(
+            "c1", "2026", slack, "C1",
+            sheet="OCBC - 0001", row=2,
+            updates={"Description": "X"},
+        )
+
+
+def test_remove_row_refuses_bank_sheet():
+    """remove_row on a bank/account sheet must raise ValueError."""
+    slack, store = _make_bank_store_with_one_row()
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match="bank-statement rows are read-only"):
+        store.remove_row(
+            "c1", "2026", slack, "C1",
+            sheet="OCBC - 0001", row=2,
+        )
+
+
+# ---- remove_row: happy path ----------------------------------------------
+
+def test_remove_row_deletes_target_row():
+    """remove_row deletes the target row; the remaining row shifts up to row 2."""
+    slack, store, _ = _make_invoice_store_with_two_rows()
+
+    result = store.remove_row(
+        "c1", "2026", slack, "C1",
+        sheet="Purchase", row=2,
+    )
+
+    assert result["sheet"] == "Purchase"
+    assert result["row"] == 2
+    assert result["removed"]["Description"] == "Alpha"
+
+    rows = store.read_rows("c1", "2026", slack, "C1")
+    assert len(rows) == 1
+    assert rows[0]["Description"] == "Beta"
+    assert rows[0]["_row"] == 2  # shifted up
+
+
+def test_remove_row_second_row():
+    """remove_row on row 3 deletes the second data row, leaves row 2 intact."""
+    slack, store, _ = _make_invoice_store_with_two_rows()
+
+    result = store.remove_row(
+        "c1", "2026", slack, "C1",
+        sheet="Purchase", row=3,
+    )
+
+    assert result["removed"]["Description"] == "Beta"
+    rows = store.read_rows("c1", "2026", slack, "C1")
+    assert len(rows) == 1
+    assert rows[0]["Description"] == "Alpha"
+
+
+def test_remove_row_uploads_new_version_and_updates_pointer():
+    """remove_row uploads a new Slack file and updates the Firestore pointer."""
+    slack, store, old_file_id = _make_invoice_store_with_two_rows()
+
+    store.remove_row(
+        "c1", "2026", slack, "C1",
+        sheet="Purchase", row=2,
+    )
+
+    ptr = store.get_pointer("c1", "2026")
+    new_file_id = ptr["slack_file_id"]
+    assert new_file_id != old_file_id
+    assert new_file_id in slack.files
+
+
+def test_remove_row_leaves_seen_doc_keys_intact():
+    """remove_row must not modify the seen_doc_keys field on the pointer."""
+    slack, store, _ = _make_invoice_store_with_two_rows()
+    keys_before = set(store.get_pointer("c1", "2026").get("seen_doc_keys") or [])
+
+    store.remove_row(
+        "c1", "2026", slack, "C1",
+        sheet="Purchase", row=2,
+    )
+
+    keys_after = set(store.get_pointer("c1", "2026").get("seen_doc_keys") or [])
+    assert keys_before == keys_after
+
+
+# ---- remove_row: error guards --------------------------------------------
+
+def test_remove_row_raises_on_missing_pointer():
+    """remove_row raises ValueError when no ledger pointer exists."""
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match="no ledger pointer"):
+        store.remove_row(
+            "nonexistent", "2026", slack, "C1",
+            sheet="Purchase", row=2,
+        )
+
+
+def test_remove_row_raises_on_unknown_sheet():
+    """remove_row raises ValueError when the sheet name is not in the workbook."""
+    slack, store, _ = _make_invoice_store_with_two_rows()
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match="sheet not found"):
+        store.remove_row(
+            "c1", "2026", slack, "C1",
+            sheet="Nonexistent", row=2,
+        )
+
+
+def test_remove_row_raises_on_row_out_of_range():
+    """remove_row raises ValueError for row < 2 or row > max_row."""
+    slack, store, _ = _make_invoice_store_with_two_rows()
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match="row.*out of range"):
+        store.remove_row(
+            "c1", "2026", slack, "C1",
+            sheet="Purchase", row=1,
+        )
+    with _pytest.raises(ValueError, match="row.*out of range"):
+        store.remove_row(
+            "c1", "2026", slack, "C1",
+            sheet="Purchase", row=100,
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Fix 1: client-name filename prefix preserved through amend_row / remove_row
+# --------------------------------------------------------------------------- #
+
+def test_amend_row_preserves_client_name_filename_prefix():
+    """amend_row must upload a file whose name still carries the '<Client> - ' prefix.
+
+    append_rows now persists client_name onto the Firestore pointer so that
+    _upload_and_reroute can rebuild the prefix without an extra profile lookup.
+    """
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+    store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        software="qbs", kind="invoice",
+        client_name="Acme Trading Pte. Ltd.",
+        batches=[{"sheet": "Purchase", "doc_key": "k1", "rows": [
+            {"Invoice Number": "INV-1", "Description": "Alpha", "Source Amount": 100.0,
+             "Account Code / COA": "6000"},
+            {"Invoice Number": "INV-2", "Description": "Beta",  "Source Amount": 200.0,
+             "Account Code / COA": "6001"},
+        ]}],
+    )
+    # Confirm client_name was persisted onto the pointer.
+    ptr = store.get_pointer("c1", "2026")
+    assert ptr.get("client_name") == "Acme Trading Pte. Ltd."
+
+    store.amend_row(
+        "c1", "2026", slack, "C1",
+        sheet="Purchase", row=2,
+        updates={"Description": "Alpha-edited"},
+    )
+
+    # The most-recent upload should carry the client-scoped filename.
+    latest_upload = slack.uploads[-1]
+    assert latest_upload["filename"] == "Acme Trading Pte. Ltd. - Ledger_FY2026.xlsx"
+
+
+def test_amend_row_legacy_pointer_without_client_name_does_not_crash():
+    """A pointer written before client_name was persisted has no client_name field.
+
+    _upload_and_reroute must fall back to a bare filename without crashing,
+    and the pointer's seen_doc_keys must remain intact.
+    """
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+    # Seed a pointer WITHOUT client_name (simulates a legacy pointer).
+    store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        software="qbs", kind="invoice",
+        # client_name intentionally omitted → defaults to ""
+        batches=[{"sheet": "Purchase", "doc_key": "k1", "rows": [
+            {"Invoice Number": "INV-1", "Description": "Alpha", "Source Amount": 100.0,
+             "Account Code / COA": "6000"},
+        ]}],
+    )
+    # Manually strip client_name from the pointer to simulate a legacy doc.
+    ptr_ref = (
+        store._db.collection("clients").document("c1")
+        .collection("ledgers").document("2026")
+    )
+    existing = ptr_ref.get().to_dict()
+    existing.pop("client_name", None)
+    ptr_ref.set(existing)
+
+    # Must not raise; bare filename is acceptable.
+    store.amend_row(
+        "c1", "2026", slack, "C1",
+        sheet="Purchase", row=2,
+        updates={"Description": "Changed"},
+    )
+
+    latest_upload = slack.uploads[-1]
+    assert latest_upload["filename"] == "Ledger_FY2026.xlsx"
+    # seen_doc_keys still intact.
+    ptr_after = store.get_pointer("c1", "2026")
+    assert "k1" in (ptr_after.get("seen_doc_keys") or [])

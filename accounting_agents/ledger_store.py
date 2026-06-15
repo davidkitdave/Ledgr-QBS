@@ -565,6 +565,9 @@ class SlackLedgerStore:
                 seen_doc_keys=list(seen_doc_keys),
                 channel_id=channel_id,
                 kind=kind,
+                # Persist so mutation ops (amend_row / remove_row) can reconstruct
+                # the client-scoped filename without an extra profile lookup.
+                client_name=client_name,
             )
 
         # Fix 1: Delete the OLD Slack file AFTER the new upload + pointer update
@@ -647,16 +650,285 @@ class SlackLedgerStore:
                 continue
             headers = [c.value for c in sheet[1]]
 
-            for row in sheet.iter_rows(min_row=2, values_only=True):
-                row_dict: dict = {"_sheet": sheet.title}
+            for ws_row_num, row in enumerate(
+                sheet.iter_rows(min_row=2, values_only=True), start=2
+            ):
+                row_dict: dict = {"_sheet": sheet.title, "_row": ws_row_num}
                 for idx, header in enumerate(headers):
                     if header is not None:
                         row_dict[header] = row[idx] if idx < len(row) else None
                 # Skip entirely-blank rows (all values None).
-                if any(v is not None for k, v in row_dict.items() if k != "_sheet"):
+                if any(v is not None for k, v in row_dict.items() if k not in ("_sheet", "_row")):
                     rows.append(row_dict)
 
         return rows
+
+    # ------------------------------------------------------------------ #
+    # Workbook mutation helpers
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _is_bank_sheet(sheet_name: str) -> bool:
+        """Return True when the sheet is a bank/account sheet rather than an invoice sheet.
+
+        Invoice workbooks only ever have "Purchase" and "Sales" sheets (defined by
+        ``_INVOICE_SHEETS``).  Any other sheet title belongs to a bank workbook
+        (e.g. "OCBC - 0001", "DBS - 9002").  Checking by *inclusion* in the
+        known-invoice set is more robust than pattern-matching account names —
+        it never needs updating when new banks appear, and it cannot be fooled by a
+        vendor description that happens to look like an account label.
+        """
+        return sheet_name not in _INVOICE_SHEETS
+
+    def _download_current_workbook(
+        self, slack_client: Any, client_id: str, fy: str
+    ) -> tuple[dict, bytes]:
+        """Return (pointer, workbook_bytes) or raise ValueError if pointer is absent."""
+        pointer = self.get_pointer(client_id, fy)
+        if not pointer or not pointer.get("slack_file_id"):
+            raise ValueError(
+                f"no ledger pointer for client={client_id!r} fy={fy!r}; "
+                "cannot mutate a workbook that doesn't exist yet"
+            )
+        data = self._download_workbook(slack_client, pointer["slack_file_id"])
+        return pointer, data
+
+    def _upload_and_reroute(
+        self,
+        slack_client: Any,
+        wb: "Workbook",
+        pointer: dict,
+        client_id: str,
+        fy: str,
+        channel_id: str,
+    ) -> str:
+        """Serialize *wb*, upload as a new Slack file, update the Firestore pointer.
+
+        Leaves ``seen_doc_keys`` intact (mutation does not un-see source docs).
+        Returns the new ``slack_file_id``.
+        """
+        prev_file_id: Optional[str] = pointer.get("slack_file_id")
+
+        # Re-use the same filename convention as append_rows.
+        kind = pointer.get("kind", "invoice")
+        # Rebuild the client-scoped prefix from the persisted client_name.
+        # Legacy pointers written before this field was stored have no client_name;
+        # fall back to no prefix so they continue working and self-heal on next append.
+        stored_name: str = pointer.get("client_name") or ""
+        prefix = f"{stored_name.strip()} - " if stored_name.strip() else ""
+        if kind == "bank":
+            filename = f"{prefix}BankStatement_FY{fy}.xlsx"
+        else:
+            filename = f"{prefix}Ledger_FY{fy}.xlsx"
+
+        new_bytes = self._to_bytes(wb)
+        result = slack_client.files_upload_v2(
+            channel=channel_id,
+            filename=filename,
+            file=new_bytes,
+            title=filename,
+        )
+        new_file_id = self._extract_uploaded_file_id(result)
+        if new_file_id:
+            # Preserve seen_doc_keys and all existing pointer fields; only
+            # swap slack_file_id.
+            self._set_pointer(
+                client_id,
+                fy,
+                new_file_id,
+                seen_doc_keys=pointer.get("seen_doc_keys"),
+                channel_id=channel_id,
+                kind=kind,
+            )
+
+        if prev_file_id and new_file_id and prev_file_id != new_file_id:
+            try:
+                slack_client.files_delete(file=prev_file_id)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "Could not delete superseded ledger file %s after mutation (non-fatal).",
+                    prev_file_id,
+                )
+
+        return new_file_id or ""
+
+    @staticmethod
+    def _header_col_map(ws) -> dict[str, int]:
+        """Return {column_header: 1-based column index} from worksheet row 1."""
+        return {
+            cell.value: cell.column
+            for cell in ws[1]
+            if cell.value is not None
+        }
+
+    @staticmethod
+    def _validate_mutation_args(
+        wb: "Workbook",
+        sheet: str,
+        row: int,
+    ) -> Any:
+        """Validate sheet + row args; return the worksheet or raise ValueError."""
+        if sheet not in wb.sheetnames:
+            raise ValueError(
+                f"sheet not found: {sheet!r}; available sheets are {wb.sheetnames}"
+            )
+        ws = wb[sheet]
+        max_row = ws.max_row
+        # Row 1 is always the header; data rows start at 2.
+        if row < 2 or row > max_row:
+            raise ValueError(
+                f"row {row} out of range for sheet {sheet!r} "
+                f"(valid data rows: 2–{max_row})"
+            )
+        return ws
+
+    # ------------------------------------------------------------------ #
+    # Public mutation API
+    # ------------------------------------------------------------------ #
+
+    def amend_row(
+        self,
+        client_id: str,
+        fy: str,
+        slack_client: Any,
+        channel_id: str,
+        *,
+        sheet: str,
+        row: int,
+        updates: dict,
+    ) -> dict:
+        """Update one or more cells in an invoice ledger row.
+
+        Downloads the current workbook, mutates exactly the cells named in
+        ``updates``, uploads a new file version, and updates the Firestore
+        pointer — the same accumulate-the-record contract as ``append_rows``.
+        ``seen_doc_keys`` is left intact.
+
+        Args:
+            client_id: Client whose ledger pointer to look up.
+            fy: Financial-year label.
+            slack_client: Slack WebClient (or fake) for download + upload.
+            channel_id: Channel the new workbook version is posted to.
+            sheet: Worksheet title to mutate.  Must be an invoice sheet
+                ("Purchase" or "Sales"); bank sheets are refused.
+            row: 1-based worksheet row number (≥ 2; row 1 is the header).
+            updates: ``{column_header: new_value}`` dict.
+
+        Returns:
+            ``{"sheet", "row", "before": {col: old}, "after": {col: new}}``.
+
+        Raises:
+            ValueError: if no pointer exists; the sheet is a bank sheet; the
+                sheet name is not found; ``row`` is out of range; or an
+                ``updates`` key is not a column header in that sheet.
+        """
+        lock = self._lock_for(channel_id, fy)
+        with lock:
+            pointer, data = self._download_current_workbook(slack_client, client_id, fy)
+            wb = self._load_workbook(data)
+
+            # Sheet-existence check before bank guard: gives a clear "not found"
+            # error for misspelled names rather than a misleading "bank" error.
+            if sheet not in wb.sheetnames:
+                raise ValueError(
+                    f"sheet not found: {sheet!r}; available sheets are {wb.sheetnames}"
+                )
+
+            if self._is_bank_sheet(sheet):
+                raise ValueError(
+                    f"bank-statement rows are read-only from chat; "
+                    f"balances are derived (sheet={sheet!r}). "
+                    "Amend invoice ledger rows (Purchase / Sales) only."
+                )
+
+            ws = self._validate_mutation_args(wb, sheet, row)
+            col_map = self._header_col_map(ws)
+
+            # Validate all update keys before touching any cell.
+            for col_name in updates:
+                if col_name not in col_map:
+                    raise ValueError(
+                        f"unknown column {col_name!r} in sheet {sheet!r}; "
+                        f"known headers: {sorted(col_map)}"
+                    )
+
+            before: dict = {}
+            after: dict = {}
+            for col_name, new_value in updates.items():
+                col_idx = col_map[col_name]
+                cell = ws.cell(row=row, column=col_idx)
+                before[col_name] = cell.value
+                cell.value = new_value
+                after[col_name] = new_value
+
+            self._upload_and_reroute(slack_client, wb, pointer, client_id, fy, channel_id)
+
+        return {"sheet": sheet, "row": row, "before": before, "after": after}
+
+    def remove_row(
+        self,
+        client_id: str,
+        fy: str,
+        slack_client: Any,
+        channel_id: str,
+        *,
+        sheet: str,
+        row: int,
+    ) -> dict:
+        """Delete one row from an invoice ledger sheet.
+
+        Subsequent rows shift up by one (openpyxl ``delete_rows``).  Uploads a
+        new file version and updates the Firestore pointer.  ``seen_doc_keys``
+        is left intact — removing a line does not un-see the source document.
+
+        Args:
+            client_id: Client whose ledger pointer to look up.
+            fy: Financial-year label.
+            slack_client: Slack WebClient (or fake) for download + upload.
+            channel_id: Channel the new workbook version is posted to.
+            sheet: Worksheet title.  Must be an invoice sheet ("Purchase" or
+                "Sales"); bank sheets are refused.
+            row: 1-based worksheet row number (≥ 2; row 1 is the header).
+
+        Returns:
+            ``{"sheet", "row", "removed": {col: value}}``.
+
+        Raises:
+            ValueError: if no pointer exists; the sheet is a bank sheet; the
+                sheet name is not found; or ``row`` is out of range.
+        """
+        lock = self._lock_for(channel_id, fy)
+        with lock:
+            pointer, data = self._download_current_workbook(slack_client, client_id, fy)
+            wb = self._load_workbook(data)
+
+            # Sheet-existence check before bank guard (same ordering as amend_row).
+            if sheet not in wb.sheetnames:
+                raise ValueError(
+                    f"sheet not found: {sheet!r}; available sheets are {wb.sheetnames}"
+                )
+
+            if self._is_bank_sheet(sheet):
+                raise ValueError(
+                    f"bank-statement rows are read-only from chat; "
+                    f"balances are derived (sheet={sheet!r}). "
+                    "Remove invoice ledger rows (Purchase / Sales) only."
+                )
+
+            ws = self._validate_mutation_args(wb, sheet, row)
+            col_map = self._header_col_map(ws)
+
+            # Capture the row's values before deletion for the return dict.
+            removed: dict = {
+                col_name: ws.cell(row=row, column=col_idx).value
+                for col_name, col_idx in col_map.items()
+            }
+
+            ws.delete_rows(row, 1)
+
+            self._upload_and_reroute(slack_client, wb, pointer, client_id, fy, channel_id)
+
+        return {"sheet": sheet, "row": row, "removed": removed}
 
     @staticmethod
     def _extract_uploaded_file_id(result: Any) -> Optional[str]:

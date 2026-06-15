@@ -45,11 +45,13 @@ All tools are pure (no I/O, no randomness) so they are trivially testable.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 from datetime import date, datetime, timedelta
 
 from google.adk.agents import LlmAgent
-from google.adk.tools import ToolContext
+from google.adk.tools import FunctionTool, ToolContext
 
 from invoice_processing.export.categorizer import resolve_account
 from invoice_processing.export.client_context import (
@@ -62,12 +64,67 @@ from invoice_processing.export.tax_classifier import TaxClassifier
 
 from . import config
 
+logger = logging.getLogger(__name__)
+
 # --------------------------------------------------------------------------- #
 # Pure ledger tools (operate on rows already in session state)
 # --------------------------------------------------------------------------- #
 
 #: The session state key the runner must set before routing to the chat path.
 LEDGER_DATA_KEY = "ledger_data"
+
+#: The session state key the chat write tools append confirmed write specs to.
+#: The Slack runner drains this AFTER a chat turn, executing each spec against
+#: the workbook (the tools never do network I/O themselves — see ADR-0009).
+PENDING_WRITE_KEY = "pending_ledger_write"
+
+#: Invoice sheets the write tools may mutate. Bank sheets carry a derived running
+#: balance (memory ``bank-ledger-continuous-sorted``) so amending/removing one
+#: would desync the chain — the tools refuse with a clear message instead.
+_INVOICE_SHEETS: frozenset[str] = frozenset({"Purchase", "Sales"})
+
+#: The accounting software value that the write tools support.  Xero workbooks
+#: use different column headers (``*AccountCode``, ``TaxAmount`` no-space, etc.)
+#: so editing them from chat would silently write wrong data or raise "unknown
+#: column" errors. Gate the tools to QBS now; Xero support is a follow-on.
+_SUPPORTED_WRITE_SOFTWARE: frozenset[str] = frozenset({"QBS Ledger", "qbs"})
+
+#: User-facing amend field → the canonical workbook column header (QBS Ledger).
+#: ``tax`` is handled specially (it re-derives the QBS ``Tax Amount`` via the
+#: classifier, never a free-text write), so it is intentionally absent here.
+_EDITABLE_FIELD_HEADERS: dict[str, str] = {
+    "account": "Account Code / COA",
+    "account code": "Account Code / COA",
+    "coa": "Account Code / COA",
+    "amount": "Source Amount",
+    "net amount": "Source Amount",
+    "description": "Description",
+}
+
+#: Field aliases that mean "amend the tax treatment". These pass THROUGH the
+#: §0.5-C master gate (a non-registered client is forced to NT) rather than
+#: writing the user's literal text.
+_TAX_FIELD_ALIASES: frozenset[str] = frozenset(
+    {"tax", "tax rate", "tax treatment", "tax code", "tax type"}
+)
+
+#: Dollar-amount tax headers that the QBS layout uses.  ``TaxAmount`` (no
+#: space) is the Xero column — kept here defensively so a mixed workbook never
+#: leaves a stale dollar value, but QBS clients are already gated above.
+#: ``Tax Rate`` / ``tax_rate`` are NOT live workbook columns and are removed
+#: to avoid writing a raw canonical treatment code into a wrong cell.
+_TAX_AMOUNT_HEADERS: frozenset[str] = frozenset({"Tax Amount", "TaxAmount"})
+#: Code-carrying headers rewritten from the re-classified treatment.
+#: Only ``*TaxType`` (Xero) remains; dead ``Tax Rate``/``tax_rate`` entries removed.
+_TAX_CODE_HEADERS: frozenset[str] = frozenset({"*TaxType"})
+
+#: Columns used to build a row SIGNATURE for replay-safety (HIGH-2).  The
+#: signature is a stable hash of key identifying values captured at Turn-1 so
+#: the commit branch can detect that the row shifted or was edited since the
+#: user saw the proposal.
+_SIGNATURE_COLS: tuple[str, ...] = (
+    "Description", "Source Amount", "Account Code / COA", "Tax Amount",
+)
 
 #: SGD threshold for mandatory GST registration (s.40B GST Act, Singapore).
 GST_THRESHOLD_SGD = 1_000_000.0
@@ -818,6 +875,384 @@ def list_recent_documents(tool_context: ToolContext, limit: str = "10") -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Write tools (Step 4 / C-2) — gated behind ADK Tool Confirmation (ADR-0009)
+# --------------------------------------------------------------------------- #
+
+
+def _row_doc_type(row: dict) -> str:
+    """Map a ledger row's sheet/Doc Type to the classifier ``doc_type``."""
+    sheet = str(row.get("_sheet") or "").strip()
+    if sheet == "Sales":
+        return "sales"
+    if sheet == "Purchase":
+        return "purchase"
+    dt = str(row.get("Doc Type") or "").strip().upper()
+    return "sales" if dt == "S" else "purchase"
+
+
+def _reclassify_tax_for_row(
+    row: dict, *, registered: bool, tax_keyword: str | None = None
+) -> tuple[str, dict]:
+    """Re-run the §0.5-C tax classifier for ``row`` and derive its tax columns.
+
+    Reconstructs a one-line ``InvoiceLine`` on a ``NormalizedInvoice`` whose
+    ``our_gst_registered`` comes from the CLIENT PROFILE (``registered``), NOT
+    the row and NOT the user — so the master gate is re-applied (a non-registered
+    client is forced to ``NT`` even if the user asked for ``SR``).
+
+    ``tax_keyword`` (set only when the user is explicitly amending the tax
+    treatment) is fed in as the line's explicit tax hint so the classifier
+    honours the requested code for a registered client; the master gate still
+    overrides it to ``NT`` for a non-registered client.
+
+    Returns ``(treatment, tax_column_updates)`` where ``tax_column_updates`` maps
+    the workbook tax headers present on ``row`` to their re-derived values
+    (``Tax Amount`` dollar value for QBS; ``Tax Rate`` / ``*TaxType`` code for
+    code-carrying layouts).
+    """
+    doc_type = _row_doc_type(row)
+    net = _to_float(row.get("Source Amount") or row.get("Sub Total") or row.get("amount"))
+    gst_cell = row.get("Tax Amount")
+    gst = _to_float(gst_cell) if gst_cell not in (None, "") else None
+    inv_date = _parse_row_date(row.get("Invoice Date") or row.get("Date"))
+
+    line = InvoiceLine(
+        description=str(row.get("Description") or ""),
+        net_amount=net,
+        gst_amount=gst,
+        tax_keyword=(tax_keyword or "").strip() or None,
+    )
+    inv = NormalizedInvoice(
+        doc_type=doc_type,
+        invoice_date=inv_date,
+        supplier=PartyInfo(name="Supplier", country="SG"),
+        customer=PartyInfo(name="Customer", country="SG"),
+        our_gst_registered=registered,
+    )
+    clf = TaxClassifier()
+    clf.classify_line(line, inv)
+
+    updates: dict = {}
+    for header in _TAX_AMOUNT_HEADERS:
+        if header in row:
+            # QBS Tax Amount: GST dollars (only SR carries tax; else 0).
+            if line.tax_treatment == "SR":
+                rate = clf.rate_for_date(inv_date)
+                amt = line.gst_amount if line.gst_amount else net * rate
+                updates[header] = round(float(amt or 0.0), 2)
+            else:
+                updates[header] = 0.0
+    for header in _TAX_CODE_HEADERS:
+        if header in row:
+            if header == "*TaxType":
+                updates[header] = clf.tax_code(line.tax_treatment, doc_type, "xero")
+            else:
+                updates[header] = line.tax_treatment
+    return line.tax_treatment, updates
+
+
+def _row_signature(row: dict) -> str:
+    """Return a stable hash of the row's key identifying values.
+
+    Captured at Turn-1 (proposal) and stored in the write spec. Verified at
+    Turn-2 / replay by re-reading the workbook row at the same (sheet, row)
+    coordinate and comparing — if the content shifted (row deletion upstream,
+    concurrent edit, or a replay after a partial failure) the write is refused
+    rather than silently corrupting a now-different row.
+    """
+    sig_values = "|".join(
+        str(row.get(col, "")) for col in _SIGNATURE_COLS
+    )
+    return hashlib.sha256(sig_values.encode()).hexdigest()[:16]
+
+
+def _load_target_row(
+    tool_context: ToolContext, row_index: str
+) -> tuple[dict | None, str]:
+    """Resolve ``row_index`` against ``state["ledger_data"]``.
+
+    Returns ``(row, "")`` on success or ``(None, message)`` with a plain
+    explanatory refusal string the tool returns verbatim.  Guards checked in
+    order: ledger not loaded → unknown index → bank sheet → non-QBS software.
+    """
+    rows = _get_rows(tool_context)
+    if not rows:
+        return None, "The ledger data is not loaded yet. Please upload the FY ledger first."
+
+    try:
+        idx = int(str(row_index).strip())
+    except (TypeError, ValueError):
+        return None, (
+            f"I couldn't read the row reference {row_index!r}. Use lookup_row first to "
+            "get the row_index of the line you mean."
+        )
+    if idx < 0 or idx >= len(rows):
+        return None, (
+            f"There's no row {idx} in the loaded ledger (it has {len(rows)} rows). "
+            "Use lookup_row to find the right row first."
+        )
+
+    row = rows[idx]
+    sheet = str(row.get("_sheet") or "")
+    if sheet not in _INVOICE_SHEETS:
+        return None, (
+            f"That row is on the bank sheet ({sheet or 'bank'}), which is read-only "
+            "from chat — its running balance is derived, so editing one line would "
+            "desync the balances. I can only amend or remove invoice ledger rows "
+            "(Purchase / Sales)."
+        )
+
+    # Gate: non-QBS workbook layouts use different column headers (e.g. Xero
+    # uses ``*AccountCode`` / ``TaxAmount`` no-space).  Writing to them via the
+    # QBS-shaped edit logic would silently produce wrong tax dollars or raise
+    # "unknown column" errors.  Refuse with a clear message rather than corrupt
+    # the workbook — Xero write support is a follow-on task.
+    software = str(tool_context.state.get("software") or "").strip()
+    if software and software not in _SUPPORTED_WRITE_SOFTWARE:
+        return None, (
+            f"Editing this ledger layout ({software!r}) from chat isn't supported yet "
+            "— only QBS Ledger workbooks can be amended here. "
+            "Use your accounting software to make this change."
+        )
+
+    return row, ""
+
+
+def _build_amend_spec(
+    tool_context: ToolContext,
+    row: dict,
+    field: str,
+    new_value: str,
+) -> tuple[dict, str, str]:
+    """Deterministically build the canonical amend write spec from the tool args.
+
+    Pure with respect to the inputs (``row`` + args + ``state["tax_registered"]``):
+    given the SAME row and args it returns the SAME spec on every call. This is the
+    seam that makes Turn-1 (preview) and Turn-2 (commit) identical BY CONSTRUCTION —
+    the commit does NOT depend on ADK carrying the Turn-1 ``request_confirmation``
+    payload through to the Turn-2 ``ToolConfirmation`` (which ADK does not reliably
+    do; see ADR-0009 / the e2e test). §0.5-C re-runs the tax classifier with
+    ``registered`` from the CLIENT PROFILE so a non-registered client is forced to
+    ``NT`` exactly as previewed.
+
+    Returns ``(spec, hint, treatment)`` — ``hint`` for the confirmation prompt,
+    ``treatment`` for the re-derived tax treatment.
+    """
+    try:
+        registered = bool(tool_context.state.get("tax_registered", True))
+    except Exception:  # noqa: BLE001
+        registered = True
+
+    field_key = (field or "").strip().lower()
+    is_tax = field_key in _TAX_FIELD_ALIASES
+    header = _EDITABLE_FIELD_HEADERS.get(field_key)
+
+    updates: dict = {}
+    # Build a working copy of the row to reflect the user's edit before
+    # re-classifying tax (so account/amount changes re-derive tax too).
+    working = dict(row)
+    requested_kw: str | None = None
+    if is_tax:
+        # Amending tax: feed the requested treatment through the master gate
+        # as the line's explicit tax_keyword, then re-classify — which forces
+        # NT for a non-registered client. Clear the dollar Tax Amount so the
+        # classifier derives it from net*rate for the new treatment.
+        requested_kw = (new_value or "").strip()
+        working["Tax Amount"] = None
+    else:
+        updates[header] = new_value
+        working[header] = new_value
+
+    treatment, tax_updates = _reclassify_tax_for_row(
+        working, registered=registered, tax_keyword=requested_kw
+    )
+    updates.update(tax_updates)
+
+    before = {col: row.get(col) for col in updates}
+    diff_lines = [
+        f"• {col}: {before.get(col)!r} → {new!r}" for col, new in updates.items()
+    ]
+    gate_note = ""
+    if is_tax and not registered:
+        gate_note = (
+            "\n(Client is NOT GST-registered, so the tax treatment is forced "
+            f"to {treatment} regardless of the requested value.)"
+        )
+    hint = (
+        f"Amend {row.get('_sheet')} row {row.get('_row')} "
+        f"({row.get('Description') or 'this line'}):\n"
+        + "\n".join(diff_lines)
+        + gate_note
+        + "\n\nReply 'yes' to apply, or 'no' to cancel."
+    )
+    spec = {
+        "op": "amend",
+        "sheet": row.get("_sheet"),
+        "row": row.get("_row"),
+        "updates": updates,
+        "tax_treatment": treatment,
+        # Replay-safety (HIGH-2): a hash of the row's key column values at
+        # proposal time.  The runner re-reads the row before writing and
+        # refuses if the signature no longer matches — catches row shifts
+        # (upstream deletion) and concurrent edits.
+        "row_signature": _row_signature(row),
+    }
+    return spec, hint, treatment
+
+
+def _build_remove_spec(row: dict) -> tuple[dict, str]:
+    """Deterministically build the canonical remove write spec from ``row``.
+
+    Same payload-independence rationale as :func:`_build_amend_spec`: Turn-1 and
+    Turn-2 both derive the spec from the same row, so the commit never relies on
+    ADK echoing the Turn-1 confirmation payload. Returns ``(spec, hint)``.
+    """
+    desc = row.get("Description") or "this line"
+    amount = row.get("Source Amount") or row.get("amount")
+    hint = (
+        f"Remove {row.get('_sheet')} row {row.get('_row')} — "
+        f"{desc} ({amount})?\n\nReply 'yes' to delete it, or 'no' to keep it."
+    )
+    spec = {
+        "op": "remove",
+        "sheet": row.get("_sheet"),
+        "row": row.get("_row"),
+        # Replay-safety: same signature scheme as amend_ledger_row.
+        "row_signature": _row_signature(row),
+    }
+    return spec, hint
+
+
+def amend_ledger_row(
+    tool_context: ToolContext,
+    row_index: str,
+    field: str,
+    new_value: str,
+) -> str:
+    """Amend one field of an invoice ledger row (gated — asks you to confirm first).
+
+    Two-turn confirm (ADR-0009): the FIRST call previews the before→after change
+    (including the §0.5-C re-classified tax) and asks for your OK; it writes
+    nothing. After you confirm, the change is committed. Call ``lookup_row``
+    FIRST to get the ``row_index`` of the line you mean.
+
+    Args:
+        tool_context: Injected by ADK; provides session state + confirmation.
+        row_index: Index into the loaded ledger (as returned by ``lookup_row``).
+        field: Which field to change — ``account`` / ``amount`` / ``description``
+            / ``tax``.
+        new_value: The new value (for ``tax`` this is a requested treatment; a
+            non-registered client is still forced to ``NT`` by the master gate).
+
+    Returns:
+        A short status string. The human-readable diff is surfaced via the
+        confirmation hint; the commit appends a write spec to
+        ``state["pending_ledger_write"]`` for the runner to execute.
+    """
+    # Guards (ledger loaded, known row, invoice sheet, QBS software) run on
+    # BOTH turns — re-deriving naturally re-runs them on Turn-2.
+    row, refusal = _load_target_row(tool_context, row_index)
+    if row is None:
+        return refusal
+
+    field_key = (field or "").strip().lower()
+    is_tax = field_key in _TAX_FIELD_ALIASES
+    header = _EDITABLE_FIELD_HEADERS.get(field_key)
+    if not is_tax and header is None:
+        allowed = "account, tax, amount, description"
+        return (
+            f"I can't amend {field!r}. Editable fields are: {allowed}."
+        )
+
+    confirmation = getattr(tool_context, "tool_confirmation", None)
+
+    # ----- Turn 1: build the preview + request confirmation -----
+    if not confirmation:
+        spec, hint, _treatment = _build_amend_spec(
+            tool_context, row, field, new_value
+        )
+        try:
+            # payload is passed for audit/UI only — the commit re-derives the
+            # spec from the original args and does NOT rely on it returning.
+            tool_context.request_confirmation(hint=hint, payload=spec)
+        except Exception:  # noqa: BLE001 — never let the gate crash the lane
+            logger.exception(
+                "amend_ledger_row: request_confirmation failed "
+                "(sheet=%s row=%s) — ADK Tool Confirmation may have regressed",
+                row.get("_sheet"), row.get("_row"),
+            )
+            return "I couldn't open the confirmation step. Please try again."
+        return "Awaiting your confirmation before I change the ledger."
+
+    # ----- Turn 2: the user answered -----
+    if not getattr(confirmation, "confirmed", False):
+        return "Okay, I won't change anything."
+
+    # Re-derive the write spec from the SAME original args (ADK re-invokes the
+    # tool with the original call's args on resume). Identical deterministic
+    # computation as Turn-1 → preview == commit by construction. We use
+    # ``confirmation.confirmed`` ONLY for the yes/no — never its payload.
+    spec, _hint, _treatment = _build_amend_spec(
+        tool_context, row, field, new_value
+    )
+    pending = tool_context.state.get(PENDING_WRITE_KEY)
+    if not isinstance(pending, list):
+        pending = []
+    pending.append(spec)
+    tool_context.state[PENDING_WRITE_KEY] = pending
+    return "Confirmed — applying the change to your ledger now."
+
+
+def remove_ledger_row(tool_context: ToolContext, row_index: str) -> str:
+    """Remove an invoice ledger row (gated — asks you to confirm first).
+
+    Two-turn confirm (ADR-0009): the FIRST call previews the row to be removed
+    and asks for your OK; it writes nothing. After you confirm, the row is
+    deleted. Call ``lookup_row`` FIRST to get the ``row_index``.
+
+    Args:
+        tool_context: Injected by ADK; provides session state + confirmation.
+        row_index: Index into the loaded ledger (as returned by ``lookup_row``).
+
+    Returns:
+        A short status string. The commit appends a write spec to
+        ``state["pending_ledger_write"]`` for the runner to execute.
+    """
+    # Guards run on BOTH turns (re-derivation re-runs _load_target_row).
+    row, refusal = _load_target_row(tool_context, row_index)
+    if row is None:
+        return refusal
+
+    confirmation = getattr(tool_context, "tool_confirmation", None)
+
+    if not confirmation:
+        spec, hint = _build_remove_spec(row)
+        try:
+            # payload is for audit/UI only; Turn-2 re-derives from the args.
+            tool_context.request_confirmation(hint=hint, payload=spec)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "remove_ledger_row: request_confirmation failed "
+                "(sheet=%s row=%s) — ADK Tool Confirmation may have regressed",
+                row.get("_sheet"), row.get("_row"),
+            )
+            return "I couldn't open the confirmation step. Please try again."
+        return "Awaiting your confirmation before I remove the row."
+
+    if not getattr(confirmation, "confirmed", False):
+        return "Okay, I won't remove anything."
+
+    # Re-derive from the same original args; never rely on confirmation.payload.
+    spec, _hint = _build_remove_spec(row)
+    pending = tool_context.state.get(PENDING_WRITE_KEY)
+    if not isinstance(pending, list):
+        pending = []
+    pending.append(spec)
+    tool_context.state[PENDING_WRITE_KEY] = pending
+    return "Confirmed — removing that row from your ledger now."
+
+
+# --------------------------------------------------------------------------- #
 # Assistant LlmAgent (standalone root — multi-turn, sees session history)
 # --------------------------------------------------------------------------- #
 
@@ -852,6 +1287,18 @@ Explain + lookup tools (when the user asks *why* or *where*):
 - ``summarize_recent_activity``: spend and activity in the last N days (default 30).
 - ``lookup_row``: find ledger rows matching a text query (vendor, description, account).
 - ``list_recent_documents``: list source documents grouped from the loaded FY ledger.
+
+Write tools (when the user asks you to FIX or DELETE a ledger line):
+- ``amend_ledger_row``: change one field (``account`` / ``amount`` / ``description``
+  / ``tax``) of an invoice ledger row.
+- ``remove_ledger_row``: delete an invoice ledger row.
+BEFORE calling either write tool you MUST call ``lookup_row`` to get the exact
+``row_index`` of the line the user means — never guess an index. Both write
+tools are GATED: the first call only PROPOSES the change and asks the user to
+confirm; nothing is written until the user replies "yes". Only invoice rows
+(Purchase / Sales) can be edited — bank rows are read-only. The tax treatment is
+always re-derived by the engine (a non-GST-registered client is forced to NT),
+so do not promise a specific tax code the user typed.
 
 For every question, call the single most relevant tool first, then explain the
 result in plain English. For a bank question naming a month, pass that month
@@ -923,6 +1370,8 @@ assistant_agent = LlmAgent(
         summarize_recent_activity,
         lookup_row,
         list_recent_documents,
+        FunctionTool(amend_ledger_row, require_confirmation=True),
+        FunctionTool(remove_ledger_row, require_confirmation=True),
     ],
 )
 
@@ -930,7 +1379,10 @@ __all__ = [
     "assistant_agent",
     "assistant_instruction",
     "LEDGER_DATA_KEY",
+    "PENDING_WRITE_KEY",
     "GST_THRESHOLD_SGD",
+    "amend_ledger_row",
+    "remove_ledger_row",
     "bank_totals",
     "summarize_by_category",
     "pnl_for_fy",

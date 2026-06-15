@@ -477,16 +477,37 @@ class TestModelInfo:
 
 
 def test_assistant_agent_is_root_multi_turn():
-    """A root LlmAgent carries no ``mode`` (multi-turn default) and exposes 12 tools.
+    """A root LlmAgent carries no ``mode`` (multi-turn default) and exposes 14 tools.
 
     See ADR-0008: in ADK 2.2.0 a root agent must not set ``mode``, so the
     runtime uses ``include_contents='default'`` and the agent sees full
-    session history.
+    session history. Step 4 (ADR-0009) adds the two gated write tools, taking
+    the tool count from 12 to 14.
     """
     from accounting_agents.assistant import assistant_agent
 
     assert assistant_agent.mode is None
-    assert len(assistant_agent.tools) == 12
+    assert len(assistant_agent.tools) == 14
+
+
+def test_write_tools_registered_with_confirmation():
+    """The two write tools are registered as FunctionTools requiring confirmation."""
+    from google.adk.tools import FunctionTool
+
+    from accounting_agents.assistant import assistant_agent
+
+    write_tools = {
+        t.func.__name__: t
+        for t in assistant_agent.tools
+        if isinstance(t, FunctionTool)
+        and getattr(t, "func", None) is not None
+        and t.func.__name__ in ("amend_ledger_row", "remove_ledger_row")
+    }
+    assert set(write_tools) == {"amend_ledger_row", "remove_ledger_row"}
+    for tool in write_tools.values():
+        # Both tools must be gated behind ADK Tool Confirmation. ADK stores the
+        # flag privately as ``_require_confirmation``.
+        assert tool._require_confirmation is True
 
 
 def test_assistant_instruction_seeds_profile():
@@ -510,3 +531,354 @@ def test_assistant_instruction_seeds_profile():
     assert assistant_instruction(_FakeToolContext({})) == _BASE_INSTRUCTION
     # Whitespace-only client_name is treated as absent.
     assert assistant_instruction(_FakeToolContext({"client_name": "   "})) == _BASE_INSTRUCTION
+
+
+# --------------------------------------------------------------------------- #
+# Write tools (Step 4 / C-2) — ADK Tool Confirmation gate (ADR-0009)
+# --------------------------------------------------------------------------- #
+
+
+class _WriteToolContext:
+    """ToolContext stub with a recording request_confirmation + settable confirm.
+
+    ``tool_confirmation`` defaults to ``None`` (Turn 1). Set it to a
+    ``_FakeConfirmation`` to simulate Turn 2 (the user's answer).
+    """
+
+    def __init__(self, state: dict):
+        self.state = state
+        self.tool_confirmation = None
+        self.requested = None  # (hint, payload) recorded on Turn 1
+
+    def request_confirmation(self, *, hint=None, payload=None):
+        self.requested = {"hint": hint, "payload": payload}
+
+
+class _FakeConfirmation:
+    def __init__(self, *, confirmed: bool, payload=None, hint=None):
+        self.confirmed = confirmed
+        self.payload = payload
+        self.hint = hint
+
+
+def _qbs_ledger_rows() -> list[dict]:
+    """A QBS-style loaded ledger: a Purchase row + a bank row, with _sheet/_row."""
+    return [
+        {
+            "_sheet": "Purchase", "_row": 2,
+            "Invoice Number": "INV-1", "Description": "AWS hosting",
+            "Source Amount": 1000.0, "Tax Amount": 90.0,
+            "Account Code / COA": "6090", "Doc Type": "P",
+        },
+        {
+            "_sheet": "OCBC - 0001", "_row": 2,
+            "Description": "FAST PAYMENT", "Withdrawal": 200.0, "Balance": 800.0,
+        },
+    ]
+
+
+def _write_ctx(rows=None, *, tax_registered=True) -> _WriteToolContext:
+    return _WriteToolContext(
+        {LEDGER_DATA_KEY: rows if rows is not None else _qbs_ledger_rows(),
+         "tax_registered": tax_registered}
+    )
+
+
+# ---- amend Turn 1: requests confirmation with before→after diff ----------
+
+
+def test_amend_turn1_requests_confirmation_account():
+    from accounting_agents.assistant import amend_ledger_row
+
+    ctx = _write_ctx()
+    out = amend_ledger_row(ctx, row_index="0", field="account", new_value="6010")
+
+    assert "confirm" in out.lower()
+    assert ctx.requested is not None
+    spec = ctx.requested["payload"]
+    assert spec["op"] == "amend"
+    assert spec["sheet"] == "Purchase"
+    assert spec["row"] == 2
+    assert spec["updates"]["Account Code / COA"] == "6010"
+    # before→after diff is in the human-readable hint.
+    assert "6090" in ctx.requested["hint"]
+    assert "6010" in ctx.requested["hint"]
+
+
+def test_amend_turn1_tax_reclassified_registered_client():
+    """A GST-registered client's SR request previews the classifier value (SR tax)."""
+    from accounting_agents.assistant import amend_ledger_row
+
+    ctx = _write_ctx(tax_registered=True)
+    out = amend_ledger_row(ctx, row_index="0", field="tax", new_value="SR")
+
+    assert "confirm" in out.lower()
+    spec = ctx.requested["payload"]
+    # SR on a 1000 net @ 9% → Tax Amount 90.0 carried in the write spec.
+    assert spec["tax_treatment"] == "SR"
+    assert spec["updates"]["Tax Amount"] == 90.0
+
+
+def test_amend_turn1_tax_forced_nt_for_non_registered_client():
+    """NON-registered client: even a user 'SR' request previews/commits NT (master gate)."""
+    from accounting_agents.assistant import amend_ledger_row
+
+    ctx = _write_ctx(tax_registered=False)
+    out = amend_ledger_row(ctx, row_index="0", field="tax", new_value="SR")
+
+    assert "confirm" in out.lower()
+    spec = ctx.requested["payload"]
+    assert spec["tax_treatment"] == "NT"
+    # NT carries zero tax dollars in the QBS Tax Amount column.
+    assert spec["updates"]["Tax Amount"] == 0.0
+    # The hint warns the user the treatment was forced.
+    assert "NT" in ctx.requested["hint"]
+
+
+def test_amend_account_reclassifies_tax_to_nt_when_non_registered():
+    """Amending a non-tax field on a non-registered client still forces NT tax."""
+    from accounting_agents.assistant import amend_ledger_row
+
+    ctx = _write_ctx(tax_registered=False)
+    amend_ledger_row(ctx, row_index="0", field="account", new_value="6010")
+    spec = ctx.requested["payload"]
+    assert spec["updates"]["Account Code / COA"] == "6010"
+    assert spec["tax_treatment"] == "NT"
+    assert spec["updates"]["Tax Amount"] == 0.0
+
+
+# ---- guards: bank sheet, unknown index, disallowed field -----------------
+
+
+def test_amend_refuses_bank_sheet():
+    from accounting_agents.assistant import amend_ledger_row
+
+    ctx = _write_ctx()
+    out = amend_ledger_row(ctx, row_index="1", field="account", new_value="6010")
+    assert "bank" in out.lower()
+    assert ctx.requested is None  # no confirmation requested
+
+
+def test_remove_refuses_bank_sheet():
+    from accounting_agents.assistant import remove_ledger_row
+
+    ctx = _write_ctx()
+    out = remove_ledger_row(ctx, row_index="1")
+    assert "bank" in out.lower()
+    assert ctx.requested is None
+
+
+def test_amend_unknown_row_index():
+    from accounting_agents.assistant import amend_ledger_row
+
+    ctx = _write_ctx()
+    out = amend_ledger_row(ctx, row_index="99", field="account", new_value="6010")
+    assert "no row" in out.lower() or "lookup_row" in out.lower()
+    assert ctx.requested is None
+
+
+def test_amend_disallowed_field():
+    from accounting_agents.assistant import amend_ledger_row
+
+    ctx = _write_ctx()
+    out = amend_ledger_row(ctx, row_index="0", field="vendor", new_value="X")
+    assert "can't amend" in out.lower() or "editable" in out.lower()
+    assert ctx.requested is None
+
+
+# ---- Turn 2: confirmed=True appends spec; confirmed=False cancels ---------
+
+
+def test_amend_turn2_confirmed_appends_spec():
+    """Turn-2 RE-DERIVES the spec from the original args (no payload echo).
+
+    Mimics the REAL ADK contract: on resume the confirmation has confirmed=True
+    but NO payload (ADK does not carry the request-side payload through — see the
+    e2e test). The commit must rebuild the canonical spec from row_index/field/
+    new_value, identical to the Turn-1 preview by construction.
+    """
+    from accounting_agents.assistant import PENDING_WRITE_KEY, amend_ledger_row
+
+    ctx = _write_ctx()  # registered client (default)
+    ctx.tool_confirmation = _FakeConfirmation(confirmed=True)  # no payload
+
+    out = amend_ledger_row(ctx, row_index="0", field="account", new_value="6010")
+    assert "applying" in out.lower() or "confirm" in out.lower()
+    pending = ctx.state[PENDING_WRITE_KEY]
+    assert len(pending) == 1
+    spec = pending[0]
+    assert spec["op"] == "amend"
+    assert spec["sheet"] == "Purchase"
+    assert spec["row"] == 2
+    assert spec["updates"]["Account Code / COA"] == "6010"
+    # Registered client: the AWS row re-classifies to SR (carries 90.0 tax).
+    assert spec["tax_treatment"] == "SR"
+    assert spec["updates"]["Tax Amount"] == 90.0
+    assert "row_signature" in spec and spec["row_signature"]
+
+
+def test_amend_turn2_confirmed_forces_nt_for_non_registered():
+    """Turn-2 re-derivation re-runs §0.5-C: a non-registered client is forced to NT."""
+    from accounting_agents.assistant import PENDING_WRITE_KEY, amend_ledger_row
+
+    ctx = _write_ctx(tax_registered=False)
+    ctx.tool_confirmation = _FakeConfirmation(confirmed=True)  # no payload
+
+    # User asks for SR on a non-registered client; the master gate forces NT.
+    amend_ledger_row(ctx, row_index="0", field="tax", new_value="SR")
+    spec = ctx.state[PENDING_WRITE_KEY][0]
+    assert spec["tax_treatment"] == "NT"
+    assert spec["updates"]["Tax Amount"] == 0.0
+
+
+def test_amend_turn2_declined_appends_nothing():
+    from accounting_agents.assistant import PENDING_WRITE_KEY, amend_ledger_row
+
+    ctx = _write_ctx()
+    ctx.tool_confirmation = _FakeConfirmation(confirmed=False)  # no payload
+
+    out = amend_ledger_row(ctx, row_index="0", field="account", new_value="6010")
+    assert "won't change" in out.lower()
+    assert ctx.state.get(PENDING_WRITE_KEY) in (None, [])
+
+
+def test_remove_turn1_requests_confirmation():
+    from accounting_agents.assistant import remove_ledger_row
+
+    ctx = _write_ctx()
+    out = remove_ledger_row(ctx, row_index="0")
+    assert "confirm" in out.lower()
+    spec = ctx.requested["payload"]
+    assert spec["op"] == "remove"
+    assert spec["sheet"] == "Purchase"
+    assert spec["row"] == 2
+    # HIGH-2: replay-safety signature must be present.
+    assert "row_signature" in spec and spec["row_signature"]
+
+
+def test_remove_turn2_confirmed_appends_spec():
+    """Turn-2 re-derives the remove spec from the original row_index (no payload)."""
+    from accounting_agents.assistant import PENDING_WRITE_KEY, remove_ledger_row
+
+    ctx = _write_ctx()
+    ctx.tool_confirmation = _FakeConfirmation(confirmed=True)  # no payload
+
+    remove_ledger_row(ctx, row_index="0")
+    pending = ctx.state[PENDING_WRITE_KEY]
+    assert len(pending) == 1
+    spec = pending[0]
+    assert spec["op"] == "remove"
+    assert spec["sheet"] == "Purchase"
+    assert spec["row"] == 2
+    assert "row_signature" in spec and spec["row_signature"]
+
+
+def test_remove_turn2_declined_appends_nothing():
+    from accounting_agents.assistant import PENDING_WRITE_KEY, remove_ledger_row
+
+    ctx = _write_ctx()
+    ctx.tool_confirmation = _FakeConfirmation(confirmed=False)  # no payload
+
+    out = remove_ledger_row(ctx, row_index="0")
+    assert "won't remove" in out.lower()
+    assert ctx.state.get(PENDING_WRITE_KEY) in (None, [])
+
+
+# --------------------------------------------------------------------------- #
+# HIGH-1 — non-QBS software gate
+# --------------------------------------------------------------------------- #
+
+
+def _xero_ctx() -> _WriteToolContext:
+    """A write ctx with Xero software — should be refused before confirmation."""
+    rows = [
+        {
+            "_sheet": "Purchase", "_row": 2,
+            "*ContactName": "Acme Trading Pte. Ltd.",
+            "Description": "Cloud hosting",
+            "*UnitAmount": 500.0, "TaxAmount": 45.0,
+            "*AccountCode": "6090", "*TaxType": "SR",
+        },
+    ]
+    return _WriteToolContext(
+        {LEDGER_DATA_KEY: rows, "tax_registered": True, "software": "Xero Ledger"}
+    )
+
+
+def test_amend_refuses_non_qbs_software():
+    from accounting_agents.assistant import amend_ledger_row
+
+    ctx = _xero_ctx()
+    out = amend_ledger_row(ctx, row_index="0", field="account", new_value="6010")
+    assert "xero ledger" in out.lower() or "not supported" in out.lower() or "isn't supported" in out.lower()
+    assert ctx.requested is None  # no confirmation requested
+
+
+def test_remove_refuses_non_qbs_software():
+    from accounting_agents.assistant import remove_ledger_row
+
+    ctx = _xero_ctx()
+    out = remove_ledger_row(ctx, row_index="0")
+    assert "not supported" in out.lower() or "isn't supported" in out.lower()
+    assert ctx.requested is None
+
+
+def test_amend_allows_qbs_explicit_software():
+    """Explicit 'qbs' (lowercase) is also allowed — used in ledger_store payloads."""
+    from accounting_agents.assistant import amend_ledger_row
+
+    ctx = _write_ctx()
+    ctx.state["software"] = "qbs"
+    out = amend_ledger_row(ctx, row_index="0", field="account", new_value="6010")
+    assert ctx.requested is not None  # confirmation was requested
+
+
+def test_amend_allows_missing_software_key():
+    """No 'software' key in state → gate passes (QBS is the default)."""
+    from accounting_agents.assistant import amend_ledger_row
+
+    ctx = _write_ctx()
+    ctx.state.pop("software", None)
+    out = amend_ledger_row(ctx, row_index="0", field="account", new_value="6010")
+    assert ctx.requested is not None
+
+
+# --------------------------------------------------------------------------- #
+# HIGH-2 — row signature in spec
+# --------------------------------------------------------------------------- #
+
+
+def test_amend_turn1_includes_row_signature():
+    from accounting_agents.assistant import amend_ledger_row
+
+    ctx = _write_ctx()
+    amend_ledger_row(ctx, row_index="0", field="account", new_value="6010")
+    spec = ctx.requested["payload"]
+    assert "row_signature" in spec
+    assert isinstance(spec["row_signature"], str)
+    assert len(spec["row_signature"]) == 16  # sha256 truncated to 16 hex chars
+
+
+def test_remove_turn1_includes_row_signature():
+    from accounting_agents.assistant import remove_ledger_row
+
+    ctx = _write_ctx()
+    remove_ledger_row(ctx, row_index="0")
+    spec = ctx.requested["payload"]
+    assert "row_signature" in spec
+    assert spec["row_signature"]
+
+
+def test_row_signature_differs_for_different_rows():
+    from accounting_agents.assistant import _row_signature
+
+    row_a = {"Description": "AWS", "Source Amount": 1000.0, "Account Code / COA": "6090", "Tax Amount": 90.0}
+    row_b = {"Description": "Rent", "Source Amount": 2000.0, "Account Code / COA": "6200", "Tax Amount": 0.0}
+    assert _row_signature(row_a) != _row_signature(row_b)
+
+
+def test_row_signature_stable_for_same_row():
+    from accounting_agents.assistant import _row_signature
+
+    row = {"Description": "AWS", "Source Amount": 1000.0, "Account Code / COA": "6090", "Tax Amount": 90.0}
+    assert _row_signature(row) == _row_signature(dict(row))
