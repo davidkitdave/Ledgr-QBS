@@ -100,7 +100,9 @@ class _InstrumentedRunner:
         self._run_delay = run_delay
         self._counter = counter  # optional {"now": int, "max": int}
 
-    async def run_async(self, *, user_id, session_id, new_message=None, state_delta=None):
+    async def run_async(
+        self, *, user_id, session_id, new_message=None, state_delta=None, run_config=None,
+    ):
         self.run_scopes.append((user_id, session_id))
         self.session_service._created.add((user_id, session_id))
         if self._counter is not None:
@@ -130,6 +132,9 @@ class _NoopLedgerStore:
     def read_rows(self, **kwargs):
         self.read_calls += 1
         return []
+
+    def latest_fy(self, client_id):
+        return None
 
 
 class _FakeFirestoreDoc:
@@ -309,8 +314,9 @@ def test_answer_question_offloads_read_rows_to_thread(monkeypatch):
 
     # The synchronous Slack-IO read was dispatched through to_thread.
     assert store.read_rows in offloaded
-    # Per-question session id was used (not the bare channel).
-    assert ("C1", "C1:q:100.1") in runner.run_scopes
+    # Chat session id (ADR-0008): a top-level message with no raw thread_ts
+    # buckets by UTC day. 100.1 → epoch 100s → 1970-01-01.
+    assert ("C1", "C1:chat:day-1970-01-01") in runner.run_scopes
 
 
 # --------------------------------------------------------------------------- #

@@ -37,6 +37,7 @@ with fakes and no live Slack/Gemini.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import logging
 import os
 import tempfile
@@ -46,7 +47,7 @@ from typing import Any, Optional
 # the string annotations produced by `from __future__ import annotations`.
 from fastapi import Request, Response
 
-from accounting_agents.qa_agent import LEDGER_DATA_KEY, QUESTION_KEY
+from accounting_agents.assistant import LEDGER_DATA_KEY
 
 from google.genai import types
 
@@ -164,8 +165,47 @@ def _is_coa_upload(f: object, *, coa_pending: bool) -> bool:
 
 
 def _per_question_session_id(channel_id: str, message_ts: str) -> str:
-    """Unique session id per question message so concurrent questions never collide."""
+    """Unique session id per question message so concurrent questions never collide.
+
+    DEPRECATED for the chat path; kept for backward compatibility. The chat lane
+    now uses :func:`_chat_session_id` (per-thread + day-bucket fallback) so
+    multi-turn history accumulates instead of being thrown away per question.
+    """
     return f"{channel_id}:q:{message_ts}"
+
+
+def _chat_session_id(
+    channel_id: str,
+    raw_thread_ts: Optional[str],
+    message_ts: Optional[str],
+) -> str:
+    """Per-thread chat session id with a day-bucket fallback (ADR-0008).
+
+    Rules:
+    - If ``raw_thread_ts`` is truthy (the message is inside a Slack thread, i.e.
+      the raw ``event["thread_ts"]`` was set) → ``{channel}:chat:{raw_thread_ts}``
+      so every reply in that thread reuses the same multi-turn session.
+    - Otherwise derive a UTC day from ``message_ts`` (Slack's event ts, a float
+      string of seconds since epoch) and return ``{channel}:chat:day-{YYYY-MM-DD}``
+      so a series of top-level messages on the same day share one session.
+    - If ``message_ts`` is missing or unparseable, fall back to ``{channel}`` so
+      the chat path still works (lower granularity is acceptable for the rare
+      direct-call case used by tests).
+
+    Deterministic (driven by Slack's ``ts``, not wall clock) and timezone-stable
+    so tests can pin a known UTC day.
+    """
+    if raw_thread_ts:
+        return f"{channel_id}:chat:{raw_thread_ts}"
+    try:
+        day = (
+            datetime.datetime.utcfromtimestamp(float(message_ts))
+            .date()
+            .isoformat()
+        )
+    except (TypeError, ValueError):
+        return channel_id
+    return f"{channel_id}:chat:day-{day}"
 
 
 # --------------------------------------------------------------------------- #
@@ -185,6 +225,27 @@ def extract_final_text(event: Any) -> str:
         return ""
     parts = getattr(content, "parts", None) or []
     return "".join(p.text for p in parts if getattr(p, "text", None))
+
+
+def extract_tool_response_text(event: Any) -> str:
+    """Return the latest function-response ``result`` text on ``event``, or "".
+
+    Safety net for the chat lane: ``gemini-2.5-flash-lite`` occasionally goes
+    silent after a tool call (emits a final event with no text parts), even
+    with an instruction telling it to always reply. When that happens we'd
+    rather surface the tool's raw result to the user than the opaque
+    "rephrase your question" canned message — they asked, the tool answered,
+    they should see it.
+    """
+    getter = getattr(event, "get_function_responses", None)
+    responses = getter() if callable(getter) else []
+    for fr in reversed(responses or []):
+        resp = getattr(fr, "response", None)
+        if isinstance(resp, dict):
+            result = resp.get("result")
+            if isinstance(result, str) and result.strip():
+                return result
+    return ""
 
 
 def find_interrupt_id(event: Any) -> Optional[str]:
@@ -818,7 +879,12 @@ def _persist_corrections(client_store, state: dict, edits: dict) -> None:
         if not isinstance(prop, dict):
             prop = {}
         acct = e.get("account_code")
-        tax = e.get("tax_code")
+        # Edit DTO uses canonical InvoiceLine key ``tax_treatment`` (post-2026-06-15
+        # rename — see nodes.EDITABLE_LINE_FIELDS). The ``add_correction`` API
+        # keeps ``tax_code`` because that's the entity_memory schema field for
+        # the vendor's learned-default tax category — a different concept from
+        # one line's tax treatment.
+        tax = e.get("tax_treatment")
         acct_changed = bool(acct) and acct != prop.get("account_code")
         tax_changed = bool(tax) and tax != prop.get("tax_treatment")
         if acct_changed or tax_changed:
@@ -849,9 +915,11 @@ def _edits_from_view_state(view: dict) -> dict:
         if prefix == "acct" and el.get("selected_option"):
             by_index.setdefault(i, {})["account_code"] = el["selected_option"]["value"]
         elif prefix == "tax" and el.get("selected_option"):
-            by_index.setdefault(i, {})["tax_code"] = el["selected_option"]["value"]
+            # Canonical InvoiceLine field name — see nodes.EDITABLE_LINE_FIELDS.
+            by_index.setdefault(i, {})["tax_treatment"] = el["selected_option"]["value"]
         elif prefix == "amt" and el.get("value"):
-            by_index.setdefault(i, {})["amount"] = float(el["value"])
+            # Canonical InvoiceLine field name — see nodes.EDITABLE_LINE_FIELDS.
+            by_index.setdefault(i, {})["net_amount"] = float(el["value"])
     lines = [{"index": i, **fields} for i, fields in sorted(by_index.items())]
     return {"lines": lines}
 
@@ -967,30 +1035,35 @@ async def answer_question(
     client_store=None,
     message_ts: Optional[str] = None,
     thread_ts: Optional[str] = None,
+    raw_thread_ts: Optional[str] = None,
 ) -> dict:
-    """Run the coordinator with a text question; qa_agent answers from ledger state.
+    """Run the chat ``assistant_agent`` against the client's ledger state.
 
     Steps:
     1. Resolve the client profile and latest FY from Firestore so ``read_rows``
        targets the correct workbook (instead of falling back to "unknown").
     2. Fetch ledger rows via :meth:`SlackLedgerStore.read_rows` and inject them
-       into ``state["ledger_data"]`` via ``state_delta``.
-    3. Run the coordinator via ``runner.run_async`` — the coordinator classifies
-       "question" intent and routes to ``qa_agent``.
-    4. Capture the final text from ``extract_final_text`` and post it to the channel.
+       into ``state["ledger_data"]`` via ``state_delta`` (also seeds the
+       profile keys so ``assistant_instruction`` can name the client).
+    3. Run the standalone chat ``runner`` (built via :func:`build_chat_runner`)
+       — the assistant is a root LlmAgent and sees session history (multi-turn).
+    4. Capture the final text from ``extract_final_text`` and post it.
 
-    Concurrency: each question gets a UNIQUE per-message session id
-    (``f"{channel_id}:q:{message_ts}"``) so concurrent questions never collide,
-    while ``user_id`` stays the ``channel_id``. The body runs under the same
-    module-level semaphore as document processing.
+    Concurrency: the chat session id is per-thread (or per-UTC-day for
+    top-level messages) via :func:`_chat_session_id` so multi-turn history
+    accumulates instead of being thrown away per question. ``user_id`` stays
+    the ``channel_id``. The body runs under the same module-level semaphore
+    as document processing.
+
+    ``runner`` MUST be the chat runner (see :func:`build_chat_runner`); the
+    document coordinator graph no longer carries text traffic (ADR-0008).
 
     Returns a small status dict ``{"status": "answered", "text": ...}``.
     """
-    # Per-question session id so concurrent questions never share a session; falls
-    # back to channel_id when no message ts is available (e.g. direct calls).
-    session_id = (
-        _per_question_session_id(channel_id, message_ts) if message_ts else channel_id
-    )
+    # Per-thread chat session id (ADR-0008): same thread → same session, so the
+    # assistant sees the full multi-turn history. Day-bucket fallback for
+    # top-level messages keeps a series of channel-level questions coherent.
+    session_id = _chat_session_id(channel_id, raw_thread_ts, message_ts)
 
     async with _SEM:
         await _ensure_session(runner, app_name, channel_id, session_id)
@@ -1027,10 +1100,23 @@ async def answer_question(
             "channel_id": channel_id,
             **profile_delta,
             LEDGER_DATA_KEY: ledger_rows,
-            QUESTION_KEY: question,
         }
 
+        # Cap the model's per-turn context to the most recent 20 events so a
+        # long chat thread does not grow unboundedly. ADK 2.2.0 API:
+        # ``RunConfig(get_session_config=GetSessionConfig(num_recent_events=20))``
+        # — see .venv/lib/python3.12/site-packages/google/adk/agents/run_config.py:330
+        # (the ``get_session_config`` field is honored by the runner before each
+        # turn). 20 is a starting cap; adjust after live QA.
+        from google.adk.agents.run_config import RunConfig
+        from google.adk.sessions.base_session_service import GetSessionConfig
+
+        run_config = RunConfig(
+            get_session_config=GetSessionConfig(num_recent_events=20)
+        )
+
         answer_text = ""
+        last_tool_text = ""
         async for event in runner.run_async(
             user_id=channel_id,
             session_id=session_id,
@@ -1038,13 +1124,21 @@ async def answer_question(
                 role="user", parts=[types.Part(text=question)]
             ),
             state_delta=state_delta,
+            run_config=run_config,
         ):
             text = extract_final_text(event)
             if text:
                 answer_text = text
+            tool_text = extract_tool_response_text(event)
+            if tool_text:
+                last_tool_text = tool_text
 
     if not answer_text:
-        answer_text = "I couldn't find an answer. Please try rephrasing your question."
+        # Safety net: model went silent after a tool call. Show the user the
+        # tool's raw result — better than the opaque "rephrase" canned message.
+        answer_text = last_tool_text or (
+            "I couldn't find an answer. Please try rephrasing your question."
+        )
 
     _post_message(slack_client, channel_id, answer_text, thread_ts=thread_ts)
     return {"status": "answered", "text": answer_text}
@@ -1098,6 +1192,26 @@ def build_runner(*, session_service=None, artifact_service=None):
     )
 
 
+def build_chat_runner(*, session_service=None, artifact_service=None):
+    """Construct the ADK ``Runner`` bound to the standalone chat assistant App.
+
+    Mirrors :func:`build_runner` but bound to ``assistant_app`` (the multi-turn
+    root LlmAgent — see ADR-0008). Imports are deferred so importing this
+    module never touches the network.
+    """
+    from google.adk.artifacts.in_memory_artifact_service import InMemoryArtifactService
+    from google.adk.runners import Runner
+
+    from accounting_agents.agent import assistant_app
+    from accounting_agents.sessions import FirestoreSessionService
+
+    return Runner(
+        app=assistant_app,
+        session_service=session_service or FirestoreSessionService(),
+        artifact_service=artifact_service or InMemoryArtifactService(),
+    )
+
+
 def _setup_channel_id(body: dict) -> str:
     """Resolve the channel id from a button-action body (mirrors handle_setup_open)."""
     return (
@@ -1142,11 +1256,22 @@ def build_async_app(
     db: Any,
     store=None,
     bot_token: Optional[str] = None,
+    chat_runner=None,
 ):
-    """Build the Bolt ``AsyncApp`` wired to the document + HITL handlers.
+    """Build the Bolt ``AsyncApp`` wired to the document + HITL + chat handlers.
 
     Onboarding (``member_joined_channel`` / ``/ledgr`` + settings modal) reuses
     the parked synchronous handlers from ``app.slack_app`` via thread offload.
+
+    Two runners:
+    - ``runner`` drives the document coordinator graph (file uploads → HITL).
+    - ``chat_runner`` drives the standalone chat assistant (text questions →
+      multi-turn). Auto-built via :func:`build_chat_runner` if not supplied.
+
+    ``store`` defaults to :class:`FirestoreClientStore` so onboarding writes
+    end up in the SAME Firestore the pipeline reads — keeps the socket-mode
+    path consistent with the FastAPI path (fixes ADR/notes: "socket-mode
+    onboarding writes to InMemoryClientStore" gap).
     """
     from slack_bolt.async_app import AsyncApp
 
@@ -1157,10 +1282,13 @@ def build_async_app(
         handle_setup_open,
         handle_use_standard_coa,
     )
-    from invoice_processing.export.client_context import InMemoryClientStore
 
     if store is None:
-        store = InMemoryClientStore()
+        from invoice_processing.export.client_context import FirestoreClientStore
+        store = FirestoreClientStore()
+
+    if chat_runner is None:
+        chat_runner = build_chat_runner()
 
     app_name = runner.app_name
     token = bot_token or os.environ.get("SLACK_BOT_TOKEN")
@@ -1543,20 +1671,26 @@ def build_async_app(
             return
 
         message_ts = event.get("ts")
-        thread_ts = event.get("thread_ts") or message_ts
+        # RAW thread_ts: only set when the message is actually inside a Slack
+        # thread. The chat session id keys on this so thread replies reuse the
+        # same multi-turn session (ADR-0008). The REPLY destination keeps the
+        # legacy fallback to message_ts so replies still land in the right place.
+        raw_thread_ts = event.get("thread_ts")
+        thread_ts = raw_thread_ts or message_ts
         logger.info(
             "question received via message: channel=%s ts=%s", channel_id, message_ts
         )
         await answer_question(
-            runner=runner,
+            runner=chat_runner,
             ledger_store=ledger_store,
             slack_client=sync_client,
             channel_id=channel_id,
             question=text,
-            app_name=app_name,
+            app_name=chat_runner.app_name,
             client_store=store,
             message_ts=message_ts,
             thread_ts=thread_ts,
+            raw_thread_ts=raw_thread_ts,
         )
 
     return async_app

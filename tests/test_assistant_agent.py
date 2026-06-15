@@ -1,11 +1,15 @@
-"""Targeted tests for the Q&A agent tools and SlackLedgerStore.read_rows.
+"""Targeted tests for the assistant agent tools and SlackLedgerStore.read_rows.
 
 Covers:
 - ``summarize_by_category``: biggest expense category, multi-category totals.
 - ``pnl_for_fy``: revenue/expense split, net calculation.
 - ``gst_threshold_check``: below / near / above threshold.
-- Empty-ledger graceful case for all three tools.
+- ``bank_totals``: month filter, opening/closing balance behaviour.
+- Empty-ledger graceful case for all tools.
 - ``SlackLedgerStore.read_rows`` round-trip with a fake Slack workbook.
+- The new read-only inspection tools (profile / learned mappings / models).
+- The ``assistant_agent`` is a root agent (no ``mode``) with 7 tools.
+- ``assistant_instruction`` seeds the client profile from session state.
 
 No live Slack, no live Gemini — all fakes / pure function calls.
 """
@@ -18,14 +22,17 @@ import json
 import pytest
 from openpyxl import Workbook
 
-from accounting_agents.ledger_store import SlackLedgerStore
-from accounting_agents.qa_agent import (
+from accounting_agents.assistant import (
     LEDGER_DATA_KEY,
     bank_totals,
     gst_threshold_check,
+    model_info,
     pnl_for_fy,
+    show_client_profile,
+    show_learned_mappings,
     summarize_by_category,
 )
+from accounting_agents.ledger_store import SlackLedgerStore
 from tests._fake_firestore import FakeFirestore
 
 
@@ -411,26 +418,95 @@ class TestReadRows:
 
 
 # --------------------------------------------------------------------------- #
-# Instruction provider — the question must reach the agent's system prompt
-# (regression for: qa_agent only received {"intent":"question"} and replied
-#  with a generic capability menu instead of answering).
+# Inspection tools — show_client_profile, show_learned_mappings, model_info
 # --------------------------------------------------------------------------- #
 
 
-def test_qa_instruction_embeds_question_from_state():
-    from accounting_agents.qa_agent import QUESTION_KEY, qa_instruction
+class TestShowClientProfile:
+    def test_no_profile_loaded_returns_friendly_message(self):
+        out = show_client_profile(_FakeToolContext({}))
+        assert "no client profile" in out.lower()
 
-    ctx = _FakeToolContext({QUESTION_KEY: "What was my total software spend in FY2026?"})
-    text = qa_instruction(ctx)
-    assert "What was my total software spend in FY2026?" in text
-    assert "Answer THIS question now" in text
+    def test_returns_profile_json_with_counts(self):
+        state = {
+            "client_name": "Acme Pte Ltd",
+            "client_uen": "201912345A",
+            "region": "SINGAPORE",
+            "base_currency": "SGD",
+            "tax_registered": True,
+            "fye_month": 12,
+            "coa": [{"code": "6000"}, {"code": "6100"}, {"code": "6200"}],
+            "entity_memory": [{"vendor": "X"}],
+        }
+        data = json.loads(show_client_profile(_FakeToolContext(state)))
+        assert data["client_name"] == "Acme Pte Ltd"
+        assert data["client_uen"] == "201912345A"
+        assert data["fye_month"] == 12
+        assert data["coa_count"] == 3
+        assert data["entity_memory_count"] == 1
 
 
-def test_qa_instruction_falls_back_without_question():
-    from accounting_agents.qa_agent import qa_instruction
+class TestShowLearnedMappings:
+    def test_empty_returns_friendly_message(self):
+        out = show_learned_mappings(_FakeToolContext({}))
+        assert "no learned mappings" in out.lower()
 
-    base = qa_instruction(_FakeToolContext({}))
-    assert "read-only accounting assistant" in base
-    # No question → no "answer this" directive, must not crash, blanks ignored.
-    assert "Answer THIS question now" not in base
-    assert qa_instruction(_FakeToolContext({"question_text": "   "})) == base
+    def test_returns_both_mappings_when_present(self):
+        state = {
+            "category_mapping": {"Hotel Booking": "6010"},
+            "entity_memory": [{"vendor": "Hotel Booking"}],
+        }
+        data = json.loads(show_learned_mappings(_FakeToolContext(state)))
+        assert data["category_mapping"] == {"Hotel Booking": "6010"}
+        assert data["entity_memory"][0]["vendor"] == "Hotel Booking"
+
+
+class TestModelInfo:
+    def test_returns_model_ids_from_config(self):
+        from accounting_agents import config
+
+        data = json.loads(model_info(_FakeToolContext({})))
+        assert data["chat_model"] == config.MODEL_LITE
+        assert data["model_lite"] == config.MODEL_LITE
+        assert data["model_std"] == config.MODEL_STD
+
+
+# --------------------------------------------------------------------------- #
+# Assistant agent shape — root LlmAgent, no mode, exactly 7 tools
+# --------------------------------------------------------------------------- #
+
+
+def test_assistant_agent_is_root_multi_turn():
+    """A root LlmAgent carries no ``mode`` (multi-turn default) and exposes 7 tools.
+
+    See ADR-0008: in ADK 2.2.0 a root agent must not set ``mode``, so the
+    runtime uses ``include_contents='default'`` and the agent sees full
+    session history.
+    """
+    from accounting_agents.assistant import assistant_agent
+
+    assert assistant_agent.mode is None
+    assert len(assistant_agent.tools) == 7
+
+
+def test_assistant_instruction_seeds_profile():
+    """The profile preamble is prepended whenever ``client_name`` is set."""
+    from accounting_agents.assistant import _BASE_INSTRUCTION, assistant_instruction
+
+    ctx = _FakeToolContext({
+        "client_name": "Acme Pte Ltd",
+        "client_uen": "201912345A",
+        "region": "SINGAPORE",
+        "base_currency": "SGD",
+        "tax_registered": True,
+        "fye_month": 12,
+    })
+    text = assistant_instruction(ctx)
+    assert "Acme Pte Ltd" in text
+    assert "201912345A" in text
+    assert text.endswith(_BASE_INSTRUCTION)
+
+    # Empty state → base instruction unchanged.
+    assert assistant_instruction(_FakeToolContext({})) == _BASE_INSTRUCTION
+    # Whitespace-only client_name is treated as absent.
+    assert assistant_instruction(_FakeToolContext({"client_name": "   "})) == _BASE_INSTRUCTION

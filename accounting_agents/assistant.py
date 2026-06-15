@@ -1,24 +1,39 @@
-"""Read-only Q&A LlmAgent over the client's FY ledger.
+"""Read-only accounting chat LlmAgent over the client's FY ledger.
 
 The agent answers questions about the client's books using pure, deterministic
 function tools that operate on ``state["ledger_data"]`` — a list of row dicts
-injected by the Slack runner before the graph runs.  NO Slack or network calls
+injected by the Slack runner before each turn.  NO Slack or network calls
 happen inside the tools; the runner layer owns data fetching.
+
+This agent is a **standalone root agent** (run on its own chat Runner, see
+``accounting_agents.agent.assistant_app``), NOT a graph node — so it carries no
+``mode`` setting and sees the full per-thread session history (multi-turn).
+See ``docs/adr/0008-chat-lane-standalone-root-agent.md``.
 
 State contract
 --------------
 ``state["ledger_data"]`` : list[dict]
     Each dict is one ledger row with string keys matching the workbook column
     headers (e.g. "Account Code / COA", "Source Amount", "Date", "Doc Type",
-    "Tax Rate", ...).  The runner injects this before running the coordinator.
+    "Tax Rate", ...).  The runner injects this before each turn.
     If the key is absent or the list is empty the agent tells the user the
     ledger is not loaded yet rather than hallucinating.
 
+The runner also injects the client profile keys (``client_name``,
+``client_uen``, ``region``, ``base_currency``, ``tax_registered``,
+``fye_month``) so ``assistant_instruction`` can tell the agent who the
+client is, plus ``category_mapping`` / ``entity_memory`` learned-mapping
+state surfaced by the inspection tools.
+
 Tools
 -----
+- ``bank_totals``             — withdrawals/deposits/balances for bank rows
 - ``summarize_by_category``   — total spend per COA / category
 - ``pnl_for_fy``              — revenue minus expenses over all rows
 - ``gst_threshold_check``     — compare total taxable turnover to SGD 1 M
+- ``show_client_profile``     — the loaded client profile (read-only)
+- ``show_learned_mappings``   — learned category/entity mappings (read-only)
+- ``model_info``              — which Gemini models back this assistant
 
 All tools are pure (no I/O, no randomness) so they are trivially testable.
 """
@@ -36,16 +51,8 @@ from . import config
 # Pure ledger tools (operate on rows already in session state)
 # --------------------------------------------------------------------------- #
 
-#: The session state key the runner must set before routing to the Q&A path.
+#: The session state key the runner must set before routing to the chat path.
 LEDGER_DATA_KEY = "ledger_data"
-
-#: The session state key carrying the user's raw question. The runner sets this
-#: alongside ``ledger_data``. It is needed because ``qa_agent`` runs in
-#: ``single_turn`` mode (ADK forces ``include_contents='none'``), so the agent
-#: cannot see the user turn from history — and the graph delivers only the
-#: router's ``{"intent": "question"}`` payload as ``node_input``. Without this
-#: the model never sees the actual question and falls back to listing its tools.
-QUESTION_KEY = "question_text"
 
 #: SGD threshold for mandatory GST registration (s.40B GST Act, Singapore).
 GST_THRESHOLD_SGD = 1_000_000.0
@@ -342,7 +349,102 @@ def gst_threshold_check(tool_context: ToolContext) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Q&A LlmAgent
+# Read-only inspection tools (Step 1.2)
+# --------------------------------------------------------------------------- #
+
+
+def show_client_profile(tool_context: ToolContext) -> str:
+    """Return the loaded client profile + learned-mapping sizes as JSON.
+
+    Pulls profile keys from session state (set by the Slack runner from
+    ``ClientContext.to_state()``) and the counts of ``coa`` + ``entity_memory``
+    so the user can see how much context the assistant has loaded.
+
+    Returns:
+        JSON string with ``client_name``, ``client_uen``, ``region``,
+        ``base_currency``, ``tax_registered``, ``fye_month``, ``coa_count``,
+        and ``entity_memory_count`` — or a friendly message when no profile
+        is loaded.
+    """
+    try:
+        state = tool_context.state
+        client_name = state.get("client_name")
+    except Exception:  # noqa: BLE001 — never let a tool crash the lane
+        return "No client profile is loaded yet for this channel."
+
+    if not client_name:
+        return "No client profile is loaded yet for this channel."
+
+    coa = state.get("coa")
+    entity_memory = state.get("entity_memory")
+    coa_count = len(coa) if isinstance(coa, list) else 0
+    entity_memory_count = len(entity_memory) if isinstance(entity_memory, list) else 0
+    return json.dumps(
+        {
+            "client_name": client_name,
+            "client_uen": state.get("client_uen"),
+            "region": state.get("region"),
+            "base_currency": state.get("base_currency"),
+            "tax_registered": state.get("tax_registered"),
+            "fye_month": state.get("fye_month"),
+            "coa_count": coa_count,
+            "entity_memory_count": entity_memory_count,
+        },
+        ensure_ascii=False,
+    )
+
+
+def show_learned_mappings(tool_context: ToolContext) -> str:
+    """Return the per-client learned category/entity mappings as JSON.
+
+    Reads ``state["category_mapping"]`` (a vendor/keyword → COA map) and
+    ``state["entity_memory"]`` (remembered entities) populated by the
+    pipeline's learning loop.
+
+    Returns:
+        JSON string ``{"category_mapping": {...}, "entity_memory": [...]}`` —
+        or a friendly message when both are empty / absent.
+    """
+    try:
+        state = tool_context.state
+        category_mapping = state.get("category_mapping")
+        entity_memory = state.get("entity_memory")
+    except Exception:  # noqa: BLE001
+        return "No learned mappings yet — process some documents first."
+
+    has_cat = isinstance(category_mapping, dict) and category_mapping
+    has_ent = isinstance(entity_memory, list) and entity_memory
+    if not has_cat and not has_ent:
+        return "No learned mappings yet — process some documents first."
+
+    return json.dumps(
+        {
+            "category_mapping": category_mapping if has_cat else {},
+            "entity_memory": entity_memory if has_ent else [],
+        },
+        ensure_ascii=False,
+    )
+
+
+def model_info(tool_context: ToolContext) -> str:  # noqa: ARG001 — uniform tool signature
+    """Return which Gemini models back this assistant + the document pipeline.
+
+    Returns:
+        JSON string with ``chat_model`` (this assistant's model), ``model_lite``
+        (invoice/chat tier), and ``model_std`` (bank/complex tier).
+    """
+    return json.dumps(
+        {
+            "chat_model": config.MODEL_LITE,
+            "model_lite": config.MODEL_LITE,
+            "model_std": config.MODEL_STD,
+        },
+        ensure_ascii=False,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Assistant LlmAgent (standalone root — multi-turn, sees session history)
 # --------------------------------------------------------------------------- #
 
 _BASE_INSTRUCTION = """
@@ -365,57 +467,89 @@ Invoice-ledger questions (spend by category, P&L, GST):
 - ``gst_threshold_check``: whether the business is near the SGD 1 M GST
   registration threshold.
 
+Inspection tools (when the user asks about setup / context / models):
+- ``show_client_profile``: the loaded client profile and counts.
+- ``show_learned_mappings``: learned category / entity mappings.
+- ``model_info``: which Gemini models back this assistant.
+
 For every question, call the single most relevant tool first, then explain the
 result in plain English. For a bank question naming a month, pass that month
 (and year if given) to ``bank_totals``. If a tool reports that the data is not
 loaded, tell the user to upload the relevant workbook first.
 
+CRITICAL — ALWAYS finish your turn with a short plain-English message to the
+user. After a tool returns, you MUST write one or two sentences summarising the
+answer in your own words, citing the relevant numbers from the tool result.
+NEVER end your turn with only a tool call and no text reply — the user cannot
+see the raw tool output, so silence looks like a broken assistant.
+
 Be concise and professional. Do not invent figures not returned by the tools.
 """.strip()
 
 
-def qa_instruction(ctx) -> str:
-    """Build the Q&A system prompt, embedding the user's actual question.
+def assistant_instruction(ctx) -> str:
+    """Build the assistant's system prompt with a one-line profile preamble.
 
-    ``qa_agent`` runs single-turn so the model cannot see the user turn from
-    history; the graph only delivers the router's ``{"intent": "question"}``
-    payload as ``node_input``. We therefore read the raw question from
-    ``state[QUESTION_KEY]`` (set by the runner) and embed it in the system
-    prompt, which is always sent regardless of ``include_contents``. Falls back
-    to the base instruction when no question is present so document/other lanes
-    (which never render this) and tests stay robust.
+    Because the assistant is a standalone root agent (see ADR-0008), it sees
+    the user turn + full session history via ``include_contents='default'``,
+    so we no longer embed the question into the prompt. Instead we prepend a
+    short profile preamble — pulled defensively from the per-channel state
+    keys produced by ``ClientContext.to_state()`` — so the model knows who
+    the client is on every turn. Falls back to the base instruction when no
+    profile is loaded so prompt assembly never crashes the lane.
     """
     try:
-        question = (ctx.state.get(QUESTION_KEY) or "").strip()
+        state = ctx.state
+        client_name = (state.get("client_name") or "").strip()
     except Exception:  # noqa: BLE001 — never let prompt assembly crash the lane
-        question = ""
-    if not question:
         return _BASE_INSTRUCTION
-    return (
-        f"{_BASE_INSTRUCTION}\n\n"
-        f"The user has asked this question:\n\"\"\"\n{question}\n\"\"\"\n"
-        "Answer THIS question now: call the most relevant tool first, then give a "
-        "concise plain-English answer grounded in the tool result. Do NOT reply "
-        "with a generic list of what you can do."
+
+    if not client_name:
+        return _BASE_INSTRUCTION
+
+    try:
+        client_uen = state.get("client_uen") or "unknown"
+        region = state.get("region") or "SINGAPORE"
+        base_currency = state.get("base_currency") or "SGD"
+        tax_registered = bool(state.get("tax_registered"))
+        fye_month = state.get("fye_month") or "unknown"
+    except Exception:  # noqa: BLE001
+        return _BASE_INSTRUCTION
+
+    gst_label = "yes" if tax_registered else "no"
+    preamble = (
+        f"You are working for {client_name} (UEN {client_uen}, {region}, "
+        f"base currency {base_currency}, GST-registered: {gst_label}, "
+        f"FYE month {fye_month}).\n\n"
     )
+    return preamble + _BASE_INSTRUCTION
 
 
-qa_agent = LlmAgent(
-    name="qa_agent",
+assistant_agent = LlmAgent(
+    name="assistant",
     model=config.MODEL_LITE,
-    mode="single_turn",
-    instruction=qa_instruction,
-    tools=[bank_totals, summarize_by_category, pnl_for_fy, gst_threshold_check],
+    instruction=assistant_instruction,
+    tools=[
+        bank_totals,
+        summarize_by_category,
+        pnl_for_fy,
+        gst_threshold_check,
+        show_client_profile,
+        show_learned_mappings,
+        model_info,
+    ],
 )
 
 __all__ = [
-    "qa_agent",
-    "qa_instruction",
+    "assistant_agent",
+    "assistant_instruction",
     "LEDGER_DATA_KEY",
-    "QUESTION_KEY",
     "GST_THRESHOLD_SGD",
     "bank_totals",
     "summarize_by_category",
     "pnl_for_fy",
     "gst_threshold_check",
+    "show_client_profile",
+    "show_learned_mappings",
+    "model_info",
 ]

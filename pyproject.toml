@@ -60,6 +60,9 @@ testpaths = ["tests"]
 # deliberately: `uv run pytest tests/integration` (with creds + server) or
 # `agents-cli eval` for tests/eval.
 addopts = "--ignore=tests/integration --ignore=tests/eval"
+markers = [
+    "eval: gated golden eval cases — require live Gemini creds; run with `pytest tests/eval/ -m eval`",
+]
 
 [tool.agent_packs]
 template = "adk"

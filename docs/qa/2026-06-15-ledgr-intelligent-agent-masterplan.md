@@ -5,8 +5,8 @@
 - `2026-06-15-engine-smart-edges-plan.md` (the engine side)
 
 Those two were never two ideas — they are the two halves of one brain. This doc unifies them.
-Grounded in `adk-docs` MCP research (citations in §8). Status: planning. Build happens in a later
-session, phase by phase.
+Grounded in `adk-docs` MCP research (citations in §8). Status: **Step 1 BUILT and live-QA'd 2026-06-15**
+(see §0.5 corrections). Subsequent steps build in later sessions, phase by phase.
 
 ---
 
@@ -18,6 +18,81 @@ handy. The accountant knows the client (name, tax status, chart of accounts, his
 own work, asks before doing anything risky, reasons about cases it hasn't seen before, and can be
 talked to in chat to actually *do* things — not just answer questions. The deterministic engine
 we already built becomes this accountant's fastest tool, not the whole product.
+
+## 0.5 Step-1 corrections (added 2026-06-15 after live build + Slack QA)
+
+This plan was written before Step 1 was built. Step 1 shipped (rename → `assistant`, multi-turn,
+profile-seed, 7 read tools, 879 unit tests, live-QA'd against the developer's local test-firm docs
+in a per-sub-client Slack channel). Two small follow-ups also landed (1.5a HITL field-name fix, 1.5c tax classifier
+master-gate). The build surfaced FIVE corrections this plan author could not have known about. Read
+these alongside the original §3–§11 text below.
+
+**A. Chat lane is a STANDALONE root agent (ADR-0008), not a multi-turn node in the graph.**
+The literal "drop `single_turn`" on `qa_agent` (originally proposed in §7 Step 1) was infeasible:
+ADK 2.2.0 forbids `mode='chat'` LlmAgents as downstream graph nodes
+(`workflow/_graph.py:520-538` `_validate_chat_agent_wiring` raises `ValueError`; docs
+`adk.dev/graphs/routes` confirm graph nodes must be `task` or `single_turn`; `task` is disabled in
+v2.0.0 graphs). The chat lane now runs on its own `App` + `Runner`, with a per-thread
+(`thread_ts`) — or per-UTC-day fallback for channel-root messages — session id, **isolated** from
+document-processing sessions (otherwise pipeline events pollute chat history). §4's "two surfaces
+over shared knowledge + tools" is exactly this shape: surfaces share Firestore profile + ledger +
+tool *code*, but NOT sessions and NOT graphs. See `docs/adr/0008-chat-lane-standalone-root-agent.md`.
+The §4 diagram is structurally correct; only the wording about the chat agent being IN the
+coordinator graph is wrong.
+
+**B. `gemini-2.5-flash-lite` sporadically goes silent after a tool call — defend it at every tool-heavy lane.**
+Caught TWICE during Step 1 live QA. The model emits a final event with no text parts after the tool
+returns; user sees a canned "rephrase your question" fallback. Two defences shipped and MUST repeat
+for Steps 2/5/7: (i) the instruction must explicitly require a final text reply ("NEVER end your
+turn with only a tool call and no text reply"); (ii) the runner needs a safety net that surfaces the
+last `function_response.result` when `extract_final_text` is empty
+(`accounting_agents/slack_runner.py:extract_tool_response_text`). This is a **reliability concern,
+not a cost concern**, but it intersects with §9.5's "circuit breaker → human" — silence is an
+accidental circuit-break, and the safety net keeps it from masquerading as "I have no answer". Add
+this to §9 as a guardrail. Memory: `gemini-flash-lite-silent-after-tool`.
+
+**C. Singapore GST master gate is OUR-side, applies to BOTH directions, overrides doc content.**
+User-confirmed rule (memory `sg-gst-tax-rule-and-xero-codes`): if the Ledgr client is NOT
+GST-registered, EVERY purchase AND sales line is `NT` regardless of doc content — input GST becomes
+cost, output GST cannot be legally charged. If the client IS registered, the doc dictates the
+SR/ZR split. Pre-fix, `tax_classifier.py` purchase branch ignored `inv.our_gst_registered` and
+wrongly coded SR on non-reg-client invoices — silently wrong numbers in the books. Fixed in 1.5c
+(hoisted master gate above tax_keyword). **Implications for later steps:**
+- **Step 2 (extract reviewer)** MUST NOT flag a non-reg client's "missing tax" as a struggle
+  signal — `NT` IS the right code for them. The reviewer's "low confidence" should ignore the
+  `tax_*` signals entirely when `inv.our_gst_registered is False`.
+- **Step 4 (write tools)** MUST re-run the classifier on amended lines so `amend_ledger_row`
+  cannot bypass this rule via the chat agent.
+- **Step 5 (hybrid categorizer)** MUST seed the LLM prompt with `client.tax_registered` so the
+  LLM doesn't fight the gate.
+
+**D. HITL Edit field-name mismatch — and the pattern that produced it.**
+Caught and fixed in 1.5a: `EDITABLE_LINE_FIELDS = ("account_code", "tax_code", "amount", ...)` did
+not match canonical `InvoiceLine` model fields (`tax_treatment`, `net_amount`), so every Edit
+silently no-op'd against the exporter columns. Add to §11 anti-goals: **any DTO that crosses the
+chat/Slack/graph/exporter boundaries MUST use the canonical `InvoiceLine` field names**. A
+regression test exists at `tests/test_nodes.py::test_apply_decision_node_edit_does_not_silently_drop_canonical_fields`.
+
+**E. The chat agent feels "rigid" through Step 3 — this is BY DESIGN; recommend reordering.**
+The user noticed this within minutes of Step 1 going live (asked "fix this row" → agent only has
+read tools). Step 3 adds *explain* (why-coded verbs); Step 4 adds *amend* (the "fix it" verb).
+**Recommended reorder of §7's roadmap** (vs. the original order):
+
+    Original:   1 → 2 (E-1 reviewer) → 3 (C-1 explain) → 4 (C-2 write) → 5 → 6 → 7 → 8
+    Recommended: 1.5b (gate) → 3 (explain) → 4 (write) → 2 (reviewer) → 5 → 6 → 7 → 8
+
+Why: Step 3+4 delivers the felt-experience win immediately. Step 2's engine-side reviewer is the
+higher long-term-quality win but the user-visible payoff is smaller per dollar of build. Step 1.5b
+(golden eval set) gates Step 2 either way per §10.A.
+
+**F. Test-data location update.** Test invoices, receipts and a Client Manager xlsx live in the
+developer's local `${LEDGR_TEST_DOC_DIR}` (a real test-firm folder with a multi-sub-client
+structure, kept outside the repo per memory `no-real-client-data-in-repo`). Bank statements live
+in `${LEDGR_TEST_BANK_DIR}`. Live QA happens in the developer's own Slack workspace. The §10 eval
+set references these via env-var-relative paths only — no real client/sub-client names committed.
+Memory `cast-unity-test-data` carries the concrete mapping privately.
+
+---
 
 ## 1. The simple mental model (so we never lose the thread)
 
@@ -163,10 +238,13 @@ Start from "a real junior accountant joined the firm." What would they do that w
 Each step is independently committable, behind tests, and live-verifiable. C = chat surface,
 E = engine surface — but they share code, so they interleave on purpose.
 
-| # | Step | Surface | Outcome |
-|---|---|---|---|
-| 1 | Rename `qa_agent` → `accounting_agent`; run it as a **standalone root agent on its own Runner**, per-thread session `{channel}:chat:{thread_ts}`, OUTSIDE the coordinator graph (**ADR-0008** — an in-graph multi-turn agent crashes graph build); seed client profile into chat; add 3 read tools (`show_client_profile`, `show_learned_mappings`, `model_info`) | C-0 | The chat helper knows who the client is and remembers the thread |
-| 2 | **Extract reviewer + retry-with-hints** between extract and categorize (Generate-and-Review / small LoopAgent). Verdict `{ok / hints_needed / user_clarify}`; mid-flow HITL on `user_clarify` | E-1 | The engine checks its own work — the single highest-leverage move |
+| # | Step | Surface | Outcome | Status |
+|---|---|---|---|---|
+| 1 | Rename `qa_agent` → `assistant_agent`; run it as a **standalone root agent on its own Runner** (`accounting_agents_assistant` App), per-thread session `{channel}:chat:{thread_ts}` with UTC-day fallback for channel-root messages, OUTSIDE the coordinator graph (**ADR-0008** — an in-graph multi-turn agent crashes graph build); seed client profile into chat; add 3 read tools (`show_client_profile`, `show_learned_mappings`, `model_info`) | C-0 | The chat helper knows who the client is and remembers the thread | ✅ **DONE 2026-06-15** (879 tests, live-QA'd) |
+| 1.5a | Align HITL Edit DTO to canonical `InvoiceLine` keys (`tax_treatment`, `net_amount`) — pre-fix every Edit silently no-op'd against the exporter columns | E/C | Edit clicks actually change the books | ✅ **DONE 2026-06-15** (regression test added) |
+| 1.5c | Tax classifier master-gate: non-GST-registered client → `NT` for ALL lines (purchase + sales), overriding doc content; Xero NT → "No GST" | E | Wrong-number bug for non-reg clients eliminated | ✅ **DONE 2026-06-15** (6 new tests) |
+| 1.5b | Golden eval set from the developer's local test-firm docs (invoices + bank statements) as the gate for Step 2; `tool_trajectory_avg_score`, `final_response_match_v2`, `hallucinations_v1` per §10 | E/C | Measurable correctness baseline before adding any LLM-in-edge | ⏳ in progress |
+| 2 | **Extract reviewer + retry-with-hints** between extract and categorize (Generate-and-Review / small LoopAgent). Verdict `{ok / hints_needed / user_clarify}`; mid-flow HITL on `user_clarify`. **Must skip `tax_*` signals when `our_gst_registered is False` (§0.5-C)** | E-1 | The engine checks its own work — the single highest-leverage move | not started |
 | 3 | Explain + lookup read tools (`explain_categorization`, `explain_tax_treatment`, `summarize_recent_activity`, `lookup_row`, `list_recent_documents`) — reuse the engine's own categorizer/tax logic | C-1 | The assistant can explain *why*, grounded in the same engine |
 | 4 | Write gate + `amend_ledger_row` / `remove_ledger_row` via ADK Tool Confirmation (smoke-test Firestore session first; fallback `adk_request_input`). Audit every write. New ADR-0009. | C-2 | The assistant gets hands — can fix the book, safely, with one-click confirm |
 | 5 | **Hybrid categorizer** — fast path (learned → keyword) unchanged; on no-match, a small LlmAgent reasons from `{line, COA, entity_memory}` → `{account_code, why}`; result feeds learning | E-2 | New vendors get reasoned, not defaulted — ends the keyword treadmill |
@@ -294,6 +372,17 @@ trajectory + output checks, not just pass/fail unit tests.
 - **Not** moving structured learning out of Firestore into ADK Memory.
 - **Not** breaking the system-of-record contract: `SlackLedgerStore.append_rows` and the Slack-
   hosted FY workbook remain the record.
+- **Not** using inventive field names across boundaries. **Every DTO that crosses
+  chat / Slack / graph / exporter MUST use the canonical `InvoiceLine` field names**
+  (`tax_treatment`, `net_amount`, `account_code`, `description`). The pre-2026-06-15 mismatch
+  silently no-op'd HITL Edit decisions — added as §0.5-D. Regression test:
+  `tests/test_nodes.py::test_apply_decision_node_edit_does_not_silently_drop_canonical_fields`.
+- **Not** trusting `MODEL_LITE` to always speak after a tool call. The Step 1 Gemini-flash-lite
+  silence pattern (§0.5-B) requires both an explicit "always reply" instruction AND a runner-side
+  safety net that surfaces the last tool result; carry this pattern into Steps 2, 5, 7.
+- **Not** ignoring `our_gst_registered` in tax classification. §0.5-C: a non-GST-registered client
+  gets `NT` on every line regardless of doc content. Step 2 reviewer must respect this; Step 4
+  write tools must re-run the classifier on amended lines.
 
 ## 12. Decisions needed before the build session
 

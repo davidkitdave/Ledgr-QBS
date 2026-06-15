@@ -114,3 +114,26 @@ Assigning each extracted line to one of the client's own COA codes.
 judged by **one LLM call against the client's own COA**; low-confidence lines are
 flagged → [[Review (HITL)]] → fix becomes a [[Correction]]. No account numbers are
 hardcoded.
+
+## Credit
+The prepaid unit a [[Firm]] spends to use Ledgr. A firm buys credits up front (a
+[[Top-up]]); processing a document consumes them. The balance is held **per Firm** —
+one balance shared across all of that firm's Client channels, not one per Client.
+**1 credit = 1 [[Billable unit]].**
+
+## Billable unit
+What one credit pays for, which differs by document kind:
+- **Bank statement:** one **page** = 1 credit.
+- **Invoice / receipt:** one **unique document written to the ledger** = 1 credit —
+  *not* per page. One PDF may hold several invoices, or one scanned page several
+  receipts (each counts); one invoice spanning several pages counts once. A skipped
+  SOA cover page is not a billable unit.
+
+A document is a billable unit only when it is **written to the ledger** (delivered).
+Documents rejected as unreadable, and documents detected as duplicates of one already
+in the ledger, are **not** billable.
+
+## Top-up
+The act of adding credits to a Firm's balance. Payment for the credits is handled
+out-of-band (the firm pays the developer); the top-up is the resulting credit grant
+recorded against the firm.

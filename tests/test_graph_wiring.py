@@ -81,14 +81,17 @@ def test_coordinator_has_profile_callback_and_schema():
 
 def test_coordinator_graph_nodes_present():
     names = _node_names(coordinator_graph)
+    # The graph carries the document + help lanes; chat runs on a separate
+    # standalone ``assistant_app`` (ADR-0008), so ``assistant`` is NOT a node.
     assert {
         "__START__",
         "coordinator",
         "dynamic_router",
         "document_workflow",
-        "qa_agent",
         "help_node",
     } <= names
+    assert "assistant" not in names
+    assert "qa_agent" not in names
 
 
 def test_coordinator_graph_start_chain_and_routes():
@@ -96,10 +99,29 @@ def test_coordinator_graph_start_chain_and_routes():
     # START -> coordinator -> dynamic_router (unconditional chain).
     assert ("__START__", "coordinator", None) in edges
     assert ("coordinator", "dynamic_router", None) in edges
-    # dynamic_router fans out to the three lanes by route label.
+    # dynamic_router fans out by route label. The question lane is repointed
+    # to help_node as a defensive fallback (real text goes through assistant_app);
+    # ADK rejects duplicate (from, to) edges, so the question + unknown labels
+    # share a single edge carrying ``route=[ROUTE_QUESTION, ROUTE_UNKNOWN]``.
     assert ("dynamic_router", "document_workflow", ROUTE_DOCUMENT) in edges
-    assert ("dynamic_router", "qa_agent", ROUTE_QUESTION) in edges
-    assert ("dynamic_router", "help_node", ROUTE_UNKNOWN) in edges
+    help_routes = {
+        tuple(r) if isinstance(r, list) else (r,)
+        for frm, to, r in edges
+        if frm == "dynamic_router" and to == "help_node"
+    }
+    assert any(
+        ROUTE_QUESTION in r and ROUTE_UNKNOWN in r for r in help_routes
+    ), f"expected a (dynamic_router → help_node) edge covering both routes, got {help_routes}"
+
+
+def test_qa_agent_not_imported_from_agent():
+    """``agent.py`` no longer imports the retired qa_agent symbol (ADR-0008)."""
+    import accounting_agents.agent as _agent
+
+    assert not hasattr(_agent, "qa_agent")
+    # The standalone chat app is exported instead.
+    assert hasattr(_agent, "assistant_app")
+    assert hasattr(_agent, "assistant_agent")
 
 
 # =========================================================================== #

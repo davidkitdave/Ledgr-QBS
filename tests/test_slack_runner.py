@@ -70,6 +70,24 @@ def test_extract_final_text_skips_non_text_parts():
     assert extract_final_text(event) == "only this"
 
 
+def test_extract_tool_response_text_returns_last_result():
+    from accounting_agents.slack_runner import extract_tool_response_text
+
+    fr1 = SimpleNamespace(response={"result": "first"})
+    fr2 = SimpleNamespace(response={"result": "second (latest)"})
+    event = SimpleNamespace(get_function_responses=lambda: [fr1, fr2])
+    assert extract_tool_response_text(event) == "second (latest)"
+
+
+def test_extract_tool_response_text_empty_when_no_responses():
+    from accounting_agents.slack_runner import extract_tool_response_text
+
+    event = SimpleNamespace(get_function_responses=lambda: [])
+    assert extract_tool_response_text(event) == ""
+    bare = SimpleNamespace()
+    assert extract_tool_response_text(bare) == ""
+
+
 def test_find_interrupt_id():
     fc = SimpleNamespace(name="adk_request_input", id="C1:F1")
     event = SimpleNamespace(get_function_calls=lambda: [fc])
@@ -164,7 +182,7 @@ _TEST_PROFILE: dict = {
 
 
 def _seeded_client_store(db: FakeFirestore, channel_id: str = "C1",
-                        client_id: str = "c1") -> "FirestoreClientStore":
+                        client_id: str = "c1") -> "FirestoreClientStore":  # noqa: F821 — string forward-ref; import is local
     """Write a minimal QBS client profile + channel reverse-index into ``db``
     and return a :class:`FirestoreClientStore` bound to that fake. The default
     channel/client ids match the rest of this test module.
@@ -539,7 +557,9 @@ def _capture_hitl_handlers(runner_mock=None, ledger_store_mock=None, db_mock=Non
 
     with patch.object(slack_runner, "_seen", fresh_seen), \
          patch("slack_bolt.async_app.AsyncApp", return_value=fake_app), \
-         patch("invoice_processing.export.client_context.InMemoryClientStore"):
+         patch("invoice_processing.export.client_context.FirestoreClientStore"), \
+         patch.object(slack_runner, "build_chat_runner",
+                      return_value=SimpleNamespace(app_name="accounting_agents_assistant")):
         build_async_app(
             runner=rm,
             ledger_store=ledger_store_mock or MagicMock(),
@@ -570,8 +590,8 @@ def test_edit_action_opens_invoice_modal_with_proposed_lines():
         nodes.NORMALIZED_KEY: [
             {
                 "lines": [
-                    {"description": "Room", "account_code": "6010", "tax_code": "SR", "amount": 51.49},
-                    {"description": "Tax", "account_code": None, "tax_code": "ZR", "amount": 3.60},
+                    {"description": "Room", "account_code": "6010", "tax_treatment": "SR", "net_amount": 51.49},
+                    {"description": "Tax", "account_code": None, "tax_treatment": "ZR", "net_amount": 3.60},
                 ]
             }
         ],
@@ -670,8 +690,8 @@ def test_edit_submit_invokes_handle_approval_action_with_parsed_edits():
     edits = call.kwargs["edits"]
     assert edits == {
         "lines": [
-            {"index": 0, "account_code": "6200", "tax_code": "ZR", "amount": 99.95},
-            {"index": 1, "account_code": "6010", "tax_code": "SR", "amount": 12.0},
+            {"index": 0, "account_code": "6200", "tax_treatment": "ZR", "net_amount": 99.95},
+            {"index": 1, "account_code": "6010", "tax_treatment": "SR", "net_amount": 12.0},
         ]
     }
 
@@ -1106,7 +1126,9 @@ def _capture_message_handler(runner_mock=None, ledger_store_mock=None, db_mock=N
 
     with patch.object(slack_runner, "_seen", fresh_seen), \
          patch("slack_bolt.async_app.AsyncApp", return_value=fake_app), \
-         patch("invoice_processing.export.client_context.InMemoryClientStore"):
+         patch("invoice_processing.export.client_context.FirestoreClientStore"), \
+         patch.object(slack_runner, "build_chat_runner",
+                      return_value=SimpleNamespace(app_name="accounting_agents_assistant")):
         build_async_app(
             runner=rm,
             ledger_store=ledger_store_mock or MagicMock(),
@@ -1237,7 +1259,9 @@ def _capture_message_handler_with_slack_client(injected_slack: FakeSlackClient):
     with patch.object(slack_runner, "_seen", fresh_seen), \
          patch("slack_bolt.async_app.AsyncApp", return_value=fake_app), \
          patch("slack_sdk.WebClient", return_value=injected_slack), \
-         patch("invoice_processing.export.client_context.InMemoryClientStore"):
+         patch("invoice_processing.export.client_context.FirestoreClientStore"), \
+         patch.object(slack_runner, "build_chat_runner",
+                      return_value=SimpleNamespace(app_name="accounting_agents_assistant")):
         build_async_app(
             runner=rm,
             ledger_store=MagicMock(),
@@ -1505,7 +1529,7 @@ def test_edits_from_view_state_builds_line_edits():
     }}}
     edits = _edits_from_view_state(view)
     assert edits == {"lines": [{"index": 0, "account_code": "6010",
-                                "tax_code": "ZR", "amount": 44.74}]}
+                                "tax_treatment": "ZR", "net_amount": 44.74}]}
 
 
 # =========================================================================== #
@@ -1533,7 +1557,7 @@ def test_persist_corrections_writes_vendor_mapping():
              "lines": [{"description": "Room"}]}  # uncategorized → edits are real changes
         ],
     }
-    edits = {"lines": [{"index": 0, "account_code": "6010", "tax_code": "ZR"}]}
+    edits = {"lines": [{"index": 0, "account_code": "6010", "tax_treatment": "ZR"}]}
     _persist_corrections(_Store(), state, edits)
     assert saved == [("CL-1", "Hotel Booking", "6010", "ZR")]
 
@@ -1579,7 +1603,7 @@ def test_persist_corrections_reads_nested_party_real_serialized_shape():
         ],
     }
     _persist_corrections(_Store(), sales_state,
-                         {"lines": [{"index": 0, "tax_code": "SR"}]})
+                         {"lines": [{"index": 0, "tax_treatment": "SR"}]})
     assert saved == [("CL-1", "PTTEP", None, "SR")]
 
 
@@ -1637,10 +1661,9 @@ def test_persist_corrections_skips_unchanged_lines():
 
 
 def test_persist_corrections_skips_lines_with_no_code_fields():
-    """A line that only changed ``amount`` (no account_code, no tax_code) is skipped.
-
-    Edits without either code field are not entity-memory worthy — the user's
-    amount tweak is a one-off variance, not a vendor rule.
+    """A line that only changed ``net_amount`` (no account_code, no tax_treatment)
+    is skipped. Edits without either code field are not entity-memory worthy —
+    the user's amount tweak is a one-off variance, not a vendor rule.
     """
     saved = []
 
@@ -1652,7 +1675,7 @@ def test_persist_corrections_skips_lines_with_no_code_fields():
         "client_id": "CL-1",
         nodes.NORMALIZED_KEY: [{"vendor_name": "Acme"}],
     }
-    edits = {"lines": [{"index": 0, "amount": 12.34}]}
+    edits = {"lines": [{"index": 0, "net_amount": 12.34}]}
     _persist_corrections(_Store(), state, edits)
     assert saved == []
 
@@ -1972,3 +1995,445 @@ def test_resolve_file_name_defaults_only_when_truly_unavailable():
             raise RuntimeError("boom")
 
     assert _resolve_file_name(_Client(), "F1", None) == "document.pdf"
+
+
+# =========================================================================== #
+# Step 1: chat session id + chat runner wiring (ADR-0008)
+# =========================================================================== #
+
+
+def test_chat_session_id_thread_case():
+    """A message inside a Slack thread keys its session by the raw thread_ts.
+
+    Replies in the same thread reuse the same session id → the assistant sees
+    multi-turn history. The message ts is irrelevant in this case.
+    """
+    from accounting_agents.slack_runner import _chat_session_id
+
+    sid = _chat_session_id("C123", "1700000000.123", "1700000005.456")
+    assert sid == "C123:chat:1700000000.123"
+
+
+def test_chat_session_id_day_bucket():
+    """A top-level message (no thread_ts) buckets by the UTC day of its ts.
+
+    1700000000 == 2023-11-14T22:13:20 UTC → day-2023-11-14.
+    """
+    from accounting_agents.slack_runner import _chat_session_id
+
+    sid = _chat_session_id("C123", None, "1700000000.000")
+    assert sid == "C123:chat:day-2023-11-14"
+
+
+def test_chat_session_id_falls_back_to_channel_when_ts_missing():
+    """A missing/unparseable message_ts degrades to ``channel_id`` alone.
+
+    Direct callers (tests, one-shot scripts) may not have a message ts; the
+    chat lane must still produce a usable session id.
+    """
+    from accounting_agents.slack_runner import _chat_session_id
+
+    assert _chat_session_id("C123", None, None) == "C123"
+    assert _chat_session_id("C123", None, "not-a-number") == "C123"
+
+
+def test_chat_and_document_sessions_isolated():
+    """A document session id and a chat session id on the same channel differ.
+
+    Pipeline events never pollute chat history and vice versa (ADR-0008).
+    """
+    from accounting_agents.slack_runner import _chat_session_id, _per_doc_session_id
+
+    doc = _per_doc_session_id("C9", "FILE1")
+    chat = _chat_session_id("C9", "1700000000.123", "1700000005.456")
+    assert doc != chat
+    assert ":chat:" in chat
+    assert ":chat:" not in doc
+
+
+# --------------------------------------------------------------------------- #
+# Multi-turn session reuse + chat-runner wiring
+# --------------------------------------------------------------------------- #
+
+
+class _CapturingChatRunner:
+    """Minimal chat-runner stub that records each ``run_async`` call.
+
+    Mirrors enough of the real ``Runner`` API for ``answer_question``: an
+    ``app_name`` + ``session_service`` + an async-generator ``run_async`` that
+    yields one final-text event.
+    """
+
+    def __init__(self, sessions: dict, app_name: str = "accounting_agents_assistant"):
+        self.app_name = app_name
+        self._sessions = sessions
+        self.calls: list[dict] = []
+
+        runner_self = self
+
+        class _SessionService:
+            def __init__(self):
+                self.created: list[tuple] = []
+
+            async def get_session(self, *, app_name, user_id, session_id):
+                return runner_self._sessions.get((user_id, session_id))
+
+            async def create_session(self, *, app_name, user_id, session_id, state=None):
+                from google.adk.errors.already_exists_error import AlreadyExistsError
+                if (user_id, session_id) in runner_self._sessions:
+                    raise AlreadyExistsError("exists")
+                self.created.append((user_id, session_id))
+                runner_self._sessions[(user_id, session_id)] = _FakeSession(state or {})
+                return runner_self._sessions[(user_id, session_id)]
+
+        self.session_service = _SessionService()
+
+    async def run_async(
+        self, *, user_id, session_id, new_message=None, state_delta=None, run_config=None,
+    ):
+        self.calls.append(
+            {
+                "user_id": user_id,
+                "session_id": session_id,
+                "state_delta": state_delta or {},
+                "run_config": run_config,
+                "new_message": new_message,
+            }
+        )
+        # Append a synthetic user event to the persisted session so the test can
+        # assert that the second turn's session contains the first turn.
+        sess = self._sessions.get((user_id, session_id))
+        if sess is not None:
+            events = getattr(sess, "events", None) or []
+            events.append(("user", new_message))
+            sess.events = events
+        yield SimpleNamespace(
+            content=SimpleNamespace(parts=[SimpleNamespace(text="ok")]),
+            get_function_calls=lambda: [],
+        )
+
+
+def _noop_ledger_store():
+    """A ledger_store stub that returns empty rows so answer_question can run hermetically."""
+    from unittest.mock import MagicMock
+
+    s = MagicMock()
+    s.latest_fy.return_value = None
+    s.read_rows.return_value = []
+    return s
+
+
+def test_multi_turn_reuses_session():
+    """Two ``answer_question`` calls on the same ``(channel, raw_thread_ts)`` reuse
+    the same chat session and the second call sees the first turn's event.
+    """
+    from accounting_agents.slack_runner import answer_question
+
+    slack = FakeSlackClient()
+    sessions: dict = {}
+    chat_runner = _CapturingChatRunner(sessions)
+
+    asyncio.run(
+        answer_question(
+            runner=chat_runner,
+            ledger_store=_noop_ledger_store(),
+            slack_client=slack,
+            channel_id="C-CHAT",
+            question="Hello",
+            app_name=chat_runner.app_name,
+            client_store=None,
+            message_ts="1700000000.001",
+            thread_ts="1700000000.001",
+            raw_thread_ts="1700000000.001",
+        )
+    )
+    asyncio.run(
+        answer_question(
+            runner=chat_runner,
+            ledger_store=_noop_ledger_store(),
+            slack_client=slack,
+            channel_id="C-CHAT",
+            question="And again",
+            app_name=chat_runner.app_name,
+            client_store=None,
+            message_ts="1700000000.002",
+            thread_ts="1700000000.001",
+            raw_thread_ts="1700000000.001",
+        )
+    )
+
+    assert len(chat_runner.calls) == 2
+    assert chat_runner.calls[0]["session_id"] == chat_runner.calls[1]["session_id"]
+    assert chat_runner.calls[0]["session_id"] == "C-CHAT:chat:1700000000.001"
+
+    # The second turn's persisted session contains events recorded by the first.
+    sess = sessions[("C-CHAT", "C-CHAT:chat:1700000000.001")]
+    assert len(getattr(sess, "events", [])) == 2
+
+
+def test_answer_question_does_not_set_question_key():
+    """The chat lane no longer embeds the question into state (multi-turn now)."""
+    from accounting_agents.slack_runner import answer_question
+
+    slack = FakeSlackClient()
+    sessions: dict = {}
+    chat_runner = _CapturingChatRunner(sessions)
+
+    asyncio.run(
+        answer_question(
+            runner=chat_runner,
+            ledger_store=_noop_ledger_store(),
+            slack_client=slack,
+            channel_id="C-CHAT",
+            question="Whatever",
+            app_name=chat_runner.app_name,
+            client_store=None,
+            message_ts="1700000000.500",
+            thread_ts="1700000000.500",
+            raw_thread_ts=None,
+        )
+    )
+
+    state_delta = chat_runner.calls[0]["state_delta"]
+    assert "question_text" not in state_delta
+    # The ledger / channel keys are still seeded.
+    assert state_delta.get("channel_id") == "C-CHAT"
+    assert "ledger_data" in state_delta
+
+
+def test_run_config_caps_recent_events():
+    """``answer_question`` passes ``RunConfig(num_recent_events=20)`` to run_async."""
+    from accounting_agents.slack_runner import answer_question
+
+    slack = FakeSlackClient()
+    sessions: dict = {}
+    chat_runner = _CapturingChatRunner(sessions)
+
+    asyncio.run(
+        answer_question(
+            runner=chat_runner,
+            ledger_store=_noop_ledger_store(),
+            slack_client=slack,
+            channel_id="C-CHAT",
+            question="hi",
+            app_name=chat_runner.app_name,
+            client_store=None,
+            message_ts="1700000000.600",
+            thread_ts="1700000000.600",
+            raw_thread_ts=None,
+        )
+    )
+
+    run_config = chat_runner.calls[0]["run_config"]
+    assert run_config is not None
+    gsc = run_config.get_session_config
+    assert gsc is not None
+    assert gsc.num_recent_events == 20
+
+
+class _SilentModelChatRunner(_CapturingChatRunner):
+    """Simulates ``gemini-2.5-flash-lite`` going silent after a tool call.
+
+    Yields a function-response event (carrying ``result``), then a final event
+    with NO text parts — the exact failure mode observed live (the model
+    occasionally produces an empty completion after a tool returns, despite
+    instruction telling it to always reply with text).
+    """
+
+    async def run_async(
+        self, *, user_id, session_id, new_message=None, state_delta=None, run_config=None,
+    ):
+        self.calls.append(
+            {
+                "user_id": user_id,
+                "session_id": session_id,
+                "state_delta": state_delta or {},
+                "run_config": run_config,
+                "new_message": new_message,
+            }
+        )
+        # Event 1: a tool result with a useful raw payload the user should see.
+        fr = SimpleNamespace(response={"result": '{"revenue": 8500, "expenses": 1820.5, "net": 6679.5}'})
+        yield SimpleNamespace(
+            content=SimpleNamespace(parts=[SimpleNamespace(text=None)]),
+            get_function_calls=lambda: [],
+            get_function_responses=lambda: [fr],
+        )
+        # Event 2: final event with EMPTY text parts (the model went silent).
+        yield SimpleNamespace(
+            content=SimpleNamespace(parts=[SimpleNamespace(text=None)]),
+            get_function_calls=lambda: [],
+            get_function_responses=lambda: [],
+        )
+
+
+def test_silent_model_safety_net_surfaces_tool_result():
+    """When the model goes silent after a tool call, the chat lane MUST surface
+    the tool's raw result rather than the opaque ``rephrase your question``
+    canned message. Observed live on 2026-06-15 with gemini-2.5-flash-lite.
+    """
+    from accounting_agents.slack_runner import answer_question
+
+    slack = FakeSlackClient()
+    sessions: dict = {}
+    chat_runner = _SilentModelChatRunner(sessions)
+
+    result = asyncio.run(
+        answer_question(
+            runner=chat_runner,
+            ledger_store=_noop_ledger_store(),
+            slack_client=slack,
+            channel_id="C-CHAT",
+            question="summarise the purchases",
+            app_name=chat_runner.app_name,
+            client_store=None,
+            message_ts="1700000000.700",
+            thread_ts="1700000000.700",
+            raw_thread_ts="1700000000.700",
+        )
+    )
+
+    posted = slack._posts[-1]["text"]
+    assert "rephrasing your question" not in posted
+    assert "revenue" in posted and "6679.5" in posted
+    assert result["text"] == posted
+
+
+# --------------------------------------------------------------------------- #
+# build_async_app: chat_runner is used for text, FirestoreClientStore is default
+# --------------------------------------------------------------------------- #
+
+
+def test_build_async_app_uses_chat_runner_for_text():
+    """The text-handler path calls ``chat_runner.run_async``, not the coordinator runner."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from accounting_agents import slack_runner
+
+    fake_chat_runner = MagicMock()
+    fake_chat_runner.app_name = "accounting_agents_assistant"
+
+    # Capture the message handler with chat_runner injected.
+    from app.slack_app import _SeenEvents
+
+    registered = {}
+    fake_app = MagicMock()
+
+    def event_decorator(name):
+        def decorator(fn):
+            registered[name] = fn
+            return fn
+        return decorator
+
+    fake_app.event = event_decorator
+    fake_app.action = lambda *a, **k: (lambda fn: fn)
+    fake_app.view = lambda *a, **k: (lambda fn: fn)
+    fake_app.command = lambda *a, **k: (lambda fn: fn)
+
+    fresh_seen = _SeenEvents()
+    rm = MagicMock()
+    rm.app_name = "acc"
+
+    with patch.object(slack_runner, "_seen", fresh_seen), \
+         patch("slack_bolt.async_app.AsyncApp", return_value=fake_app), \
+         patch.object(slack_runner, "build_chat_runner", return_value=fake_chat_runner):
+        slack_runner.build_async_app(
+            runner=rm,
+            ledger_store=MagicMock(),
+            db=MagicMock(),
+            store=MagicMock(),  # avoid FirestoreClientStore default
+        )
+
+    handler = registered["message"]
+
+    body = {"event_id": "Ev-text-cr"}
+    event = {
+        "type": "message",
+        "ts": "1700000000.700",
+        "channel": "C-qa",
+        "text": "How am I doing?",
+    }
+    mock_aq = AsyncMock(return_value={"status": "answered", "text": "ok"})
+    with patch.object(slack_runner, "answer_question", mock_aq):
+        asyncio.run(handler(event=event, body=body, client=MagicMock()))
+
+    mock_aq.assert_called_once()
+    # The runner passed to answer_question is the chat runner, NOT the coordinator runner.
+    assert mock_aq.call_args.kwargs["runner"] is fake_chat_runner
+    assert mock_aq.call_args.kwargs["app_name"] == fake_chat_runner.app_name
+
+
+def test_build_async_app_default_store_is_firestore():
+    """When no ``store`` is supplied, ``build_async_app`` defaults to FirestoreClientStore.
+
+    This fixes the socket-mode gap where onboarding writes used to vanish into
+    an ``InMemoryClientStore`` while the pipeline read from Firestore.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from accounting_agents import slack_runner
+    from invoice_processing.export.client_context import FirestoreClientStore
+
+    captured: dict = {}
+    real_build_async_app = slack_runner.build_async_app
+
+    # Spy on FirestoreClientStore — capture the instance returned to the function.
+    real_cls = FirestoreClientStore
+
+    def _capture(*args, **kwargs):
+        inst = real_cls.__new__(real_cls)
+        # Avoid touching Firestore in __init__.
+        captured["instance"] = inst
+        return inst
+
+    rm = MagicMock()
+    rm.app_name = "acc"
+    fake_app = MagicMock()
+    fake_app.event = lambda *a, **k: (lambda fn: fn)
+    fake_app.action = lambda *a, **k: (lambda fn: fn)
+    fake_app.view = lambda *a, **k: (lambda fn: fn)
+    fake_app.command = lambda *a, **k: (lambda fn: fn)
+
+    with patch("slack_bolt.async_app.AsyncApp", return_value=fake_app), \
+         patch("invoice_processing.export.client_context.FirestoreClientStore", side_effect=_capture), \
+         patch.object(slack_runner, "build_chat_runner", return_value=MagicMock(app_name="chat")):
+        real_build_async_app(
+            runner=rm,
+            ledger_store=MagicMock(),
+            db=MagicMock(),
+            # NOTE: store omitted → must default to FirestoreClientStore
+        )
+
+    assert "instance" in captured, "FirestoreClientStore must be instantiated when no store is passed"
+    assert type(captured["instance"]).__name__ == "FirestoreClientStore"
+
+
+# --------------------------------------------------------------------------- #
+# _ensure_session is idempotent — the chat lane must reuse sessions across turns
+# --------------------------------------------------------------------------- #
+
+
+def test_ensure_session_is_idempotent_for_chat_reuse():
+    """Calling ``_ensure_session`` twice for the same (user, session) is a no-op.
+
+    The chat lane relies on this: the second turn must NOT wipe the events the
+    first turn added — get-or-create semantics only.
+    """
+    from accounting_agents.slack_runner import _ensure_session
+
+    class _Svc:
+        def __init__(self):
+            self.created: list[tuple] = []
+
+        async def create_session(self, *, app_name, user_id, session_id, state=None):
+            from google.adk.errors.already_exists_error import AlreadyExistsError
+            key = (user_id, session_id)
+            if key in self.created:
+                raise AlreadyExistsError("exists")
+            self.created.append(key)
+
+    svc = _Svc()
+    runner = SimpleNamespace(session_service=svc)
+    asyncio.run(_ensure_session(runner, "app", "U1", "S1"))
+    asyncio.run(_ensure_session(runner, "app", "U1", "S1"))  # must not raise
+    assert svc.created == [("U1", "S1")]

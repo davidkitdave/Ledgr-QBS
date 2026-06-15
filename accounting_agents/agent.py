@@ -7,8 +7,13 @@ Top-level shape (verified against google-adk 2.2.0)::
                              before_agent_callback loads the channel's profile)
       -> dynamic_router     (@node -> Event(route=...))
       -> { "document": DocumentWorkflow,
-           "question": qa_agent,
+           "question": help_node,   # defensive fallback — text now bypasses
+                                    # the graph and runs on assistant_app (ADR-0008)
            "unknown":  help_node }
+
+The chat lane runs OUTSIDE this graph on ``assistant_app`` — a standalone root
+``LlmAgent`` (multi-turn, sees per-thread session history). See
+``docs/adr/0008-chat-lane-standalone-root-agent.md``.
 
 DocumentWorkflow (resumable, dynamic)::
 
@@ -51,7 +56,7 @@ from google.adk.agents import LlmAgent
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.apps import App, ResumabilityConfig
 from google.adk.events.event import Event
-from google.adk.workflow import START, Workflow, node
+from google.adk.workflow import START, Edge, Workflow, node
 from pydantic import BaseModel, Field
 
 from invoice_processing.export.client_context import (
@@ -61,7 +66,7 @@ from invoice_processing.export.client_context import (
 
 from . import config  # ensures AI Studio env is set before any ADK model init
 from . import nodes
-from .qa_agent import qa_agent  # noqa: F401 — re-exported via __all__
+from .assistant import assistant_agent  # noqa: F401 — re-exported via __all__
 
 # --------------------------------------------------------------------------- #
 # Route labels (top-level coordinator router)
@@ -229,23 +234,31 @@ document_workflow = Workflow(
 
 coordinator_graph = Workflow(
     name="coordinator_graph",
-    description="Front-desk router dispatching to document / question / help lanes.",
+    description="Front-desk router dispatching to document / help lanes.",
     edges=[
         (START, coordinator, dynamic_router),
         (
             dynamic_router,
-            {
-                ROUTE_DOCUMENT: document_workflow,
-                ROUTE_QUESTION: qa_agent,
-                ROUTE_UNKNOWN: help_node,
-            },
+            {ROUTE_DOCUMENT: document_workflow},
+        ),
+        # Text/question traffic is handled by the standalone ``assistant_app``
+        # (ADR-0008); the chat lane no longer runs through this graph. Keep
+        # the ``ROUTE_QUESTION`` label wired to ``help_node`` (shared with
+        # ``ROUTE_UNKNOWN``) as a defensive fallback in case a file_shared
+        # path ever misroutes here. ADK rejects two (from, to) edges with the
+        # same endpoints, so the two route labels live on a single ``Edge``
+        # with ``route=[...]`` instead of separate dict entries.
+        Edge(
+            from_node=dynamic_router,
+            to_node=help_node,
+            route=[ROUTE_QUESTION, ROUTE_UNKNOWN],
         ),
     ],
 )
 
 
 # --------------------------------------------------------------------------- #
-# App
+# Apps — document coordinator + standalone chat assistant
 # --------------------------------------------------------------------------- #
 
 app = App(
@@ -254,4 +267,21 @@ app = App(
     resumability_config=ResumabilityConfig(is_resumable=True),
 )
 
-__all__ = ["app", "coordinator", "coordinator_graph", "document_workflow", "RouteDecision"]
+#: Standalone chat-lane App: a root ``LlmAgent`` with no ``mode`` so it sees
+#: full per-thread session history (multi-turn). Has its own Runner built by
+#: ``slack_runner.build_chat_runner``. No ``resumability_config`` — chat has no
+#: HITL gates. See ADR-0008.
+assistant_app = App(
+    name="accounting_agents_assistant",
+    root_agent=assistant_agent,
+)
+
+__all__ = [
+    "app",
+    "assistant_app",
+    "assistant_agent",
+    "coordinator",
+    "coordinator_graph",
+    "document_workflow",
+    "RouteDecision",
+]
