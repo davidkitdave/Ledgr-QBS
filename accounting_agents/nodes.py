@@ -144,8 +144,16 @@ APPROVAL_CONFIDENCE_THRESHOLD = 0.7
 #: State key recording the gate's outcome ("auto_approved" | the human decision).
 APPROVAL_STATUS_KEY = "approval_status"
 
-#: Fields on an invoice line that the HITL Edit flow may overwrite.
-EDITABLE_LINE_FIELDS: tuple[str, ...] = ("account_code", "tax_code", "amount", "description")
+#: Fields on an invoice line that the HITL Edit flow may overwrite. These MUST
+#: match the canonical ``InvoiceLine`` model field names (``invoice_processing/
+#: export/models.py``) — the exporter reads ``line.tax_treatment`` /
+#: ``line.net_amount`` when writing the ledger row, so an edit applied to
+#: ``tax_code`` / ``amount`` (the pre-2026-06-15 names) is a silent no-op on
+#: the actual ledger column. See ADR-0008's §1.5a follow-up and memory
+#: ``ledgr-live-qa-state-2026-06`` for the live-QA-caught bug.
+EDITABLE_LINE_FIELDS: tuple[str, ...] = (
+    "account_code", "tax_treatment", "net_amount", "description",
+)
 
 
 class ApproveDecision(BaseModel):

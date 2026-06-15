@@ -367,21 +367,51 @@ def test_route_node_bank_workbook():
 
 
 def test_apply_decision_node_applies_line_edits():
+    """HITL Edit MUST land on the CANONICAL InvoiceLine keys (``tax_treatment``,
+    ``net_amount``) — the exporter reads those when writing the ledger row.
+    The pre-2026-06-15 names (``tax_code``, ``amount``) silently no-op'd."""
     state = _base_state()
     state[nodes.NORMALIZED_KEY] = [{
         "invoice_number": "INV-1", "lines": [
-            {"description": "Room", "account_code": None, "tax_code": "SR", "amount": 51.49}
+            {"description": "Room", "account_code": None, "tax_treatment": "SR", "net_amount": 51.49}
         ],
     }]
     ctx = FakeContext(state)
     decision = {"decision": "edit", "edits": {"lines": [
-        {"index": 0, "account_code": "6010", "tax_code": "ZR"}
+        {"index": 0, "account_code": "6010", "tax_treatment": "ZR", "net_amount": 44.74}
     ]}}
     asyncio.run(nodes.apply_decision_node(ctx, decision))
     line = ctx.state[nodes.NORMALIZED_KEY][0]["lines"][0]
     assert line["account_code"] == "6010"
-    assert line["tax_code"] == "ZR"
+    assert line["tax_treatment"] == "ZR"
+    assert line["net_amount"] == 44.74
     assert ctx.state[nodes.APPROVAL_STATUS_KEY] == "edit"
+
+
+def test_apply_decision_node_edit_does_not_silently_drop_canonical_fields():
+    """REGRESSION (live-QA 2026-06): an Edit DTO that writes ``tax_treatment``
+    and ``net_amount`` lands on the SAME keys the exporter later reads from
+    (``invoice_processing/export/exporters.py`` consumes ``line.tax_treatment``
+    and ``line.net_amount``). Pre-fix the edit DTO used ``tax_code`` /
+    ``amount`` and silently no-op'd against the canonical exporter fields.
+    """
+    state = _base_state()
+    state[nodes.NORMALIZED_KEY] = [{
+        "invoice_number": "INV-1", "lines": [
+            {"description": "Room", "account_code": None,
+             "tax_treatment": "SR", "net_amount": 100.00}
+        ],
+    }]
+    ctx = FakeContext(state)
+    asyncio.run(nodes.apply_decision_node(
+        ctx,
+        {"decision": "edit", "edits": {"lines": [
+            {"index": 0, "tax_treatment": "ZR", "net_amount": 88.00}
+        ]}},
+    ))
+    line = ctx.state[nodes.NORMALIZED_KEY][0]["lines"][0]
+    assert line["tax_treatment"] == "ZR", "Edit must write canonical key (exporter reads tax_treatment)"
+    assert line["net_amount"] == 88.00, "Edit must write canonical key (exporter reads net_amount)"
 
 
 def test_apply_decision_node_reject_clears_invoices():
@@ -411,15 +441,15 @@ def test_apply_decision_node_approve_passes_through_with_status():
 
 
 @pytest.mark.parametrize("edits_payload, expected_line", [
-    ({"lines": []}, {"description": "Room", "account_code": None, "tax_code": "SR", "amount": 51.49}),
-    ({"lines": [{"index": 99, "account_code": "6010"}]}, {"description": "Room", "account_code": None, "tax_code": "SR", "amount": 51.49}),
-    ({"lines": [{"index": "0", "account_code": "6010"}]}, {"description": "Room", "account_code": None, "tax_code": "SR", "amount": 51.49}),
+    ({"lines": []}, {"description": "Room", "account_code": None, "tax_treatment": "SR", "net_amount": 51.49}),
+    ({"lines": [{"index": 99, "account_code": "6010"}]}, {"description": "Room", "account_code": None, "tax_treatment": "SR", "net_amount": 51.49}),
+    ({"lines": [{"index": "0", "account_code": "6010"}]}, {"description": "Room", "account_code": None, "tax_treatment": "SR", "net_amount": 51.49}),
 ])
 def test_apply_decision_node_edit_edge_cases_no_op(edits_payload, expected_line):
     state = _base_state()
     state[nodes.NORMALIZED_KEY] = [{
         "invoice_number": "INV-1",
-        "lines": [{"description": "Room", "account_code": None, "tax_code": "SR", "amount": 51.49}],
+        "lines": [{"description": "Room", "account_code": None, "tax_treatment": "SR", "net_amount": 51.49}],
     }]
     ctx = FakeContext(state)
     asyncio.run(nodes.apply_decision_node(ctx, {"decision": "edit", "edits": edits_payload}))
@@ -430,8 +460,8 @@ def test_apply_decision_node_edit_with_multi_invoice_logs_warning(caplog):
     import logging
     state = _base_state()
     state[nodes.NORMALIZED_KEY] = [
-        {"invoice_number": "INV-1", "lines": [{"description": "A", "account_code": None, "tax_code": "SR", "amount": 10.0}]},
-        {"invoice_number": "INV-2", "lines": [{"description": "B", "account_code": None, "tax_code": "SR", "amount": 20.0}]},
+        {"invoice_number": "INV-1", "lines": [{"description": "A", "account_code": None, "tax_treatment": "SR", "net_amount": 10.0}]},
+        {"invoice_number": "INV-2", "lines": [{"description": "B", "account_code": None, "tax_treatment": "SR", "net_amount": 20.0}]},
     ]
     ctx = FakeContext(state)
     with caplog.at_level(logging.WARNING, logger="accounting_agents.nodes"):

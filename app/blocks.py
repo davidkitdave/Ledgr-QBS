@@ -587,10 +587,15 @@ def coa_prompt_blocks() -> list:
 
 
 def invoice_edit_modal(op_id: str, lines: list[dict], coa_options: list[tuple[str, str]]) -> dict:
-    """Modal to correct each flagged line's account code / tax code / amount.
+    """Modal to correct each flagged line's account code / tax treatment / net amount.
 
     ``coa_options`` is a list of (code, label) for the static_select; ``lines`` is
     the proposed extraction. ``block_id`` encodes the line index: ``acct_<i>`` etc.
+
+    The modal's initial values are pulled from the canonical ``InvoiceLine`` keys
+    (``tax_treatment`` and ``net_amount``) so the values pre-populate from the
+    extractor's actual output and a round-tripped edit lands on the canonical
+    keys the exporter writes from.
     """
     coa = [{"text": {"type": "plain_text", "text": lbl[:75]}, "value": code}
            for code, lbl in coa_options]
@@ -598,8 +603,9 @@ def invoice_edit_modal(op_id: str, lines: list[dict], coa_options: list[tuple[st
                 for t in ("SR", "ZR", "ES", "TX", "OS")]
     blocks: list = []
     # Modal exposes the subset of nodes.EDITABLE_LINE_FIELDS that users can
-    # actually correct in-place (account_code/tax_code/amount). The line
-    # description is shown read-only as the section header above each group.
+    # actually correct in-place (account_code/tax_treatment/net_amount). The
+    # line description is shown read-only as the section header above each
+    # group.
     for i, ln in enumerate(lines):
         blocks.append({"type": "section",
                        "text": {"type": "mrkdwn", "text": f"*Line {i + 1}: {ln.get('description', '')}*"}})
@@ -614,18 +620,18 @@ def invoice_edit_modal(op_id: str, lines: list[dict], coa_options: list[tuple[st
                 "element": {"type": "static_select", "action_id": "v", "options": coa,
                             **({"initial_option": acct_initial} if acct_initial else {})},
             })
-        tax_initial = next((o for o in tax_opts if o["value"] == ln.get("tax_code")), None)
+        tax_initial = next((o for o in tax_opts if o["value"] == ln.get("tax_treatment")), None)
         blocks.append({
             "type": "input", "block_id": f"tax_{i}", "optional": True,
-            "label": {"type": "plain_text", "text": "Tax code"},
+            "label": {"type": "plain_text", "text": "Tax treatment"},
             "element": {"type": "static_select", "action_id": "v", "options": tax_opts,
                         **({"initial_option": tax_initial} if tax_initial else {})},
         })
         blocks.append({
             "type": "input", "block_id": f"amt_{i}", "optional": True,
-            "label": {"type": "plain_text", "text": "Amount"},
+            "label": {"type": "plain_text", "text": "Net amount"},
             "element": {"type": "number_input", "action_id": "v", "is_decimal_allowed": True,
-                        **({"initial_value": str(ln["amount"])} if ln.get("amount") is not None else {})},
+                        **({"initial_value": str(ln["net_amount"])} if ln.get("net_amount") is not None else {})},
         })
     return {
         "type": "modal", "callback_id": "ledgr_invoice_edit", "private_metadata": op_id,
