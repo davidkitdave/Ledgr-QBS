@@ -360,6 +360,172 @@ def _per_doc_line(doc) -> str:
     return _clamp_section(f"{marker}:page_facing_up: " + "  •  ".join(parts) + dest)
 
 
+_MAX_CARD_TITLE = 150
+_MAX_CARD_BODY = 200
+
+
+def _truncate(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def per_doc_card(
+    doc,
+    *,
+    actions: list[str] | None = None,
+    op_id: str | None = None,
+    channel_id: str | None = None,
+) -> list[dict]:
+    """Build a per-document block.
+
+    Native path: a ``card`` block with title/subtitle/body/actions.
+    Fallback path: the existing mrkdwn section (+ optional actions block).
+    """
+    actions = actions or []
+
+    if supports_native_blocks(channel_id):
+        return _per_doc_card_native(doc, actions=actions, op_id=op_id)
+    return _per_doc_card_fallback(doc, actions=actions, op_id=op_id)
+
+
+def _per_doc_card_native(doc, *, actions: list[str], op_id: str | None) -> list[dict]:
+    is_bank = (
+        getattr(doc, "doc_type", None) in ("bank_statement", "bank")
+        or getattr(doc, "bank", None) is not None
+    )
+
+    if is_bank:
+        bank = getattr(doc, "bank", None)
+        accounts = getattr(bank, "accounts", None) or []
+        title_raw = (
+            ", ".join(a.bank_name for a in accounts if getattr(a, "bank_name", None))
+            or "Bank statement"
+        )
+        period = next(
+            (a.statement_period for a in accounts if getattr(a, "statement_period", None)),
+            None,
+        )
+        n_txns = sum(len(getattr(a, "transactions", []) or []) for a in accounts)
+        subtitle_raw = period or ""
+        body_raw = f"{n_txns} transaction{'s' if n_txns != 1 else ''}"
+    else:
+        norm = getattr(doc, "normalized", None)
+        direction = (getattr(doc, "direction", None) or "").strip().lower()
+        party = None
+        if norm is not None:
+            party = norm.customer if direction == "sales" else norm.supplier
+        title_raw = (getattr(party, "name", None) or "Unknown").strip() or "Unknown"
+
+        inv_no = getattr(norm, "invoice_number", None)
+        inv_date = getattr(norm, "invoice_date", None)
+        date_str = (
+            inv_date.isoformat() if inv_date and hasattr(inv_date, "isoformat") else str(inv_date)
+        ) if inv_date else ""
+        subtitle_parts = []
+        if inv_no:
+            subtitle_parts.append(f"Invoice #{inv_no}")
+        if date_str:
+            subtitle_parts.append(date_str)
+        subtitle_raw = " · ".join(subtitle_parts)
+
+        total = getattr(norm, "doc_total", None)
+        currency = getattr(norm, "currency", None) or "SGD"
+        body_raw = _fmt_money(total, currency)
+
+    route = getattr(doc, "route", None)
+    fy = getattr(route, "fy", None)
+    workbook = getattr(route, "workbook", None)
+    body_suffix_parts = []
+    if fy is not None:
+        body_suffix_parts.append(f"FY{fy}")
+    if workbook:
+        body_suffix_parts.append(workbook)
+    if body_suffix_parts:
+        suffix = " / ".join(body_suffix_parts)
+        full_body = f"{body_raw} · {suffix}" if body_raw else suffix
+    else:
+        full_body = body_raw
+
+    card: dict = {
+        "type": "card",
+        "title": _truncate(title_raw, _MAX_CARD_TITLE),
+        "subtitle": _truncate(subtitle_raw, _MAX_CARD_TITLE) if subtitle_raw else None,
+        "body": _truncate(full_body, _MAX_CARD_BODY) if full_body else None,
+    }
+
+    needs_review = getattr(doc, "reconciled", True) is False
+    if needs_review:
+        note = (getattr(doc, "note", "") or "").strip()
+        if note.upper().startswith("ERROR"):
+            label = "failed to process"
+        else:
+            label = "needs review"
+        reason = note if len(note) <= _MAX_CARD_BODY else note[: _MAX_CARD_BODY - 1] + "…"
+        subtext = f"{label} — {reason}" if reason else label
+        card["subtext"] = subtext[: _MAX_CARD_BODY] if len(subtext) > _MAX_CARD_BODY else subtext
+
+    # Remove None-valued fields so the block is clean.
+    card = {k: v for k, v in card.items() if v is not None}
+
+    if actions:
+        file_id = getattr(doc, "file_id", None) or getattr(doc, "path", None) or ""
+        btn_value = op_id or file_id or ""
+        button_defs = {
+            "reextract": {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Re-extract"},
+                "action_id": "ledgr_per_doc_reextract",
+                "value": file_id or btn_value,
+            },
+            "edit": {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Edit"},
+                "action_id": "ledgr_per_doc_edit",
+                "value": op_id or file_id or "",
+            },
+            "view_row": {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "View row"},
+                "action_id": "ledgr_per_doc_view_row",
+                "value": file_id or "",
+            },
+        }
+        card["actions"] = [button_defs[a] for a in actions if a in button_defs]
+
+    return [card]
+
+
+def _per_doc_card_fallback(doc, *, actions: list[str], op_id: str | None) -> list[dict]:
+    blocks: list[dict] = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": _per_doc_line(doc)}}
+    ]
+    if actions:
+        file_id = getattr(doc, "file_id", None) or getattr(doc, "path", None) or ""
+        button_defs = {
+            "reextract": {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Re-extract"},
+                "action_id": "ledgr_per_doc_reextract",
+                "value": file_id,
+            },
+            "edit": {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Edit"},
+                "action_id": "ledgr_per_doc_edit",
+                "value": op_id or file_id or "",
+            },
+            "view_row": {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "View row"},
+                "action_id": "ledgr_per_doc_view_row",
+                "value": file_id,
+            },
+        }
+        blocks.append(
+            {"type": "actions", "elements": [button_defs[a] for a in actions if a in button_defs]}
+        )
+    return blocks
+
+
 def result_card(
     *,
     n_files: int,
@@ -369,6 +535,7 @@ def result_card(
     coa_missing: bool = False,
     archive_notes: list[str] | None = None,
     docs: list | None = None,
+    channel_id: str | None = None,
 ) -> list:
     """Summary card posted after processing a batch of shared documents.
 
@@ -403,17 +570,21 @@ def result_card(
         }
     ]
 
-    # Per-doc detail — one section per doc, capped to keep within Slack block
+    # Per-doc detail — one card per doc, capped to keep within Slack block
     # limits. Beyond the cap, a "+N more" context line summarises the remainder.
     if docs:
         _DOC_CAP = 10
         for doc in docs[:_DOC_CAP]:
-            blocks.append(
-                {
-                    "type": "section",
-                    "text": {"type": "mrkdwn", "text": _per_doc_line(doc)},
-                }
+            needs_actions = (
+                getattr(doc, "reconciled", True) is False
+                or getattr(doc, "status", None) in ("needs_review", "failed")
             )
+            doc_actions: list[str] = []
+            if needs_actions:
+                doc_actions = ["reextract", "edit"]
+                if getattr(doc, "file_id", None):
+                    doc_actions.append("view_row")
+            blocks.extend(per_doc_card(doc, actions=doc_actions, channel_id=channel_id))
         if len(docs) > _DOC_CAP:
             blocks.append(
                 {

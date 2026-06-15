@@ -3804,3 +3804,131 @@ class TestStageState:
         snap1[0]["status"] = "complete"
         snap2 = state.snapshot()
         assert snap2[0]["status"] == "pending"
+
+
+# --------------------------------------------------------------------------- #
+# per-doc card inline action handlers
+# --------------------------------------------------------------------------- #
+
+
+def _capture_per_doc_handlers(runner_mock=None, ledger_store_mock=None, db_mock=None):
+    """Build the Bolt app with fakes; capture the per-doc action handlers."""
+    from unittest.mock import MagicMock, patch
+
+    from app.slack_app import _SeenEvents
+    from accounting_agents import slack_runner
+
+    registered = {"actions": {}, "views": {}}
+
+    def action_decorator(action_id, *a, **k):
+        def decorator(fn):
+            registered["actions"][action_id] = fn
+            return fn
+        return decorator
+
+    def view_decorator(callback_id, *a, **k):
+        def decorator(fn):
+            registered["views"][callback_id] = fn
+            return fn
+        return decorator
+
+    fake_app = MagicMock()
+    fake_app.event = lambda *a, **k: (lambda fn: fn)
+    fake_app.action = action_decorator
+    fake_app.view = view_decorator
+    fake_app.command = lambda *a, **k: (lambda fn: fn)
+
+    fresh_seen = _SeenEvents()
+    rm = runner_mock or _FakeActionViewRunner()
+
+    with patch.object(slack_runner, "_seen", fresh_seen), \
+         patch("slack_bolt.async_app.AsyncApp", return_value=fake_app), \
+         patch("invoice_processing.export.client_context.FirestoreClientStore"), \
+         patch.object(slack_runner, "build_chat_runner",
+                      return_value=SimpleNamespace(app_name="accounting_agents_assistant")):
+        build_async_app(
+            runner=rm,
+            ledger_store=ledger_store_mock or MagicMock(),
+            db=db_mock or MagicMock(),
+        )
+
+    return (
+        registered["actions"]["ledgr_per_doc_reextract"],
+        registered["actions"]["ledgr_per_doc_edit"],
+        registered["actions"]["ledgr_per_doc_view_row"],
+    )
+
+
+def test_per_doc_reextract_opens_modal_with_file_id():
+    """ledgr_per_doc_reextract opens the proactive_redo hint modal with the
+    file_id from the button value — same UX as proactive_redo."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    sync_client = MagicMock()
+    with patch("slack_sdk.WebClient", return_value=sync_client):
+        reextract_handler, _, _ = _capture_per_doc_handlers()
+
+    body = {
+        "actions": [{"action_id": "ledgr_per_doc_reextract", "value": "F-CARD-1"}],
+        "trigger_id": "T-CARD-1",
+    }
+    ack = AsyncMock()
+    asyncio.run(reextract_handler(ack=ack, body=body, client=MagicMock()))
+
+    ack.assert_awaited_once()
+    sync_client.views_open.assert_called_once()
+    kwargs = sync_client.views_open.call_args.kwargs
+    assert kwargs["trigger_id"] == "T-CARD-1"
+    view = kwargs["view"]
+    assert view["callback_id"] == "ledgr_proactive_redo"
+    assert view["private_metadata"] == "F-CARD-1"
+
+
+def test_per_doc_edit_posts_ephemeral_not_supported():
+    """ledgr_per_doc_edit posts an ephemeral explaining the limitation."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    sync_client = MagicMock()
+    with patch("slack_sdk.WebClient", return_value=sync_client):
+        _, edit_handler, _ = _capture_per_doc_handlers()
+
+    body = {
+        "actions": [{"action_id": "ledgr_per_doc_edit", "value": "F-EDIT-1"}],
+        "trigger_id": "T-EDIT-1",
+        "channel": {"id": "C-EDIT-1"},
+        "user": {"id": "U-EDIT-1"},
+    }
+    ack = AsyncMock()
+    asyncio.run(edit_handler(ack=ack, body=body, client=MagicMock()))
+
+    ack.assert_awaited_once()
+    sync_client.chat_postEphemeral.assert_called_once()
+    kwargs = sync_client.chat_postEphemeral.call_args.kwargs
+    assert kwargs["channel"] == "C-EDIT-1"
+    assert kwargs["user"] == "U-EDIT-1"
+    assert "Re-extract" in kwargs["text"]
+
+
+def test_per_doc_view_row_posts_coming_soon_ephemeral():
+    """ledgr_per_doc_view_row posts a 'coming soon' ephemeral."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    sync_client = MagicMock()
+    with patch("slack_sdk.WebClient", return_value=sync_client):
+        _, _, view_row_handler = _capture_per_doc_handlers()
+
+    body = {
+        "actions": [{"action_id": "ledgr_per_doc_view_row", "value": "F-VR-1"}],
+        "trigger_id": "T-VR-1",
+        "channel": {"id": "C-VR-1"},
+        "user": {"id": "U-VR-1"},
+    }
+    ack = AsyncMock()
+    asyncio.run(view_row_handler(ack=ack, body=body, client=MagicMock()))
+
+    ack.assert_awaited_once()
+    sync_client.chat_postEphemeral.assert_called_once()
+    kwargs = sync_client.chat_postEphemeral.call_args.kwargs
+    assert kwargs["channel"] == "C-VR-1"
+    assert kwargs["user"] == "U-VR-1"
+    assert "coming soon" in kwargs["text"].lower()

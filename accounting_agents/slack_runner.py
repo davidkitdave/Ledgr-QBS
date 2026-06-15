@@ -2726,6 +2726,57 @@ def build_async_app(
             thread_ts=upload_ts,
         )
 
+    # --- per-doc card inline action handlers ---
+
+    @async_app.action("ledgr_per_doc_reextract")
+    async def _per_doc_reextract(ack, body, client):
+        # Same flow as proactive_redo: open the hint modal; the submit handler
+        # (ledgr_proactive_redo) will drain it via _execute_pending_reextract.
+        await ack()
+        file_id = (body.get("actions") or [{}])[0].get("value")
+        if not file_id:
+            return
+        sync_client.views_open(
+            trigger_id=body["trigger_id"],
+            view=proactive_redo_modal(file_id),
+        )
+
+    @async_app.action("ledgr_per_doc_edit")
+    async def _per_doc_edit(ack, body, client):
+        # Editing an already-filed doc is not yet supported via the per-doc card.
+        # Post an ephemeral explaining the limitation; full filed-doc edit is a
+        # follow-up commit.
+        await ack()
+        channel_id_edit = (body.get("channel") or {}).get("id") or ""
+        user_id = (body.get("user") or {}).get("id") or ""
+        if channel_id_edit and user_id:
+            try:
+                sync_client.chat_postEphemeral(
+                    channel=channel_id_edit,
+                    user=user_id,
+                    text=(
+                        "Editing already-filed docs isn't supported yet — "
+                        "try *Re-extract* instead to re-read the document with a hint."
+                    ),
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("per_doc_edit: could not post ephemeral")
+
+    @async_app.action("ledgr_per_doc_view_row")
+    async def _per_doc_view_row(ack, body, client):
+        await ack()
+        channel_id_vr = (body.get("channel") or {}).get("id") or ""
+        user_id = (body.get("user") or {}).get("id") or ""
+        if channel_id_vr and user_id:
+            try:
+                sync_client.chat_postEphemeral(
+                    channel=channel_id_vr,
+                    user=user_id,
+                    text="(coming soon) View row will jump to the workbook line.",
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("per_doc_view_row: could not post ephemeral")
+
     # --- onboarding + commands (reuse parked sync handlers off-thread) ---
 
     @async_app.action("ledgr_setup_open")

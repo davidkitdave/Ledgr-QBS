@@ -6,12 +6,14 @@ from datetime import date
 
 import pytest
 
+import app.native_blocks_compat as compat
 from app.blocks import (
     approval_card_blocks,
     coa_prompt_blocks,
     invoice_edit_modal,
     job_summary_text,
     onboarding_modal,
+    per_doc_card,
     proactive_redo_blocks,
     proactive_redo_modal,
     profile_summary_blocks,
@@ -312,12 +314,11 @@ class TestResultCardPerDoc:
         blocks = result_card(
             n_files=13, n_processed=13, workbooks=["Ledger_FY2025.xlsx"], errors=[], docs=docs
         )
-        # header + 10 doc sections + "+N more" context + workbooks section
-        section_blocks = [b for b in blocks if b.get("type") == "section"]
-        # header(1) + 10 docs + workbooks(1) = 12 section blocks
-        assert len(section_blocks) == 12
-        combined = _all_block_text(blocks)
-        assert "+3 more" in combined
+        # header(1) + 10 doc blocks (section or card) + "+N more" context + workbooks(1) = 13
+        doc_blocks = [b for b in blocks if b.get("type") in ("section", "card")]
+        # header(1) + 10 docs + workbooks(1) = 12
+        assert len(doc_blocks) == 12
+        assert "+3 more" in str(blocks)
         # well under the Slack ~50-block ceiling
         assert len(blocks) <= 50
 
@@ -341,7 +342,8 @@ class TestResultCardPerDoc:
         blocks = result_card(n_files=1, n_processed=0, workbooks=[], errors=[], docs=[doc])
         texts = self._section_texts(blocks)
         assert all(t.strip() for t in texts)            # no empty section (Slack rejects those)
-        combined = _all_block_text(blocks)
+        # Use str(blocks) to cover both card.subtext and section.text representations.
+        combined = str(blocks)
         assert "failed to process" in combined          # distinct from "needs review"
         assert "Unknown" in combined
 
@@ -688,4 +690,238 @@ class TestProactiveRedoModal:
         assert len(inputs) == 1
         assert inputs[0]["block_id"] == "hint_block"
         assert inputs[0]["element"]["action_id"] == "hint_input"
+
+
+# --------------------------------------------------------------------------- #
+# per_doc_card tests
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture(autouse=True)
+def _reset_compat_cache():
+    compat._reset_for_tests()
+    yield
+    compat._reset_for_tests()
+
+
+class TestPerDocCardNative:
+
+    @pytest.fixture(autouse=True)
+    def _force_native(self, monkeypatch):
+        monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
+
+    def test_invoice_produces_one_card_block(self):
+        doc = _invoice_doc()
+        blocks = per_doc_card(doc)
+        assert len(blocks) == 1
+        assert blocks[0]["type"] == "card"
+
+    def test_invoice_title_is_vendor_name(self):
+        doc = _invoice_doc(supplier_name="Acme Inc")
+        card = per_doc_card(doc)[0]
+        assert card["title"] == "Acme Inc"
+        assert isinstance(card["title"], str)
+
+    def test_invoice_subtitle_contains_number_and_date(self):
+        doc = _invoice_doc(invoice_number="INV-007", invoice_date=date(2025, 9, 15))
+        card = per_doc_card(doc)[0]
+        assert "Invoice #INV-007" in card["subtitle"]
+        assert "2025-09-15" in card["subtitle"]
+
+    def test_invoice_body_contains_total_and_workbook(self):
+        doc = _invoice_doc(doc_total=1234.5)
+        card = per_doc_card(doc)[0]
+        assert "1,234.50" in card["body"]
+        assert "FY2025" in card["body"]
+        assert "Ledger_FY2025.xlsx" in card["body"]
+
+    def test_three_actions_in_order(self):
+        doc = _invoice_doc()
+        card = per_doc_card(doc, actions=["reextract", "edit", "view_row"])[0]
+        acts = card["actions"]
+        assert len(acts) == 3
+        assert acts[0]["action_id"] == "ledgr_per_doc_reextract"
+        assert acts[0]["text"]["text"] == "Re-extract"
+        assert acts[1]["action_id"] == "ledgr_per_doc_edit"
+        assert acts[1]["text"]["text"] == "Edit"
+        assert acts[2]["action_id"] == "ledgr_per_doc_view_row"
+        assert acts[2]["text"]["text"] == "View row"
+
+    def test_empty_actions_omits_actions_key(self):
+        doc = _invoice_doc()
+        card = per_doc_card(doc, actions=[])[0]
+        assert "actions" not in card
+
+    def test_no_actions_arg_omits_actions_key(self):
+        doc = _invoice_doc()
+        card = per_doc_card(doc)[0]
+        assert "actions" not in card
+
+    def test_reconciled_false_adds_needs_review_subtext(self):
+        doc = _invoice_doc(reconciled=False, note="missing supplier GST no.")
+        card = per_doc_card(doc)[0]
+        assert "needs review" in card["subtext"]
+        assert "missing supplier GST no." in card["subtext"]
+
+    def test_error_note_uses_failed_to_process_label(self):
+        doc = _invoice_doc(reconciled=False, note="ERROR: pipeline blew up")
+        card = per_doc_card(doc)[0]
+        assert "failed to process" in card["subtext"]
+
+    def test_clean_doc_has_no_subtext(self):
+        doc = _invoice_doc(reconciled=True)
+        card = per_doc_card(doc)[0]
+        assert "subtext" not in card
+
+    def test_body_length_cap_with_long_workbook(self):
+        long_wb = "A" * 300 + ".xlsx"
+        doc = ProcessedDoc(
+            path="/tmp/d.pdf",
+            doc_type="invoice",
+            direction="purchase",
+            normalized=NormalizedInvoice(
+                doc_type="purchase",
+                invoice_number="INV-1",
+                invoice_date=date(2025, 1, 1),
+                supplier=PartyInfo(name="Vendor"),
+                doc_total=99.0,
+            ),
+            bank=None,
+            route=DocRoute(fy=2025, bucket="purchase", archive_path="x", workbook=long_wb, sheet="P"),
+            reconciled=True,
+            note="ok",
+        )
+        card = per_doc_card(doc)[0]
+        assert len(card["body"]) <= 200
+        assert card["body"].endswith("…")
+
+    def test_bank_doc_title_is_bank_name(self):
+        from invoice_processing.extract.bank_statement_extractor import (
+            ExtractedAccount,
+            ExtractedBankStatement,
+        )
+        bank = ExtractedBankStatement(
+            accounts=[ExtractedAccount(bank_name="OCBC - 5001", statement_period="DEC 2024")]
+        )
+        doc = ProcessedDoc(
+            path="/tmp/b.pdf",
+            doc_type="bank_statement",
+            direction=None,
+            normalized=None,
+            bank=bank,
+            route=_route(workbook="BankStatement_FY2025.xlsx"),
+            reconciled=True,
+            note="ok",
+        )
+        card = per_doc_card(doc)[0]
+        assert card["title"] == "OCBC - 5001"
+        assert "DEC 2024" in card.get("subtitle", "") or "DEC 2024" in card.get("body", "")
+
+    def test_bank_doc_type_is_card(self):
+        from invoice_processing.extract.bank_statement_extractor import ExtractedBankStatement
+        doc = ProcessedDoc(
+            path="/tmp/b.pdf",
+            doc_type="bank_statement",
+            direction=None,
+            normalized=None,
+            bank=ExtractedBankStatement(accounts=[]),
+            route=_route(workbook="BankStatement_FY2025.xlsx"),
+            reconciled=True,
+            note="ok",
+        )
+        blocks = per_doc_card(doc)
+        assert blocks[0]["type"] == "card"
+
+
+class TestPerDocCardFallback:
+
+    @pytest.fixture(autouse=True)
+    def _force_fallback(self, monkeypatch):
+        monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "0")
+
+    def test_fallback_produces_section_block(self):
+        doc = _invoice_doc()
+        blocks = per_doc_card(doc)
+        assert blocks[0]["type"] == "section"
+
+    def test_fallback_with_actions_appends_actions_block(self):
+        doc = _invoice_doc()
+        blocks = per_doc_card(doc, actions=["reextract", "edit"])
+        assert len(blocks) == 2
+        assert blocks[1]["type"] == "actions"
+        action_ids = [el["action_id"] for el in blocks[1]["elements"]]
+        assert "ledgr_per_doc_reextract" in action_ids
+        assert "ledgr_per_doc_edit" in action_ids
+
+    def test_fallback_no_actions_no_actions_block(self):
+        doc = _invoice_doc()
+        blocks = per_doc_card(doc, actions=[])
+        assert len(blocks) == 1
+        assert blocks[0]["type"] == "section"
+
+    def test_fallback_section_text_is_mrkdwn(self):
+        doc = _invoice_doc(supplier_name="Fallback Vendor")
+        blocks = per_doc_card(doc)
+        assert blocks[0]["text"]["type"] == "mrkdwn"
+        assert "Fallback Vendor" in blocks[0]["text"]["text"]
+
+
+class TestResultCardNativeMode:
+
+    @pytest.fixture(autouse=True)
+    def _force_native(self, monkeypatch):
+        monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
+
+    def test_needs_review_doc_gets_actions(self):
+        docs = [
+            _invoice_doc(reconciled=True),
+            _invoice_doc(reconciled=True),
+            _invoice_doc(reconciled=False, note="bad total"),
+        ]
+        blocks = result_card(
+            n_files=3, n_processed=3, workbooks=[], errors=[], docs=docs, channel_id="C1"
+        )
+        card_blocks = [b for b in blocks if b.get("type") == "card"]
+        assert len(card_blocks) == 3
+        clean_cards = [c for c in card_blocks if "actions" not in c]
+        review_cards = [c for c in card_blocks if "actions" in c]
+        assert len(clean_cards) == 2
+        assert len(review_cards) == 1
+        action_ids = [a["action_id"] for a in review_cards[0]["actions"]]
+        assert "ledgr_per_doc_reextract" in action_ids
+        assert "ledgr_per_doc_edit" in action_ids
+
+    def test_clean_docs_have_no_actions(self):
+        docs = [_invoice_doc(reconciled=True) for _ in range(3)]
+        blocks = result_card(
+            n_files=3, n_processed=3, workbooks=[], errors=[], docs=docs, channel_id="C1"
+        )
+        for card in (b for b in blocks if b.get("type") == "card"):
+            assert "actions" not in card
+
+
+class TestResultCardFallbackMode:
+
+    @pytest.fixture(autouse=True)
+    def _force_fallback(self, monkeypatch):
+        monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "0")
+
+    def test_structure_matches_legacy_section_layout(self):
+        docs = [_invoice_doc(), _invoice_doc()]
+        blocks = result_card(
+            n_files=2, n_processed=2, workbooks=["Ledger_FY2025.xlsx"], errors=[], docs=docs
+        )
+        section_blocks = [b for b in blocks if b.get("type") == "section"]
+        # header(1) + 2 doc sections + workbooks(1) = 4
+        assert len(section_blocks) == 4
+
+    def test_needs_review_in_fallback_appends_actions_block(self):
+        docs = [_invoice_doc(reconciled=False, note="check totals")]
+        blocks = result_card(
+            n_files=1, n_processed=1, workbooks=[], errors=[], docs=docs
+        )
+        action_blocks = [b for b in blocks if b.get("type") == "actions"]
+        assert len(action_blocks) == 1
+        action_ids = [el["action_id"] for el in action_blocks[0]["elements"]]
+        assert "ledgr_per_doc_reextract" in action_ids
 
