@@ -1544,6 +1544,9 @@ async def _finalize_run_outcome(
                 slack_client, channel_id, summary, interrupt_id,
                 thread_ts=thread_ts, doc_label=doc_label,
             )
+            extra: dict = {"summary": summary, "doc_label": doc_label}
+            if thread_ts:
+                extra["thread_ts"] = thread_ts
             write_interrupt(
                 db,
                 interrupt_id,
@@ -1552,7 +1555,7 @@ async def _finalize_run_outcome(
                 slack_file_id=file_id,
                 message_ts=posted,
                 user_id=user_id,
-                extra={"summary": summary, "doc_label": doc_label},
+                extra=extra,
             )
         return {"status": "paused", "op_id": interrupt_id, "message_ts": posted}
 
@@ -1711,6 +1714,7 @@ async def handle_approval_action(
     # convention). Older interrupt docs omit it → fall back to session_id.
     user_id = interrupt.get("user_id") or session_id
     summary = interrupt.get("summary") or ""
+    thread_ts = interrupt.get("thread_ts") or None
 
     events = await resume_session(
         runner, db, op_id, ApproveDecision(decision=decision, edits=edits)
@@ -1726,10 +1730,11 @@ async def handle_approval_action(
             session_id=session_id,
             app_name=app_name,
             user_id=user_id,
+            thread_ts=thread_ts,
         )
     else:
         update_interrupt_status(db, op_id, "rejected")
-        _post_message(slack_client, channel_id, "Document rejected — nothing was added to the ledger.")
+        _post_message(slack_client, channel_id, "Document rejected — nothing was added to the ledger.", thread_ts=thread_ts)
 
     _update_card(slack_client, interrupt, summary, decision)
     return {"status": "resumed", "op_id": op_id, "events": len(events), "append": append_result}

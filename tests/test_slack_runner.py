@@ -4770,3 +4770,238 @@ def test_file_shared_rejects_xlsx_when_not_pending_coa():
     # … the regular pipeline must have been called so the extension gate can reject it.
     mock_pfe.assert_called_once()
     assert mock_pfe.call_args.kwargs["file_id"] == "FXLSX2"
+
+
+# =========================================================================== #
+# P1-1 — HITL delivery card must be threaded under the original upload
+# =========================================================================== #
+
+
+def _capture_approval_handlers(
+    runner_mock=None, ledger_store_mock=None, db_mock=None,
+    injected_slack: "FakeSlackClient | None" = None,
+):
+    """Build the Bolt app with fakes; capture the ``approve``, ``edit``,
+    ``ledgr_invoice_edit`` and ``reject`` handlers.
+
+    Pass ``injected_slack`` to use that FakeSlackClient as the sync WebClient
+    so caller can inspect ``_posts`` after the handler fires.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from app.slack_app import _SeenEvents
+    from accounting_agents import slack_runner
+
+    registered = {"actions": {}, "views": {}}
+
+    def action_decorator(action_id, *a, **k):
+        def decorator(fn):
+            registered["actions"][action_id] = fn
+            return fn
+        return decorator
+
+    def view_decorator(callback_id, *a, **k):
+        def decorator(fn):
+            registered["views"][callback_id] = fn
+            return fn
+        return decorator
+
+    fake_app = MagicMock()
+    fake_app.event = lambda *a, **k: (lambda fn: fn)
+    fake_app.action = action_decorator
+    fake_app.view = view_decorator
+    fake_app.command = lambda *a, **k: (lambda fn: fn)
+
+    fresh_seen = _SeenEvents()
+    rm = runner_mock or _FakeActionViewRunner()
+
+    slack_patch = (
+        patch("slack_sdk.WebClient", return_value=injected_slack)
+        if injected_slack is not None
+        else patch("slack_sdk.WebClient")
+    )
+
+    with patch.object(slack_runner, "_seen", fresh_seen), \
+         patch("slack_bolt.async_app.AsyncApp", return_value=fake_app), \
+         slack_patch, \
+         patch("invoice_processing.export.client_context.FirestoreClientStore"), \
+         patch.object(slack_runner, "build_chat_runner",
+                      return_value=SimpleNamespace(app_name="accounting_agents_assistant")):
+        build_async_app(
+            runner=rm,
+            ledger_store=ledger_store_mock or MagicMock(),
+            db=db_mock or MagicMock(),
+        )
+
+    return (
+        registered["actions"]["approve"],
+        registered["actions"]["reject"],
+        registered["actions"]["edit"],
+        registered["views"]["ledgr_invoice_edit"],
+    )
+
+
+def test_approve_path_emits_delivery_card_in_thread():
+    """Clicking Approve posts the delivery card threaded under the original upload.
+
+    The interrupt body carries ``thread_ts="T_UPLOAD"`` (stored when the approval
+    card was first posted). After the fix, persist_and_deliver receives that
+    thread_ts and every chat_postMessage call carries it.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from accounting_agents import slack_runner
+
+    db = FakeFirestore()
+    slack = FakeSlackClient()
+    runner = _FakeRunner([], _ledger_payload())
+    runner.session_service.created = True
+    ledger_store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+
+    write_interrupt(
+        db, "CAPPROVE:F1", session_id="CAPPROVE:F1", channel_id="CAPPROVE",
+        slack_file_id="F1", message_ts="10.0", user_id="CAPPROVE",
+        extra={"summary": "needs review", "thread_ts": "T_UPLOAD"},
+    )
+
+    async def fake_resume(_runner, _db, op, decision):
+        return []
+
+    approve_handler, _, _, _ = _capture_approval_handlers(
+        runner_mock=runner,
+        ledger_store_mock=ledger_store,
+        db_mock=db,
+        injected_slack=slack,
+    )
+
+    with patch.object(slack_runner, "resume_session", fake_resume):
+        ack = AsyncMock()
+        body = {"actions": [{"action_id": "approve", "value": "CAPPROVE:F1"}]}
+        asyncio.run(approve_handler(ack=ack, body=body, client=MagicMock()))
+
+    ack.assert_awaited_once()
+
+    posts = _post_calls(slack)
+    delivery_posts = [
+        p for p in posts
+        if "FY2026 ledger" in p.get("text", "")
+    ]
+    assert delivery_posts, "Expected a delivery card post but found none"
+    assert all(
+        p.get("thread_ts") == "T_UPLOAD" for p in delivery_posts
+    ), f"Delivery post(s) missing thread_ts='T_UPLOAD': {delivery_posts}"
+
+
+def test_edit_path_emits_delivery_card_in_thread():
+    """Submitting the Edit modal posts the delivery card threaded under the upload.
+
+    The interrupt body carries ``thread_ts="T_UPLOAD"``; after the fix it flows
+    through handle_approval_action → persist_and_deliver → chat_postMessage.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from accounting_agents import slack_runner
+
+    db = FakeFirestore()
+    slack = FakeSlackClient()
+    runner = _FakeRunner([], _ledger_payload())
+    runner.session_service.created = True
+    ledger_store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+
+    write_interrupt(
+        db, "CEDIT:F2", session_id="CEDIT:F2", channel_id="CEDIT",
+        slack_file_id="F2", message_ts="20.0", user_id="CEDIT",
+        extra={"summary": "needs review", "thread_ts": "T_UPLOAD"},
+    )
+
+    async def fake_resume(_runner, _db, op, decision):
+        return []
+
+    _, _, _, edit_submit_handler = _capture_approval_handlers(
+        runner_mock=runner,
+        ledger_store_mock=ledger_store,
+        db_mock=db,
+        injected_slack=slack,
+    )
+
+    # Minimal view_submission body: one line, no real edits needed.
+    body = {
+        "view": {
+            "callback_id": "ledgr_invoice_edit",
+            "private_metadata": "CEDIT:F2",
+            "state": {
+                "values": {
+                    "acct_0": {"v": {"selected_option": {"value": "6010"}}},
+                    "tax_0": {"v": {"selected_option": {"value": "SR"}}},
+                    "amt_0": {"v": {"value": "100.00"}},
+                }
+            },
+        }
+    }
+
+    with patch.object(slack_runner, "resume_session", fake_resume), \
+         patch.object(slack_runner, "_persist_corrections", MagicMock()):
+        ack = AsyncMock()
+        asyncio.run(edit_submit_handler(ack=ack, body=body, client=MagicMock()))
+
+    ack.assert_awaited_once()
+
+    posts = _post_calls(slack)
+    delivery_posts = [
+        p for p in posts
+        if "FY2026 ledger" in p.get("text", "")
+    ]
+    assert delivery_posts, "Expected a delivery card post but found none"
+    assert all(
+        p.get("thread_ts") == "T_UPLOAD" for p in delivery_posts
+    ), f"Delivery post(s) missing thread_ts='T_UPLOAD': {delivery_posts}"
+
+
+def test_reject_path_posts_rejection_in_thread():
+    """Clicking Reject posts the rejection notice threaded under the original upload.
+
+    The interrupt body carries ``thread_ts="T_UPLOAD"``; after the fix the
+    rejection message is posted with that thread_ts instead of channel root.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from accounting_agents import slack_runner
+
+    db = FakeFirestore()
+    slack = FakeSlackClient()
+    runner = _FakeRunner([], {})
+    runner.session_service.created = True
+    ledger_store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+
+    write_interrupt(
+        db, "CREJECT:F3", session_id="CREJECT:F3", channel_id="CREJECT",
+        slack_file_id="F3", message_ts="30.0", user_id="CREJECT",
+        extra={"summary": "", "thread_ts": "T_UPLOAD"},
+    )
+
+    async def fake_resume(_runner, _db, op, decision):
+        return []
+
+    approve_handler, reject_handler, _, _ = _capture_approval_handlers(
+        runner_mock=runner,
+        ledger_store_mock=ledger_store,
+        db_mock=db,
+        injected_slack=slack,
+    )
+
+    with patch.object(slack_runner, "resume_session", fake_resume):
+        ack = AsyncMock()
+        body = {"actions": [{"action_id": "reject", "value": "CREJECT:F3"}]}
+        asyncio.run(reject_handler(ack=ack, body=body, client=MagicMock()))
+
+    ack.assert_awaited_once()
+
+    posts = _post_calls(slack)
+    rejection_posts = [
+        p for p in posts
+        if "rejected" in p.get("text", "").lower()
+    ]
+    assert rejection_posts, "Expected a rejection message post but found none"
+    assert all(
+        p.get("thread_ts") == "T_UPLOAD" for p in rejection_posts
+    ), f"Rejection post(s) missing thread_ts='T_UPLOAD': {rejection_posts}"
