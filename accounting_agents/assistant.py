@@ -34,6 +34,11 @@ Tools
 - ``show_client_profile``     — the loaded client profile (read-only)
 - ``show_learned_mappings``   — learned category/entity mappings (read-only)
 - ``model_info``              — which Gemini models back this assistant
+- ``explain_categorization``  — why a line maps to a COA account (engine logic)
+- ``explain_tax_treatment``   — why a line gets a tax code (engine logic)
+- ``summarize_recent_activity`` — spend/activity in the last N days
+- ``lookup_row``              — search ledger rows by text
+- ``list_recent_documents``   — grouped list of source documents in the FY ledger
 
 All tools are pure (no I/O, no randomness) so they are trivially testable.
 """
@@ -41,9 +46,19 @@ All tools are pure (no I/O, no randomness) so they are trivially testable.
 from __future__ import annotations
 
 import json
+from datetime import date, datetime, timedelta
 
 from google.adk.agents import LlmAgent
 from google.adk.tools import ToolContext
+
+from invoice_processing.export.categorizer import resolve_account
+from invoice_processing.export.client_context import (
+    category_mapping_from_state,
+    coa_from_state,
+    entity_memory_from_state,
+)
+from invoice_processing.export.models import InvoiceLine, NormalizedInvoice, PartyInfo
+from invoice_processing.export.tax_classifier import TaxClassifier
 
 from . import config
 
@@ -185,6 +200,70 @@ def _to_float(value) -> float:
         return float(value or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _parse_row_date(value) -> date | None:
+    """Parse a ledger ``Date`` cell (``DD/MM/YYYY`` str or date object)."""
+    if value is None:
+        return None
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    parts = str(value).strip().split("/")
+    if len(parts) == 3:
+        try:
+            day, month, year = int(parts[0]), int(parts[1]), int(parts[2])
+            if year < 100:
+                year += 2000
+            return date(year, month, day)
+        except ValueError:
+            return None
+    try:
+        return date.fromisoformat(str(value).strip()[:10])
+    except ValueError:
+        return None
+
+
+def _parse_int_param(value: str, default: int, *, minimum: int = 1, maximum: int) -> int:
+    """Parse an ADK string tool param to a bounded int."""
+    try:
+        n = int(str(value or "").strip() or default)
+    except ValueError:
+        n = default
+    return max(minimum, min(maximum, n))
+
+
+def _parse_bool_param(value: str, *, default: bool | None = None) -> bool | None:
+    """Parse yes/no/true/false tool param; empty string → ``default``."""
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return default
+    if raw in ("true", "yes", "1"):
+        return True
+    if raw in ("false", "no", "0"):
+        return False
+    return default
+
+
+def _categorization_reason(source: str, res) -> str:
+    """Human-readable reason string for a categorization resolution branch."""
+    if source == "entity_memory":
+        return (
+            f"Vendor matched a remembered entity_memory entry "
+            f"(confidence {res.confidence})."
+        )
+    if source == "category_mapping":
+        return (
+            f"Universal category mapped to account {res.account_code} "
+            f"(confidence {res.confidence})."
+        )
+    if source == "coa_keyword":
+        return (
+            f"Line or vendor text matched a COA keyword for "
+            f"{res.account_name or res.account_code} (confidence {res.confidence})."
+        )
+    return "No deterministic match — line would be flagged for review or LLM fallback."
 
 
 def bank_totals(tool_context: ToolContext, month: str = "", year: str = "") -> str:
@@ -444,6 +523,301 @@ def model_info(tool_context: ToolContext) -> str:  # noqa: ARG001 — uniform to
 
 
 # --------------------------------------------------------------------------- #
+# Explain + lookup read tools (Step 3 / C-1)
+# --------------------------------------------------------------------------- #
+
+
+def explain_categorization(
+    tool_context: ToolContext,
+    vendor_name: str,
+    line_description: str,
+    category: str = "",
+) -> str:
+    """Explain why a line would map to a COA account using the engine's categorizer.
+
+    Re-runs the same deterministic ``resolve_account`` logic the document pipeline
+    uses (entity_memory → category_mapping → COA keyword). Does NOT call the LLM
+    fallback — this explains the first-pass deterministic path only.
+
+    Args:
+        tool_context: Injected by ADK; provides session state.
+        vendor_name: Supplier / vendor name on the invoice line.
+        line_description: The line item description.
+        category: Optional universal category label (for category_mapping lookups).
+
+    Returns:
+        JSON with ``status``, ``account_code``, ``account_name``, ``confidence``,
+        ``source``, ``flagged``, and ``reason``.
+    """
+    try:
+        state = tool_context.state
+    except Exception:  # noqa: BLE001
+        state = {}
+
+    res = resolve_account(
+        line_description,
+        vendor_name,
+        coa=coa_from_state(state),
+        category_mapping=category_mapping_from_state(state),
+        entity_memory=entity_memory_from_state(state),
+        category=(category or "").strip() or None,
+    )
+    status = "unresolved" if res.source == "unresolved" else "resolved"
+    return json.dumps(
+        {
+            "status": status,
+            "account_code": res.account_code,
+            "account_name": res.account_name,
+            "confidence": res.confidence,
+            "source": res.source,
+            "flagged": res.flagged,
+            "reason": _categorization_reason(res.source, res),
+        },
+        ensure_ascii=False,
+    )
+
+
+def explain_tax_treatment(
+    tool_context: ToolContext,
+    line_description: str,
+    tax_keyword: str = "",
+    net_amount: str = "",
+    gst_amount: str = "",
+    doc_type: str = "purchase",
+    invoice_date: str = "",
+    our_gst_registered: str = "",
+) -> str:
+    """Explain why a line gets a tax treatment code using the engine's tax classifier.
+
+    Builds a one-line ``NormalizedInvoice`` in memory and runs
+    ``TaxClassifier.classify_line`` — the same logic as ``tax_node``. Honours the
+    §0.5-C master gate: when the client is not GST-registered, every line is ``NT``.
+
+    Args:
+        tool_context: Injected by ADK; provides session state.
+        line_description: Line item description.
+        tax_keyword: Explicit per-line tax wording from extraction (canonical field).
+        net_amount: Line net amount ex-tax (canonical ``net_amount``).
+        gst_amount: GST on the line (canonical ``gst_amount``).
+        doc_type: ``purchase`` or ``sales``.
+        invoice_date: ISO date ``YYYY-MM-DD`` (or empty for today-unknown).
+        our_gst_registered: ``true``/``false``; empty → read ``state["tax_registered"]``.
+
+    Returns:
+        JSON with ``tax_treatment``, ``tax_confidence``, ``tax_flagged``,
+        ``tax_reason``.
+    """
+    try:
+        state = tool_context.state
+    except Exception:  # noqa: BLE001
+        state = {}
+
+    reg = _parse_bool_param(our_gst_registered, default=bool(state.get("tax_registered", True)))
+    if reg is None:
+        reg = True
+
+    inv_date: date | None = None
+    if (invoice_date or "").strip():
+        inv_date = _parse_row_date(invoice_date.strip())
+
+    net = _to_float(net_amount) if (net_amount or "").strip() else None
+    gst = _to_float(gst_amount) if (gst_amount or "").strip() else None
+    dtype = (doc_type or "purchase").strip().lower()
+    if dtype not in ("purchase", "sales"):
+        dtype = "purchase"
+
+    line = InvoiceLine(
+        description=line_description or "",
+        tax_keyword=(tax_keyword or "").strip() or None,
+        net_amount=net,
+        gst_amount=gst,
+    )
+    inv = NormalizedInvoice(
+        doc_type=dtype,
+        invoice_date=inv_date,
+        supplier=PartyInfo(name="Supplier", country="SG"),
+        customer=PartyInfo(name="Customer", country="SG"),
+        our_gst_registered=reg,
+    )
+    TaxClassifier().classify_line(line, inv)
+    return json.dumps(
+        {
+            "tax_treatment": line.tax_treatment,
+            "tax_confidence": line.tax_confidence,
+            "tax_flagged": line.tax_flagged,
+            "tax_reason": line.tax_reason,
+        },
+        ensure_ascii=False,
+    )
+
+
+def summarize_recent_activity(tool_context: ToolContext, days: str = "30") -> str:
+    """Summarise ledger activity in the last N days.
+
+    Filters ``state["ledger_data"]`` to rows whose ``Date`` falls within the
+    window (default 30 days). Skips bank-statement rows.
+
+    Args:
+        tool_context: Injected by ADK; provides session state.
+        days: Look-back window in days (default ``30``).
+
+    Returns:
+        JSON with ``period_days``, ``transaction_count``, ``total_spend``,
+        ``by_category``, ``by_doc_type``, and ``flagged_count``.
+    """
+    rows = _get_rows(tool_context)
+    if not rows:
+        return "The ledger data is not loaded yet. Please upload the FY ledger first."
+
+    window = _parse_int_param(days, default=30, minimum=1, maximum=366)
+    cutoff = date.today() - timedelta(days=window)
+    by_category: dict[str, float] = {}
+    by_doc_type: dict[str, float] = {"S": 0.0, "P": 0.0}
+    total_spend = 0.0
+    txn_count = 0
+    flagged_count = 0
+
+    for row in rows:
+        if _is_bank_row(row):
+            continue
+        row_date = _parse_row_date(row.get("Date"))
+        if row_date is None or row_date < cutoff:
+            continue
+
+        amount = _to_float(row.get("Source Amount") or row.get("amount"))
+        category = str(row.get("Account Code / COA") or row.get("category") or "Uncategorized")
+        by_category[category] = by_category.get(category, 0.0) + amount
+        total_spend += amount
+        txn_count += 1
+
+        doc_type = str(row.get("Doc Type") or "").strip().upper()
+        if doc_type in by_doc_type:
+            by_doc_type[doc_type] += amount
+
+        if row.get("Review") or row.get("Flagged"):
+            flagged_count += 1
+
+    return json.dumps(
+        {
+            "period_days": window,
+            "transaction_count": txn_count,
+            "total_spend": round(total_spend, 2),
+            "by_category": dict(
+                sorted(by_category.items(), key=lambda kv: kv[1], reverse=True)
+            ),
+            "by_doc_type": {k: round(v, 2) for k, v in by_doc_type.items()},
+            "flagged_count": flagged_count,
+        },
+        ensure_ascii=False,
+    )
+
+
+def lookup_row(tool_context: ToolContext, query: str, limit: str = "5") -> str:
+    """Search loaded ledger rows by substring (case-insensitive).
+
+    Matches against ``Description``, ``Vendor``, ``Reference``, and
+    ``Account Code / COA`` columns.
+
+    Args:
+        tool_context: Injected by ADK; provides session state.
+        query: Substring to search for.
+        limit: Maximum matches to return (default ``5``, max ``20``).
+
+    Returns:
+        JSON ``{"matches": [...]}`` — empty list when nothing matches.
+    """
+    rows = _get_rows(tool_context)
+    if not rows:
+        return "The ledger data is not loaded yet. Please upload the FY ledger first."
+
+    needle = (query or "").strip().lower()
+    if not needle:
+        return json.dumps({"matches": []}, ensure_ascii=False)
+
+    cap = _parse_int_param(limit, default=5, minimum=1, maximum=20)
+    matches: list[dict] = []
+    for idx, row in enumerate(rows):
+        haystack = " ".join(
+            str(row.get(col) or "")
+            for col in ("Description", "Vendor", "Reference", "Account Code / COA")
+        ).lower()
+        if needle not in haystack:
+            continue
+        matches.append(
+            {
+                "row_index": idx,
+                "sheet": row.get("_sheet"),
+                "account_code": row.get("Account Code / COA") or row.get("category"),
+                "amount": _to_float(row.get("Source Amount") or row.get("amount")),
+                "date": row.get("Date"),
+                "description": row.get("Description"),
+                "vendor": row.get("Vendor"),
+                "tax_rate": row.get("Tax Rate") or row.get("tax_rate"),
+                "doc_type": row.get("Doc Type"),
+            }
+        )
+        if len(matches) >= cap:
+            break
+
+    return json.dumps({"matches": matches}, ensure_ascii=False)
+
+
+def list_recent_documents(tool_context: ToolContext, limit: str = "10") -> str:
+    """List source documents grouped from the loaded FY ledger rows.
+
+    Groups by ``(Date, Source Filename, Doc Type)``. Only covers documents
+    present in the currently loaded workbook — not a cross-FY job log.
+
+    Args:
+        tool_context: Injected by ADK; provides session state.
+        limit: Maximum documents to return (default ``10``, max ``50``).
+
+    Returns:
+        JSON ``{"documents": [{date, filename, doc_type, row_count, total, ...}]}``.
+    """
+    rows = _get_rows(tool_context)
+    if not rows:
+        return "The ledger data is not loaded yet. Please upload the FY ledger first."
+
+    cap = _parse_int_param(limit, default=10, minimum=1, maximum=50)
+    groups: dict[tuple, dict] = {}
+
+    for row in rows:
+        if _is_bank_row(row):
+            continue
+        key = (
+            str(row.get("Date") or ""),
+            str(row.get("Source Filename") or row.get("source_filename") or "unknown"),
+            str(row.get("Doc Type") or ""),
+        )
+        if key not in groups:
+            groups[key] = {
+                "date": key[0],
+                "filename": key[1],
+                "doc_type": key[2],
+                "row_count": 0,
+                "total": 0.0,
+                "currency": row.get("Currency") or row.get("currency") or "SGD",
+                "flagged_count": 0,
+            }
+        entry = groups[key]
+        entry["row_count"] += 1
+        entry["total"] += _to_float(row.get("Source Amount") or row.get("amount"))
+        if row.get("Review") or row.get("Flagged"):
+            entry["flagged_count"] += 1
+
+    documents = sorted(
+        groups.values(),
+        key=lambda d: (_parse_row_date(d["date"]) or date.min, d["filename"]),
+        reverse=True,
+    )[:cap]
+    for doc in documents:
+        doc["total"] = round(doc["total"], 2)
+
+    return json.dumps({"documents": documents}, ensure_ascii=False)
+
+
+# --------------------------------------------------------------------------- #
 # Assistant LlmAgent (standalone root — multi-turn, sees session history)
 # --------------------------------------------------------------------------- #
 
@@ -471,6 +845,13 @@ Inspection tools (when the user asks about setup / context / models):
 - ``show_client_profile``: the loaded client profile and counts.
 - ``show_learned_mappings``: learned category / entity mappings.
 - ``model_info``: which Gemini models back this assistant.
+
+Explain + lookup tools (when the user asks *why* or *where*):
+- ``explain_categorization``: why a vendor/line maps to a COA account (same engine logic).
+- ``explain_tax_treatment``: why a line gets SR/ZR/NT/etc (same tax classifier).
+- ``summarize_recent_activity``: spend and activity in the last N days (default 30).
+- ``lookup_row``: find ledger rows matching a text query (vendor, description, account).
+- ``list_recent_documents``: list source documents grouped from the loaded FY ledger.
 
 For every question, call the single most relevant tool first, then explain the
 result in plain English. For a bank question naming a month, pass that month
@@ -537,6 +918,11 @@ assistant_agent = LlmAgent(
         show_client_profile,
         show_learned_mappings,
         model_info,
+        explain_categorization,
+        explain_tax_treatment,
+        summarize_recent_activity,
+        lookup_row,
+        list_recent_documents,
     ],
 )
 
@@ -552,4 +938,9 @@ __all__ = [
     "show_client_profile",
     "show_learned_mappings",
     "model_info",
+    "explain_categorization",
+    "explain_tax_treatment",
+    "summarize_recent_activity",
+    "lookup_row",
+    "list_recent_documents",
 ]

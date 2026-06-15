@@ -92,6 +92,13 @@ in `${LEDGR_TEST_BANK_DIR}`. Live QA happens in the developer's own Slack worksp
 set references these via env-var-relative paths only — no real client/sub-client names committed.
 Memory `cast-unity-test-data` carries the concrete mapping privately.
 
+**G. Step 3 shipped 2026-06-15 (C-1 explain + lookup).** Five read-only chat tools added to
+`assistant_agent`: `explain_categorization`, `explain_tax_treatment`, `summarize_recent_activity`,
+`lookup_row`, `list_recent_documents`. Build followed the §0.5-E reorder (1.5b → **3** → 4 → 2).
+Live Slack QA prompts for Step 3: (1) "why did the Acme invoice go to 6100?", (2) "what tax code
+should a non-registered client get on this SR line?", (3) "show me last month's activity",
+(4) "find the AWS line", (5) "what documents have I processed this month?"
+
 ---
 
 ## 1. The simple mental model (so we never lose the thread)
@@ -243,9 +250,9 @@ E = engine surface — but they share code, so they interleave on purpose.
 | 1 | Rename `qa_agent` → `assistant_agent`; run it as a **standalone root agent on its own Runner** (`accounting_agents_assistant` App), per-thread session `{channel}:chat:{thread_ts}` with UTC-day fallback for channel-root messages, OUTSIDE the coordinator graph (**ADR-0008** — an in-graph multi-turn agent crashes graph build); seed client profile into chat; add 3 read tools (`show_client_profile`, `show_learned_mappings`, `model_info`) | C-0 | The chat helper knows who the client is and remembers the thread | ✅ **DONE 2026-06-15** (879 tests, live-QA'd) |
 | 1.5a | Align HITL Edit DTO to canonical `InvoiceLine` keys (`tax_treatment`, `net_amount`) — pre-fix every Edit silently no-op'd against the exporter columns | E/C | Edit clicks actually change the books | ✅ **DONE 2026-06-15** (regression test added) |
 | 1.5c | Tax classifier master-gate: non-GST-registered client → `NT` for ALL lines (purchase + sales), overriding doc content; Xero NT → "No GST" | E | Wrong-number bug for non-reg clients eliminated | ✅ **DONE 2026-06-15** (6 new tests) |
-| 1.5b | Golden eval set from the developer's local test-firm docs (invoices + bank statements) as the gate for Step 2; `tool_trajectory_avg_score`, `final_response_match_v2`, `hallucinations_v1` per §10 | E/C | Measurable correctness baseline before adding any LLM-in-edge | ⏳ in progress |
+| 1.5b | Golden eval set from the developer's local test-firm docs (invoices + bank statements) as the gate for Step 2; `tool_trajectory_avg_score`, `final_response_match_v2`, `hallucinations_v1` per §10 | E/C | Measurable correctness baseline before adding any LLM-in-edge | ✅ **DONE 2026-06-15** (10-case evalset + pytest gate) |
 | 2 | **Extract reviewer + retry-with-hints** between extract and categorize (Generate-and-Review / small LoopAgent). Verdict `{ok / hints_needed / user_clarify}`; mid-flow HITL on `user_clarify`. **Must skip `tax_*` signals when `our_gst_registered is False` (§0.5-C)** | E-1 | The engine checks its own work — the single highest-leverage move | not started |
-| 3 | Explain + lookup read tools (`explain_categorization`, `explain_tax_treatment`, `summarize_recent_activity`, `lookup_row`, `list_recent_documents`) — reuse the engine's own categorizer/tax logic | C-1 | The assistant can explain *why*, grounded in the same engine |
+| 3 | Explain + lookup read tools (`explain_categorization`, `explain_tax_treatment`, `summarize_recent_activity`, `lookup_row`, `list_recent_documents`) — reuse the engine's own categorizer/tax logic | C-1 | The assistant can explain *why*, grounded in the same engine | ✅ **DONE 2026-06-15** (17 unit tests, 903 fast suite green) |
 | 4 | Write gate + `amend_ledger_row` / `remove_ledger_row` via ADK Tool Confirmation (smoke-test Firestore session first; fallback `adk_request_input`). Audit every write. New ADR-0009. | C-2 | The assistant gets hands — can fix the book, safely, with one-click confirm |
 | 5 | **Hybrid categorizer** — fast path (learned → keyword) unchanged; on no-match, a small LlmAgent reasons from `{line, COA, entity_memory}` → `{account_code, why}`; result feeds learning | E-2 | New vendors get reasoned, not defaulted — ends the keyword treadmill |
 | 6 | Migrate document-lane orchestration to **Dynamic Workflows** (`@node` + `ctx.run_node`), now that the smart-edge shape is proven | E-3 | Clean, resumable, easy to add the next inspector per node |

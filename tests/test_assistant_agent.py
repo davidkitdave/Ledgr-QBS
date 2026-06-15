@@ -8,7 +8,7 @@ Covers:
 - Empty-ledger graceful case for all tools.
 - ``SlackLedgerStore.read_rows`` round-trip with a fake Slack workbook.
 - The new read-only inspection tools (profile / learned mappings / models).
-- The ``assistant_agent`` is a root agent (no ``mode``) with 7 tools.
+- The ``assistant_agent`` is a root agent (no ``mode``) with 12 tools.
 - ``assistant_instruction`` seeds the client profile from session state.
 
 No live Slack, no live Gemini — all fakes / pure function calls.
@@ -472,12 +472,12 @@ class TestModelInfo:
 
 
 # --------------------------------------------------------------------------- #
-# Assistant agent shape — root LlmAgent, no mode, exactly 7 tools
+# Assistant agent shape — root LlmAgent, no mode, exactly 12 tools
 # --------------------------------------------------------------------------- #
 
 
 def test_assistant_agent_is_root_multi_turn():
-    """A root LlmAgent carries no ``mode`` (multi-turn default) and exposes 7 tools.
+    """A root LlmAgent carries no ``mode`` (multi-turn default) and exposes 12 tools.
 
     See ADR-0008: in ADK 2.2.0 a root agent must not set ``mode``, so the
     runtime uses ``include_contents='default'`` and the agent sees full
@@ -486,7 +486,7 @@ def test_assistant_agent_is_root_multi_turn():
     from accounting_agents.assistant import assistant_agent
 
     assert assistant_agent.mode is None
-    assert len(assistant_agent.tools) == 7
+    assert len(assistant_agent.tools) == 12
 
 
 def test_assistant_instruction_seeds_profile():
