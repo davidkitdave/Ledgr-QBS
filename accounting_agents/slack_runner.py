@@ -47,7 +47,12 @@ from typing import Any, Optional
 # the string annotations produced by `from __future__ import annotations`.
 from fastapi import Request, Response
 
-from accounting_agents.assistant import LEDGER_DATA_KEY, PENDING_LEARN_KEY, PENDING_WRITE_KEY
+from accounting_agents.assistant import (
+    LEDGER_DATA_KEY,
+    PENDING_LEARN_KEY,
+    PENDING_REEXTRACT_KEY,
+    PENDING_WRITE_KEY,
+)
 
 from google.genai import types
 
@@ -507,6 +512,7 @@ async def persist_and_deliver(
     app_name: str,
     user_id: Optional[str] = None,
     thread_ts: Optional[str] = None,
+    replace: bool = False,
 ) -> dict:
     """Read the finished session's ledger payload → append to the FY workbook → post.
 
@@ -529,6 +535,21 @@ async def persist_and_deliver(
     payload = state.get(nodes.LEDGER_ROWS_KEY) or {}
     batches = payload.get("batches") or []
 
+    # Re-extract (ADR-0010): the corrected read pauses at the HITL gate, so the
+    # ``replace`` intent is seeded into run state (``reextract_replace``) and read
+    # here — it survives the pause and the resume path (handle_review_action) too.
+    # The explicit ``replace`` kwarg (fresh-run callers) takes precedence.
+    effective_replace = bool(replace) or bool(state.get("reextract_replace"))
+    # Belt-and-suspenders: clear the flag the moment it is consumed so it cannot
+    # leak into a future normal drop on the same long-lived session. This covers
+    # the HITL-resumed path (handle_review_action → _finalize_run_outcome →
+    # persist_and_deliver) where process_file_event's unconditional state_delta
+    # reset does not re-run.
+    if state.get("reextract_replace"):
+        await _apply_state_delta(
+            runner, app_name, user_id, session_id, {"reextract_replace": False}
+        )
+
     append_result: dict = {}
     if batches:
         append_result = await asyncio.to_thread(
@@ -541,6 +562,7 @@ async def persist_and_deliver(
             software=payload.get("software") or "qbs",
             kind=payload.get("kind") or "invoice",
             client_name=payload.get("client_name") or "",
+            replace=effective_replace,
         )
         # Carry context forward so the batch tally can label the destination
         # accurately (bank statement vs ledger) without re-reading the payload.
@@ -715,6 +737,8 @@ async def process_file_event(
     source_filename: str = "document.pdf",
     thread_ts: Optional[str] = None,
     client_store=None,
+    hint: str = "",
+    replace: bool = False,
 ) -> dict:
     """Download the dropped PDF, run the workflow, and persist OR pause for HITL.
 
@@ -815,6 +839,14 @@ async def process_file_event(
             nodes.ARTIFACT_NAME_KEY: artifact_name,
             **profile_delta,
         }
+        # Re-extract (ADR-0010): ALWAYS write both keys unconditionally so a
+        # normal re-drop of the same file_id (replace=False, hint="") resets any
+        # stale ``reextract_replace=True`` / leftover hint that a prior re-extract
+        # run wrote into the long-lived per-doc session. Writing only when present
+        # caused the HIGH data-loss bug: the state_delta MERGES into existing
+        # session state, so omitting the key leaves the old value in place.
+        state_delta["review_hint"] = hint or ""
+        state_delta["reextract_replace"] = bool(replace)
 
         interrupt_id: Optional[str] = None
         last_text = ""
@@ -855,6 +887,7 @@ async def process_file_event(
             user_id=channel_id,
             file_id=file_id,
             thread_ts=thread_ts,
+            replace=replace,
         )
 
         if outcome["status"] == "paused":
@@ -1116,6 +1149,7 @@ async def _finalize_run_outcome(
     user_id: str,
     file_id: str,
     thread_ts: Optional[str] = None,
+    replace: bool = False,
 ) -> dict:
     """Shared post-run tail: post the right card or deliver, based on the event stream.
 
@@ -1205,6 +1239,7 @@ async def _finalize_run_outcome(
         app_name=app_name,
         user_id=user_id,
         thread_ts=thread_ts,
+        replace=replace,
     )
     if append_result.get("all_deduped"):
         return {"status": "duplicate", "append": append_result}
@@ -1675,6 +1710,132 @@ async def _execute_pending_writes(
     return any_committed
 
 
+async def _execute_pending_reextract(
+    specs: list,
+    *,
+    doc_runner: Any,
+    ledger_store: SlackLedgerStore,
+    db: Any,
+    slack_client: Any,
+    channel_id: str,
+    app_name: str,
+    client_store=None,
+    thread_ts: Optional[str] = None,
+) -> bool:
+    """Drain ``state["pending_reextract"]`` → re-run each document through the pipeline.
+
+    For each spec (``{"op": "reextract", "file_id", "hints"}``) re-run the FULL
+    document pipeline via :func:`process_file_event` with the hint seeded and
+    ``replace=True`` (ADR-0010): the corrected read flows through the same
+    Approve / Edit / Reject card and its rows replace the old ones by reconstructed
+    identity. ``process_file_event`` posts its own status / card / delivery, so we
+    just let it run and only add a note when the identity changed (replaced 0 rows
+    yet still recorded — the user must clear the stale rows by month).
+
+    Idempotency: a per-``file_id:hint`` marker on the doc-runner instance guards a
+    double "yes" so the same re-extract is not run twice. Returns ``True`` when at
+    least one re-extract was dispatched.
+
+    Runs on the DOCUMENT runner (the graph) — the chat runner cannot drive the
+    doc pipeline (ADR-0010); the caller injects ``doc_runner``.
+    """
+    if not isinstance(specs, list) or not specs:
+        return False
+
+    # Per-run-instance idempotency marker: a double "yes" re-drains the same list,
+    # so skip any (file_id, hints) pair already dispatched in this process.
+    seen = getattr(doc_runner, "_reextract_seen", None)
+    if not isinstance(seen, set):
+        seen = set()
+        try:
+            doc_runner._reextract_seen = seen
+        except Exception:  # noqa: BLE001 — a read-only fake is still fine; dedup degrades
+            pass
+
+    dispatched = False
+    for spec in specs:
+        if not isinstance(spec, dict) or spec.get("op") != "reextract":
+            continue
+        file_id = str(spec.get("file_id") or "").strip()
+        hints = str(spec.get("hints") or "").strip()
+        if not file_id or not hints:
+            continue
+
+        key = f"{file_id}:{hints}"
+        if key in seen:
+            logger.info(
+                "re_extract already dispatched (file=%s) — skipping double-run.",
+                file_id,
+            )
+            continue
+        seen.add(key)
+
+        try:
+            result = await process_file_event(
+                runner=doc_runner,
+                ledger_store=ledger_store,
+                db=db,
+                slack_client=slack_client,
+                channel_id=channel_id,
+                file_id=file_id,
+                app_name=app_name,
+                download_fn=download_pdf_bytes,
+                source_filename=f"re-extract-{file_id}.pdf",
+                hint=hints,
+                replace=True,
+                client_store=client_store,
+                thread_ts=thread_ts,
+            )
+        except Exception:  # noqa: BLE001 — a failed re-extract must not crash the lane
+            logger.exception(
+                "re_extract failed: file=%s channel=%s", file_id, channel_id,
+            )
+            _post_message(
+                slack_client, channel_id,
+                f"⚠️ I couldn't re-read file {file_id}. Nothing was changed.",
+                thread_ts=thread_ts,
+            )
+            continue
+
+        dispatched = True
+        status = (result or {}).get("status")
+
+        # Identity-change check (ADR-0010 §3): when the re-read matched 0 old
+        # rows to replace, the document's identity changed (e.g. a credit note).
+        # This shows up as either:
+        #   (a) status="delivered" with appended>0, replaced=0 — added rows but
+        #       couldn't remove the old ones; or
+        #   (b) status="duplicate" (all_deduped) — the corrected doc_key is
+        #       already in seen_doc_keys AND replaced=0, meaning the stale rows
+        #       from the original identity are still in the sheet uncleaned.
+        # In both cases point the user at the month-level primitive.
+        append_result = (result or {}).get("append", {}) or {}
+        replace_counts = append_result.get("batch_replace_counts") or []
+        total_replaced = sum(int(b.get("replaced") or 0) for b in replace_counts)
+        total_appended = sum(int(b.get("appended") or 0) for b in replace_counts)
+        identity_changed = total_replaced == 0 and (
+            (status == "delivered" and total_appended > 0)
+            or status == "duplicate"
+        )
+        if identity_changed:
+            _post_message(
+                slack_client, channel_id,
+                "Heads up: the re-read changed the document's identity, so I "
+                "added the corrected version but couldn't auto-remove the old "
+                "rows. Use `clear <month>` (replace_recorded_month) to drop the "
+                "stale rows.",
+                thread_ts=thread_ts,
+            )
+
+        logger.info(
+            "CHAT_REEXTRACT_AUDIT channel=%s file=%s hints=%r status=%s "
+            "replaced=%d appended=%d",
+            channel_id, file_id, hints, status, total_replaced, total_appended,
+        )
+
+    return dispatched
+
+
 async def answer_question(
     *,
     runner: Any,
@@ -1687,6 +1848,8 @@ async def answer_question(
     message_ts: Optional[str] = None,
     thread_ts: Optional[str] = None,
     raw_thread_ts: Optional[str] = None,
+    doc_runner: Any = None,
+    db: Any = None,
 ) -> dict:
     """Run the chat ``assistant_agent`` against the client's ledger state.
 
@@ -1879,6 +2042,36 @@ async def answer_question(
             await _apply_state_delta(
                 runner, app_name, channel_id, session_id, {PENDING_LEARN_KEY: []}
             )
+
+    # Drain pending_reextract OUTSIDE the chat semaphore (ADR-0010): each spec
+    # re-runs the FULL document pipeline via process_file_event, which acquires
+    # the same module-level ``_SEM`` itself — running it inside this block would
+    # deadlock at concurrency 1. doc_runner is the document graph runner (the chat
+    # runner cannot drive the doc pipeline); the _message handler injects it.
+    pending_reextract = post_state.get(PENDING_REEXTRACT_KEY)
+    if isinstance(pending_reextract, list) and pending_reextract:
+        if doc_runner is not None:
+            await _execute_pending_reextract(
+                pending_reextract,
+                doc_runner=doc_runner,
+                ledger_store=ledger_store,
+                db=db,
+                slack_client=slack_client,
+                channel_id=channel_id,
+                app_name=app_name,
+                client_store=client_store,
+                thread_ts=thread_ts,
+            )
+        else:
+            logger.warning(
+                "pending_reextract present but no doc_runner injected (channel=%s) "
+                "— cannot re-run the document pipeline.",
+                channel_id,
+            )
+        # Clear the key regardless so a re-extract is never retried unbounded.
+        await _apply_state_delta(
+            runner, app_name, channel_id, session_id, {PENDING_REEXTRACT_KEY: []}
+        )
 
     if not answer_text:
         # Safety net: model went silent after a tool call. Show the user the
@@ -2503,6 +2696,8 @@ def build_async_app(
             message_ts=message_ts,
             thread_ts=thread_ts,
             raw_thread_ts=raw_thread_ts,
+            doc_runner=runner,
+            db=db,
         )
 
     return async_app

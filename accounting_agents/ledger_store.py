@@ -422,6 +422,7 @@ class SlackLedgerStore:
         software: str = "qbs",
         kind: str = "invoice",
         client_name: str = "",
+        replace: bool = False,
     ) -> dict:
         """Append a run's rows to the channel FY workbook (fetch → append → upload).
 
@@ -437,9 +438,18 @@ class SlackLedgerStore:
             software: The client's accounting software ("qbs"/"xero") — selects the
                 exporter column layout for a fresh invoice workbook.
             kind: "invoice" or "bank" — selects workbook layout + filename.
+            replace: When ``True``, for each INVOICE batch, existing rows whose
+                ``Invoice Number`` matches the batch's invoice number(s) are deleted
+                BEFORE the batch is appended, and the batch's ``doc_key`` is removed
+                from ``seen_doc_keys`` so the re-append is not silently deduped.
+                Bank batches are unaffected (they use the merge path regardless).
+                ``False`` (default) preserves today's exact dedup behaviour.
 
         Returns:
             ``{"slack_file_id", "appended", "deduped", "filename"}``.
+            When ``replace=True`` the dict also includes
+            ``"batch_replace_counts": [{sheet, doc_key, replaced, appended}, ...]``
+            so callers can warn when no old rows were matched (identity changed).
         """
         lock = self._lock_for(channel_id, fy)
         with lock:
@@ -452,6 +462,7 @@ class SlackLedgerStore:
                 software=software,
                 kind=kind,
                 client_name=client_name,
+                replace=replace,
             )
 
     def _append_rows_locked(
@@ -465,6 +476,7 @@ class SlackLedgerStore:
         software: str,
         kind: str,
         client_name: str = "",
+        replace: bool = False,
     ) -> dict:
         pointer = self.get_pointer(client_id, fy)
 
@@ -512,15 +524,63 @@ class SlackLedgerStore:
 
         appended = 0
         deduped = 0
+        batch_replace_counts: list[dict] = []
+
         for batch in batches:
             sheet_name = batch["sheet"]
             doc_key = str(batch["doc_key"])
             rows = batch.get("rows") or []
 
+            # ------------------------------------------------------------------ #
+            # replace=True path (INVOICE sheets only).
+            # For each invoice batch: find existing rows whose Invoice Number
+            # matches the batch's invoice numbers, delete them bottom-up, then
+            # remove the doc_key from seen so the re-append is NOT deduped.
+            # Bank batches are skipped — they use the merge path below regardless.
+            # ------------------------------------------------------------------ #
+            replaced_count = 0
+            if replace and kind == "invoice" and sheet_name in _INVOICE_SHEETS:
+                # Collect the invoice numbers carried by the incoming batch.
+                batch_inv_nums: set[str] = {
+                    str(r.get("Invoice Number", "")).strip()
+                    for r in rows
+                    if r.get("Invoice Number") not in (None, "")
+                }
+
+                if batch_inv_nums and sheet_name in wb.sheetnames:
+                    ws = wb[sheet_name]
+                    if ws.max_row >= 2:
+                        col_map = self._header_col_map(ws)
+                        inv_col = col_map.get("Invoice Number")
+                        if inv_col is not None:
+                            # Collect matching row indices (ascending) then delete bottom-up.
+                            matching_rows: list[int] = []
+                            for row_num in range(2, ws.max_row + 1):
+                                cell_val = ws.cell(row=row_num, column=inv_col).value
+                                if cell_val is not None and str(cell_val).strip() in batch_inv_nums:
+                                    matching_rows.append(row_num)
+
+                            replaced_count = len(matching_rows)
+                            for row_num in sorted(matching_rows, reverse=True):
+                                ws.delete_rows(row_num, 1)
+
+                # Remove this batch's doc_key from seen so the subsequent append
+                # is NOT skipped by the dedup guard below.
+                seen_doc_keys.discard(doc_key)
+
+            # ------------------------------------------------------------------ #
             # Firestore-side dedupe: skip entirely if this doc was already processed.
+            # (replace=True already discarded the key above, so this only fires for
+            #  replace=False or for bank batches where the key is genuinely new.)
+            # ------------------------------------------------------------------ #
             logger.debug("append_rows: doc_key=%r match=%s", doc_key, doc_key in seen_doc_keys)
             if doc_key in seen_doc_keys:
                 deduped += 1
+                if replace:
+                    batch_replace_counts.append(
+                        {"sheet": sheet_name, "doc_key": doc_key,
+                         "replaced": 0, "appended": 0}
+                    )
                 continue
 
             sheet = self._get_or_create_sheet(wb, sheet_name, kind)
@@ -535,28 +595,41 @@ class SlackLedgerStore:
 
             if n == 0:
                 deduped += 1
+                if replace:
+                    batch_replace_counts.append(
+                        {"sheet": sheet_name, "doc_key": doc_key,
+                         "replaced": replaced_count, "appended": 0}
+                    )
             else:
                 appended += n
                 seen_doc_keys.add(doc_key)
+                if replace:
+                    batch_replace_counts.append(
+                        {"sheet": sheet_name, "doc_key": doc_key,
+                         "replaced": replaced_count, "appended": n}
+                    )
 
         # Skip the expensive download→re-upload cycle when nothing was appended
         # (every batch was already in seen_doc_keys).
         if appended == 0:
-            return {
+            result: dict = {
                 "slack_file_id": prev_file_id or "",
                 "appended": 0,
                 "deduped": deduped,
                 "filename": filename,
             }
+            if replace:
+                result["batch_replace_counts"] = batch_replace_counts
+            return result
 
         new_bytes = self._to_bytes(wb)
-        result = slack_client.files_upload_v2(
+        upload_result = slack_client.files_upload_v2(
             channel=channel_id,
             filename=filename,
             file=new_bytes,
             title=filename,
         )
-        new_file_id = self._extract_uploaded_file_id(result)
+        new_file_id = self._extract_uploaded_file_id(upload_result)
         if new_file_id:
             self._set_pointer(
                 client_id,
@@ -582,12 +655,15 @@ class SlackLedgerStore:
                     prev_file_id,
                 )
 
-        return {
+        result = {
             "slack_file_id": new_file_id,
             "appended": appended,
             "deduped": deduped,
             "filename": filename,
         }
+        if replace:
+            result["batch_replace_counts"] = batch_replace_counts
+        return result
 
     @staticmethod
     def _get_or_create_sheet(wb: Workbook, sheet_name: str, kind: str):

@@ -83,6 +83,12 @@ PENDING_WRITE_KEY = "pending_ledger_write"
 #: ``client_store.add_correction`` for each entry (the tool never does I/O).
 PENDING_LEARN_KEY = "pending_learn_mapping"
 
+#: The session state key the ``re_extract_document`` tool appends re-extract
+#: specs to (ADR-0010). The Slack runner drains this AFTER a chat turn, re-running
+#: the document pipeline (with the hint + ``replace=True``) per spec via
+#: ``process_file_event`` — the tool itself never downloads or runs anything.
+PENDING_REEXTRACT_KEY = "pending_reextract"
+
 #: Invoice sheets the write tools may mutate. Bank sheets carry a derived running
 #: balance (memory ``bank-ledger-continuous-sorted``) so amending/removing one
 #: would desync the chain — the tools refuse with a clear message instead.
@@ -1485,6 +1491,96 @@ def replace_recorded_month(tool_context: ToolContext, month: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Re-extract write tool (Step 7 / ADR-0010) — gated; drains via process_file_event
+# --------------------------------------------------------------------------- #
+
+
+def re_extract_document(tool_context: ToolContext, file_id: str, hints: str) -> str:
+    """Re-read a filed document with a hint and replace its ledger rows (gated).
+
+    Use this when the user wants you to re-process an already-filed document with
+    a correction — e.g. "re-read the Acme invoice as a credit note" or "re-read
+    file F123 and treat the freight line as zero-rated". The corrected read goes
+    back through the NORMAL Approve / Edit / Reject card (a human confirms it),
+    and its rows replace the old ones (ADR-0010).
+
+    Two-turn confirm (ADR-0009): the FIRST call previews what will happen and
+    asks for your OK — nothing runs. After you confirm, a re-extract spec is
+    queued for the runner to execute. The ``hints`` text is the whole point of
+    the tool, so both ``file_id`` and ``hints`` are required.
+
+    Args:
+        tool_context: Injected by ADK; provides session state + confirmation.
+        file_id: The Slack file id of the document to re-read (as shown by
+            ``list_recent_documents``).
+        hints: The free-text instruction steering the re-read (e.g. "read as a
+            credit note", "the freight line is zero-rated").
+
+    Returns:
+        A short status string. The commit appends a re-extract spec to
+        ``state["pending_reextract"]`` for the runner to execute.
+    """
+    # Software gate — same check as amend/remove/replace_month.
+    software = str(tool_context.state.get("software") or "").strip()
+    if software and software not in _SUPPORTED_WRITE_SOFTWARE:
+        return (
+            f"Re-extracting from chat isn't supported for this ledger layout "
+            f"({software!r}) yet — only QBS Ledger workbooks can be re-read here."
+        )
+
+    file_id = (file_id or "").strip()
+    hints = (hints or "").strip()
+    if not file_id:
+        return (
+            "I need the document's file id to re-read it — use "
+            "`list_recent_documents` to find it, then tell me which one."
+        )
+    if not hints:
+        return (
+            "Tell me HOW to re-read it (the hint is the whole point) — e.g. "
+            "\"read it as a credit note\" or \"the freight line is zero-rated\"."
+        )
+
+    confirmation = getattr(tool_context, "tool_confirmation", None)
+
+    # ----- Turn 1: preview (honest per ADR-0010) + request confirmation -----
+    if not confirmation:
+        hint = (
+            f"I'll re-read file {file_id} with: '{hints}', then replace its rows "
+            "through the normal approval card. This works cleanly when the "
+            "document keeps its invoice number (a re-code / tax fix); if the new "
+            "read changes the document's identity (e.g. a credit note), I'll add "
+            "the corrected version and you may need to clear the old rows with "
+            "'clear <month>'. Reply 'yes'."
+        )
+        spec = {"op": "reextract", "file_id": file_id, "hints": hints}
+        try:
+            # payload is for audit/UI only; Turn-2 re-derives from the args.
+            tool_context.request_confirmation(hint=hint, payload=spec)
+        except Exception:  # noqa: BLE001 — never let the gate crash the lane
+            logger.exception(
+                "re_extract_document: request_confirmation failed (file_id=%s)",
+                file_id,
+            )
+            return "I couldn't open the confirmation step. Please try again."
+        return "Awaiting your confirmation before I re-read the document."
+
+    # ----- Turn 2: the user answered -----
+    if not getattr(confirmation, "confirmed", False):
+        return "Okay, I won't re-read anything."
+
+    # Re-derive the spec from the SAME original args (ADR-0009); never rely on
+    # confirmation.payload.
+    spec = {"op": "reextract", "file_id": file_id, "hints": hints}
+    pending = tool_context.state.get(PENDING_REEXTRACT_KEY)
+    if not isinstance(pending, list):
+        pending = []
+    pending.append(spec)
+    tool_context.state[PENDING_REEXTRACT_KEY] = pending
+    return "Confirmed — re-reading that document now; I'll send it back through the approval card."
+
+
+# --------------------------------------------------------------------------- #
 # Learn-mapping write tool (Step 7 / C-3) — direct write, no confirmation gate
 # --------------------------------------------------------------------------- #
 
@@ -1626,6 +1722,12 @@ Write tools (when the user asks you to FIX, DELETE, or CLEAR a ledger line or mo
   shows a count and asks for confirmation; nothing is written until the user
   replies "yes". After clearing, the user can re-drop the original documents and
   they will be recorded fresh (the dedupe keys are purged too).
+- ``re_extract_document``: re-read an ALREADY-FILED document with a correction
+  hint (e.g. "re-read the Acme invoice as a credit note", "re-read file F123 and
+  zero-rate the freight line") and REPLACE its ledger rows. The corrected read
+  goes back through the normal Approve / Edit / Reject card. This is GATED — the
+  first call previews and asks for confirmation. Requires the document's
+  ``file_id`` (use ``list_recent_documents`` to find it) AND a non-empty hint.
 BEFORE calling ``amend_ledger_row`` or ``remove_ledger_row`` you MUST call
 ``lookup_row`` to get the exact ``row_index`` of the line the user means —
 never guess an index. All write tools are GATED: the first call only PROPOSES
@@ -1714,6 +1816,7 @@ assistant_agent = LlmAgent(
         FunctionTool(amend_ledger_row, require_confirmation=True),
         FunctionTool(remove_ledger_row, require_confirmation=True),
         FunctionTool(replace_recorded_month, require_confirmation=True),
+        FunctionTool(re_extract_document, require_confirmation=True),
         learn_mapping,
     ],
 )
@@ -1724,10 +1827,12 @@ __all__ = [
     "LEDGER_DATA_KEY",
     "PENDING_WRITE_KEY",
     "PENDING_LEARN_KEY",
+    "PENDING_REEXTRACT_KEY",
     "GST_THRESHOLD_SGD",
     "amend_ledger_row",
     "remove_ledger_row",
     "replace_recorded_month",
+    "re_extract_document",
     "learn_mapping",
     "bank_totals",
     "summarize_by_category",

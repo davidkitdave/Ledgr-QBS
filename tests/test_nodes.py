@@ -847,3 +847,44 @@ def test_guard_warns_on_payload_size_exceeding_threshold(caplog):
         for r in caplog.records
     ), f"Expected payload-size WARNING; records={[r.message for r in caplog.records]}"
 
+
+
+# =========================================================================== #
+# extract_invoice_node honors state["review_hint"] on the FIRST extraction
+# (Step 7 / ADR-0010 — re_extract_document seeds the hint into run state).
+# =========================================================================== #
+
+
+def test_extract_invoice_node_passes_review_hint_to_extractor():
+    """A seeded ``review_hint`` steers the FIRST read — EXTRACT_BUNDLE_FN gets it."""
+    captured: dict = {}
+
+    def _recorder(data, mime, **kw):
+        captured["hint"] = kw.get("hint")
+        return ExtractedInvoiceBundle(invoices=[_ex_invoice("INV-1")])
+
+    nodes.EXTRACT_BUNDLE_FN = _recorder
+
+    ctx = FakeContext(_base_state(**{
+        nodes.DIRECTION_KEY: "purchase",
+        "review_hint": "read as a credit note",
+    }))
+    asyncio.run(nodes.extract_invoice_node(ctx))
+
+    assert captured["hint"] == "read as a credit note"
+
+
+def test_extract_invoice_node_omits_hint_when_no_review_hint():
+    """The normal drop path (no review_hint) calls the extractor WITHOUT a hint."""
+    captured: dict = {"saw_key": True}
+
+    def _recorder(data, mime, **kw):
+        captured["saw_key"] = "hint" in kw
+        return ExtractedInvoiceBundle(invoices=[_ex_invoice("INV-1")])
+
+    nodes.EXTRACT_BUNDLE_FN = _recorder
+
+    ctx = FakeContext(_base_state(**{nodes.DIRECTION_KEY: "purchase"}))
+    asyncio.run(nodes.extract_invoice_node(ctx))
+
+    assert captured["saw_key"] is False

@@ -332,9 +332,10 @@ def test_assistant_agent_has_sixteen_tools():
     # Step 3 added the 12 read tools; Step 4 (ADR-0009) adds the two gated
     # write tools (amend_ledger_row / remove_ledger_row) → 14; Step 7 adds the
     # direct learn_mapping tool → 15; Step 7/C-3 adds the gated
-    # replace_recorded_month tool → 16.
+    # replace_recorded_month tool → 16; Step 7/ADR-0010 adds the gated
+    # re_extract_document tool → 17.
     assert assistant_agent.mode is None
-    assert len(assistant_agent.tools) == 16
+    assert len(assistant_agent.tools) == 17
 
 
 def test_assistant_instruction_mentions_new_tools():

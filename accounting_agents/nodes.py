@@ -328,7 +328,17 @@ async def extract_invoice_node(ctx) -> Event:
     invoices written to ``state[NORMALIZED_KEY]``.
     """
     data, mime_type = await _load_pdf_bytes(ctx)
-    bundle: ExtractedInvoiceBundle = EXTRACT_BUNDLE_FN(data, mime_type, model=MODEL_LITE)
+    # A re_extract request (chat tool / ADR-0010) seeds ``review_hint`` into run
+    # state so the FIRST read is steered too — not just the reviewer's retry. Only
+    # pass the kwarg when a hint is actually present so the normal file-drop path
+    # (no hint) calls ``EXTRACT_BUNDLE_FN`` exactly as before.
+    review_hint = (ctx.state.get("review_hint") or "").strip()
+    if review_hint:
+        bundle: ExtractedInvoiceBundle = EXTRACT_BUNDLE_FN(
+            data, mime_type, model=MODEL_LITE, hint=review_hint
+        )
+    else:
+        bundle = EXTRACT_BUNDLE_FN(data, mime_type, model=MODEL_LITE)
 
     normalized = _normalize_bundle(ctx, bundle)
     ctx.state[NORMALIZED_KEY] = _guard_state_payload(

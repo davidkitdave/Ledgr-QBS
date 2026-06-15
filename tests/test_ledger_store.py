@@ -1767,3 +1767,237 @@ def test_remove_rows_for_month_missing_sheet_returns_zero_count():
     rows = store.read_rows("c1", "2026", slack, "C1")
     sep_sales = [r for r in rows if r.get("_sheet") == "Sales" and "09/2025" in str(r.get("Date", ""))]
     assert len(sep_sales) == 1
+
+
+# --------------------------------------------------------------------------- #
+# append_rows replace=True (Step 7 / E-3 identity-replace primitive)
+# --------------------------------------------------------------------------- #
+
+def _make_invoice_store_with_named_invoices() -> tuple["FakeSlackClient", "SlackLedgerStore"]:
+    """Seed a Purchase sheet with INV-10 (2 lines) + INV-20 (1 line) and return (slack, store).
+
+    doc_key format matches consolidate_node: "{sheet}:{invoice_number}".
+    """
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+    store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        software="qbs", kind="invoice",
+        batches=[
+            {
+                "sheet": "Purchase",
+                "doc_key": "Purchase:INV-10",
+                "rows": [
+                    {"Invoice Number": "INV-10", "Description": "Line A", "Source Amount": 100.0, "Account Code / COA": "6000"},
+                    {"Invoice Number": "INV-10", "Description": "Line B", "Source Amount": 50.0,  "Account Code / COA": "6001"},
+                ],
+            },
+            {
+                "sheet": "Purchase",
+                "doc_key": "Purchase:INV-20",
+                "rows": [
+                    {"Invoice Number": "INV-20", "Description": "Other Invoice", "Source Amount": 200.0, "Account Code / COA": "6002"},
+                ],
+            },
+        ],
+    )
+    return slack, store
+
+
+def test_replace_true_matched_invoice_removes_old_rows_appends_new():
+    """replace=True + matching invoice number: old rows removed, new rows appended,
+    result reports replaced > 0."""
+    slack, store = _make_invoice_store_with_named_invoices()
+
+    # Confirm baseline: 3 rows total (2 for INV-10, 1 for INV-20).
+    rows_before = store.read_rows("c1", "2026", slack, "C1")
+    assert len(rows_before) == 3
+
+    result = store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        software="qbs", kind="invoice",
+        replace=True,
+        batches=[{
+            "sheet": "Purchase",
+            "doc_key": "Purchase:INV-10",
+            "rows": [
+                {"Invoice Number": "INV-10", "Description": "Corrected Line", "Source Amount": 999.0, "Account Code / COA": "6000"},
+            ],
+        }],
+    )
+
+    # appended reflects the newly appended row count.
+    assert result["appended"] == 1
+    # batch_replace_counts reports replaced=2 (the two old INV-10 lines).
+    assert "batch_replace_counts" in result
+    counts = result["batch_replace_counts"]
+    assert len(counts) == 1
+    assert counts[0]["replaced"] == 2
+    assert counts[0]["appended"] == 1
+
+    rows_after = store.read_rows("c1", "2026", slack, "C1")
+    descs = [r["Description"] for r in rows_after]
+    # Old INV-10 lines gone, new corrected line present, INV-20 untouched.
+    assert "Line A" not in descs
+    assert "Line B" not in descs
+    assert "Corrected Line" in descs
+    assert "Other Invoice" in descs
+    # Total: 1 (INV-10 replacement) + 1 (INV-20 survivor) = 2 rows.
+    assert len(rows_after) == 2
+
+
+def test_replace_true_no_match_appends_new_reports_replaced_zero():
+    """replace=True where the invoice number does NOT match any existing row:
+    new rows are appended, nothing removed, replaced=0 (caller-warn signal)."""
+    slack, store = _make_invoice_store_with_named_invoices()
+
+    result = store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        software="qbs", kind="invoice",
+        replace=True,
+        batches=[{
+            "sheet": "Purchase",
+            "doc_key": "Purchase:INV-99",
+            "rows": [
+                {"Invoice Number": "INV-99", "Description": "Brand New", "Source Amount": 300.0, "Account Code / COA": "6005"},
+            ],
+        }],
+    )
+
+    assert result["appended"] == 1
+    counts = result["batch_replace_counts"]
+    assert len(counts) == 1
+    assert counts[0]["replaced"] == 0  # no match — caller should warn user
+    assert counts[0]["appended"] == 1
+
+    rows_after = store.read_rows("c1", "2026", slack, "C1")
+    descs = [r["Description"] for r in rows_after]
+    # Original rows intact, new row added.
+    assert "Line A" in descs
+    assert "Line B" in descs
+    assert "Other Invoice" in descs
+    assert "Brand New" in descs
+    assert len(rows_after) == 4
+
+
+def test_replace_true_only_replaces_matched_invoice_leaves_others_intact():
+    """replace=True removes ONLY the matching invoice number's rows;
+    a second, different invoice in the same sheet is completely untouched."""
+    slack, store = _make_invoice_store_with_named_invoices()
+
+    store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        software="qbs", kind="invoice",
+        replace=True,
+        batches=[{
+            "sheet": "Purchase",
+            "doc_key": "Purchase:INV-10",
+            "rows": [
+                {"Invoice Number": "INV-10", "Description": "INV-10 Replacement", "Source Amount": 111.0, "Account Code / COA": "6000"},
+            ],
+        }],
+    )
+
+    rows_after = store.read_rows("c1", "2026", slack, "C1")
+    inv20_rows = [r for r in rows_after if r.get("Invoice Number") == "INV-20"]
+    inv10_rows = [r for r in rows_after if r.get("Invoice Number") == "INV-10"]
+
+    # INV-20 is completely untouched.
+    assert len(inv20_rows) == 1
+    assert inv20_rows[0]["Description"] == "Other Invoice"
+    assert inv20_rows[0]["Source Amount"] == 200.0
+
+    # INV-10 replaced by the single new line.
+    assert len(inv10_rows) == 1
+    assert inv10_rows[0]["Description"] == "INV-10 Replacement"
+
+
+def test_replace_false_duplicate_doc_key_is_still_deduped():
+    """replace=False (default) keeps today's exact dedup behaviour:
+    a duplicate doc_key is still skipped — the default path did not regress."""
+    slack, store = _make_invoice_store_with_named_invoices()
+
+    # Re-submit INV-10 with replace=False (the default).
+    result = store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        software="qbs", kind="invoice",
+        replace=False,
+        batches=[{
+            "sheet": "Purchase",
+            "doc_key": "Purchase:INV-10",
+            "rows": [
+                {"Invoice Number": "INV-10", "Description": "Should Not Appear", "Source Amount": 1.0, "Account Code / COA": "9999"},
+            ],
+        }],
+    )
+
+    assert result["appended"] == 0
+    assert result["deduped"] == 1
+    # batch_replace_counts NOT present in replace=False result.
+    assert "batch_replace_counts" not in result
+
+    rows_after = store.read_rows("c1", "2026", slack, "C1")
+    descs = [r["Description"] for r in rows_after]
+    assert "Should Not Appear" not in descs
+    # Original 3 rows unchanged.
+    assert len(rows_after) == 3
+
+
+def test_replace_true_multi_line_invoice_all_lines_replaced():
+    """replace=True on a multi-line invoice: ALL lines of the matched invoice
+    number are replaced (not just the first row)."""
+    slack, store = _make_invoice_store_with_named_invoices()
+
+    # INV-10 currently has 2 lines (Line A + Line B). Replace with 3 new lines.
+    result = store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        software="qbs", kind="invoice",
+        replace=True,
+        batches=[{
+            "sheet": "Purchase",
+            "doc_key": "Purchase:INV-10",
+            "rows": [
+                {"Invoice Number": "INV-10", "Description": "New Line 1", "Source Amount": 10.0, "Account Code / COA": "6000"},
+                {"Invoice Number": "INV-10", "Description": "New Line 2", "Source Amount": 20.0, "Account Code / COA": "6001"},
+                {"Invoice Number": "INV-10", "Description": "New Line 3", "Source Amount": 30.0, "Account Code / COA": "6002"},
+            ],
+        }],
+    )
+
+    counts = result["batch_replace_counts"]
+    assert counts[0]["replaced"] == 2   # both old lines removed
+    assert counts[0]["appended"] == 3   # three new lines written
+
+    rows_after = store.read_rows("c1", "2026", slack, "C1")
+    inv10_rows = [r for r in rows_after if r.get("Invoice Number") == "INV-10"]
+    assert len(inv10_rows) == 3
+    new_descs = {r["Description"] for r in inv10_rows}
+    assert new_descs == {"New Line 1", "New Line 2", "New Line 3"}
+
+    # Old lines gone.
+    all_descs = [r["Description"] for r in rows_after]
+    assert "Line A" not in all_descs
+    assert "Line B" not in all_descs
+
+
+def test_replace_true_doc_key_in_seen_after_replace():
+    """After replace=True the replaced doc_key is still in seen_doc_keys
+    (the re-added key blocks accidental double-append)."""
+    slack, store = _make_invoice_store_with_named_invoices()
+
+    store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        software="qbs", kind="invoice",
+        replace=True,
+        batches=[{
+            "sheet": "Purchase",
+            "doc_key": "Purchase:INV-10",
+            "rows": [
+                {"Invoice Number": "INV-10", "Description": "Replaced", "Source Amount": 1.0, "Account Code / COA": "6000"},
+            ],
+        }],
+    )
+
+    ptr = store.get_pointer("c1", "2026")
+    seen = set(ptr.get("seen_doc_keys") or [])
+    assert "Purchase:INV-10" in seen

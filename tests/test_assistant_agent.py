@@ -477,17 +477,18 @@ class TestModelInfo:
 
 
 def test_assistant_agent_is_root_multi_turn():
-    """A root LlmAgent carries no ``mode`` (multi-turn default) and exposes 16 tools.
+    """A root LlmAgent carries no ``mode`` (multi-turn default) and exposes 17 tools.
 
     See ADR-0008: in ADK 2.2.0 a root agent must not set ``mode``, so the
     runtime uses ``include_contents='default'`` and the agent sees full
     session history. Step 4 (ADR-0009) adds the two gated write tools (14);
-    Step 7 (C-3) adds learn_mapping (15) and replace_recorded_month (16).
+    Step 7 (C-3) adds learn_mapping (15) and replace_recorded_month (16);
+    Step 7 (ADR-0010) adds re_extract_document (17).
     """
     from accounting_agents.assistant import assistant_agent
 
     assert assistant_agent.mode is None
-    assert len(assistant_agent.tools) == 16
+    assert len(assistant_agent.tools) == 17
 
 
 def test_write_tools_registered_with_confirmation():
@@ -640,7 +641,7 @@ def test_amend_account_reclassifies_tax_to_nt_when_non_registered():
     from accounting_agents.assistant import amend_ledger_row
 
     ctx = _write_ctx(tax_registered=False)
-    amend_ledger_row(ctx, row_index="0", field="account", new_value="6010")
+    out = amend_ledger_row(ctx, row_index="0", field="account", new_value="6010")
     spec = ctx.requested["payload"]
     assert spec["updates"]["Account Code / COA"] == "6010"
     assert spec["tax_treatment"] == "NT"
@@ -852,7 +853,7 @@ def test_amend_turn1_includes_row_signature():
     from accounting_agents.assistant import amend_ledger_row
 
     ctx = _write_ctx()
-    amend_ledger_row(ctx, row_index="0", field="account", new_value="6010")
+    out = amend_ledger_row(ctx, row_index="0", field="account", new_value="6010")
     spec = ctx.requested["payload"]
     assert "row_signature" in spec
     assert isinstance(spec["row_signature"], str)
@@ -1067,7 +1068,7 @@ def _invoice_rows_two_months() -> list[dict]:
     ]
 
 
-from accounting_agents.assistant import replace_recorded_month, LEDGER_DATA_KEY, PENDING_WRITE_KEY
+from accounting_agents.assistant import replace_recorded_month, PENDING_WRITE_KEY
 
 
 class TestReplaceRecordedMonth:
@@ -1090,7 +1091,7 @@ class TestReplaceRecordedMonth:
 
     def test_turn1_counts_rows_and_writes_nothing(self):
         ctx = _FakeToolContextWithConfirm(self._state())
-        result = replace_recorded_month(ctx, "September 2025")
+        replace_recorded_month(ctx, "September 2025")
         # Should have requested confirmation.
         assert ctx.confirmation_requested is not None
         hint = ctx.confirmation_requested["hint"]
@@ -1164,3 +1165,110 @@ class TestReplaceRecordedMonth:
         result = replace_recorded_month(ctx, "NotAMonth")
         assert "couldn't parse" in result.lower() or "parse" in result.lower()
         assert ctx.confirmation_requested is None
+
+
+# --------------------------------------------------------------------------- #
+# re_extract_document (Step 7 / ADR-0010) — gated re-read + replace
+# --------------------------------------------------------------------------- #
+
+
+def _reextract_ctx(*, software=None) -> _WriteToolContext:
+    """A write ctx for re_extract_document. ``software`` seeds the gate; the
+    ledger rows are irrelevant (the tool only needs file_id + hints)."""
+    state = {LEDGER_DATA_KEY: _qbs_ledger_rows(), "tax_registered": True}
+    if software is not None:
+        state["software"] = software
+    return _WriteToolContext(state)
+
+
+def test_reextract_refuses_non_qbs_software():
+    """The software gate refuses a non-QBS workbook before any confirmation."""
+    from accounting_agents.assistant import PENDING_REEXTRACT_KEY, re_extract_document
+
+    ctx = _reextract_ctx(software="Xero Ledger")
+    out = re_extract_document(ctx, file_id="F1", hints="read as a credit note")
+    assert "not supported" in out.lower() or "isn't supported" in out.lower()
+    assert ctx.requested is None  # no confirmation requested
+    assert not ctx.state.get(PENDING_REEXTRACT_KEY)
+
+
+def test_reextract_missing_file_id_is_helpful_and_writes_nothing():
+    from accounting_agents.assistant import PENDING_REEXTRACT_KEY, re_extract_document
+
+    ctx = _reextract_ctx()
+    out = re_extract_document(ctx, file_id="   ", hints="read as a credit note")
+    assert "file id" in out.lower()
+    assert ctx.requested is None
+    assert not ctx.state.get(PENDING_REEXTRACT_KEY)
+
+
+def test_reextract_missing_hints_is_helpful_and_writes_nothing():
+    from accounting_agents.assistant import PENDING_REEXTRACT_KEY, re_extract_document
+
+    ctx = _reextract_ctx()
+    out = re_extract_document(ctx, file_id="F1", hints="   ")
+    # The hint is the whole point — refuse and explain.
+    assert "how to re-read" in out.lower() or "hint" in out.lower()
+    assert ctx.requested is None
+    assert not ctx.state.get(PENDING_REEXTRACT_KEY)
+
+
+def test_reextract_turn1_previews_with_identity_caveat_and_writes_nothing():
+    from accounting_agents.assistant import PENDING_REEXTRACT_KEY, re_extract_document
+
+    ctx = _reextract_ctx()
+    out = re_extract_document(ctx, file_id="F1", hints="read as a credit note")
+
+    assert "confirmation" in out.lower() or "yes" in out.lower()
+    assert ctx.requested is not None
+    hint = ctx.requested["hint"]
+    # Honest per ADR-0010: states the identity-change caveat + the clear fallback.
+    assert "F1" in hint
+    assert "read as a credit note" in hint
+    assert "credit note" in hint.lower()
+    assert "clear" in hint.lower()
+    # Turn-1 writes nothing.
+    assert not ctx.state.get(PENDING_REEXTRACT_KEY)
+    # The preview payload carries the deterministic spec for audit.
+    assert ctx.requested["payload"]["op"] == "reextract"
+    assert ctx.requested["payload"]["file_id"] == "F1"
+
+
+def test_reextract_turn2_confirmed_appends_spec():
+    from accounting_agents.assistant import PENDING_REEXTRACT_KEY, re_extract_document
+
+    ctx = _reextract_ctx()
+    ctx.tool_confirmation = _FakeConfirmation(confirmed=True)  # no payload
+    out = re_extract_document(ctx, file_id="F1", hints="zero-rate the freight line")
+
+    assert "confirmed" in out.lower()
+    pending = ctx.state[PENDING_REEXTRACT_KEY]
+    assert pending == [
+        {"op": "reextract", "file_id": "F1", "hints": "zero-rate the freight line"}
+    ]
+
+
+def test_reextract_turn2_declined_writes_nothing():
+    from accounting_agents.assistant import PENDING_REEXTRACT_KEY, re_extract_document
+
+    ctx = _reextract_ctx()
+    ctx.tool_confirmation = _FakeConfirmation(confirmed=False)
+    out = re_extract_document(ctx, file_id="F1", hints="read as a credit note")
+
+    assert "won't" in out.lower() or "okay" in out.lower()
+    assert not ctx.state.get(PENDING_REEXTRACT_KEY)
+
+
+def test_reextract_registered_in_tool_list_with_confirmation():
+    """re_extract_document is registered as a FunctionTool requiring confirmation."""
+    from google.adk.tools import FunctionTool
+
+    from accounting_agents.assistant import assistant_agent
+
+    tool = next(
+        t for t in assistant_agent.tools
+        if isinstance(t, FunctionTool)
+        and getattr(t, "func", None) is not None
+        and t.func.__name__ == "re_extract_document"
+    )
+    assert tool._require_confirmation is True

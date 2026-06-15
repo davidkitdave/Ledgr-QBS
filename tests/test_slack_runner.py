@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 
 from types import SimpleNamespace
+from unittest.mock import patch
 from google.adk.apps import App, ResumabilityConfig
 from google.adk.events.event import Event
 from google.adk.runners import Runner
@@ -2995,7 +2996,6 @@ def test_runner_drains_pending_learn_mapping():
     assert corr["client_id"] == channel_id
 
     # The pending list was cleared from the session.
-    sess = sessions.get((channel_id, session_id))
     # _apply_state_delta appends an event; check the session state was cleared.
     # (_CapturingChatRunner.session_service.get_session returns the same _FakeSession
     # object; _apply_state_delta appends an Event — but since our fake doesn't
@@ -3136,3 +3136,339 @@ def test_execute_pending_writes_replace_month_refreshes_ledger_data():
     rows = store.read_rows("c1", "2026", slack, "C1")
     assert len(rows) == 1  # only Oct Purchase row
     assert rows[0].get("Date") == "03/10/2025"
+
+
+# =========================================================================== #
+# Re-extract (Step 7 / ADR-0010): process_file_event hint+replace params,
+# _execute_pending_reextract drain.
+# =========================================================================== #
+
+
+class _StateCapturingRunner(_FakeRunner):
+    """A doc-graph runner that records the ``state_delta`` it was run with."""
+
+    def __init__(self, events, final_state, app_name="acc"):
+        super().__init__(events, final_state, app_name=app_name)
+        self.run_state_delta: dict = {}
+
+    async def run_async(self, *, user_id, session_id, new_message=None, state_delta=None):
+        self.run_state_delta = dict(state_delta or {})
+        async for ev in super().run_async(
+            user_id=user_id, session_id=session_id,
+            new_message=new_message, state_delta=state_delta,
+        ):
+            yield ev
+
+
+class _CapturingLedgerStore:
+    """A ledger_store stand-in that records the ``replace`` kwarg of append_rows."""
+
+    def __init__(self, *, batch_replace_counts=None):
+        self.append_calls: list[dict] = []
+        self._batch_replace_counts = batch_replace_counts
+
+    def append_rows(self, **kwargs):
+        self.append_calls.append(kwargs)
+        result = {
+            "slack_file_id": "F-up", "appended": 1, "deduped": 0,
+            "filename": "ledger.xlsx",
+        }
+        if self._batch_replace_counts is not None:
+            result["batch_replace_counts"] = self._batch_replace_counts
+        return result
+
+
+def _completion_runner():
+    """A doc runner whose run completes cleanly (no interrupt) → persist+deliver."""
+    final_event = SimpleNamespace(
+        content=SimpleNamespace(parts=[SimpleNamespace(text="done")]),
+        get_function_calls=lambda: [],
+    )
+    return final_event
+
+
+def test_process_file_event_hint_flows_into_state_delta_as_review_hint():
+    slack = FakeSlackClient()
+    db = FakeFirestore()
+    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+    runner = _StateCapturingRunner([_completion_runner()], _ledger_payload())
+
+    asyncio.run(
+        process_file_event(
+            runner=runner, ledger_store=store, db=db, slack_client=slack,
+            channel_id="C1", file_id="F1", app_name="acc",
+            download_fn=lambda c, f: b"%PDF-1.4 fake",
+            source_filename="re-extract-F1.pdf",
+            hint="read as a credit note",
+            client_store=_seeded_client_store(db),
+        )
+    )
+
+    assert runner.run_state_delta.get("review_hint") == "read as a credit note"
+
+
+def test_process_file_event_replace_flows_to_append_rows():
+    slack = FakeSlackClient()
+    db = FakeFirestore()
+    ledger = _CapturingLedgerStore()
+    runner = _FakeRunner([_completion_runner()], _ledger_payload())
+
+    asyncio.run(
+        process_file_event(
+            runner=runner, ledger_store=ledger, db=db, slack_client=slack,
+            channel_id="C1", file_id="F1", app_name="acc",
+            download_fn=lambda c, f: b"%PDF-1.4 fake",
+            source_filename="re-extract-F1.pdf",
+            hint="read as a credit note",
+            replace=True,
+            client_store=_seeded_client_store(db),
+        )
+    )
+
+    assert ledger.append_calls, "append_rows must have been called"
+    assert ledger.append_calls[0]["replace"] is True
+
+
+def test_process_file_event_default_path_does_not_replace_or_hint():
+    """The normal file-drop path RESETS the re-extract keys (so a re-shared file
+    can't inherit a stale hint/replace flag) and calls append_rows replace=False."""
+    slack = FakeSlackClient()
+    db = FakeFirestore()
+    ledger = _CapturingLedgerStore()
+    runner = _StateCapturingRunner([_completion_runner()], _ledger_payload())
+
+    asyncio.run(
+        process_file_event(
+            runner=runner, ledger_store=ledger, db=db, slack_client=slack,
+            channel_id="C1", file_id="F1", app_name="acc",
+            download_fn=lambda c, f: b"%PDF-1.4 fake",
+            source_filename="invoice.pdf",
+            client_store=_seeded_client_store(db),
+        )
+    )
+
+    # Reset (not absent): a fresh drop overwrites any stale leaked values.
+    assert runner.run_state_delta.get("review_hint") == ""
+    assert runner.run_state_delta.get("reextract_replace") is False
+    assert ledger.append_calls[0]["replace"] is False
+
+
+# --- _execute_pending_reextract ------------------------------------------- #
+
+
+class _RecordingPFE:
+    """A replacement for slack_runner.process_file_event that records its kwargs
+    and returns a scripted result (default: a clean replaced delivery)."""
+
+    def __init__(self, result=None):
+        self.calls: list[dict] = []
+        self._result = result or {
+            "status": "delivered",
+            "append": {"batch_replace_counts": [{"replaced": 1, "appended": 1}]},
+        }
+
+    async def __call__(self, **kwargs):
+        self.calls.append(kwargs)
+        return self._result
+
+
+def _run_reextract(specs, *, pfe, slack, doc_runner=None):
+    from accounting_agents import slack_runner
+
+    db = FakeFirestore()
+    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+    runner = doc_runner or _FakeRunner([], _ledger_payload())
+    with patch.object(slack_runner, "process_file_event", pfe):
+        asyncio.run(
+            slack_runner._execute_pending_reextract(
+                specs,
+                doc_runner=runner,
+                ledger_store=store,
+                db=db,
+                slack_client=slack,
+                channel_id="C1",
+                app_name="acc",
+                client_store=None,
+                thread_ts=None,
+            )
+        )
+    return runner
+
+
+def test_execute_pending_reextract_calls_pfe_with_hint_and_replace():
+    slack = FakeSlackClient()
+    pfe = _RecordingPFE()
+    doc_runner = _FakeRunner([], _ledger_payload())
+    specs = [{"op": "reextract", "file_id": "F9", "hints": "read as a credit note"}]
+
+    _run_reextract(specs, pfe=pfe, slack=slack, doc_runner=doc_runner)
+
+    assert len(pfe.calls) == 1
+    call = pfe.calls[0]
+    assert call["runner"] is doc_runner  # the INJECTED doc runner, not the chat one
+    assert call["file_id"] == "F9"
+    assert call["hint"] == "read as a credit note"
+    assert call["replace"] is True
+
+
+def test_execute_pending_reextract_is_idempotent_on_double_run():
+    slack = FakeSlackClient()
+    pfe = _RecordingPFE()
+    doc_runner = _FakeRunner([], _ledger_payload())
+    specs = [{"op": "reextract", "file_id": "F9", "hints": "read as a credit note"}]
+
+    from accounting_agents import slack_runner
+
+    db = FakeFirestore()
+    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+    with patch.object(slack_runner, "process_file_event", pfe):
+        async def _twice():
+            for _ in range(2):
+                await slack_runner._execute_pending_reextract(
+                    specs, doc_runner=doc_runner, ledger_store=store, db=db,
+                    slack_client=slack, channel_id="C1", app_name="acc",
+                    client_store=None, thread_ts=None,
+                )
+        asyncio.run(_twice())
+
+    # Same (file_id, hints) on the same runner instance → dispatched exactly once.
+    assert len(pfe.calls) == 1
+
+
+def test_execute_pending_reextract_posts_clear_month_note_on_identity_change():
+    """A delivered re-read that replaced 0 rows (identity changed) → the user is
+    pointed at the month-level primitive (replace_recorded_month / clear)."""
+    slack = FakeSlackClient()
+    pfe = _RecordingPFE(result={
+        "status": "delivered",
+        "append": {"batch_replace_counts": [{"replaced": 0, "appended": 2}]},
+    })
+    specs = [{"op": "reextract", "file_id": "F9", "hints": "read as a credit note"}]
+
+    _run_reextract(specs, pfe=pfe, slack=slack)
+
+    texts = " ".join(_posted_texts(slack)).lower()
+    assert "clear" in texts and "identity" in texts
+
+
+# --- HIGH regression: state-leak between runs on the same file_id ----------- #
+
+
+class _CapturingLedgerStoreMulti:
+    """Records every append_rows call so we can assert per-call replace kwarg."""
+
+    def __init__(self):
+        self.append_calls: list[dict] = []
+
+    def append_rows(self, **kwargs):
+        self.append_calls.append(dict(kwargs))
+        return {
+            "slack_file_id": "F-up", "appended": 1, "deduped": 0,
+            "filename": "ledger.xlsx",
+        }
+
+
+def test_normal_drop_after_reextract_does_not_inherit_replace_flag():
+    """HIGH regression: re-extract run on file_id X sets reextract_replace=True in
+    session state. A subsequent normal drop of the SAME file_id on the SAME
+    long-lived per-doc session MUST call append_rows with replace=False — not the
+    stale True from the prior run."""
+    slack = FakeSlackClient()
+    db = FakeFirestore()
+    ledger = _CapturingLedgerStoreMulti()
+    # Use a _FakeRunner that reuses the same _FakeSessionService between calls so
+    # the second run sees the session that the first run created — the realistic
+    # long-lived-session scenario.
+    runner = _FakeRunner([_completion_runner()], _ledger_payload())
+    client_store = _seeded_client_store(db)
+
+    # First call: re-extract (replace=True) — seeds reextract_replace=True into state.
+    asyncio.run(
+        process_file_event(
+            runner=runner, ledger_store=ledger, db=db, slack_client=slack,
+            channel_id="C1", file_id="F1", app_name="acc",
+            download_fn=lambda c, f: b"%PDF-1.4 fake",
+            source_filename="invoice.pdf",
+            hint="read as a credit note",
+            replace=True,
+            client_store=client_store,
+        )
+    )
+    assert ledger.append_calls[0]["replace"] is True
+
+    # Reset the runner's events so the second run also completes cleanly.
+    runner._events = [_completion_runner()]
+    # The session now exists with reextract_replace=True in state; the second
+    # NORMAL drop must overwrite it to False via the unconditional state_delta.
+    asyncio.run(
+        process_file_event(
+            runner=runner, ledger_store=ledger, db=db, slack_client=slack,
+            channel_id="C1", file_id="F1", app_name="acc",
+            download_fn=lambda c, f: b"%PDF-1.4 fake",
+            source_filename="invoice.pdf",
+            # No hint, no replace — normal drop.
+            client_store=client_store,
+        )
+    )
+    # Second call must have replace=False (not the stale True from the first run).
+    assert len(ledger.append_calls) == 2
+    assert ledger.append_calls[1]["replace"] is False
+
+
+def test_normal_drop_after_reextract_does_not_inherit_review_hint():
+    """HIGH regression: a normal re-drop of file_id X must NOT forward the hint
+    that a prior re-extract run seeded into the session's state_delta."""
+    slack = FakeSlackClient()
+    db = FakeFirestore()
+    runner = _StateCapturingRunner([_completion_runner()], _ledger_payload())
+    client_store = _seeded_client_store(db)
+
+    # First call: re-extract seeds review_hint into state_delta.
+    asyncio.run(
+        process_file_event(
+            runner=runner, ledger_store=SlackLedgerStore(FakeFirestore(), opener=slack.opener()),
+            db=db, slack_client=slack,
+            channel_id="C1", file_id="F1", app_name="acc",
+            download_fn=lambda c, f: b"%PDF-1.4 fake",
+            source_filename="invoice.pdf",
+            hint="read as a credit note",
+            replace=True,
+            client_store=client_store,
+        )
+    )
+    assert runner.run_state_delta.get("review_hint") == "read as a credit note"
+
+    # Second call: normal drop — state_delta must carry review_hint="" (not the stale hint).
+    runner._events = [_completion_runner()]
+    asyncio.run(
+        process_file_event(
+            runner=runner, ledger_store=SlackLedgerStore(FakeFirestore(), opener=slack.opener()),
+            db=db, slack_client=slack,
+            channel_id="C1", file_id="F1", app_name="acc",
+            download_fn=lambda c, f: b"%PDF-1.4 fake",
+            source_filename="invoice.pdf",
+            client_store=client_store,
+        )
+    )
+    assert runner.run_state_delta.get("review_hint") == ""
+    assert runner.run_state_delta.get("reextract_replace") is False
+
+
+# --- MEDIUM regression: duplicate path also fires the identity-change note --- #
+
+
+def test_execute_pending_reextract_posts_clear_month_note_on_duplicate_status():
+    """MEDIUM regression: when the re-read returns status='duplicate' (all_deduped)
+    and replaced=0 the identity changed — the user must still see the 'clear month'
+    guidance. Previously only status='delivered' triggered it."""
+    slack = FakeSlackClient()
+    pfe = _RecordingPFE(result={
+        "status": "duplicate",
+        "append": {"batch_replace_counts": [{"replaced": 0, "appended": 0}]},
+    })
+    specs = [{"op": "reextract", "file_id": "F9", "hints": "read as a credit note"}]
+
+    _run_reextract(specs, pfe=pfe, slack=slack)
+
+    texts = " ".join(_posted_texts(slack)).lower()
+    assert "clear" in texts and "identity" in texts
