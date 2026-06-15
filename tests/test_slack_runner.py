@@ -4435,3 +4435,147 @@ def test_feedback_neg_opens_proactive_redo_modal():
     assert vkw["view"]["private_metadata"] == "F-FB-NEG"
     # Ephemeral acknowledgement also posted
     sync_client.chat_postEphemeral.assert_called_once()
+
+
+# =========================================================================== #
+# P0-1: file_shared COA routing — xlsx must reach run_coa_ingest when pending
+# =========================================================================== #
+
+
+def _capture_file_shared_handler(store_mock=None):
+    """Build the Bolt async app and return the registered ``file_shared`` handler.
+
+    The helper mirrors ``_capture_message_handler`` but captures ``file_shared``
+    instead of ``message``.  ``store_mock`` is passed directly to
+    ``build_async_app`` so tests can control what ``store.get_by_channel`` returns.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from app.slack_app import _SeenEvents
+    from accounting_agents import slack_runner
+
+    registered = {}
+    fake_app = MagicMock()
+
+    def event_decorator(name):
+        def decorator(fn):
+            registered[name] = fn
+            return fn
+        return decorator
+
+    fake_app.event = event_decorator
+    fake_app.action = lambda *a, **k: (lambda fn: fn)
+    fake_app.view = lambda *a, **k: (lambda fn: fn)
+    fake_app.command = lambda *a, **k: (lambda fn: fn)
+
+    fresh_seen = _SeenEvents()
+    rm = MagicMock()
+    rm.app_name = "acc"
+
+    with patch.object(slack_runner, "_seen", fresh_seen), \
+         patch("slack_bolt.async_app.AsyncApp", return_value=fake_app), \
+         patch("slack_sdk.WebClient", return_value=MagicMock()), \
+         patch("invoice_processing.export.client_context.FirestoreClientStore"), \
+         patch.object(slack_runner, "build_chat_runner",
+                      return_value=SimpleNamespace(app_name="accounting_agents_assistant")):
+        build_async_app(
+            runner=rm,
+            ledger_store=MagicMock(),
+            db=MagicMock(),
+            store=store_mock or MagicMock(),
+        )
+
+    return registered["file_shared"], fresh_seen
+
+
+def test_file_shared_routes_xlsx_to_coa_when_pending_coa():
+    """An xlsx file_shared on a pending_coa channel must call run_coa_ingest and
+    NOT call process_file_event (P0-1 fix verification).
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from accounting_agents import slack_runner
+
+    # Channel profile whose status is pending_coa (no real profile object needed —
+    # _coa_pending is True when resolved is None or status=="pending_coa").
+    store_mock = MagicMock()
+    store_mock.get_by_channel.return_value = None  # no profile → pending_coa=True
+
+    handler, _ = _capture_file_shared_handler(store_mock=store_mock)
+
+    # Simulate a file_shared event for an xlsx COA file.
+    event = {
+        "type": "file_shared",
+        "event_ts": "300.001",
+        "file_id": "FXLSX1",
+        "channel_id": "C-coa-pending",
+        "file": {
+            "id": "FXLSX1",
+            "name": "COA & List.xlsx",
+            "filetype": "xlsx",
+            "mimetype": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        },
+    }
+    body = {"event_id": "Ev-coa-xlsx-1"}
+    fake_bolt_client = MagicMock()
+
+    mock_pfe = AsyncMock(return_value={"status": "delivered"})
+    mock_coa = MagicMock()  # run_coa_ingest is sync, called via asyncio.to_thread
+
+    with patch.object(slack_runner, "process_file_event", mock_pfe), \
+         patch("app.slack_app.run_coa_ingest", mock_coa), \
+         patch("app.slack_app.slack_download_file", return_value="/tmp/fake/COA.xlsx"):
+        asyncio.run(handler(event=event, body=body, client=fake_bolt_client))
+
+    # COA ingest must have been invoked …
+    mock_coa.assert_called_once()
+    coa_kwargs = mock_coa.call_args.kwargs
+    assert coa_kwargs["channel_id"] == "C-coa-pending"
+    # … and the regular document pipeline must NOT have been called.
+    mock_pfe.assert_not_called()
+
+
+def test_file_shared_rejects_xlsx_when_not_pending_coa():
+    """An xlsx file_shared on an already-onboarded channel (not pending_coa) must
+    fall through to process_file_event (the regular extension gate handles it),
+    and must NOT call run_coa_ingest.  Safety net: we are not blanket-allowing xlsx.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from accounting_agents import slack_runner
+
+    # Channel has an active profile (status != "pending_coa").
+    active_profile = SimpleNamespace(status="active")
+    store_mock = MagicMock()
+    store_mock.get_by_channel.return_value = active_profile
+
+    handler, _ = _capture_file_shared_handler(store_mock=store_mock)
+
+    event = {
+        "type": "file_shared",
+        "event_ts": "300.002",
+        "file_id": "FXLSX2",
+        "channel_id": "C-onboarded",
+        "file": {
+            "id": "FXLSX2",
+            "name": "COA & List.xlsx",
+            "filetype": "xlsx",
+            "mimetype": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        },
+    }
+    body = {"event_id": "Ev-coa-xlsx-2"}
+    fake_bolt_client = MagicMock()
+
+    mock_pfe = AsyncMock(return_value={"status": "rejected"})
+    mock_coa = MagicMock()
+
+    with patch.object(slack_runner, "process_file_event", mock_pfe), \
+         patch("app.slack_app.run_coa_ingest", mock_coa), \
+         patch("app.slack_app.slack_download_file", return_value="/tmp/fake/COA.xlsx"):
+        asyncio.run(handler(event=event, body=body, client=fake_bolt_client))
+
+    # COA ingest must NOT have been called …
+    mock_coa.assert_not_called()
+    # … the regular pipeline must have been called so the extension gate can reject it.
+    mock_pfe.assert_called_once()
+    assert mock_pfe.call_args.kwargs["file_id"] == "FXLSX2"

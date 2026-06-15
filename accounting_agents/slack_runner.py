@@ -2628,6 +2628,43 @@ def build_async_app(
         if _seen.seen_before(f"file:{file_id}"):
             logger.debug("dedup: file %s already being processed", file_id)
             return
+        # COA-routing path B (ADR-0006): mirror the message-handler gate so that
+        # drag-dropped xlsx/csv files land in run_coa_ingest when the channel is
+        # not-yet-onboarded / pending_coa.  Without this check _is_coa_upload is
+        # never consulted on the file_shared path and .xlsx is rejected by the
+        # global _ACCEPTED_EXTENSIONS allow-list in process_file_event (P0-1).
+        _resolved = store.get_by_channel(channel_id)
+        _coa_pending = _resolved is None or getattr(_resolved, "status", None) == "pending_coa"
+        file_payload = event.get("file") or {"id": file_id}
+
+        if _is_coa_upload(file_payload, coa_pending=_coa_pending):
+            logger.info(
+                "file_shared: routing spreadsheet %s to COA ingest for channel %s",
+                file_id, channel_id,
+            )
+            import shutil as _shutil
+            import tempfile as _tempfile
+
+            from app.slack_app import run_coa_ingest as _run_coa_ingest
+            from app.slack_app import slack_download_file as _dl
+
+            def _say_in_channel(**kwargs):
+                sync_client.chat_postMessage(channel=channel_id, **kwargs)
+
+            task_dir = _tempfile.mkdtemp(prefix="ledgr_coa_")
+            try:
+                local_path = await asyncio.to_thread(_dl, sync_client, file_id, task_dir)
+                await asyncio.to_thread(
+                    _run_coa_ingest,
+                    channel_id=channel_id,
+                    file_path=local_path,
+                    store=store,
+                    say_fn=_say_in_channel,
+                )
+            finally:
+                _shutil.rmtree(task_dir, ignore_errors=True)
+            return
+
         fut: asyncio.Future = asyncio.get_event_loop().create_future()
         _file_futures[file_id] = fut
         try:
