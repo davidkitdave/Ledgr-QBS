@@ -24,7 +24,7 @@ from google.adk.workflow import START, Workflow, node
 from google.genai import types
 
 from accounting_agents import nodes
-from accounting_agents.hitl import write_interrupt
+from accounting_agents.hitl import read_interrupt, write_interrupt
 from accounting_agents.ledger_store import SlackLedgerStore
 from accounting_agents.nodes import approval_gate
 from accounting_agents.sessions import FirestoreSessionService
@@ -2828,3 +2828,93 @@ def test_execute_pending_writes_remove_replay_after_marker_failure():
     remaining = store.read_rows("c1", "2026", slack, "C1")
     assert len(remaining) == 1
     assert remaining[0]["Description"] == "Rent"
+
+
+# --------------------------------------------------------------------------- #
+# Step 2B: handle_review_action post-resume continuation (the Critical fix).
+# After a confirm_as_is / reextract_as resume, the run flows to the terminal
+# approval_gate, which either pauses AGAIN (must post the approval card) or
+# auto-approves and completes (must persist + deliver — else silent data loss).
+# --------------------------------------------------------------------------- #
+def test_handle_review_action_delivers_on_clean_completion(monkeypatch):
+    """confirm_as_is whose resumed run auto-approves → persist_and_deliver runs."""
+    from accounting_agents.slack_runner import handle_review_action
+
+    slack = FakeSlackClient()
+    db = FakeFirestore()
+    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+    op_id = "CR9:FR9:review"
+    write_interrupt(
+        db, op_id, session_id="CR9:FR9", channel_id="CR9", slack_file_id="FR9",
+        message_ts="1.1", user_id="CR9", extra={"kind": "review", "question": "q?", "reasons": []},
+    )
+
+    # Resumed run completes with no further interrupt.
+    final_event = SimpleNamespace(
+        content=SimpleNamespace(parts=[SimpleNamespace(text="done")]),
+        get_function_calls=lambda: [],
+    )
+
+    async def fake_resume(runner, db_, op, decision):
+        return [final_event]
+
+    monkeypatch.setattr("accounting_agents.slack_runner.resume_session", fake_resume)
+
+    runner = _FakeRunner([], _ledger_payload())
+    # The (faked) resumed run would have populated the session; mark it created
+    # so persist_and_deliver can read the final ledger payload.
+    runner.session_service.created = True
+    result = asyncio.run(
+        handle_review_action(
+            runner=runner, ledger_store=store, db=db, slack_client=slack,
+            op_id=op_id, action="confirm_as_is", app_name="acc",
+        )
+    )
+
+    assert result["status"] == "resumed"
+    # The document was actually delivered to the ledger (the silent-data-loss guard).
+    assert result["outcome"]["status"] == "delivered"
+    assert len(slack.uploads) == 1
+    assert any("FY2026 ledger" in t for t in _posted_texts(slack))
+
+
+def test_handle_review_action_reposts_terminal_card_on_repause(monkeypatch):
+    """confirm_as_is whose resumed run pauses again at approval_gate → approval card posted."""
+    from accounting_agents.slack_runner import handle_review_action
+
+    slack = FakeSlackClient()
+    db = FakeFirestore()
+    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+    op_id = "CR8:FR8:review"
+    write_interrupt(
+        db, op_id, session_id="CR8:FR8", channel_id="CR8", slack_file_id="FR8",
+        message_ts="2.2", user_id="CR8", extra={"kind": "review", "question": "q?", "reasons": []},
+    )
+
+    # Resumed run pauses again at the TERMINAL gate with the BASE id (no :review).
+    repause_event = SimpleNamespace(
+        content=SimpleNamespace(parts=[]),
+        get_function_calls=lambda: [SimpleNamespace(name="adk_request_input", id="CR8:FR8")],
+    )
+
+    async def fake_resume(runner, db_, op, decision):
+        return [repause_event]
+
+    monkeypatch.setattr("accounting_agents.slack_runner.resume_session", fake_resume)
+
+    runner = _FakeRunner([], {"approval_message": "needs review: line X"})
+    result = asyncio.run(
+        handle_review_action(
+            runner=runner, ledger_store=store, db=db, slack_client=slack,
+            op_id=op_id, action="confirm_as_is", app_name="acc",
+        )
+    )
+
+    assert result["status"] == "resumed"
+    # The terminal approval interrupt was surfaced (not silently stalled).
+    assert result["outcome"]["status"] == "paused"
+    assert result["outcome"]["op_id"] == "CR8:FR8"
+    # A base-id interrupt doc was written so the approve/edit/reject card can resume.
+    assert read_interrupt(db, "CR8:FR8") is not None
+    # Nothing uploaded while paused.
+    assert slack.uploads == []

@@ -61,8 +61,15 @@ from accounting_agents.hitl import (
     write_interrupt,
 )
 from accounting_agents.ledger_store import SlackLedgerStore
-from accounting_agents.nodes import ApproveDecision
-from app.blocks import approval_card_blocks, approval_outcome_blocks, invoice_edit_modal
+from accounting_agents.nodes import ApproveDecision, ReviewClarifyDecision
+from app.blocks import (
+    approval_card_blocks,
+    approval_outcome_blocks,
+    invoice_edit_modal,
+    review_card_blocks,
+    review_hint_modal,
+    review_outcome_blocks,
+)
 from app.slack_app import _SeenEvents
 from invoice_processing.export.client_context import FirestoreClientStore
 
@@ -834,49 +841,30 @@ async def process_file_event(
             if text:
                 last_text = text
 
-        if interrupt_id is not None:
-            _update_status(
-                slack_client, channel_id, status_ts, "⏳ Needs your review"
-            )
-            summary = await _read_interrupt_summary(
-                runner, app_name, channel_id, session_id, last_text
-            )
-            # Enrich the card with a per-document label so a user dropping
-            # many files can tell the review cards apart. Read the paused
-            # session state (the same fetch that backs the summary helper)
-            # to derive filename + first invoice vendor / total.
-            paused_state = await _read_session_state(
-                runner, app_name,
-                {"user_id": channel_id, "session_id": session_id},
-            )
-            doc_label = _doc_label_from_state(paused_state)
-            posted = _post_approval_card(
-                slack_client, channel_id, summary, interrupt_id,
-                thread_ts=thread_ts, doc_label=doc_label,
-            )
-            write_interrupt(
-                db,
-                interrupt_id,
-                session_id=session_id,
-                channel_id=channel_id,
-                slack_file_id=file_id,
-                message_ts=posted,
-                user_id=channel_id,
-                extra={"summary": summary, "doc_label": doc_label},
-            )
-            return {"status": "paused", "op_id": interrupt_id, "message_ts": posted}
-
-        append_result = await persist_and_deliver(
+        outcome = await _finalize_run_outcome(
+            events=[],  # events already drained into interrupt_id / last_text above
+            interrupt_id=interrupt_id,
+            last_text=last_text,
             runner=runner,
             ledger_store=ledger_store,
+            db=db,
             slack_client=slack_client,
             channel_id=channel_id,
             session_id=session_id,
             app_name=app_name,
             user_id=channel_id,
+            file_id=file_id,
             thread_ts=thread_ts,
         )
 
+        if outcome["status"] == "paused":
+            _update_status(
+                slack_client, channel_id, status_ts, "⏳ Needs your review"
+            )
+            return outcome
+
+        # Delivery branch — decorate the status line and reactions.
+        append_result = outcome.get("append", {})
         if append_result.get("all_deduped"):
             _update_status(slack_client, channel_id, status_ts, "📋 Already recorded")
             _remove_reaction(slack_client, channel_id, upload_msg_ts, "eyes")
@@ -890,7 +878,7 @@ async def process_file_event(
         # Swap the 👀 reaction for ✅ on the user's original upload message.
         _remove_reaction(slack_client, channel_id, upload_msg_ts, "eyes")
         _add_reaction(slack_client, channel_id, upload_msg_ts, "white_check_mark")
-        return {"status": "delivered", "append": append_result}
+        return outcome
 
 
 async def _ensure_session(
@@ -1113,6 +1101,116 @@ def _edits_from_view_state(view: dict) -> dict:
     return {"lines": lines}
 
 
+async def _finalize_run_outcome(
+    *,
+    events: list,
+    interrupt_id: Optional[str],
+    last_text: str,
+    runner: Any,
+    ledger_store: SlackLedgerStore,
+    db: Any,
+    slack_client: Any,
+    channel_id: str,
+    session_id: str,
+    app_name: str,
+    user_id: str,
+    file_id: str,
+    thread_ts: Optional[str] = None,
+) -> dict:
+    """Shared post-run tail: post the right card or deliver, based on the event stream.
+
+    Called from both ``process_file_event`` (fresh run) and
+    ``handle_review_action`` (resumed run).  In the fresh-run caller the
+    generator has already been drained into ``interrupt_id`` / ``last_text``
+    before calling this helper; for the resumed caller ``events`` is the list
+    returned by ``resume_session`` and we scan it here.
+
+    Two branches:
+    * **Interrupt detected** — a ``find_interrupt_id`` hit in ``events`` (or the
+      pre-computed ``interrupt_id`` argument from the fresh-run path).  If the
+      id ends with ``:review`` → post the review card + write the review
+      interrupt doc.  Otherwise → post the approval card + write the approval
+      interrupt doc.  Returns ``{"status": "paused", "op_id": ..., "message_ts": ...}``.
+    * **No interrupt** — the run completed cleanly.  Call ``persist_and_deliver``
+      and return ``{"status": "delivered"|"duplicate", "append": ...}``.
+
+    ``file_id`` is the Slack file id stored in every interrupt doc so the
+    resume handler can re-download the PDF when needed.
+    """
+    # For the resumed-run caller (handle_review_action), scan the events list
+    # for a new interrupt.  For the fresh-run caller, interrupt_id is pre-set
+    # and events is empty — so the scan is a no-op.
+    for ev in events:
+        iid = find_interrupt_id(ev)
+        if iid is not None:
+            interrupt_id = iid
+        txt = extract_final_text(ev)
+        if txt:
+            last_text = txt
+
+    if interrupt_id is not None:
+        # Read the paused session state once; both card paths need it.
+        paused_state = await _read_session_state(
+            runner, app_name,
+            {"user_id": user_id, "session_id": session_id},
+        )
+
+        if interrupt_id.endswith(":review"):
+            # Mid-flow extract-review interrupt from ``review_extraction_node``.
+            question = paused_state.get("review_question") or last_text or ""
+            reasons: list = paused_state.get(nodes.REVIEW_REASON_KEY) or []
+            posted = _post_review_card(
+                slack_client, channel_id, question, interrupt_id,
+                reasons, thread_ts=thread_ts,
+            )
+            write_interrupt(
+                db,
+                interrupt_id,
+                session_id=session_id,
+                channel_id=channel_id,
+                slack_file_id=file_id,
+                message_ts=posted,
+                user_id=user_id,
+                extra={"kind": "review", "question": question, "reasons": reasons},
+            )
+        else:
+            # Terminal approval-gate interrupt: Approve/Edit/Reject card.
+            summary = await _read_interrupt_summary(
+                runner, app_name, user_id, session_id, last_text
+            )
+            doc_label = _doc_label_from_state(paused_state)
+            posted = _post_approval_card(
+                slack_client, channel_id, summary, interrupt_id,
+                thread_ts=thread_ts, doc_label=doc_label,
+            )
+            write_interrupt(
+                db,
+                interrupt_id,
+                session_id=session_id,
+                channel_id=channel_id,
+                slack_file_id=file_id,
+                message_ts=posted,
+                user_id=user_id,
+                extra={"summary": summary, "doc_label": doc_label},
+            )
+        return {"status": "paused", "op_id": interrupt_id, "message_ts": posted}
+
+    # No interrupt — run completed cleanly; persist and deliver.
+    append_result = await persist_and_deliver(
+        runner=runner,
+        ledger_store=ledger_store,
+        slack_client=slack_client,
+        channel_id=channel_id,
+        session_id=session_id,
+        app_name=app_name,
+        user_id=user_id,
+        thread_ts=thread_ts,
+    )
+    if append_result.get("all_deduped"):
+        return {"status": "duplicate", "append": append_result}
+    return {"status": "delivered", "append": append_result}
+
+
 def _post_approval_card(
     slack_client: Any, channel_id: str, summary: str, op_id: str, thread_ts=None,
     doc_label: Optional[str] = None,
@@ -1129,6 +1227,48 @@ def _post_approval_card(
     if isinstance(data, dict):
         return data.get("ts")
     return None
+
+
+def _post_review_card(
+    slack_client: Any,
+    channel_id: str,
+    question: str,
+    op_id: str,
+    reasons: list,
+    thread_ts=None,
+) -> Optional[str]:
+    """Post the mid-flow review card and return its Slack ``ts``."""
+    kwargs = {
+        "channel": channel_id,
+        "blocks": review_card_blocks(question, op_id, reasons),
+        "text": "Extraction needs your input before continuing.",
+    }
+    if thread_ts:
+        kwargs["thread_ts"] = thread_ts
+    resp = slack_client.chat_postMessage(**kwargs)
+    data = resp.data if hasattr(resp, "data") else resp
+    if isinstance(data, dict):
+        return data.get("ts")
+    return None
+
+
+def _update_review_card(
+    slack_client: Any, interrupt: dict, question: str, action: str
+) -> None:
+    """Replace the review card with the resolved-outcome block."""
+    ts = interrupt.get("message_ts")
+    channel_id = interrupt.get("channel_id")
+    if not ts or not channel_id:
+        return
+    try:
+        slack_client.chat_update(
+            channel=channel_id,
+            ts=ts,
+            blocks=review_outcome_blocks(question, action),
+            text=f"Review resolved: {action}.",
+        )
+    except Exception:  # noqa: BLE001 - card update is cosmetic
+        logger.exception("failed to update review card for %s", channel_id)
 
 
 # --------------------------------------------------------------------------- #
@@ -1206,6 +1346,93 @@ def _update_card(slack_client: Any, interrupt: dict, summary: str, decision: str
         )
     except Exception:  # noqa: BLE001 - card update is cosmetic
         logger.exception("failed to update approval card for %s", channel_id)
+
+
+# --------------------------------------------------------------------------- #
+# Review action handlers (mid-flow extract-review HITL)
+# --------------------------------------------------------------------------- #
+
+
+async def handle_review_action(
+    *,
+    runner: Any,
+    ledger_store: SlackLedgerStore,
+    db: Any,
+    slack_client: Any,
+    op_id: str,
+    action: str,
+    app_name: str,
+    hint: Optional[str] = None,
+) -> dict:
+    """Resume a paused ``review_extraction_node`` interrupt with the human's decision.
+
+    Idempotent: guarded by the ``processed/{op_id}`` marker so a double-click
+    resumes at most once.  After resume the workflow falls through to
+    ``categorize_node`` and (if the extraction is non-empty) to the terminal
+    ``approval_gate``.  For ``confirm_as_is`` / ``reextract_as`` we hand the
+    resumed events to :func:`_finalize_run_outcome`, which posts the terminal
+    approval card if the gate paused again, or persists + delivers if the gate
+    auto-approved and the run completed — exactly like a fresh run.  Without
+    this the document would silently stall (re-pause never surfaced) or be lost
+    (auto-approve never delivered).
+
+    Single-shot review (MEDIUM-2): the ``:review`` op_id is derived
+    deterministically (``{approval_id}:review``) and ``mark_processed`` after
+    one resume, so a second ``:review`` escalation for the SAME document would
+    collide with the processed marker.  This is safe today only because the node
+    applies the decision on resume and falls straight through to categorize
+    WITHOUT re-running the reviewer loop — there is no second ``:review`` pause
+    per document.
+
+    Args:
+        op_id:   The ``:review`` interrupt id.
+        action:  One of ``"reextract_as"``, ``"confirm_as_is"``, or ``"reject"``.
+        hint:    Optional free-text hint; only meaningful for ``"reextract_as"``.
+    """
+    if is_processed(db, op_id):
+        logger.info("review action for %s already processed; ignoring.", op_id)
+        return {"status": "already_processed", "op_id": op_id}
+
+    interrupt = read_interrupt(db, op_id)
+    if interrupt is None:
+        logger.warning("no interrupt doc for op_id %s; cannot resume review.", op_id)
+        return {"status": "missing_interrupt", "op_id": op_id}
+
+    channel_id = interrupt["channel_id"]
+    session_id = interrupt["session_id"]
+    question = interrupt.get("question") or ""
+
+    decision = ReviewClarifyDecision(action=action, hint=hint if action == "reextract_as" else None)
+    events = await resume_session(runner, db, op_id, decision)
+
+    _update_review_card(slack_client, interrupt, question, action)
+
+    if action == "reject":
+        update_interrupt_status(db, op_id, "rejected")
+        _post_message(slack_client, channel_id, "Document rejected — nothing was added to the ledger.")
+        return {"status": "resumed", "op_id": op_id, "events": len(events)}
+
+    # confirm_as_is / reextract_as: the resumed run flowed through categorize/tax
+    # to the terminal approval_gate.  Finalize that outcome exactly like a fresh
+    # run — post the terminal approval card on a re-pause, or persist + deliver
+    # on a clean auto-approve.  Pass the SAME session/user the run was keyed
+    # under (as resume_session resolved them from the interrupt doc).
+    outcome = await _finalize_run_outcome(
+        events=events,
+        interrupt_id=None,
+        last_text="",
+        runner=runner,
+        ledger_store=ledger_store,
+        db=db,
+        slack_client=slack_client,
+        channel_id=channel_id,
+        session_id=session_id,
+        app_name=app_name,
+        user_id=interrupt.get("user_id") or session_id,
+        file_id=interrupt.get("slack_file_id") or "",
+        thread_ts=interrupt.get("thread_ts"),
+    )
+    return {"status": "resumed", "op_id": op_id, "outcome": outcome, "events": len(events)}
 
 
 # --------------------------------------------------------------------------- #
@@ -1876,6 +2103,71 @@ def build_async_app(
     @async_app.action("reject")
     async def _reject(ack, body, client):
         await _run_action(ack, body, client, "reject")
+
+    # --- mid-flow extract-review HITL (review_extraction_node) ---
+
+    async def _run_review_action(ack, body, action_str, hint=None):
+        await ack()
+        action = (body.get("actions") or [{}])[0]
+        op_id = action.get("value")
+        if not op_id:
+            return
+        await handle_review_action(
+            runner=runner,
+            ledger_store=ledger_store,
+            db=db,
+            slack_client=sync_client,
+            op_id=op_id,
+            action=action_str,
+            app_name=app_name,
+            hint=hint,
+        )
+
+    @async_app.action("review_confirm")
+    async def _review_confirm(ack, body, client):
+        await _run_review_action(ack, body, "confirm_as_is")
+
+    @async_app.action("review_reject")
+    async def _review_reject(ack, body, client):
+        await _run_review_action(ack, body, "reject")
+
+    @async_app.action("review_reextract")
+    async def _review_reextract(ack, body, client):
+        # Open a hint-input modal so the human can describe what the extractor
+        # missed.  Mirrors the Edit button: ack() immediately, then views_open
+        # with the trigger_id (Slack invalidates it after a few seconds).
+        await ack()
+        op_id = (body.get("actions") or [{}])[0].get("value")
+        if not op_id:
+            return
+        sync_client.views_open(
+            trigger_id=body["trigger_id"],
+            view=review_hint_modal(op_id),
+        )
+
+    @async_app.view("ledgr_review_hint")
+    async def _review_hint_submit(ack, body, client):
+        await ack()
+        view = body["view"]
+        op_id = view.get("private_metadata") or ""
+        hint_text = (
+            view.get("state", {})
+            .get("values", {})
+            .get("hint_block", {})
+            .get("hint_input", {})
+            .get("value")
+            or ""
+        )
+        await handle_review_action(
+            runner=runner,
+            ledger_store=ledger_store,
+            db=db,
+            slack_client=sync_client,
+            op_id=op_id,
+            action="reextract_as",
+            app_name=app_name,
+            hint=hint_text or None,
+        )
 
     # --- onboarding + commands (reuse parked sync handlers off-thread) ---
 

@@ -560,6 +560,136 @@ def approval_outcome_blocks(summary: str, decision: str) -> list:
     ]
 
 
+def review_card_blocks(question: str, op_id: str, reasons: list[str] | None = None) -> list:
+    """Mid-flow HITL card for a :review interrupt from ``review_extraction_node``.
+
+    Shows the reviewer's precise question + a short bullet summary of the
+    struggle signals that triggered the escalation.  Three buttons let the human
+    steer the re-extraction without ever touching the ledger:
+
+    * ``review_reextract`` — opens a hint-input modal so the human can describe
+      what the extractor missed (e.g. "this is a tax invoice, not a receipt").
+    * ``review_confirm`` — waves the current extraction through unchanged.
+    * ``review_reject`` — drops the document entirely (mirrors the approval Reject).
+
+    Each button carries ``op_id`` (the ``:review`` interrupt id) as its ``value``
+    so the action handler can resume the correct paused session.
+
+    Args:
+        question: Human-facing question produced by ``review_extraction_node``
+                  (stored in ``state["review_question"]``).
+        op_id:    The ``:review`` interrupt id.
+        reasons:  List of struggle signals from ``state[REVIEW_REASON_KEY]``.
+                  Rendered as bullets under the question; ``None`` or empty hides
+                  the bullets section.
+    """
+    header = ":mag: *Extraction needs your input*"
+    body = question
+    if reasons:
+        bullets = "\n".join(f"  • {r}" for r in reasons)
+        body = f"{question}\n\n*Signals detected:*\n{bullets}"
+
+    blocks: list[dict] = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"{header}\n{body}",
+            },
+        },
+        {
+            "type": "actions",
+            "block_id": "ledgr_review",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Re-extract with a hint", "emoji": True},
+                    "action_id": "review_reextract",
+                    "style": "primary",
+                    "value": op_id,
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Looks right, keep it", "emoji": True},
+                    "action_id": "review_confirm",
+                    "value": op_id,
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Reject this doc", "emoji": True},
+                    "action_id": "review_reject",
+                    "style": "danger",
+                    "value": op_id,
+                },
+            ],
+        },
+    ]
+    return blocks
+
+
+def review_outcome_blocks(question: str, action: str) -> list:
+    """Replacement card (via ``chat_update``) showing the resolved review outcome.
+
+    Args:
+        question: The original reviewer question (carried from the interrupt doc).
+        action:   One of ``"reextract_as"``, ``"confirm_as_is"``, or ``"reject"``.
+    """
+    icon = {
+        "reextract_as": ":arrows_counterclockwise:",
+        "confirm_as_is": ":white_check_mark:",
+        "reject": ":x:",
+    }.get(action, ":information_source:")
+    verb = {
+        "reextract_as": "Re-extracting with your hint",
+        "confirm_as_is": "Extraction accepted — continuing",
+        "reject": "Rejected",
+    }.get(action, action.replace("_", " ").title())
+    return [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"{icon} *{verb}.* {question}"},
+        }
+    ]
+
+
+def review_hint_modal(op_id: str) -> dict:
+    """Modal for the 'Re-extract with a hint' button.
+
+    A single plain-text input collects the human's free-text hint.  The modal's
+    ``private_metadata`` carries ``op_id`` so the view-submission handler can
+    resume the correct session.  ``callback_id`` = ``"ledgr_review_hint"`` so
+    the Bolt ``@app.view`` decorator can route it.
+    """
+    return {
+        "type": "modal",
+        "callback_id": "ledgr_review_hint",
+        "private_metadata": op_id,
+        "title": {"type": "plain_text", "text": "Hint for re-extraction", "emoji": True},
+        "submit": {"type": "plain_text", "text": "Re-extract", "emoji": True},
+        "close": {"type": "plain_text", "text": "Cancel", "emoji": True},
+        "blocks": [
+            {
+                "type": "input",
+                "block_id": "hint_block",
+                "label": {
+                    "type": "plain_text",
+                    "text": "What should the extractor know?",
+                    "emoji": True,
+                },
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "hint_input",
+                    "multiline": True,
+                    "placeholder": {
+                        "type": "plain_text",
+                        "text": "e.g. 'This is a tax invoice. The supplier is GST-registered.'",
+                    },
+                },
+            }
+        ],
+    }
+
+
 def coa_prompt_blocks() -> list:
     """Blocks posted in-channel after a profile is saved, asking for COA."""
     return [
