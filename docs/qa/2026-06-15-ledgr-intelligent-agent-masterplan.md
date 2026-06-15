@@ -67,6 +67,38 @@ them before they reached the workbook.
 6. Tax determination is rules + fallback — same limitation.
 7. The router is the dumbest possible edge (intent ∈ {document, question, unknown}).
 
+### 3.1 Extraction-engine reality (evidence-mapped 2026-06-15)
+
+A direct code read of the extractors answers "does a NEW kind of document break it?" — the answer
+is three-layered and matters for where we add intelligence:
+
+- **The reader IS adaptive.** Extraction is a multimodal LLM (`gemini` flash, temperature=0) that
+  *looks* at the PDF/image against a fixed Pydantic schema — NOT per-vendor templates or hardcoded
+  Python parsing (`invoice_processing/extract/invoice_extractor.py:200`, `_BUNDLE_PROMPT:157`;
+  `bank_statement_extractor.py` hybrid digital/vision). A never-seen invoice/receipt/bank LAYOUT of
+  a KNOWN type reads fine. Multi-invoice PDFs, rotated multi-receipt scans, SOA packages, and
+  multi-account statements are explicitly handled. **New layouts are a strength, not a break risk.**
+- **The structure around it is rigid.** Output schema is fixed; doc types are a CLOSED list
+  (`invoice, receipt, bank_statement, credit_note, statement_of_account, other` —
+  `document_classifier.py:24`); a type not in the list is silently coerced to `"other"` and still
+  routed down the invoice path. Tax is pure hardcoded Python + a YAML substring-keyword list,
+  defaulting to `"SR"` (0.4 conf + flag) on anything unfamiliar (`tax_classifier.py`).
+- **The real gap is SILENT failure, not crashes.** When the adaptive reader meets something that
+  doesn't fit the rigid structure, it emits a wrong-but-valid result and passes it forward: unknown
+  type → processed as invoice; 0 lines / 0 invoices → empty result flows downstream with no retry
+  and no "I'm unsure"; novel bank column layout → possible silent data loss. A malformed LLM
+  response (rare) raises a Pydantic error that is CAUGHT at the handler
+  (`slack_runner.py:1210`/`1437`) — so the **bot never crashes**, but that document silently gets no
+  result. In accounting, a silently-wrong number is worse than a loud crash.
+
+**Implication (drives §6/§7):** the engine already has the intelligent part (an LLM reader). What's
+missing is the *inspector that notices when the reader struggled* (empty lines, unreconciled totals,
+low confidence, coerced `"other"`, 0 records) and retries-with-hints or asks the user — i.e.
+**E-Move 1 (extract reviewer)** is the direct, evidence-backed fix, and it must fire only on those
+cheap deterministic struggle-signals so the happy path stays free. A second target this surfaces:
+**doc-type flexibility** — handle credit notes / purchase orders / payslips with the right shape
+instead of jamming everything into the invoice schema.
+
 ## 4. The unified architecture — one brain, two surfaces
 
 ```
