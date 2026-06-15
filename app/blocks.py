@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import urllib.parse
+
 from app.native_blocks_compat import supports_native_blocks
 
 # Ordered pipeline stage keys and their display titles.
@@ -387,39 +389,73 @@ def per_doc_card(
     return _per_doc_card_fallback(doc, actions=actions, op_id=op_id)
 
 
+def _doc_get(doc, *keys, default=None):
+    """Retrieve a value from doc, supporting both attribute-style objects and plain dicts."""
+    for key in keys:
+        val = doc.get(key) if isinstance(doc, dict) else getattr(doc, key, None)
+        if val is not None:
+            return val
+    return default
+
+
 def _per_doc_card_native(doc, *, actions: list[str], op_id: str | None) -> list[dict]:
+    doc_type = _doc_get(doc, "doc_type")
     is_bank = (
-        getattr(doc, "doc_type", None) in ("bank_statement", "bank")
-        or getattr(doc, "bank", None) is not None
+        doc_type in ("bank_statement", "bank")
+        or _doc_get(doc, "bank") is not None
     )
 
     if is_bank:
-        bank = getattr(doc, "bank", None)
-        accounts = getattr(bank, "accounts", None) or []
-        title_raw = (
-            ", ".join(a.bank_name for a in accounts if getattr(a, "bank_name", None))
-            or "Bank statement"
-        )
-        period = next(
-            (a.statement_period for a in accounts if getattr(a, "statement_period", None)),
-            None,
-        )
-        n_txns = sum(len(getattr(a, "transactions", []) or []) for a in accounts)
-        subtitle_raw = period or ""
-        body_raw = f"{n_txns} transaction{'s' if n_txns != 1 else ''}"
+        bank = _doc_get(doc, "bank")
+        if isinstance(bank, dict):
+            # plain-dict bank shape: keys bank_name, period, txn_count
+            title_raw = bank.get("bank_name") or "Bank statement"
+            subtitle_raw = bank.get("period") or ""
+            n_txns = bank.get("txn_count") or bank.get("account_number") and 0 or 0
+            body_raw = f"{n_txns} transaction{'s' if n_txns != 1 else ''}"
+        else:
+            accounts = getattr(bank, "accounts", None) or []
+            title_raw = (
+                ", ".join(a.bank_name for a in accounts if getattr(a, "bank_name", None))
+                or "Bank statement"
+            )
+            period = next(
+                (a.statement_period for a in accounts if getattr(a, "statement_period", None)),
+                None,
+            )
+            n_txns = sum(len(getattr(a, "transactions", []) or []) for a in accounts)
+            subtitle_raw = period or ""
+            body_raw = f"{n_txns} transaction{'s' if n_txns != 1 else ''}"
     else:
-        norm = getattr(doc, "normalized", None)
-        direction = (getattr(doc, "direction", None) or "").strip().lower()
-        party = None
-        if norm is not None:
-            party = norm.customer if direction == "sales" else norm.supplier
-        title_raw = (getattr(party, "name", None) or "Unknown").strip() or "Unknown"
+        # Try plain-dict doc shape first (keys: counterparty, invoice_number, etc.)
+        counterparty = _doc_get(doc, "counterparty")
+        if counterparty is not None:
+            title_raw = counterparty.strip() or "Unknown"
+            inv_no = _doc_get(doc, "invoice_number")
+            inv_date = _doc_get(doc, "invoice_date")
+            date_str = str(inv_date) if inv_date else ""
+            currency = _doc_get(doc, "currency") or "SGD"
+            total = _doc_get(doc, "total")
+            tax_code = _doc_get(doc, "tax_code")
+            account_code = _doc_get(doc, "account_code")
+        else:
+            # Object-style ProcessedDoc
+            norm = _doc_get(doc, "normalized")
+            direction = (_doc_get(doc, "direction") or "").strip().lower()
+            party = None
+            if norm is not None:
+                party = norm.customer if direction == "sales" else norm.supplier
+            title_raw = (getattr(party, "name", None) or "Unknown").strip() or "Unknown"
+            inv_no = getattr(norm, "invoice_number", None)
+            inv_date = getattr(norm, "invoice_date", None)
+            date_str = (
+                inv_date.isoformat() if inv_date and hasattr(inv_date, "isoformat") else str(inv_date)
+            ) if inv_date else ""
+            currency = getattr(norm, "currency", None) or "SGD"
+            total = getattr(norm, "doc_total", None)
+            tax_code = None
+            account_code = None
 
-        inv_no = getattr(norm, "invoice_number", None)
-        inv_date = getattr(norm, "invoice_date", None)
-        date_str = (
-            inv_date.isoformat() if inv_date and hasattr(inv_date, "isoformat") else str(inv_date)
-        ) if inv_date else ""
         subtitle_parts = []
         if inv_no:
             subtitle_parts.append(f"Invoice #{inv_no}")
@@ -427,13 +463,22 @@ def _per_doc_card_native(doc, *, actions: list[str], op_id: str | None) -> list[
             subtitle_parts.append(date_str)
         subtitle_raw = " · ".join(subtitle_parts)
 
-        total = getattr(norm, "doc_total", None)
-        currency = getattr(norm, "currency", None) or "SGD"
-        body_raw = _fmt_money(total, currency)
+        body_parts = [_fmt_money(total, currency)]
+        if tax_code:
+            body_parts.append(tax_code)
+        if account_code:
+            body_parts.append(str(account_code))
+        body_raw = " · ".join(p for p in body_parts if p and p != "—")
 
-    route = getattr(doc, "route", None)
-    fy = getattr(route, "fy", None)
-    workbook = getattr(route, "workbook", None)
+    # Route / FY / workbook suffix — works for both plain dicts and objects.
+    fy = _doc_get(doc, "fy")
+    workbook = _doc_get(doc, "workbook_name")
+    if fy is None or workbook is None:
+        route = _doc_get(doc, "route")
+        if route is not None:
+            fy = fy if fy is not None else getattr(route, "fy", None)
+            workbook = workbook if workbook is not None else getattr(route, "workbook", None)
+
     body_suffix_parts = []
     if fy is not None:
         body_suffix_parts.append(f"FY{fy}")
@@ -445,51 +490,67 @@ def _per_doc_card_native(doc, *, actions: list[str], op_id: str | None) -> list[
     else:
         full_body = body_raw
 
+    # Bug 1 fix: title/subtitle/body must be mrkdwn text objects, not bare strings.
     card: dict = {
         "type": "card",
-        "title": _truncate(title_raw, _MAX_CARD_TITLE),
-        "subtitle": _truncate(subtitle_raw, _MAX_CARD_TITLE) if subtitle_raw else None,
-        "body": _truncate(full_body, _MAX_CARD_BODY) if full_body else None,
+        "title": {"type": "mrkdwn", "text": _truncate(title_raw, _MAX_CARD_TITLE)},
     }
+    if subtitle_raw:
+        card["subtitle"] = {"type": "mrkdwn", "text": _truncate(subtitle_raw, _MAX_CARD_TITLE)}
+    if full_body:
+        card["body"] = {"type": "mrkdwn", "text": _truncate(full_body, _MAX_CARD_BODY)}
 
-    needs_review = getattr(doc, "reconciled", True) is False
+    # reconciled check: plain dicts use key "reconciled", objects use attribute.
+    reconciled = _doc_get(doc, "reconciled")
+    needs_review = reconciled is False
     if needs_review:
-        note = (getattr(doc, "note", "") or "").strip()
+        note = (_doc_get(doc, "note") or "").strip()
         if note.upper().startswith("ERROR"):
             label = "failed to process"
         else:
             label = "needs review"
         reason = note if len(note) <= _MAX_CARD_BODY else note[: _MAX_CARD_BODY - 1] + "…"
         subtext = f"{label} — {reason}" if reason else label
-        card["subtext"] = subtext[: _MAX_CARD_BODY] if len(subtext) > _MAX_CARD_BODY else subtext
-
-    # Remove None-valued fields so the block is clean.
-    card = {k: v for k, v in card.items() if v is not None}
+        subtext_val = subtext[: _MAX_CARD_BODY] if len(subtext) > _MAX_CARD_BODY else subtext
+        # Bug 1 fix: subtext must also be a mrkdwn text object.
+        card["subtext"] = {"type": "mrkdwn", "text": subtext_val}
 
     if actions:
-        file_id = getattr(doc, "file_id", None) or getattr(doc, "path", None) or ""
-        btn_value = op_id or file_id or ""
-        button_defs = {
-            "reextract": {
+        # Bug 2 fix: resolve file_id from plain dict keys first, then object attrs.
+        file_id = (
+            _doc_get(doc, "file_id")
+            or _doc_get(doc, "doc_key")
+            or _doc_get(doc, "doc_id")
+            or (getattr(doc, "path", None) if not isinstance(doc, dict) else None)
+        )
+
+        def _btn(action_id: str, label: str, value: str | None) -> dict | None:
+            """Return a button dict, or None if value is empty (Bug 3 fix)."""
+            resolved = op_id if action_id == "ledgr_per_doc_edit" else value
+            resolved = resolved or op_id or file_id
+            if not resolved:
+                import warnings
+                warnings.warn(
+                    f"per_doc_card: omitting {action_id!r} button — no usable value",
+                    stacklevel=4,
+                )
+                return None
+            return {
                 "type": "button",
-                "text": {"type": "plain_text", "text": "Re-extract"},
-                "action_id": "ledgr_per_doc_reextract",
-                "value": file_id or btn_value,
-            },
-            "edit": {
-                "type": "button",
-                "text": {"type": "plain_text", "text": "Edit"},
-                "action_id": "ledgr_per_doc_edit",
-                "value": op_id or file_id or "",
-            },
-            "view_row": {
-                "type": "button",
-                "text": {"type": "plain_text", "text": "View row"},
-                "action_id": "ledgr_per_doc_view_row",
-                "value": file_id or "",
-            },
+                "text": {"type": "plain_text", "text": label},
+                "action_id": action_id,
+                "value": resolved,
+            }
+
+        button_builders = {
+            "reextract": lambda: _btn("ledgr_per_doc_reextract", "Re-extract", file_id),
+            "edit":      lambda: _btn("ledgr_per_doc_edit",      "Edit",        op_id or file_id),
+            "view_row":  lambda: _btn("ledgr_per_doc_view_row",  "View row",    file_id),
         }
-        card["actions"] = [button_defs[a] for a in actions if a in button_defs]
+        built = [button_builders[a]() for a in actions if a in button_builders]
+        non_empty = [b for b in built if b is not None]
+        if non_empty:
+            card["actions"] = non_empty
 
     return [card]
 
@@ -1162,6 +1223,86 @@ def invoice_edit_modal(op_id: str, lines: list[dict], coa_options: list[tuple[st
         "close": {"type": "plain_text", "text": "Cancel"},
         "blocks": blocks,
     }
+
+
+def _dedup_value(vendor: str, fy: int, month: str, op_id: str | None) -> str:
+    # Format: vendor|fy|month|op_id  — month/vendor are %-encoded so "|" is safe as delimiter.
+    # op_id falls back to "-" so button value is never empty (Slack rejects "value": "").
+    return "|".join([
+        urllib.parse.quote(vendor, safe="") or "-",
+        str(fy) or "0",
+        urllib.parse.quote(month, safe="") or "-",
+        op_id or "-",
+    ])
+
+
+def dedup_callout_card(
+    *,
+    vendor: str,
+    fy: int,
+    month: str,
+    existing: dict,
+    incoming: dict,
+    op_id: str | None = None,
+    channel_id: str | None = None,
+) -> list[dict]:
+    """Yellow-warning card posted when the dedup guard finds a duplicate month/vendor.
+
+    Args:
+        vendor:   Vendor or counterparty name.
+        fy:       Financial year integer (e.g. 2025).
+        month:    Human month label (e.g. "September 2025").
+        existing: ``{"rows": int, "date_range": str, "workbook": str}`` for what's recorded.
+        incoming: ``{"rows": int, "date_range": str, "file_label": str}`` for the new file.
+        op_id:    Optional run/interrupt id threaded into button values.
+        channel_id: Used by supports_native_blocks() for per-channel probe.
+    """
+    title_text = f"⚠️ I already have *{month}* invoices for {vendor}"
+    subtitle_text = f"FY{fy} · {existing.get('workbook', '')}"
+    body_raw = (
+        f"*Existing:* {existing.get('rows', 0)} rows · {existing.get('date_range', '—')}\n"
+        f"*Incoming:* {incoming.get('rows', 0)} rows · {incoming.get('date_range', '—')}"
+    )
+    body_text = body_raw if len(body_raw) <= _MAX_CARD_BODY else body_raw[: _MAX_CARD_BODY - 1] + "…"
+
+    btn_value = _dedup_value(vendor, fy, month, op_id)
+    replace_btn = {
+        "type": "button",
+        "text": {"type": "plain_text", "text": "Replace recorded month"},
+        "style": "danger",
+        "action_id": "ledgr_dedup_replace",
+        "value": btn_value,
+    }
+    keep_btn = {
+        "type": "button",
+        "text": {"type": "plain_text", "text": "Keep existing"},
+        "action_id": "ledgr_dedup_keep",
+        "value": btn_value,
+    }
+
+    if supports_native_blocks(channel_id):
+        return [
+            {
+                "type": "card",
+                "title": {"type": "mrkdwn", "text": title_text},
+                "subtitle": {"type": "mrkdwn", "text": subtitle_text},
+                "body": {"type": "mrkdwn", "text": body_text},
+                "actions": [replace_btn, keep_btn],
+            }
+        ]
+
+    # Fallback: section with concatenated text + actions block.
+    fallback_text = f"{title_text}\n{subtitle_text}\n{body_text}"
+    return [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": fallback_text},
+        },
+        {
+            "type": "actions",
+            "elements": [replace_btn, keep_btn],
+        },
+    ]
 
 
 def profile_summary_blocks(profile: dict) -> list:

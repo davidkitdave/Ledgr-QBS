@@ -3932,3 +3932,132 @@ def test_per_doc_view_row_posts_coming_soon_ephemeral():
     assert kwargs["channel"] == "C-VR-1"
     assert kwargs["user"] == "U-VR-1"
     assert "coming soon" in kwargs["text"].lower()
+
+
+# --------------------------------------------------------------------------- #
+# Commit 3: dedup callout card action handlers
+# --------------------------------------------------------------------------- #
+
+
+def _capture_dedup_handlers(runner_mock=None, ledger_store_mock=None, db_mock=None):
+    """Build the Bolt app with fakes; capture the dedup action handlers."""
+    from unittest.mock import MagicMock, patch
+
+    from app.slack_app import _SeenEvents
+    from accounting_agents import slack_runner
+
+    registered = {"actions": {}, "views": {}}
+
+    def action_decorator(action_id, *a, **k):
+        def decorator(fn):
+            registered["actions"][action_id] = fn
+            return fn
+        return decorator
+
+    def view_decorator(callback_id, *a, **k):
+        def decorator(fn):
+            registered["views"][callback_id] = fn
+            return fn
+        return decorator
+
+    fake_app = MagicMock()
+    fake_app.event = lambda *a, **k: (lambda fn: fn)
+    fake_app.action = action_decorator
+    fake_app.view = view_decorator
+    fake_app.command = lambda *a, **k: (lambda fn: fn)
+
+    fresh_seen = _SeenEvents()
+    rm = runner_mock or _FakeActionViewRunner()
+
+    with patch.object(slack_runner, "_seen", fresh_seen), \
+         patch("slack_bolt.async_app.AsyncApp", return_value=fake_app), \
+         patch("invoice_processing.export.client_context.FirestoreClientStore"), \
+         patch.object(slack_runner, "build_chat_runner",
+                      return_value=SimpleNamespace(app_name="accounting_agents_assistant")):
+        build_async_app(
+            runner=rm,
+            ledger_store=ledger_store_mock or MagicMock(),
+            db=db_mock or MagicMock(),
+        )
+
+    return (
+        registered["actions"]["ledgr_dedup_replace"],
+        registered["actions"]["ledgr_dedup_keep"],
+    )
+
+
+def test_dedup_replace_handler_is_registered():
+    """ledgr_dedup_replace handler must be registered in build_async_app."""
+    replace_handler, _ = _capture_dedup_handlers()
+    assert callable(replace_handler)
+
+
+def test_dedup_keep_handler_is_registered():
+    """ledgr_dedup_keep handler must be registered in build_async_app."""
+    _, keep_handler = _capture_dedup_handlers()
+    assert callable(keep_handler)
+
+
+def test_dedup_replace_posts_ephemeral_with_label():
+    """ledgr_dedup_replace acks and posts an ephemeral describing the replace intent."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+    import urllib.parse
+
+    sync_client = MagicMock()
+    with patch("slack_sdk.WebClient", return_value=sync_client):
+        replace_handler, _ = _capture_dedup_handlers()
+
+    vendor_enc = urllib.parse.quote("Acme Supplies", safe="")
+    month_enc = urllib.parse.quote("September 2025", safe="")
+    btn_value = f"{vendor_enc}|2025|{month_enc}|OP-42"
+
+    body = {
+        "actions": [{"action_id": "ledgr_dedup_replace", "value": btn_value}],
+        "channel": {"id": "C-DEDUP-1"},
+        "message": {"ts": "111.222"},
+        "user": {"id": "U-DEDUP-1"},
+    }
+    ack = AsyncMock()
+    asyncio.run(replace_handler(ack=ack, body=body, client=MagicMock()))
+
+    ack.assert_awaited_once()
+    sync_client.chat_postEphemeral.assert_called_once()
+    kwargs = sync_client.chat_postEphemeral.call_args.kwargs
+    assert kwargs["channel"] == "C-DEDUP-1"
+    assert "September 2025" in kwargs["text"]
+    assert "Acme Supplies" in kwargs["text"]
+
+
+def test_dedup_keep_updates_message_to_kept_outcome():
+    """ledgr_dedup_keep acks and edits the dedup card to the kept-existing outcome."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+    import urllib.parse
+
+    sync_client = MagicMock()
+    with patch("slack_sdk.WebClient", return_value=sync_client):
+        _, keep_handler = _capture_dedup_handlers()
+
+    vendor_enc = urllib.parse.quote("Acme Supplies", safe="")
+    month_enc = urllib.parse.quote("September 2025", safe="")
+    btn_value = f"{vendor_enc}|2025|{month_enc}|-"
+
+    body = {
+        "actions": [{"action_id": "ledgr_dedup_keep", "value": btn_value}],
+        "channel": {"id": "C-DEDUP-2"},
+        "message": {"ts": "333.444"},
+        "user": {"id": "U-DEDUP-2"},
+    }
+    ack = AsyncMock()
+    asyncio.run(keep_handler(ack=ack, body=body, client=MagicMock()))
+
+    ack.assert_awaited_once()
+    sync_client.chat_update.assert_called_once()
+    kwargs = sync_client.chat_update.call_args.kwargs
+    assert kwargs["channel"] == "C-DEDUP-2"
+    assert kwargs["ts"] == "333.444"
+    assert "Kept existing" in kwargs["text"]
+    assert "September 2025" in kwargs["text"]
+    assert "Acme Supplies" in kwargs["text"]
+    # The updated message must have a blocks list (not raw text only)
+    assert isinstance(kwargs.get("blocks"), list)
+    assert len(kwargs["blocks"]) >= 1

@@ -7,9 +7,13 @@ from datetime import date
 import pytest
 
 import app.native_blocks_compat as compat
+import urllib.parse
+
 from app.blocks import (
+    _dedup_value,
     approval_card_blocks,
     coa_prompt_blocks,
+    dedup_callout_card,
     invoice_edit_modal,
     job_summary_text,
     onboarding_modal,
@@ -716,24 +720,43 @@ class TestPerDocCardNative:
         assert len(blocks) == 1
         assert blocks[0]["type"] == "card"
 
+    def test_invoice_title_is_mrkdwn_object(self):
+        """Bug 1 regression: title must be a mrkdwn text object, not a bare string."""
+        doc = _invoice_doc(supplier_name="Acme Inc")
+        card = per_doc_card(doc)[0]
+        assert isinstance(card["title"], dict), "title must be a dict"
+        assert card["title"]["type"] == "mrkdwn"
+        assert card["title"]["text"] == "Acme Inc"
+
     def test_invoice_title_is_vendor_name(self):
         doc = _invoice_doc(supplier_name="Acme Inc")
         card = per_doc_card(doc)[0]
-        assert card["title"] == "Acme Inc"
-        assert isinstance(card["title"], str)
+        assert card["title"]["text"] == "Acme Inc"
 
     def test_invoice_subtitle_contains_number_and_date(self):
         doc = _invoice_doc(invoice_number="INV-007", invoice_date=date(2025, 9, 15))
         card = per_doc_card(doc)[0]
-        assert "Invoice #INV-007" in card["subtitle"]
-        assert "2025-09-15" in card["subtitle"]
+        subtitle_text = card["subtitle"]["text"]
+        assert "Invoice #INV-007" in subtitle_text
+        assert "2025-09-15" in subtitle_text
 
     def test_invoice_body_contains_total_and_workbook(self):
         doc = _invoice_doc(doc_total=1234.5)
         card = per_doc_card(doc)[0]
-        assert "1,234.50" in card["body"]
-        assert "FY2025" in card["body"]
-        assert "Ledger_FY2025.xlsx" in card["body"]
+        body_text = card["body"]["text"]
+        assert "1,234.50" in body_text
+        assert "FY2025" in body_text
+        assert "Ledger_FY2025.xlsx" in body_text
+
+    def test_card_fields_are_mrkdwn_objects(self):
+        """Regression: all text fields on the card block must be mrkdwn objects."""
+        doc = _invoice_doc(supplier_name="Vendor", invoice_number="INV-1", doc_total=99.0)
+        card = per_doc_card(doc)[0]
+        for field in ("title", "subtitle", "body"):
+            if field in card:
+                assert isinstance(card[field], dict), f"{field} must be a dict"
+                assert card[field].get("type") == "mrkdwn", f"{field} type must be mrkdwn"
+                assert isinstance(card[field].get("text"), str), f"{field}.text must be a str"
 
     def test_three_actions_in_order(self):
         doc = _invoice_doc()
@@ -760,13 +783,14 @@ class TestPerDocCardNative:
     def test_reconciled_false_adds_needs_review_subtext(self):
         doc = _invoice_doc(reconciled=False, note="missing supplier GST no.")
         card = per_doc_card(doc)[0]
-        assert "needs review" in card["subtext"]
-        assert "missing supplier GST no." in card["subtext"]
+        subtext_text = card["subtext"]["text"]
+        assert "needs review" in subtext_text
+        assert "missing supplier GST no." in subtext_text
 
     def test_error_note_uses_failed_to_process_label(self):
         doc = _invoice_doc(reconciled=False, note="ERROR: pipeline blew up")
         card = per_doc_card(doc)[0]
-        assert "failed to process" in card["subtext"]
+        assert "failed to process" in card["subtext"]["text"]
 
     def test_clean_doc_has_no_subtext(self):
         doc = _invoice_doc(reconciled=True)
@@ -792,8 +816,9 @@ class TestPerDocCardNative:
             note="ok",
         )
         card = per_doc_card(doc)[0]
-        assert len(card["body"]) <= 200
-        assert card["body"].endswith("…")
+        body_text = card["body"]["text"]
+        assert len(body_text) <= 200
+        assert body_text.endswith("…")
 
     def test_bank_doc_title_is_bank_name(self):
         from invoice_processing.extract.bank_statement_extractor import (
@@ -814,8 +839,10 @@ class TestPerDocCardNative:
             note="ok",
         )
         card = per_doc_card(doc)[0]
-        assert card["title"] == "OCBC - 5001"
-        assert "DEC 2024" in card.get("subtitle", "") or "DEC 2024" in card.get("body", "")
+        assert card["title"]["text"] == "OCBC - 5001"
+        subtitle_text = card.get("subtitle", {}).get("text", "")
+        body_text = card.get("body", {}).get("text", "")
+        assert "DEC 2024" in subtitle_text or "DEC 2024" in body_text
 
     def test_bank_doc_type_is_card(self):
         from invoice_processing.extract.bank_statement_extractor import ExtractedBankStatement
@@ -831,6 +858,55 @@ class TestPerDocCardNative:
         )
         blocks = per_doc_card(doc)
         assert blocks[0]["type"] == "card"
+
+    def test_plain_dict_doc_renders_correctly(self):
+        """Bug 2 regression: plain dict with canonical pipeline keys must not produce
+        'Unknown'/'—' titles or empty button values."""
+        doc = {
+            "doc_type": "invoice",
+            "counterparty": "Acme Trading Pte Ltd",
+            "invoice_number": "INV-2025-0042",
+            "invoice_date": "2025-09-15",
+            "currency": "SGD",
+            "total": 1234.50,
+            "tax_code": "SR",
+            "account_code": "6090",
+            "fy": 2025,
+            "workbook_name": "Purchase Ledger FY2025",
+            "file_id": "F999CARD",
+            "reconciled": True,
+        }
+        card = per_doc_card(doc, actions=["reextract", "edit", "view_row"])[0]
+        assert card["type"] == "card"
+        assert card["title"]["text"] == "Acme Trading Pte Ltd"
+        assert card["title"]["text"] != "Unknown"
+        subtitle_text = card.get("subtitle", {}).get("text", "")
+        assert "INV-2025-0042" in subtitle_text
+        body_text = card.get("body", {}).get("text", "")
+        assert "1,234.50" in body_text
+        assert "FY2025" in body_text
+        # Bug 3 regression: no button with empty value
+        for btn in card.get("actions", []):
+            assert btn["value"], f"button {btn['action_id']!r} has empty value"
+
+    def test_plain_dict_button_omitted_when_no_file_id(self):
+        """Bug 3: buttons are omitted (not emitted with empty value) when no file_id."""
+        import warnings
+        doc = {
+            "doc_type": "invoice",
+            "counterparty": "Acme",
+            "invoice_number": "INV-1",
+            "invoice_date": "2025-01-01",
+            "currency": "SGD",
+            "total": 100.0,
+            # no file_id, no doc_key, no doc_id
+        }
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            card = per_doc_card(doc, actions=["reextract", "edit", "view_row"])[0]
+        # All buttons should be omitted since there's no usable value at all
+        for btn in card.get("actions", []):
+            assert btn["value"], f"button {btn['action_id']!r} has empty value"
 
 
 class TestPerDocCardFallback:
@@ -924,4 +1000,168 @@ class TestResultCardFallbackMode:
         assert len(action_blocks) == 1
         action_ids = [el["action_id"] for el in action_blocks[0]["elements"]]
         assert "ledgr_per_doc_reextract" in action_ids
+
+
+# --------------------------------------------------------------------------- #
+# Commit 3: dedup_callout_card
+# --------------------------------------------------------------------------- #
+
+_EXISTING = {"rows": 12, "date_range": "September 2025", "workbook": "Acme - Ledger_FY2025.xlsx"}
+_INCOMING = {"rows": 8, "date_range": "September 2025", "file_label": "Invoice-Sept.pdf"}
+
+
+class TestDedupCalloutCardNative:
+
+    @pytest.fixture(autouse=True)
+    def _force_native(self, monkeypatch):
+        monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
+
+    def test_returns_one_card_block(self):
+        blocks = dedup_callout_card(
+            vendor="Acme Supplies", fy=2025, month="September 2025",
+            existing=_EXISTING, incoming=_INCOMING,
+        )
+        assert len(blocks) == 1
+        assert blocks[0]["type"] == "card"
+
+    def test_title_is_mrkdwn_object(self):
+        card = dedup_callout_card(
+            vendor="Acme Supplies", fy=2025, month="September 2025",
+            existing=_EXISTING, incoming=_INCOMING,
+        )[0]
+        title = card["title"]
+        assert isinstance(title, dict)
+        assert title["type"] == "mrkdwn"
+        assert "September 2025" in title["text"]
+        assert "Acme Supplies" in title["text"]
+
+    def test_subtitle_is_mrkdwn_object_with_fy_and_workbook(self):
+        card = dedup_callout_card(
+            vendor="Acme Supplies", fy=2025, month="September 2025",
+            existing=_EXISTING, incoming=_INCOMING,
+        )[0]
+        subtitle = card["subtitle"]
+        assert isinstance(subtitle, dict)
+        assert subtitle["type"] == "mrkdwn"
+        assert "FY2025" in subtitle["text"]
+        assert "Acme - Ledger_FY2025.xlsx" in subtitle["text"]
+
+    def test_body_is_mrkdwn_object_with_row_counts(self):
+        card = dedup_callout_card(
+            vendor="Acme Supplies", fy=2025, month="September 2025",
+            existing=_EXISTING, incoming=_INCOMING,
+        )[0]
+        body = card["body"]
+        assert isinstance(body, dict)
+        assert body["type"] == "mrkdwn"
+        assert "12" in body["text"]
+        assert "8" in body["text"]
+
+    def test_two_actions_replace_is_danger(self):
+        card = dedup_callout_card(
+            vendor="Acme Supplies", fy=2025, month="September 2025",
+            existing=_EXISTING, incoming=_INCOMING,
+        )[0]
+        actions = card["actions"]
+        assert len(actions) == 2
+        replace_btn = actions[0]
+        assert replace_btn["action_id"] == "ledgr_dedup_replace"
+        assert replace_btn.get("style") == "danger"
+        keep_btn = actions[1]
+        assert keep_btn["action_id"] == "ledgr_dedup_keep"
+
+    def test_button_values_round_trip(self):
+        blocks = dedup_callout_card(
+            vendor="Acme Supplies", fy=2025, month="September 2025",
+            existing=_EXISTING, incoming=_INCOMING, op_id="OP-42",
+        )
+        card = blocks[0]
+        btn_value = card["actions"][0]["value"]
+        parts = btn_value.split("|")
+        assert urllib.parse.unquote(parts[0]) == "Acme Supplies"
+        assert parts[1] == "2025"
+        assert urllib.parse.unquote(parts[2]) == "September 2025"
+        assert parts[3] == "OP-42"
+
+    def test_button_value_never_empty(self):
+        blocks = dedup_callout_card(
+            vendor="", fy=0, month="", existing=_EXISTING, incoming=_INCOMING,
+        )
+        for btn in blocks[0]["actions"]:
+            assert btn["value"]
+            assert btn["value"] != ""
+
+    def test_body_capped_at_200_chars_with_ellipsis(self):
+        # date_range must be long enough to push the body over 200 chars.
+        long_dr = "D" * 250
+        existing_long = {"rows": 1, "date_range": long_dr, "workbook": "Ledger_FY2025.xlsx"}
+        card = dedup_callout_card(
+            vendor="V", fy=2025, month="Jan 2025",
+            existing=existing_long, incoming=_INCOMING,
+        )[0]
+        assert len(card["body"]["text"]) <= 200
+        assert card["body"]["text"].endswith("…")
+
+    def test_both_buttons_share_same_value(self):
+        card = dedup_callout_card(
+            vendor="Acme", fy=2025, month="Oct 2025",
+            existing=_EXISTING, incoming=_INCOMING,
+        )[0]
+        assert card["actions"][0]["value"] == card["actions"][1]["value"]
+
+
+class TestDedupCalloutCardFallback:
+
+    @pytest.fixture(autouse=True)
+    def _force_fallback(self, monkeypatch):
+        monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "0")
+
+    def test_returns_section_plus_actions(self):
+        blocks = dedup_callout_card(
+            vendor="Acme Supplies", fy=2025, month="September 2025",
+            existing=_EXISTING, incoming=_INCOMING,
+        )
+        assert len(blocks) == 2
+        assert blocks[0]["type"] == "section"
+        assert blocks[1]["type"] == "actions"
+
+    def test_section_text_contains_title_and_body(self):
+        blocks = dedup_callout_card(
+            vendor="Acme Supplies", fy=2025, month="September 2025",
+            existing=_EXISTING, incoming=_INCOMING,
+        )
+        text = blocks[0]["text"]["text"]
+        assert "September 2025" in text
+        assert "Acme Supplies" in text
+        assert "12" in text
+
+    def test_fallback_has_same_two_buttons(self):
+        blocks = dedup_callout_card(
+            vendor="Acme", fy=2025, month="Oct 2025",
+            existing=_EXISTING, incoming=_INCOMING,
+        )
+        action_ids = [el["action_id"] for el in blocks[1]["elements"]]
+        assert "ledgr_dedup_replace" in action_ids
+        assert "ledgr_dedup_keep" in action_ids
+
+
+class TestDedupValue:
+
+    def test_round_trips_vendor_and_month(self):
+        val = _dedup_value("Acme & Sons", 2025, "September 2025", "OP-1")
+        parts = val.split("|")
+        assert urllib.parse.unquote(parts[0]) == "Acme & Sons"
+        assert parts[1] == "2025"
+        assert urllib.parse.unquote(parts[2]) == "September 2025"
+        assert parts[3] == "OP-1"
+
+    def test_none_op_id_gives_dash_not_empty(self):
+        val = _dedup_value("V", 2025, "Jan 2025", None)
+        parts = val.split("|")
+        assert parts[3] == "-"
+
+    def test_empty_vendor_gives_dash(self):
+        val = _dedup_value("", 2025, "Jan 2025", None)
+        parts = val.split("|")
+        assert parts[0] == "-"
 

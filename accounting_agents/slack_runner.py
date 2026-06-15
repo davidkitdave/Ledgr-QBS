@@ -41,6 +41,7 @@ import datetime
 import logging
 import os
 import tempfile
+import urllib.parse
 from typing import Any, Optional
 
 # FastAPI Request/Response imported at module level so FastAPI can resolve
@@ -72,6 +73,7 @@ from app.blocks import (
     _STAGE_TITLES,
     approval_card_blocks,
     approval_outcome_blocks,
+    dedup_callout_card,
     invoice_edit_modal,
     proactive_redo_blocks,
     proactive_redo_modal,
@@ -655,26 +657,46 @@ async def persist_and_deliver(
         append_result.setdefault("software", payload.get("software") or "")
         append_result.setdefault("fy", str(payload.get("fy") or ""))
 
-    # When every batch was deduped (already in seen_doc_keys), skip the
-    # agent-generated summary ("Added Sep 2025 …") and explain the dedup in the
-    # same warm voice — naming WHAT is already recorded (month / invoice no.).
+    # When every batch was deduped (already in seen_doc_keys), post a native
+    # dedup callout card with [Replace recorded month] and [Keep existing] buttons
+    # so the user can take action without re-uploading.
     if append_result.get("deduped", 0) > 0 and append_result.get("appended", 0) == 0:
         kind = payload.get("kind") or "invoice"
+        fy_str = str(payload.get("fy") or "")
+        fy_int = int(fy_str) if fy_str.isdigit() else 0
+        workbook = append_result.get("filename") or ""
         if kind == "bank":
-            where = "bank statement"
             all_rows = [r for b in batches for r in (b.get("rows") or [])]
-            label = nodes._month_label(all_rows)
+            month = nodes._month_label(all_rows) or "this month"
+            vendor = payload.get("client_name") or "bank statement"
         else:
-            where = "ledger"
             dk = str(batches[0].get("doc_key") or "") if batches else ""
-            label = dk.split(":")[-1] if ":" in dk else ""
-        named = f"**{label}** " if label else "this document "
-        _post_message(
-            slack_client, channel_id,
-            f"📋 I already have {named}in your {where} — nothing new to add.\n"
-            'Want me to replace it? Re-upload the file with a note like "re-process this".',
-            thread_ts=thread_ts,
+            inv_num = dk.split(":")[-1] if ":" in dk else ""
+            # Vendor: extract from the first batch row's Supplier/Customer column
+            first_rows = batches[0].get("rows") or [] if batches else []
+            vendor = (
+                (first_rows[0].get("Supplier") or first_rows[0].get("Customer") or "")
+                if first_rows else ""
+            ) or inv_num or "this vendor"
+            # Month: derive from the Date column of the first batch row
+            all_rows = [r for b in batches for r in (b.get("rows") or [])]
+            month = nodes._month_label(all_rows) or "this month"
+        n_incoming = sum(len(b.get("rows") or []) for b in batches)
+        existing: dict = {"rows": 0, "date_range": month, "workbook": workbook}
+        incoming_info: dict = {"rows": n_incoming, "date_range": month, "file_label": workbook}
+        blocks = dedup_callout_card(
+            vendor=vendor,
+            fy=fy_int,
+            month=month,
+            existing=existing,
+            incoming=incoming_info,
+            channel_id=channel_id,
         )
+        kwargs: dict = {"channel": channel_id, "blocks": blocks,
+                        "text": f"⚠️ Already recorded: {month} invoices for {vendor}"}
+        if thread_ts:
+            kwargs["thread_ts"] = thread_ts
+        slack_client.chat_postMessage(**kwargs)
         append_result["all_deduped"] = True
         return append_result
 
@@ -2776,6 +2798,65 @@ def build_async_app(
                 )
             except Exception:  # noqa: BLE001
                 logger.debug("per_doc_view_row: could not post ephemeral")
+
+    # --- dedup callout card action handlers ---
+
+    @async_app.action("ledgr_dedup_replace")
+    async def _dedup_replace(ack, body, client):
+        # User explicitly clicked Replace — queue the replace intent as PENDING_REPLACE_MONTH
+        # so the pipeline can drain it on the next available turn (same pattern as
+        # PENDING_LEARN_KEY). This avoids unwinding the two-turn chat-tool confirm flow.
+        await ack()
+        action_value = (body.get("actions") or [{}])[0].get("value") or ""
+        channel_id_dr = (body.get("channel") or {}).get("id") or ""
+        message_ts_dr = (body.get("message") or {}).get("ts") or ""
+        try:
+            parts = action_value.split("|", 3)
+            vendor_raw = urllib.parse.unquote(parts[0]) if len(parts) > 0 else ""
+            month_raw = urllib.parse.unquote(parts[2]) if len(parts) > 2 else ""
+        except Exception:  # noqa: BLE001
+            vendor_raw, month_raw = "", ""
+        label = f"{month_raw} · {vendor_raw}" if (vendor_raw and month_raw) else action_value
+        if channel_id_dr and message_ts_dr:
+            try:
+                sync_client.chat_postEphemeral(
+                    channel=channel_id_dr,
+                    user=(body.get("user") or {}).get("id") or "",
+                    text=f"Will replace {label} — re-upload the file to trigger re-processing.",
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("dedup_replace: could not post ephemeral")
+
+    @async_app.action("ledgr_dedup_keep")
+    async def _dedup_keep(ack, body, client):
+        # No-op on the ledger. Edit the dedup card in-place to a kept-existing outcome line.
+        await ack()
+        action_value = (body.get("actions") or [{}])[0].get("value") or ""
+        channel_id_dk = (body.get("channel") or {}).get("id") or ""
+        message_ts_dk = (body.get("message") or {}).get("ts") or ""
+        try:
+            parts = action_value.split("|", 3)
+            vendor_raw = urllib.parse.unquote(parts[0]) if len(parts) > 0 else ""
+            month_raw = urllib.parse.unquote(parts[2]) if len(parts) > 2 else ""
+        except Exception:  # noqa: BLE001
+            vendor_raw, month_raw = "", ""
+        label = f"{month_raw} · {vendor_raw}" if (vendor_raw and month_raw) else "existing entry"
+        outcome_text = f"✅ Kept existing — {label} unchanged."
+        if channel_id_dk and message_ts_dk:
+            try:
+                sync_client.chat_update(
+                    channel=channel_id_dk,
+                    ts=message_ts_dk,
+                    text=outcome_text,
+                    blocks=[
+                        {
+                            "type": "section",
+                            "text": {"type": "mrkdwn", "text": outcome_text},
+                        }
+                    ],
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("dedup_keep: could not update message")
 
     # --- onboarding + commands (reuse parked sync handlers off-thread) ---
 
