@@ -765,6 +765,22 @@ def summarize_recent_activity(tool_context: ToolContext, days: str = "30") -> st
         if row.get("Review") or row.get("Flagged"):
             flagged_count += 1
 
+    if txn_count == 0:
+        # Find the most recent non-bank invoice date in the full dataset so the
+        # user knows what period IS available and can ask a smarter follow-up.
+        newest: date | None = None
+        for row in rows:
+            if _is_bank_row(row):
+                continue
+            rd = _parse_row_date(row.get("Date"))
+            if rd is not None and (newest is None or rd > newest):
+                newest = rd
+        newest_hint = f" The newest document I see is from {newest.isoformat()}." if newest else ""
+        return (
+            f"No transactions found in the last {window} days.{newest_hint}"
+            f" Ask me for that month or the full FY if you'd like a wider view."
+        )
+
     return json.dumps(
         {
             "period_days": window,

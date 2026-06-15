@@ -2557,6 +2557,197 @@ def test_silent_model_safety_net_surfaces_tool_result():
 
 
 # --------------------------------------------------------------------------- #
+# P0-2: chat session must see freshly-written ledger rows across turns
+# --------------------------------------------------------------------------- #
+
+
+class _StatefulCapturingChatRunner(_CapturingChatRunner):
+    """Like _CapturingChatRunner but has a session service with ``append_event``
+    that actually applies the state_delta to the session state in-memory,
+    mirroring what a real ADK InMemorySessionService does.
+
+    Also records ``pre_run_state_snapshots`` so tests can assert what state
+    the session held at the START of each ``run_async`` call (i.e. AFTER any
+    pre-write via ``_apply_state_delta`` but before the agent processes the turn).
+    """
+
+    def __init__(self, sessions: dict, app_name: str = "accounting_agents_assistant"):
+        super().__init__(sessions, app_name)
+        self.pre_run_state_snapshots: list[dict] = []
+
+        # Wrap the inherited _SessionService to add append_event support so
+        # _apply_state_delta (called before run_async) can actually update the
+        # in-memory session state.
+        _runner_ref = self
+
+        class _SessionServiceWithAppend(self.session_service.__class__):
+            def __init__(self):
+                pass  # fields copied below
+
+            async def append_event(self, session, event):
+                """Apply event.actions.state_delta to the persisted session state."""
+                if event and event.actions and event.actions.state_delta:
+                    delta = event.actions.state_delta
+                    # Update all stored sessions whose state object IS this session.
+                    for stored in _runner_ref._sessions.values():
+                        if stored is session:
+                            stored.state.update(delta)
+                            break
+                    else:
+                        # session is a copy — update by matching identity via state.
+                        session.state.update(delta)
+                        # Propagate to all stored sessions (there's only one per test).
+                        for stored in _runner_ref._sessions.values():
+                            stored.state.update(delta)
+                return event
+
+        # Re-instantiate with the same internal data but the enriched class.
+        existing_svc = self.session_service
+        new_svc = _SessionServiceWithAppend()
+        new_svc.__dict__.update(existing_svc.__dict__)
+        self.session_service = new_svc
+
+    async def run_async(
+        self, *, user_id, session_id, new_message=None, state_delta=None, run_config=None,
+    ):
+        sess = self._sessions.get((user_id, session_id))
+        # Snapshot the session state at the START of this call (AFTER any
+        # _apply_state_delta pre-write, BEFORE run_async processes the turn).
+        self.pre_run_state_snapshots.append(
+            dict(sess.state) if sess is not None else {}
+        )
+        async for event in super().run_async(
+            user_id=user_id,
+            session_id=session_id,
+            new_message=new_message,
+            state_delta=state_delta,
+            run_config=run_config,
+        ):
+            yield event
+
+
+def test_chat_session_sees_freshly_written_ledger_rows():
+    """Turn 2 must see the rows that the pipeline wrote BETWEEN the two turns.
+
+    Regression test for P0-2 (2026-06-15 live QA): after the pipeline posted a
+    bank statement the chat lane replied "I cannot see any documents" because
+    either the session state was stale or the pre-write never happened.
+
+    The fix: ``answer_question`` explicitly pre-writes ``ledger_data`` into the
+    session state via ``_apply_state_delta`` BEFORE calling ``runner.run_async``,
+    so the value is unconditionally overwritten each turn regardless of what the
+    session already holds.
+    """
+    from accounting_agents.slack_runner import LEDGER_DATA_KEY, answer_question
+
+    THREE_ROWS = [
+        {"Date": "01/12/2025", "Source Filename": "bank.pdf", "Doc Type": "B",
+         "Source Amount": 100.0, "Description": "FAST PMT", "Balance": 900.0,
+         "Withdrawal": 100.0, "Deposit": None, "Currency": "SGD"},
+        {"Date": "05/12/2025", "Source Filename": "bank.pdf", "Doc Type": "B",
+         "Source Amount": 200.0, "Description": "SALARY", "Balance": 1100.0,
+         "Withdrawal": None, "Deposit": 200.0, "Currency": "SGD"},
+        {"Date": "10/12/2025", "Source Filename": "bank.pdf", "Doc Type": "B",
+         "Source Amount": 50.0, "Description": "ATM", "Balance": 1050.0,
+         "Withdrawal": 50.0, "Deposit": None, "Currency": "SGD"},
+    ]
+
+    from unittest.mock import MagicMock
+
+    slack = FakeSlackClient()
+    sessions: dict = {}
+    chat_runner = _StatefulCapturingChatRunner(sessions)
+
+    # Turn 1: ledger store has no data yet (pipeline hasn't posted).
+    ledger_turn1 = MagicMock()
+    ledger_turn1.latest_fy.return_value = None
+    ledger_turn1.read_rows.return_value = []
+
+    asyncio.run(
+        answer_question(
+            runner=chat_runner,
+            ledger_store=ledger_turn1,
+            slack_client=slack,
+            channel_id="C-P02",
+            question="list recent documents",
+            app_name=chat_runner.app_name,
+            client_store=None,
+            message_ts="1700000001.001",
+            thread_ts="1700000001.001",
+            raw_thread_ts="1700000001.001",
+        )
+    )
+
+    # Between turns: pipeline posts and writes 3 rows.
+    ledger_turn2 = MagicMock()
+    ledger_turn2.latest_fy.return_value = "FY2025"
+    ledger_turn2.read_rows.return_value = THREE_ROWS
+
+    asyncio.run(
+        answer_question(
+            runner=chat_runner,
+            ledger_store=ledger_turn2,
+            slack_client=slack,
+            channel_id="C-P02",
+            question="list recent documents",
+            app_name=chat_runner.app_name,
+            client_store=None,
+            message_ts="1700000001.002",
+            thread_ts="1700000001.001",
+            raw_thread_ts="1700000001.001",
+        )
+    )
+
+    assert len(chat_runner.calls) == 2
+
+    # The session state at the START of turn 2 (before run_async) must already
+    # hold the fresh rows — not the stale [] from turn 1.  This is the invariant
+    # the fix enforces by calling _apply_state_delta BEFORE runner.run_async.
+    turn2_pre_state = chat_runner.pre_run_state_snapshots[1]
+    assert turn2_pre_state.get(LEDGER_DATA_KEY) == THREE_ROWS, (
+        f"Session state at turn-2 start held stale ledger_data="
+        f"{turn2_pre_state.get(LEDGER_DATA_KEY)!r}; expected 3 rows."
+    )
+
+
+# --------------------------------------------------------------------------- #
+# P0-2 UX: summarize_recent_activity empty-window names the window + newest date
+# --------------------------------------------------------------------------- #
+
+
+def test_summarize_empty_result_message_names_window():
+    """When the 30-day window is empty, the message must name the window size
+    AND cite the most-recent date in the data so the user knows what to ask for.
+
+    Regression for P0-2 UX (2026-06-15): the old empty response was a JSON blob
+    with ``transaction_count: 0`` — no hint about the window or newest data.
+    """
+    from accounting_agents.assistant import LEDGER_DATA_KEY, summarize_recent_activity
+
+    # Rows all dated 2025-12-01 — well outside the 30-day window from 2026-06-15.
+    rows = [
+        {"Date": "01/12/2025", "Source Amount": 500.0,
+         "Account Code / COA": "6100-Software", "Doc Type": "P"},
+        {"Date": "15/12/2025", "Source Amount": 300.0,
+         "Account Code / COA": "6200-Rent", "Doc Type": "P"},
+    ]
+
+    class _FakeTool:
+        def __init__(self, state):
+            self.state = state
+
+    ctx = _FakeTool({LEDGER_DATA_KEY: rows})
+
+    # Rows dated 2025-Dec are always outside a 30-day window from any 2026 date
+    # — no mocking needed.
+    result = summarize_recent_activity(ctx)
+
+    # Must mention the window ("30") AND the most-recent date present in the data.
+    assert "30" in result, f"Expected '30' in result: {result!r}"
+    assert "2025" in result, f"Expected '2025' in result: {result!r}"
+
+
+# --------------------------------------------------------------------------- #
 # build_async_app: chat_runner is used for text, FirestoreClientStore is default
 # --------------------------------------------------------------------------- #
 

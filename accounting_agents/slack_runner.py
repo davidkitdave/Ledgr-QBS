@@ -2284,6 +2284,20 @@ async def answer_question(
             LEDGER_DATA_KEY: ledger_rows,
         }
 
+        # Pre-write the freshly-fetched ledger rows into the session state NOW,
+        # before run_async, so the value is unconditionally overwritten on every
+        # turn.  ADK's run_async applies state_delta via append_event (which
+        # updates session.state in-place), but that only happens as part of the
+        # user-message event inside the invocation.  Pre-writing here is a
+        # belt-and-suspenders guard that ensures stale ledger_data from a prior
+        # turn (e.g. the initial empty-ledger turn) can never mask a
+        # freshly-posted delivery — regardless of runner internals.
+        # (P0-2 fix, 2026-06-15)
+        await _apply_state_delta(
+            runner, app_name, channel_id, session_id,
+            {LEDGER_DATA_KEY: ledger_rows},
+        )
+
         # Cap the model's per-turn context to the most recent 20 events so a
         # long chat thread does not grow unboundedly. ADK 2.2.0 API:
         # ``RunConfig(get_session_config=GetSessionConfig(num_recent_events=20))``
