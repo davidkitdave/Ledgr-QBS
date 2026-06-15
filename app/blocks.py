@@ -646,6 +646,27 @@ def result_card(
                 if getattr(doc, "file_id", None):
                     doc_actions.append("view_row")
             blocks.extend(per_doc_card(doc, actions=doc_actions, channel_id=channel_id))
+            # Attach feedback buttons only to clean (delivered) docs.
+            # needs_review docs already have direct decision buttons — feedback is redundant.
+            if not needs_actions:
+                _file_id = _doc_get(doc, "file_id", "doc_key", "doc_id")
+                _vendor = None
+                _account_code = _doc_get(doc, "account_code")
+                _tax_code = _doc_get(doc, "tax_code")
+                _norm = _doc_get(doc, "normalized")
+                _direction = (_doc_get(doc, "direction") or "").strip().lower()
+                if _norm is not None:
+                    _party = _norm.customer if _direction == "sales" else _norm.supplier
+                    _vendor = getattr(_party, "name", None)
+                if _vendor is None:
+                    _vendor = _doc_get(doc, "counterparty")
+                _doc_ref = make_feedback_doc_ref(
+                    file_id=_file_id,
+                    vendor=_vendor,
+                    account_code=_account_code,
+                    tax_code=_tax_code,
+                )
+                blocks.extend(feedback_buttons_block(doc_ref=_doc_ref, channel_id=channel_id))
         if len(docs) > _DOC_CAP:
             blocks.append(
                 {
@@ -726,6 +747,89 @@ def result_card(
         )
 
     return blocks
+
+
+def feedback_buttons_block(
+    *,
+    doc_ref: str,
+    channel_id: str | None = None,
+) -> list[dict]:
+    """context_actions block with 👍 (learn_mapping) and 👎 (redo) feedback buttons.
+
+    Args:
+        doc_ref: ``|``-delimited string serialising (file_id, vendor, account_code,
+                 tax_code). Use :func:`make_feedback_doc_ref` to build it safely.
+                 Falls back to ``"-"`` when empty so Slack never rejects a blank value.
+        channel_id: Used by supports_native_blocks() for per-channel probe.
+    """
+    safe_ref = doc_ref if doc_ref else "-"
+    pos_value = f"pos|{safe_ref}"
+    neg_value = f"neg|{safe_ref}"
+
+    if supports_native_blocks(channel_id):
+        return [
+            {
+                "type": "context_actions",
+                "elements": [
+                    {
+                        "type": "feedback_buttons",
+                        "action_id": "ledgr_doc_feedback",
+                        "positive_button": {
+                            "text": {"type": "plain_text", "text": "👍"},
+                            "value": pos_value,
+                        },
+                        "negative_button": {
+                            "text": {"type": "plain_text", "text": "👎"},
+                            "value": neg_value,
+                        },
+                    }
+                ],
+            }
+        ]
+
+    # Fallback: two small buttons in an actions block.
+    return [
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": ":thumbsup:", "emoji": True},
+                    "action_id": "ledgr_doc_feedback_pos",
+                    "value": pos_value,
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": ":thumbsdown:", "emoji": True},
+                    "action_id": "ledgr_doc_feedback_neg",
+                    "value": neg_value,
+                },
+            ],
+        }
+    ]
+
+
+def make_feedback_doc_ref(
+    *,
+    file_id: str | None = None,
+    vendor: str | None = None,
+    account_code: str | None = None,
+    tax_code: str | None = None,
+) -> str:
+    """Build the ``|``-delimited doc_ref string for :func:`feedback_buttons_block`.
+
+    Each field is %-encoded to keep ``|`` safe as a delimiter.
+    Falls back to ``"-"`` for any missing field so the value is never blank.
+    """
+    def _enc(val: str | None) -> str:
+        return urllib.parse.quote(str(val or ""), safe="") or "-"
+
+    return "|".join([
+        _enc(file_id),
+        _enc(vendor),
+        _enc(account_code),
+        _enc(tax_code),
+    ])
 
 
 def coa_saved_blocks(n_accounts: int) -> list:

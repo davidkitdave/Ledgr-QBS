@@ -2895,6 +2895,166 @@ def build_async_app(
             except Exception:  # noqa: BLE001
                 logger.debug("per_doc_view_row: could not post ephemeral")
 
+    # --- Commit 5: feedback buttons under delivered per-doc cards ---
+
+    def _handle_feedback_action(action_value: str, channel_id_fb: str, user_id_fb: str):
+        """Shared logic for both native (ledgr_doc_feedback) and fallback handlers.
+
+        Parses ``pos|<doc_ref>`` or ``neg|<doc_ref>`` from action_value and:
+        - pos: queues a PENDING_LEARN_MAPPING entry so the next chat drain persists
+          the vendor → account → tax mapping via client_store.add_correction.
+        - neg: opens the proactive_redo_modal pre-populated with hint="user flagged via 👎".
+        Then posts an ephemeral acknowledgement.
+        """
+        # Not used for modal open (no trigger_id available here); neg uses redo_modal via
+        # a separate path driven by the body's trigger_id in the outer handlers below.
+        pass  # implemented inline in each handler; this function documents the contract.
+
+    @async_app.action("ledgr_doc_feedback")
+    async def _doc_feedback(ack, body, client):
+        """Native context_actions feedback_buttons handler.
+
+        Button value format: ``pos|<doc_ref>`` or ``neg|<doc_ref>``
+        where doc_ref = ``file_id|vendor|account_code|tax_code`` (%-encoded fields).
+        """
+        await ack()
+        action = (body.get("actions") or [{}])[0]
+        raw_value = action.get("value") or ""
+        channel_id_fb = (body.get("channel") or {}).get("id") or ""
+        user_id_fb = (body.get("user") or {}).get("id") or ""
+
+        # Split into polarity + doc_ref
+        if "|" not in raw_value:
+            return
+        polarity, doc_ref = raw_value.split("|", 1)
+
+        # Parse doc_ref: file_id|vendor|account_code|tax_code
+        parts = doc_ref.split("|", 3)
+        file_id_fb = urllib.parse.unquote(parts[0]) if len(parts) > 0 else ""
+        vendor_fb = urllib.parse.unquote(parts[1]) if len(parts) > 1 else ""
+        account_code_fb = urllib.parse.unquote(parts[2]) if len(parts) > 2 else ""
+        tax_code_fb = urllib.parse.unquote(parts[3]) if len(parts) > 3 else ""
+
+        if polarity == "pos":
+            # 👍 — persist the vendor → account → tax mapping (same drain path as chat learn_mapping)
+            if vendor_fb and vendor_fb != "-":
+                try:
+                    _effective_store = store or _DEFAULT_CLIENT_STORE
+                    client_id_fb = _effective_store.get_client_id(channel_id=channel_id_fb) if hasattr(_effective_store, "get_client_id") else channel_id_fb
+                    _effective_store.add_correction(
+                        client_id=client_id_fb,
+                        vendor=vendor_fb,
+                        account_code=account_code_fb if account_code_fb and account_code_fb != "-" else None,
+                        tax_code=tax_code_fb if tax_code_fb and tax_code_fb != "-" else None,
+                    )
+                    logger.info(
+                        "FEEDBACK_LEARN_AUDIT channel=%s vendor=%r account_code=%r tax_code=%r",
+                        channel_id_fb, vendor_fb, account_code_fb, tax_code_fb,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception("feedback 👍: add_correction failed channel=%s vendor=%r", channel_id_fb, vendor_fb)
+        elif polarity == "neg":
+            # 👎 — open the proactive-redo modal pre-populated with prefill hint
+            file_id_clean = file_id_fb if file_id_fb and file_id_fb != "-" else ""
+            if file_id_clean:
+                try:
+                    modal = proactive_redo_modal(file_id_clean)
+                    sync_client.views_open(
+                        trigger_id=body.get("trigger_id", ""),
+                        view=modal,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception("feedback 👎: views_open failed channel=%s file=%s", channel_id_fb, file_id_clean)
+
+        # Ephemeral acknowledgement in both cases.
+        if channel_id_fb and user_id_fb:
+            try:
+                sync_client.chat_postEphemeral(
+                    channel=channel_id_fb,
+                    user=user_id_fb,
+                    text="Thanks — recorded your feedback.",
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("doc_feedback: could not post ephemeral")
+
+    @async_app.action("ledgr_doc_feedback_pos")
+    async def _doc_feedback_pos(ack, body, client):
+        """Fallback 👍 handler (actions block path)."""
+        await ack()
+        action = (body.get("actions") or [{}])[0]
+        raw_value = action.get("value") or ""
+        channel_id_fb = (body.get("channel") or {}).get("id") or ""
+        user_id_fb = (body.get("user") or {}).get("id") or ""
+
+        # raw_value is ``pos|doc_ref`` — strip polarity prefix
+        doc_ref = raw_value[len("pos|"):] if raw_value.startswith("pos|") else raw_value
+        parts = doc_ref.split("|", 3)
+        vendor_fb = urllib.parse.unquote(parts[1]) if len(parts) > 1 else ""
+        account_code_fb = urllib.parse.unquote(parts[2]) if len(parts) > 2 else ""
+        tax_code_fb = urllib.parse.unquote(parts[3]) if len(parts) > 3 else ""
+
+        if vendor_fb and vendor_fb != "-":
+            try:
+                _effective_store = store or _DEFAULT_CLIENT_STORE
+                client_id_fb = _effective_store.get_client_id(channel_id=channel_id_fb) if hasattr(_effective_store, "get_client_id") else channel_id_fb
+                _effective_store.add_correction(
+                    client_id=client_id_fb,
+                    vendor=vendor_fb,
+                    account_code=account_code_fb if account_code_fb and account_code_fb != "-" else None,
+                    tax_code=tax_code_fb if tax_code_fb and tax_code_fb != "-" else None,
+                )
+                logger.info(
+                    "FEEDBACK_LEARN_AUDIT channel=%s vendor=%r account_code=%r tax_code=%r (fallback)",
+                    channel_id_fb, vendor_fb, account_code_fb, tax_code_fb,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("feedback_pos: add_correction failed channel=%s vendor=%r", channel_id_fb, vendor_fb)
+
+        if channel_id_fb and user_id_fb:
+            try:
+                sync_client.chat_postEphemeral(
+                    channel=channel_id_fb,
+                    user=user_id_fb,
+                    text="Thanks — recorded your feedback.",
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("doc_feedback_pos: could not post ephemeral")
+
+    @async_app.action("ledgr_doc_feedback_neg")
+    async def _doc_feedback_neg(ack, body, client):
+        """Fallback 👎 handler (actions block path)."""
+        await ack()
+        action = (body.get("actions") or [{}])[0]
+        raw_value = action.get("value") or ""
+        channel_id_fb = (body.get("channel") or {}).get("id") or ""
+        user_id_fb = (body.get("user") or {}).get("id") or ""
+
+        # raw_value is ``neg|doc_ref`` — strip polarity prefix
+        doc_ref = raw_value[len("neg|"):] if raw_value.startswith("neg|") else raw_value
+        parts = doc_ref.split("|", 3)
+        file_id_fb = urllib.parse.unquote(parts[0]) if len(parts) > 0 else ""
+
+        file_id_clean = file_id_fb if file_id_fb and file_id_fb != "-" else ""
+        if file_id_clean:
+            try:
+                modal = proactive_redo_modal(file_id_clean)
+                sync_client.views_open(
+                    trigger_id=body.get("trigger_id", ""),
+                    view=modal,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("feedback_neg: views_open failed channel=%s file=%s", channel_id_fb, file_id_clean)
+
+        if channel_id_fb and user_id_fb:
+            try:
+                sync_client.chat_postEphemeral(
+                    channel=channel_id_fb,
+                    user=user_id_fb,
+                    text="Thanks — recorded your feedback.",
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("doc_feedback_neg: could not post ephemeral")
+
     # --- dedup callout card action handlers ---
 
     @async_app.action("ledgr_dedup_replace")

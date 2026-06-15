@@ -4145,3 +4145,121 @@ def test_dedup_keep_updates_message_to_kept_outcome():
     # The updated message must have a blocks list (not raw text only)
     assert isinstance(kwargs.get("blocks"), list)
     assert len(kwargs["blocks"]) >= 1
+
+
+# --------------------------------------------------------------------------- #
+# Commit 5: feedback buttons action handlers
+# --------------------------------------------------------------------------- #
+
+
+def _capture_feedback_handlers(runner_mock=None, ledger_store_mock=None, db_mock=None):
+    """Build the Bolt app with fakes; capture the feedback action handlers."""
+    from unittest.mock import MagicMock, patch
+
+    from app.slack_app import _SeenEvents
+    from accounting_agents import slack_runner
+
+    registered = {"actions": {}}
+
+    def action_decorator(action_id, *a, **k):
+        def decorator(fn):
+            registered["actions"][action_id] = fn
+            return fn
+        return decorator
+
+    fake_app = MagicMock()
+    fake_app.event = lambda *a, **k: (lambda fn: fn)
+    fake_app.action = action_decorator
+    fake_app.view = lambda *a, **k: (lambda fn: fn)
+    fake_app.command = lambda *a, **k: (lambda fn: fn)
+
+    fresh_seen = _SeenEvents()
+    rm = runner_mock or _FakeActionViewRunner()
+
+    with patch.object(slack_runner, "_seen", fresh_seen), \
+         patch("slack_bolt.async_app.AsyncApp", return_value=fake_app), \
+         patch("invoice_processing.export.client_context.FirestoreClientStore"), \
+         patch.object(slack_runner, "build_chat_runner",
+                      return_value=SimpleNamespace(app_name="accounting_agents_assistant")):
+        build_async_app(
+            runner=rm,
+            ledger_store=ledger_store_mock or MagicMock(),
+            db=db_mock or MagicMock(),
+        )
+
+    return (
+        registered["actions"].get("ledgr_doc_feedback"),
+        registered["actions"].get("ledgr_doc_feedback_pos"),
+        registered["actions"].get("ledgr_doc_feedback_neg"),
+    )
+
+
+def test_feedback_handler_is_registered():
+    """ledgr_doc_feedback handler must be registered in build_async_app."""
+    native_handler, pos_handler, neg_handler = _capture_feedback_handlers()
+    assert callable(native_handler), "ledgr_doc_feedback not registered"
+    assert callable(pos_handler), "ledgr_doc_feedback_pos not registered"
+    assert callable(neg_handler), "ledgr_doc_feedback_neg not registered"
+
+
+def test_feedback_pos_posts_ephemeral():
+    """👍 path: acks, then posts an ephemeral acknowledgement."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+    import urllib.parse
+
+    sync_client = MagicMock()
+    # Stub get_client_id so add_correction path doesn't blow up on MagicMock.
+    sync_client.get_client_id = MagicMock(return_value="client-1")
+
+    with patch("slack_sdk.WebClient", return_value=sync_client):
+        native_handler, _, _ = _capture_feedback_handlers()
+
+    vendor_enc = urllib.parse.quote("Acme Supplies", safe="")
+    doc_ref = f"F-FB-1|{vendor_enc}|6090|SR"
+    body = {
+        "actions": [{"action_id": "ledgr_doc_feedback", "value": f"pos|{doc_ref}"}],
+        "channel": {"id": "C-FB-1"},
+        "user": {"id": "U-FB-1"},
+        "trigger_id": "T-FB-1",
+    }
+    ack = AsyncMock()
+    asyncio.run(native_handler(ack=ack, body=body, client=MagicMock()))
+
+    ack.assert_awaited_once()
+    sync_client.chat_postEphemeral.assert_called_once()
+    kwargs = sync_client.chat_postEphemeral.call_args.kwargs
+    assert kwargs["channel"] == "C-FB-1"
+    assert kwargs["user"] == "U-FB-1"
+    assert "feedback" in kwargs["text"].lower() or "thanks" in kwargs["text"].lower()
+
+
+def test_feedback_neg_opens_proactive_redo_modal():
+    """👎 path: acks, opens the proactive-redo modal with the correct file_id,
+    then posts an ephemeral acknowledgement."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+    import urllib.parse
+
+    sync_client = MagicMock()
+    with patch("slack_sdk.WebClient", return_value=sync_client):
+        native_handler, _, _ = _capture_feedback_handlers()
+
+    vendor_enc = urllib.parse.quote("Acme Supplies", safe="")
+    doc_ref = f"F-FB-NEG|{vendor_enc}|6090|SR"
+    body = {
+        "actions": [{"action_id": "ledgr_doc_feedback", "value": f"neg|{doc_ref}"}],
+        "channel": {"id": "C-FB-2"},
+        "user": {"id": "U-FB-2"},
+        "trigger_id": "T-FB-NEG",
+    }
+    ack = AsyncMock()
+    asyncio.run(native_handler(ack=ack, body=body, client=MagicMock()))
+
+    ack.assert_awaited_once()
+    sync_client.views_open.assert_called_once()
+    vkw = sync_client.views_open.call_args.kwargs
+    assert vkw["trigger_id"] == "T-FB-NEG"
+    # Modal callback_id and private_metadata carry the file_id
+    assert vkw["view"]["callback_id"] == "ledgr_proactive_redo"
+    assert vkw["view"]["private_metadata"] == "F-FB-NEG"
+    # Ephemeral acknowledgement also posted
+    sync_client.chat_postEphemeral.assert_called_once()

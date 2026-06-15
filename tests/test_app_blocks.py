@@ -14,9 +14,11 @@ from app.blocks import (
     approval_card_blocks,
     coa_prompt_blocks,
     dedup_callout_card,
+    feedback_buttons_block,
     invoice_edit_modal,
     job_summary_text,
     ledger_preview_data_table,
+    make_feedback_doc_ref,
     onboarding_modal,
     per_doc_card,
     proactive_redo_blocks,
@@ -1339,4 +1341,196 @@ class TestLedgerPreviewDataTableFallback:
         text = blocks[0]["text"]["text"]
         assert "2025-09-15" in text
         assert "Acme INV-001" in text
+
+
+# --------------------------------------------------------------------------- #
+# Commit 5: feedback_buttons_block + result_card integration
+# --------------------------------------------------------------------------- #
+
+
+class TestFeedbackButtonsBlockNative:
+
+    @pytest.fixture(autouse=True)
+    def _force_native(self, monkeypatch):
+        monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
+
+    def test_returns_one_context_actions_block(self):
+        blocks = feedback_buttons_block(doc_ref="F123|Acme|6090|SR", channel_id="C1")
+        assert len(blocks) == 1
+        assert blocks[0]["type"] == "context_actions"
+
+    def test_has_feedback_buttons_element(self):
+        blocks = feedback_buttons_block(doc_ref="F123|Acme|6090|SR", channel_id="C1")
+        elements = blocks[0]["elements"]
+        assert len(elements) == 1
+        assert elements[0]["type"] == "feedback_buttons"
+
+    def test_action_id_is_ledgr_doc_feedback(self):
+        elem = feedback_buttons_block(doc_ref="F1|V|6090|SR", channel_id="C1")[0]["elements"][0]
+        assert elem["action_id"] == "ledgr_doc_feedback"
+
+    def test_positive_value_starts_with_pos_pipe(self):
+        doc_ref = "F123|Acme|6090|SR"
+        elem = feedback_buttons_block(doc_ref=doc_ref, channel_id="C1")[0]["elements"][0]
+        assert elem["positive_button"]["value"] == f"pos|{doc_ref}"
+
+    def test_negative_value_starts_with_neg_pipe(self):
+        doc_ref = "F123|Acme|6090|SR"
+        elem = feedback_buttons_block(doc_ref=doc_ref, channel_id="C1")[0]["elements"][0]
+        assert elem["negative_button"]["value"] == f"neg|{doc_ref}"
+
+    def test_positive_value_round_trips_to_doc_ref(self):
+        doc_ref = make_feedback_doc_ref(
+            file_id="F42", vendor="Acme Trading", account_code="6090", tax_code="SR"
+        )
+        blocks = feedback_buttons_block(doc_ref=doc_ref, channel_id="C1")
+        pos_val = blocks[0]["elements"][0]["positive_button"]["value"]
+        _, extracted_ref = pos_val.split("|", 1)
+        assert extracted_ref == doc_ref
+
+    def test_empty_doc_ref_falls_back_to_dash(self):
+        blocks = feedback_buttons_block(doc_ref="", channel_id="C1")
+        elem = blocks[0]["elements"][0]
+        assert elem["positive_button"]["value"] == "pos|-"
+        assert elem["negative_button"]["value"] == "neg|-"
+
+    def test_positive_button_text_is_thumbsup(self):
+        elem = feedback_buttons_block(doc_ref="F1|V|6090|SR", channel_id="C1")[0]["elements"][0]
+        assert elem["positive_button"]["text"]["text"] == "👍"
+
+    def test_negative_button_text_is_thumbsdown(self):
+        elem = feedback_buttons_block(doc_ref="F1|V|6090|SR", channel_id="C1")[0]["elements"][0]
+        assert elem["negative_button"]["text"]["text"] == "👎"
+
+
+class TestFeedbackButtonsBlockFallback:
+
+    @pytest.fixture(autouse=True)
+    def _force_fallback(self, monkeypatch):
+        monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "0")
+
+    def test_returns_one_actions_block(self):
+        blocks = feedback_buttons_block(doc_ref="F123|Acme|6090|SR")
+        assert len(blocks) == 1
+        assert blocks[0]["type"] == "actions"
+
+    def test_has_two_buttons(self):
+        elements = feedback_buttons_block(doc_ref="F123|Acme|6090|SR")[0]["elements"]
+        assert len(elements) == 2
+
+    def test_action_ids(self):
+        elements = feedback_buttons_block(doc_ref="F123|Acme|6090|SR")[0]["elements"]
+        action_ids = {el["action_id"] for el in elements}
+        assert "ledgr_doc_feedback_pos" in action_ids
+        assert "ledgr_doc_feedback_neg" in action_ids
+
+    def test_both_buttons_have_non_empty_value(self):
+        elements = feedback_buttons_block(doc_ref="F123|Acme|6090|SR")[0]["elements"]
+        for el in elements:
+            assert el["value"], f"button {el['action_id']!r} has empty value"
+
+    def test_empty_doc_ref_buttons_still_non_empty(self):
+        elements = feedback_buttons_block(doc_ref="")[0]["elements"]
+        for el in elements:
+            assert el["value"], f"button {el['action_id']!r} has empty value with empty doc_ref"
+
+    def test_positive_button_value_starts_with_pos_pipe(self):
+        elements = feedback_buttons_block(doc_ref="F1|Acme|6090|SR")[0]["elements"]
+        pos = next(el for el in elements if el["action_id"] == "ledgr_doc_feedback_pos")
+        assert pos["value"].startswith("pos|")
+
+    def test_negative_button_value_starts_with_neg_pipe(self):
+        elements = feedback_buttons_block(doc_ref="F1|Acme|6090|SR")[0]["elements"]
+        neg = next(el for el in elements if el["action_id"] == "ledgr_doc_feedback_neg")
+        assert neg["value"].startswith("neg|")
+
+
+class TestResultCardFeedbackIntegration:
+    """result_card attaches feedback blocks to clean docs only."""
+
+    @pytest.fixture(autouse=True)
+    def _force_native(self, monkeypatch):
+        monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
+
+    def test_clean_doc_gets_feedback_block(self):
+        docs = [_invoice_doc(reconciled=True)]
+        blocks = result_card(
+            n_files=1, n_processed=1, workbooks=[], errors=[], docs=docs, channel_id="C1"
+        )
+        feedback = [b for b in blocks if b.get("type") == "context_actions"]
+        assert len(feedback) == 1
+
+    def test_needs_review_doc_does_not_get_feedback_block(self):
+        docs = [_invoice_doc(reconciled=False, note="bad total")]
+        blocks = result_card(
+            n_files=1, n_processed=1, workbooks=[], errors=[], docs=docs, channel_id="C1"
+        )
+        feedback = [b for b in blocks if b.get("type") == "context_actions"]
+        assert len(feedback) == 0
+
+    def test_two_clean_one_review_gives_two_feedback_blocks(self):
+        docs = [
+            _invoice_doc(reconciled=True),
+            _invoice_doc(reconciled=True),
+            _invoice_doc(reconciled=False, note="needs check"),
+        ]
+        blocks = result_card(
+            n_files=3, n_processed=3, workbooks=[], errors=[], docs=docs, channel_id="C1"
+        )
+        feedback = [b for b in blocks if b.get("type") == "context_actions"]
+        assert len(feedback) == 2
+
+    def test_feedback_block_follows_its_card(self):
+        """The context_actions block must immediately follow the card it belongs to."""
+        docs = [_invoice_doc(reconciled=True)]
+        blocks = result_card(
+            n_files=1, n_processed=1, workbooks=[], errors=[], docs=docs, channel_id="C1"
+        )
+        card_idx = next(i for i, b in enumerate(blocks) if b.get("type") == "card")
+        assert blocks[card_idx + 1]["type"] == "context_actions"
+
+    def test_feedback_value_encodes_non_empty_ref(self):
+        """Positive button value must parse back to a non-empty doc_ref."""
+        docs = [_invoice_doc(reconciled=True)]
+        blocks = result_card(
+            n_files=1, n_processed=1, workbooks=[], errors=[], docs=docs, channel_id="C1"
+        )
+        ctx = next(b for b in blocks if b.get("type") == "context_actions")
+        pos_val = ctx["elements"][0]["positive_button"]["value"]
+        assert pos_val.startswith("pos|")
+        assert pos_val != "pos|-"  # should have at least some data encoded
+
+
+class TestResultCardFeedbackFallback:
+    """result_card fallback: clean docs get an actions feedback block, not context_actions."""
+
+    @pytest.fixture(autouse=True)
+    def _force_fallback(self, monkeypatch):
+        monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "0")
+
+    def test_clean_doc_gets_actions_feedback_block_in_fallback(self):
+        docs = [_invoice_doc(reconciled=True)]
+        blocks = result_card(
+            n_files=1, n_processed=1, workbooks=[], errors=[], docs=docs
+        )
+        # Fallback: actions blocks with feedback action_ids
+        actions_blocks = [b for b in blocks if b.get("type") == "actions"]
+        feedback_ids = {"ledgr_doc_feedback_pos", "ledgr_doc_feedback_neg"}
+        feedback_blocks = [
+            b for b in actions_blocks
+            if any(el.get("action_id") in feedback_ids for el in b.get("elements", []))
+        ]
+        assert len(feedback_blocks) == 1
+
+    def test_needs_review_in_fallback_no_feedback_actions(self):
+        docs = [_invoice_doc(reconciled=False, note="check")]
+        blocks = result_card(
+            n_files=1, n_processed=1, workbooks=[], errors=[], docs=docs
+        )
+        feedback_ids = {"ledgr_doc_feedback_pos", "ledgr_doc_feedback_neg"}
+        feedback_blocks = [
+            b for b in blocks if b.get("type") == "actions"
+            and any(el.get("action_id") in feedback_ids for el in b.get("elements", []))
+        ]
+        assert len(feedback_blocks) == 0
 
