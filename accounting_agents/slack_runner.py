@@ -47,7 +47,7 @@ from typing import Any, Optional
 # the string annotations produced by `from __future__ import annotations`.
 from fastapi import Request, Response
 
-from accounting_agents.assistant import LEDGER_DATA_KEY, PENDING_WRITE_KEY
+from accounting_agents.assistant import LEDGER_DATA_KEY, PENDING_LEARN_KEY, PENDING_WRITE_KEY
 
 from google.genai import types
 
@@ -1806,6 +1806,36 @@ async def answer_question(
                     logger.exception("ledger refresh after chat write failed")
             await _apply_state_delta(
                 runner, app_name, channel_id, session_id, write_back
+            )
+
+        # Drain pending_learn_mapping: persist each vendor rule to entity_memory
+        # via client_store.add_correction so the next document run picks it up.
+        pending_learn = post_state.get(PENDING_LEARN_KEY)
+        if isinstance(pending_learn, list) and pending_learn:
+            _effective_client_store = client_store or _DEFAULT_CLIENT_STORE
+            for entry in pending_learn:
+                if not isinstance(entry, dict):
+                    continue
+                try:
+                    _effective_client_store.add_correction(
+                        client_id=client_id,
+                        vendor=entry["vendor"],
+                        account_code=entry.get("account_code"),
+                        tax_code=entry.get("tax_code"),
+                    )
+                    logger.info(
+                        "CHAT_LEARN_AUDIT session=%s channel=%s client=%s "
+                        "vendor=%r account_code=%r tax_code=%r",
+                        session_id, channel_id, client_id,
+                        entry["vendor"], entry.get("account_code"), entry.get("tax_code"),
+                    )
+                except Exception:  # noqa: BLE001 — a failed learn must not crash the lane
+                    logger.exception(
+                        "learn_mapping drain failed: client=%s vendor=%r",
+                        client_id, entry.get("vendor"),
+                    )
+            await _apply_state_delta(
+                runner, app_name, channel_id, session_id, {PENDING_LEARN_KEY: []}
             )
 
     if not answer_text:

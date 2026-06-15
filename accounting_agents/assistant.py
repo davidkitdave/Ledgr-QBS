@@ -78,6 +78,11 @@ LEDGER_DATA_KEY = "ledger_data"
 #: the workbook (the tools never do network I/O themselves — see ADR-0009).
 PENDING_WRITE_KEY = "pending_ledger_write"
 
+#: The session state key the learn_mapping tool appends mapping specs to.
+#: The Slack runner drains this AFTER a chat turn, calling
+#: ``client_store.add_correction`` for each entry (the tool never does I/O).
+PENDING_LEARN_KEY = "pending_learn_mapping"
+
 #: Invoice sheets the write tools may mutate. Bank sheets carry a derived running
 #: balance (memory ``bank-ledger-continuous-sorted``) so amending/removing one
 #: would desync the chain — the tools refuse with a clear message instead.
@@ -1253,6 +1258,103 @@ def remove_ledger_row(tool_context: ToolContext, row_index: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Learn-mapping write tool (Step 7 / C-3) — direct write, no confirmation gate
+# --------------------------------------------------------------------------- #
+
+
+def learn_mapping(
+    tool_context: ToolContext,
+    vendor: str,
+    account_code: str = "",
+    tax_code: str = "",
+) -> str:
+    """Teach the assistant a vendor→account or vendor→tax rule for future invoices.
+
+    When you say "remember, Vendor X goes to account 6090" or "Vendor Y is
+    always ZR", this tool records the rule in entity_memory so the next invoice
+    from that vendor is auto-categorised correctly.
+
+    This is a DIRECT write (no confirmation step) — the user's imperative IS
+    the human action (ADR-0004).
+
+    Args:
+        tool_context: Injected by ADK; provides session state.
+        vendor: The vendor / supplier name to map (required).
+        account_code: The COA account code to assign (e.g. ``6090``). At least
+            one of ``account_code`` / ``tax_code`` must be provided.
+        tax_code: The tax treatment to assign (e.g. ``SR``, ``ZR``, ``NT``).
+            At least one of ``account_code`` / ``tax_code`` must be provided.
+
+    Returns:
+        A confirmation message naming what was learned, or a plain-English
+        rejection explaining what was wrong.
+    """
+    v = (vendor or "").strip()
+    if not v:
+        return (
+            "I need a vendor name to learn a mapping. "
+            "Try: \"remember, Acme goes to account 6090\"."
+        )
+
+    ac = (account_code or "").strip()
+    tc = (tax_code or "").strip()
+
+    if not ac and not tc:
+        return (
+            f"Please tell me what to map {v!r} to — "
+            "an account code (e.g. 6090), a tax code (e.g. SR / ZR), or both."
+        )
+
+    # Validate account_code against the client's COA when one is supplied.
+    if ac:
+        try:
+            coa = tool_context.state.get("coa") or []
+        except Exception:  # noqa: BLE001
+            coa = []
+        if coa:
+            # COA entries may be dicts ({"code": "6090", ...}) or plain strings.
+            known_codes: set[str] = set()
+            for entry in coa:
+                if isinstance(entry, dict):
+                    code = str(entry.get("code") or entry.get("account_code") or "").strip()
+                    if code:
+                        known_codes.add(code)
+                elif isinstance(entry, str):
+                    known_codes.add(entry.strip())
+            if known_codes and ac not in known_codes:
+                return (
+                    f"I don't recognise {ac!r} in this client's chart of accounts. "
+                    "Check the code and try again (use ``show_learned_mappings`` to "
+                    "see what accounts are available)."
+                )
+
+    # Append the mapping spec to the pending list — the runner drains it post-run.
+    try:
+        pending = tool_context.state.get(PENDING_LEARN_KEY)
+        if not isinstance(pending, list):
+            pending = []
+        pending.append({
+            "vendor": v,
+            "account_code": ac or None,
+            "tax_code": tc or None,
+        })
+        tool_context.state[PENDING_LEARN_KEY] = pending
+    except Exception:  # noqa: BLE001 — never crash the lane
+        logger.exception("learn_mapping: failed to append pending entry for vendor=%r", v)
+        return "Something went wrong recording that mapping — please try again."
+
+    parts: list[str] = []
+    if ac:
+        parts.append(f"account {ac}")
+    if tc:
+        parts.append(f"tax code {tc}")
+    mapping_desc = " and ".join(parts)
+    return (
+        f"Got it — I'll code invoices from {v} to {mapping_desc} from now on."
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Assistant LlmAgent (standalone root — multi-turn, sees session history)
 # --------------------------------------------------------------------------- #
 
@@ -1299,6 +1401,12 @@ confirm; nothing is written until the user replies "yes". Only invoice rows
 (Purchase / Sales) can be edited — bank rows are read-only. The tax treatment is
 always re-derived by the engine (a non-GST-registered client is forced to NT),
 so do not promise a specific tax code the user typed.
+
+Learning tool (when the user says "remember X goes to Y" or "always code X as Y"):
+- ``learn_mapping``: record a vendor→account or vendor→tax rule so the next
+  invoice from that vendor is auto-categorised correctly. This is IMMEDIATE —
+  no confirmation step. Call it as soon as you recognise the user's intent to
+  teach a rule. Confirm back what was learned in plain English.
 
 For every question, call the single most relevant tool first, then explain the
 result in plain English. For a bank question naming a month, pass that month
@@ -1372,6 +1480,7 @@ assistant_agent = LlmAgent(
         list_recent_documents,
         FunctionTool(amend_ledger_row, require_confirmation=True),
         FunctionTool(remove_ledger_row, require_confirmation=True),
+        learn_mapping,
     ],
 )
 
@@ -1380,9 +1489,11 @@ __all__ = [
     "assistant_instruction",
     "LEDGER_DATA_KEY",
     "PENDING_WRITE_KEY",
+    "PENDING_LEARN_KEY",
     "GST_THRESHOLD_SGD",
     "amend_ledger_row",
     "remove_ledger_row",
+    "learn_mapping",
     "bank_totals",
     "summarize_by_category",
     "pnl_for_fy",

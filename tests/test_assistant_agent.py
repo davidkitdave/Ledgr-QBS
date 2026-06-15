@@ -477,17 +477,17 @@ class TestModelInfo:
 
 
 def test_assistant_agent_is_root_multi_turn():
-    """A root LlmAgent carries no ``mode`` (multi-turn default) and exposes 14 tools.
+    """A root LlmAgent carries no ``mode`` (multi-turn default) and exposes 15 tools.
 
     See ADR-0008: in ADK 2.2.0 a root agent must not set ``mode``, so the
     runtime uses ``include_contents='default'`` and the agent sees full
-    session history. Step 4 (ADR-0009) adds the two gated write tools, taking
-    the tool count from 12 to 14.
+    session history. Step 4 (ADR-0009) adds the two gated write tools (14);
+    Step 7 (C-3) adds learn_mapping (15).
     """
     from accounting_agents.assistant import assistant_agent
 
     assert assistant_agent.mode is None
-    assert len(assistant_agent.tools) == 14
+    assert len(assistant_agent.tools) == 15
 
 
 def test_write_tools_registered_with_confirmation():
@@ -882,3 +882,146 @@ def test_row_signature_stable_for_same_row():
 
     row = {"Description": "AWS", "Source Amount": 1000.0, "Account Code / COA": "6090", "Tax Amount": 90.0}
     assert _row_signature(row) == _row_signature(dict(row))
+
+
+# --------------------------------------------------------------------------- #
+# learn_mapping tool (Step 7 / C-3)
+# --------------------------------------------------------------------------- #
+
+
+def _learn_ctx(*, coa: list | None = None) -> _FakeToolContext:
+    """ToolContext stub for learn_mapping tests."""
+    state: dict = {}
+    if coa is not None:
+        state["coa"] = coa
+    return _FakeToolContext(state)
+
+
+def test_learn_mapping_valid_vendor_and_account_appends_pending():
+    """Valid vendor + COA-present account_code appends the right pending entry."""
+    from accounting_agents.assistant import PENDING_LEARN_KEY, learn_mapping
+
+    # COA has the code 6090 — should pass validation.
+    coa = [{"code": "6090", "name": "Cloud Services"}, {"code": "6200", "name": "Rent"}]
+    ctx = _learn_ctx(coa=coa)
+    result = learn_mapping(ctx, vendor="Acme Cloud", account_code="6090")
+
+    assert "Acme Cloud" in result
+    assert "6090" in result
+    pending = ctx.state.get(PENDING_LEARN_KEY)
+    assert isinstance(pending, list) and len(pending) == 1
+    entry = pending[0]
+    assert entry["vendor"] == "Acme Cloud"
+    assert entry["account_code"] == "6090"
+    assert entry["tax_code"] is None
+
+
+def test_learn_mapping_valid_vendor_and_tax_code_appends_pending():
+    """Valid vendor + tax_code (no account_code) appends correctly."""
+    from accounting_agents.assistant import PENDING_LEARN_KEY, learn_mapping
+
+    ctx = _learn_ctx()
+    result = learn_mapping(ctx, vendor="Freight Co", tax_code="ZR")
+
+    assert "Freight Co" in result
+    assert "ZR" in result
+    pending = ctx.state.get(PENDING_LEARN_KEY)
+    assert isinstance(pending, list) and len(pending) == 1
+    entry = pending[0]
+    assert entry["vendor"] == "Freight Co"
+    assert entry["account_code"] is None
+    assert entry["tax_code"] == "ZR"
+
+
+def test_learn_mapping_both_account_and_tax_appends_pending():
+    """Both account_code and tax_code supplied — both stored."""
+    from accounting_agents.assistant import PENDING_LEARN_KEY, learn_mapping
+
+    coa = [{"code": "6090", "name": "Cloud"}]
+    ctx = _learn_ctx(coa=coa)
+    result = learn_mapping(ctx, vendor="Acme Cloud", account_code="6090", tax_code="SR")
+
+    assert "Acme Cloud" in result
+    assert "6090" in result
+    assert "SR" in result
+    pending = ctx.state[PENDING_LEARN_KEY]
+    assert pending[0]["account_code"] == "6090"
+    assert pending[0]["tax_code"] == "SR"
+
+
+def test_learn_mapping_unknown_account_code_rejected():
+    """An account_code not in the COA is rejected; nothing is appended."""
+    from accounting_agents.assistant import PENDING_LEARN_KEY, learn_mapping
+
+    coa = [{"code": "6090", "name": "Cloud"}, {"code": "6200", "name": "Rent"}]
+    ctx = _learn_ctx(coa=coa)
+    result = learn_mapping(ctx, vendor="Acme Cloud", account_code="9999")
+
+    assert "9999" in result
+    assert "don't recognise" in result.lower() or "not recognise" in result.lower() or "9999" in result
+    assert ctx.state.get(PENDING_LEARN_KEY) in (None, [])
+
+
+def test_learn_mapping_empty_vendor_rejected():
+    """Missing vendor returns a helpful message; nothing appended."""
+    from accounting_agents.assistant import PENDING_LEARN_KEY, learn_mapping
+
+    ctx = _learn_ctx()
+    result = learn_mapping(ctx, vendor="", account_code="6090")
+
+    assert "vendor" in result.lower()
+    assert ctx.state.get(PENDING_LEARN_KEY) in (None, [])
+
+
+def test_learn_mapping_no_codes_rejected():
+    """Neither account_code nor tax_code → helpful message, nothing appended."""
+    from accounting_agents.assistant import PENDING_LEARN_KEY, learn_mapping
+
+    ctx = _learn_ctx()
+    result = learn_mapping(ctx, vendor="Acme Cloud", account_code="", tax_code="")
+
+    assert "account" in result.lower() or "tax" in result.lower()
+    assert ctx.state.get(PENDING_LEARN_KEY) in (None, [])
+
+
+def test_learn_mapping_skips_coa_check_when_coa_empty():
+    """When no COA is loaded, any account_code is accepted (can't validate)."""
+    from accounting_agents.assistant import PENDING_LEARN_KEY, learn_mapping
+
+    ctx = _learn_ctx(coa=[])  # empty COA list → skip validation
+    result = learn_mapping(ctx, vendor="Acme Cloud", account_code="6090")
+
+    assert "Acme Cloud" in result
+    pending = ctx.state.get(PENDING_LEARN_KEY)
+    assert pending and pending[0]["account_code"] == "6090"
+
+
+def test_learn_mapping_registered_as_plain_function_not_confirmed():
+    """learn_mapping must be registered as a plain function tool (no require_confirmation)."""
+    from google.adk.tools import FunctionTool
+
+    from accounting_agents.assistant import assistant_agent
+
+    # Collect all FunctionTool entries that wrap learn_mapping.
+    confirmed_learn = [
+        t for t in assistant_agent.tools
+        if isinstance(t, FunctionTool)
+        and getattr(t, "func", None) is not None
+        and t.func.__name__ == "learn_mapping"
+        and getattr(t, "_require_confirmation", False)
+    ]
+    assert confirmed_learn == [], (
+        "learn_mapping must NOT be registered with require_confirmation=True"
+    )
+
+    # Also confirm it IS present in the tools list (either as bare function or
+    # as a FunctionTool without require_confirmation).
+    from accounting_agents.assistant import learn_mapping as _lm_fn
+
+    tool_fns = set()
+    for t in assistant_agent.tools:
+        if callable(t) and not isinstance(t, FunctionTool):
+            tool_fns.add(t)
+        elif isinstance(t, FunctionTool) and getattr(t, "func", None) is not None:
+            tool_fns.add(t.func)
+    assert _lm_fn in tool_fns, "learn_mapping must be present in assistant_agent.tools"
