@@ -133,7 +133,7 @@ tool re-runs the exact same categorizer the pipeline used. One mind, two doors i
 | Inspector between two nodes | **Generate-and-Review** (generator → critic → branch on status) | workflows/patterns |
 | "Retry until good enough" | **Iterative Refinement** (`LoopAgent` + `escalate=True`) | workflows/patterns |
 | Ask the user before a risky write (chat OR mid-pipeline) | **Tool Confirmation** (`FunctionTool(require_confirmation=True)` / `tool_context.request_confirmation(hint, payload)`) | tools-custom/confirmation |
-| Multi-turn chat that remembers the thread | LlmAgent default mode (drop `mode="single_turn"`); `session_id = thread_ts` | sessions; llm-agents |
+| Multi-turn chat that remembers the thread | **Standalone root LlmAgent on its own Runner** (no `mode` → `include_contents='default'`), per-thread session `{channel}:chat:{thread_ts}`. A multi-turn chat agent CANNOT be a coordinator-graph node in ADK 2.x — "just drop `single_turn`" crashes graph build. See **ADR-0008** | sessions; llm-agents; ADR-0008 |
 | Route work to a specialist | Coordinator + `sub_agents` (LLM-driven delegation) — already used at top level | workflows/patterns |
 | Modular tool packaging when the toolset grows | **Skills** (`SkillToolset`, experimental v1.25.0+) | skills |
 
@@ -165,10 +165,10 @@ E = engine surface — but they share code, so they interleave on purpose.
 
 | # | Step | Surface | Outcome |
 |---|---|---|---|
-| 1 | Rename `qa_agent` → `accounting_agent`; drop `single_turn` (multi-turn); seed client profile into chat; add 3 read tools (`show_client_profile`, `show_learned_mappings`, `model_info`) | C-0 | The chat helper knows who the client is and remembers the thread |
+| 1 | Rename `qa_agent` → `accounting_agent`; run it as a **standalone root agent on its own Runner**, per-thread session `{channel}:chat:{thread_ts}`, OUTSIDE the coordinator graph (**ADR-0008** — an in-graph multi-turn agent crashes graph build); seed client profile into chat; add 3 read tools (`show_client_profile`, `show_learned_mappings`, `model_info`) | C-0 | The chat helper knows who the client is and remembers the thread |
 | 2 | **Extract reviewer + retry-with-hints** between extract and categorize (Generate-and-Review / small LoopAgent). Verdict `{ok / hints_needed / user_clarify}`; mid-flow HITL on `user_clarify` | E-1 | The engine checks its own work — the single highest-leverage move |
 | 3 | Explain + lookup read tools (`explain_categorization`, `explain_tax_treatment`, `summarize_recent_activity`, `lookup_row`, `list_recent_documents`) — reuse the engine's own categorizer/tax logic | C-1 | The assistant can explain *why*, grounded in the same engine |
-| 4 | Write gate + `amend_ledger_row` / `remove_ledger_row` via ADK Tool Confirmation (smoke-test Firestore session first; fallback `adk_request_input`). Audit every write. ADR-0008. | C-2 | The assistant gets hands — can fix the book, safely, with one-click confirm |
+| 4 | Write gate + `amend_ledger_row` / `remove_ledger_row` via ADK Tool Confirmation (smoke-test Firestore session first; fallback `adk_request_input`). Audit every write. New ADR-0009. | C-2 | The assistant gets hands — can fix the book, safely, with one-click confirm |
 | 5 | **Hybrid categorizer** — fast path (learned → keyword) unchanged; on no-match, a small LlmAgent reasons from `{line, COA, entity_memory}` → `{account_code, why}`; result feeds learning | E-2 | New vendors get reasoned, not defaulted — ends the keyword treadmill |
 | 6 | Migrate document-lane orchestration to **Dynamic Workflows** (`@node` + `ctx.run_node`), now that the smart-edge shape is proven | E-3 | Clean, resumable, easy to add the next inspector per node |
 | 7 | `re_extract_document(file_id, hints)` + `replace_recorded_month` + `learn_mapping` from chat — both lanes now share the exact same engine tools | C-3 | Talk-to-it-and-it-acts; the engine and chat are one mind |
@@ -192,7 +192,12 @@ biggest single intelligence win on the engine.
 - **sessions** — Session = one thread (events+state); State = per-session; Memory = cross-session
   (we don't need it).
 - **llm-agents** — `name/description/model/instruction/tools/sub_agents`; `description` drives
-  delegation; our `mode="single_turn"` forces `include_contents='none'` (drop it for multi-turn).
+  delegation. `mode="single_turn"` forces `include_contents='none'`; a root agent with NO `mode` →
+  `include_contents='default'` (sees history). VERIFIED (ADK 2.2.0): a multi-turn (`chat`) agent
+  CANNOT be a downstream graph node — `workflow/_graph.py:520-538` raises `ValueError`; graph nodes
+  must be task/single-turn, and `task` is disabled in graph workflows. So multi-turn chat = a
+  STANDALONE root agent + per-thread session, NOT "drop single_turn in place". See ADR-0008 and
+  memory [[adk-chat-mode-graph-constraint]].
 - **skills** (experimental v1.25.0+) — `SkillToolset`; SKILL.md + references/assets/scripts;
   loaded incrementally to save context. Use in Step 6+ if the toolset grows large.
 - **agents/routing** — `RoutedAgent` is TypeScript-only today; Python uses coordinator+sub_agents.
