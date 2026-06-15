@@ -71,6 +71,8 @@ from app.blocks import (
     approval_card_blocks,
     approval_outcome_blocks,
     invoice_edit_modal,
+    proactive_redo_blocks,
+    proactive_redo_modal,
     review_card_blocks,
     review_hint_modal,
     review_outcome_blocks,
@@ -633,6 +635,36 @@ def _resolve_file_message_ts(slack_client: Any, file_id: str, channel_id: str) -
     except Exception:  # noqa: BLE001 - cosmetic
         logger.debug("files_info failed for file %s channel %s", file_id, channel_id)
     return None
+
+
+def _resolve_file_channel(
+    slack_client: Any, file_id: str
+) -> tuple[Optional[str], Optional[str]]:
+    """Return ``(channel_id, upload_ts)`` for ``file_id`` from ``files_info``.
+
+    ``file.shares.{public,private}`` is a dict keyed by CHANNEL id, each value a
+    list of share records carrying the upload ``ts``.  The proactive re-extract
+    view-submission body has no reliable channel context (Slack does not echo the
+    source channel on a ``view_submission``), so we recover it from the file's own
+    share record — the same ``files_info`` shape :func:`_resolve_file_message_ts`
+    reads.  Returns ``(None, None)`` on any error or missing data.
+    """
+    try:
+        resp = slack_client.files_info(file=file_id)
+        data = resp.data if hasattr(resp, "data") else resp
+        if not isinstance(data, dict):
+            return (None, None)
+        file_obj = data.get("file") or {}
+        shares = file_obj.get("shares") or {}
+        for bucket in ("private", "public"):
+            channels = shares.get(bucket) or {}
+            for channel_id, records in channels.items():
+                if records:
+                    ts = records[0].get("ts")
+                    return (channel_id, ts)
+    except Exception:  # noqa: BLE001 - best-effort channel recovery
+        logger.debug("files_info(channel) failed for file %s", file_id)
+    return (None, None)
 
 
 def _resolve_file_name(slack_client: Any, file_id: str, file_obj: Optional[dict] = None) -> str:
@@ -1241,9 +1273,50 @@ async def _finalize_run_outcome(
         thread_ts=thread_ts,
         replace=replace,
     )
-    if append_result.get("all_deduped"):
-        return {"status": "duplicate", "append": append_result}
-    return {"status": "delivered", "append": append_result}
+    status = "duplicate" if append_result.get("all_deduped") else "delivered"
+
+    # Step 8 — proactive auto-hint: when the extract reviewer FIRED (non-empty
+    # REVIEW_REASON_KEY) on this run but it was filed without ever pausing the
+    # user (verdict != CLARIFY — a CLARIFY already surfaced the mid-flow review
+    # card and engaged them), offer a re-extract AFTER delivery. A clean
+    # happy-path doc writes REVIEW_VERDICT_OK with NO reasons → posts nothing,
+    # so the offer is rare. Bank docs don't run the reviewer → no reasons → no
+    # offer. Best-effort: a read/post failure must never break the delivery
+    # return value.
+    try:
+        delivered_state = await _read_session_state(
+            runner, app_name,
+            {"user_id": user_id, "session_id": session_id},
+        )
+        reasons = delivered_state.get(nodes.REVIEW_REASON_KEY) or []
+        verdict = delivered_state.get(nodes.REVIEW_VERDICT_KEY)
+        if reasons and verdict != nodes.REVIEW_VERDICT_CLARIFY:
+            _post_proactive_redo_card(
+                slack_client, channel_id, file_id, reasons, thread_ts=thread_ts,
+            )
+    except Exception:  # noqa: BLE001 - the proactive offer is non-critical
+        logger.debug("proactive redo offer skipped for file %s", file_id)
+
+    return {"status": status, "append": append_result}
+
+
+def _post_proactive_redo_card(
+    slack_client: Any, channel_id: str, file_id: str, reasons: list,
+    thread_ts=None,
+) -> Optional[str]:
+    """Post the Step-8 proactive re-extract offer (threaded under the delivery)."""
+    kwargs = {
+        "channel": channel_id,
+        "blocks": proactive_redo_blocks(file_id, reasons),
+        "text": "This document looked off — want me to re-read it?",
+    }
+    if thread_ts:
+        kwargs["thread_ts"] = thread_ts
+    resp = slack_client.chat_postMessage(**kwargs)
+    data = resp.data if hasattr(resp, "data") else resp
+    if isinstance(data, dict):
+        return data.get("ts")
+    return None
 
 
 def _post_approval_card(
@@ -2432,6 +2505,61 @@ def build_async_app(
             action="reextract_as",
             app_name=app_name,
             hint=hint_text or None,
+        )
+
+    # --- Step 8: proactive post-delivery re-extract offer ---
+
+    @async_app.action("proactive_redo")
+    async def _proactive_redo(ack, body, client):
+        # The doc is already filed (no paused interrupt). Open a hint modal so the
+        # human can describe what the extractor missed; submit runs the re-extract.
+        await ack()
+        file_id = (body.get("actions") or [{}])[0].get("value")
+        if not file_id:
+            return
+        sync_client.views_open(
+            trigger_id=body["trigger_id"],
+            view=proactive_redo_modal(file_id),
+        )
+
+    @async_app.view("ledgr_proactive_redo")
+    async def _proactive_redo_submit(ack, body, client):
+        # The button-click + modal-submit IS the confirmation — run the re-extract
+        # directly (NOT a paused-interrupt resume; the document is already filed).
+        await ack()
+        view = body["view"]
+        file_id = (view.get("private_metadata") or "").strip()
+        hint_text = (
+            view.get("state", {})
+            .get("values", {})
+            .get("hint_block", {})
+            .get("hint_input", {})
+            .get("value")
+            or ""
+        ).strip()
+        if not file_id or not hint_text:
+            return
+        # The view_submission body has no source channel; recover it (and the
+        # upload ts to thread under) from the file's own share record.
+        channel_id, upload_ts = _resolve_file_channel(sync_client, file_id)
+        if not channel_id:
+            logger.warning(
+                "proactive_redo: could not resolve channel for file %s — skipping.",
+                file_id,
+            )
+            return
+        # Reuse the Step-7 re_extract drain (full pipeline + replace=True + the
+        # CHAT_REEXTRACT_AUDIT log + the per-(file_id,hint) idempotency marker).
+        await _execute_pending_reextract(
+            [{"op": "reextract", "file_id": file_id, "hints": hint_text}],
+            doc_runner=runner,
+            ledger_store=ledger_store,
+            db=db,
+            slack_client=sync_client,
+            channel_id=channel_id,
+            app_name=app_name,
+            client_store=store,
+            thread_ts=upload_ts,
         )
 
     # --- onboarding + commands (reuse parked sync handlers off-thread) ---

@@ -690,6 +690,124 @@ def review_hint_modal(op_id: str) -> dict:
     }
 
 
+#: Maps the STABLE machine reason prefixes produced by ``detect_struggle``
+#: (nodes.py) to a friendly human phrase. The reviewer reasons can carry a
+#: ``"<prefix>: <label> (<note>)"`` suffix, so we match on the leading prefix and
+#: drop the audit detail for the proactive offer card.
+_PROACTIVE_REASON_PHRASES = {
+    "unreconciled": "the totals didn't reconcile",
+    "doc_type_other": "the document type was unclear",
+    "bundle_empty": "I couldn't find any line items",
+    "lines_empty": "a document had no line items",
+    "low_classify_confidence": "I wasn't confident how to categorise it",
+    "missing_required": "some required fields were missing",
+}
+
+
+def _humanize_review_reason(reason: str) -> str:
+    """Turn one STABLE machine reason string into a friendly phrase.
+
+    ``detect_struggle`` emits reasons like ``"unreconciled: Invoice (FX off by
+    0.02)"`` or ``"low_classify_confidence"``.  We key off the prefix before the
+    first ``":"`` and fall back to a de-underscored form for any future signal we
+    don't have an explicit phrase for.
+    """
+    prefix = (reason or "").split(":", 1)[0].strip()
+    phrase = _PROACTIVE_REASON_PHRASES.get(prefix)
+    if phrase:
+        return phrase
+    return prefix.replace("_", " ") or "something looked off"
+
+
+def proactive_redo_blocks(file_id: str, reasons: list[str] | None = None) -> list:
+    """Post-delivery offer card: this doc looked off — want me to re-read it?
+
+    Surfaced AFTER a flagged document has already been filed (the extract
+    reviewer fired but the doc was delivered without pausing the user).  Names
+    what looked off in friendly language and offers a single button that opens a
+    hint-input modal to re-extract.  The button ``value`` carries ``file_id`` so
+    the action handler can open the modal for the right document.
+
+    Args:
+        file_id: Slack file id of the delivered document (button value).
+        reasons: STABLE machine reason strings from ``state[REVIEW_REASON_KEY]``.
+                 Humanized + de-duplicated for the friendly line.
+    """
+    phrases: list[str] = []
+    for r in reasons or []:
+        phrase = _humanize_review_reason(r)
+        if phrase not in phrases:
+            phrases.append(phrase)
+    if phrases:
+        detail = "; ".join(phrases)
+        body = (
+            f":thinking_face: This one looked a little off — {detail}. "
+            "I filed it anyway, but want me to re-read it with a hint?"
+        )
+    else:
+        body = (
+            ":thinking_face: This one looked a little off. I filed it anyway, "
+            "but want me to re-read it with a hint?"
+        )
+    return [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": body},
+        },
+        {
+            "type": "actions",
+            "block_id": "ledgr_proactive_redo",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Re-extract with a hint", "emoji": True},
+                    "action_id": "proactive_redo",
+                    "value": file_id,
+                }
+            ],
+        },
+    ]
+
+
+def proactive_redo_modal(file_id: str) -> dict:
+    """Hint-input modal for the proactive 'Re-extract with a hint' button.
+
+    Mirrors :func:`review_hint_modal` but for the POST-delivery proactive path:
+    there is no paused interrupt to resume, so ``private_metadata`` carries the
+    ``file_id`` (not an ``op_id``) and the ``callback_id`` is
+    ``"ledgr_proactive_redo"`` so the Bolt ``@app.view`` decorator routes it to
+    the proactive re-extract handler.
+    """
+    return {
+        "type": "modal",
+        "callback_id": "ledgr_proactive_redo",
+        "private_metadata": file_id,
+        "title": {"type": "plain_text", "text": "Re-read this document", "emoji": True},
+        "submit": {"type": "plain_text", "text": "Re-extract", "emoji": True},
+        "close": {"type": "plain_text", "text": "Cancel", "emoji": True},
+        "blocks": [
+            {
+                "type": "input",
+                "block_id": "hint_block",
+                "label": {
+                    "type": "plain_text",
+                    "text": "What should the extractor know?",
+                    "emoji": True,
+                },
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "hint_input",
+                    "multiline": True,
+                    "placeholder": {
+                        "type": "plain_text",
+                        "text": "e.g. 'This is a tax invoice. The supplier is GST-registered.'",
+                    },
+                },
+            }
+        ],
+    }
+
+
 def coa_prompt_blocks() -> list:
     """Blocks posted in-channel after a profile is saved, asking for COA."""
     return [

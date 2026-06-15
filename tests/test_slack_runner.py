@@ -3472,3 +3472,252 @@ def test_execute_pending_reextract_posts_clear_month_note_on_duplicate_status():
 
     texts = " ".join(_posted_texts(slack)).lower()
     assert "clear" in texts and "identity" in texts
+
+
+# =========================================================================== #
+# Step 8: proactive post-delivery re-extract offer
+#   - _finalize_run_outcome posts the offer ONLY when the reviewer fired
+#     (REVIEW_REASON_KEY non-empty) AND verdict != CLARIFY (a CLARIFY already
+#     surfaced the mid-flow card). Clean happy-path docs post NOTHING.
+#   - the proactive_redo action opens the hint modal with the right file_id.
+#   - the ledgr_proactive_redo view submit runs the re-extract (file_id, hint,
+#     replace=True) via the Step-7 drain.
+# =========================================================================== #
+
+
+def _run_finalize_delivery(final_state: dict, *, slack=None):
+    """Drive process_file_event to a clean (no-interrupt) delivery whose final
+    session state is ``final_state``, then return the FakeSlackClient so callers
+    can inspect whether the proactive offer card was posted."""
+    slack = slack or FakeSlackClient()
+    db = FakeFirestore()
+    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+
+    final_event = SimpleNamespace(
+        content=SimpleNamespace(parts=[SimpleNamespace(text="done")]),
+        get_function_calls=lambda: [],
+    )
+    runner = _FakeRunner([final_event], final_state)
+
+    def fake_download(client, file_id):
+        return b"%PDF-1.4 fake"
+
+    result = asyncio.run(
+        process_file_event(
+            runner=runner,
+            ledger_store=store,
+            db=db,
+            slack_client=slack,
+            channel_id="C1",
+            file_id="F1",
+            app_name="acc",
+            download_fn=fake_download,
+            source_filename="invoice.pdf",
+            client_store=_seeded_client_store(db),
+        )
+    )
+    return slack, result
+
+
+def _proactive_card_posts(slack: FakeSlackClient) -> list:
+    """All chat_postMessage calls carrying the proactive_redo action button."""
+    out = []
+    for p in _post_calls(slack):
+        for b in (p.get("blocks") or []):
+            if b.get("block_id") == "ledgr_proactive_redo":
+                out.append(p)
+    return out
+
+
+def test_finalize_posts_proactive_offer_when_reviewer_fired_and_not_clarify():
+    """Reviewer FIRED (non-empty reasons) + verdict != CLARIFY + delivered →
+    the proactive re-extract offer is posted (threaded under the delivery)."""
+    state = dict(_ledger_payload())
+    state[nodes.REVIEW_REASON_KEY] = ["unreconciled: Invoice (FX off)"]
+    state[nodes.REVIEW_VERDICT_KEY] = nodes.REVIEW_VERDICT_HINTS
+
+    slack, result = _run_finalize_delivery(state)
+
+    assert result["status"] == "delivered"
+    offers = _proactive_card_posts(slack)
+    assert len(offers) == 1
+    button = offers[0]["blocks"][1]["elements"][0]
+    assert button["action_id"] == "proactive_redo"
+    assert button["value"] == "F1"
+    # The humanized reason is rendered, not the raw machine string.
+    assert "the totals didn't reconcile" in offers[0]["blocks"][0]["text"]["text"]
+
+
+def test_finalize_posts_no_offer_on_clean_happy_path():
+    """A clean delivery (no review reasons, verdict OK) delivers normally and
+    posts NO proactive offer — proving the offer is rare."""
+    state = dict(_ledger_payload())
+    state[nodes.REVIEW_REASON_KEY] = []
+    state[nodes.REVIEW_VERDICT_KEY] = nodes.REVIEW_VERDICT_OK
+
+    slack, result = _run_finalize_delivery(state)
+
+    assert result["status"] == "delivered"
+    assert _proactive_card_posts(slack) == []
+    # The normal delivery summary still posted.
+    assert any("FY2026 ledger" in t for t in _posted_texts(slack))
+
+
+def test_finalize_posts_no_offer_when_verdict_clarify():
+    """When the verdict is CLARIFY the mid-flow review card already engaged the
+    user, so the post-delivery offer must NOT also fire (no double-prompt)."""
+    state = dict(_ledger_payload())
+    state[nodes.REVIEW_REASON_KEY] = ["doc_type_other"]
+    state[nodes.REVIEW_VERDICT_KEY] = nodes.REVIEW_VERDICT_CLARIFY
+
+    slack, result = _run_finalize_delivery(state)
+
+    assert result["status"] == "delivered"
+    assert _proactive_card_posts(slack) == []
+
+
+def _capture_proactive_handlers(runner_mock=None, ledger_store_mock=None, db_mock=None):
+    """Build the Bolt app with fakes; capture the ``proactive_redo`` action +
+    ``ledgr_proactive_redo`` view handlers that build_async_app registers."""
+    from unittest.mock import MagicMock, patch
+
+    from app.slack_app import _SeenEvents
+    from accounting_agents import slack_runner
+
+    registered = {"actions": {}, "views": {}}
+
+    def action_decorator(action_id, *a, **k):
+        def decorator(fn):
+            registered["actions"][action_id] = fn
+            return fn
+        return decorator
+
+    def view_decorator(callback_id, *a, **k):
+        def decorator(fn):
+            registered["views"][callback_id] = fn
+            return fn
+        return decorator
+
+    fake_app = MagicMock()
+    fake_app.event = lambda *a, **k: (lambda fn: fn)
+    fake_app.action = action_decorator
+    fake_app.view = view_decorator
+    fake_app.command = lambda *a, **k: (lambda fn: fn)
+
+    fresh_seen = _SeenEvents()
+    rm = runner_mock or _FakeActionViewRunner()
+
+    with patch.object(slack_runner, "_seen", fresh_seen), \
+         patch("slack_bolt.async_app.AsyncApp", return_value=fake_app), \
+         patch("invoice_processing.export.client_context.FirestoreClientStore"), \
+         patch.object(slack_runner, "build_chat_runner",
+                      return_value=SimpleNamespace(app_name="accounting_agents_assistant")):
+        build_async_app(
+            runner=rm,
+            ledger_store=ledger_store_mock or MagicMock(),
+            db=db_mock or MagicMock(),
+        )
+
+    return registered["actions"]["proactive_redo"], registered["views"]["ledgr_proactive_redo"]
+
+
+def test_proactive_redo_action_opens_modal_with_file_id():
+    """Clicking the offer button opens the hint modal whose private_metadata
+    carries the file_id from the button value."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    sync_client = MagicMock()
+    with patch("slack_sdk.WebClient", return_value=sync_client):
+        action_handler, _ = _capture_proactive_handlers()
+
+    body = {
+        "actions": [{"action_id": "proactive_redo", "value": "F-REDO-1"}],
+        "trigger_id": "T-REDO-1",
+    }
+    ack = AsyncMock()
+    asyncio.run(action_handler(ack=ack, body=body, client=MagicMock()))
+
+    ack.assert_awaited_once()
+    sync_client.views_open.assert_called_once()
+    kwargs = sync_client.views_open.call_args.kwargs
+    assert kwargs["trigger_id"] == "T-REDO-1"
+    view = kwargs["view"]
+    assert view["callback_id"] == "ledgr_proactive_redo"
+    assert view["private_metadata"] == "F-REDO-1"
+
+
+def test_proactive_redo_view_submit_runs_reextract_with_hint_and_replace():
+    """Submitting the proactive hint modal runs the re-extract directly:
+    process_file_event is called with the file_id, the hint, and replace=True.
+    The channel is recovered from the file's share record (the view_submission
+    body has no source channel)."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from accounting_agents import slack_runner
+
+    # A FakeSlackClient that knows file F-REDO-9 was shared in channel C1 — this
+    # is what _resolve_file_channel reads to recover the channel from files_info.
+    slack = FakeSlackClient()
+    slack._file_share_ts["F-REDO-9"] = {"C1": "111.222"}
+
+    doc_runner = _FakeRunner([], _ledger_payload())
+    with patch("slack_sdk.WebClient", return_value=slack):
+        _, view_handler = _capture_proactive_handlers(
+            runner_mock=doc_runner,
+            ledger_store_mock=MagicMock(),
+            db_mock=FakeFirestore(),
+        )
+
+    body = {
+        "view": {
+            "callback_id": "ledgr_proactive_redo",
+            "private_metadata": "F-REDO-9",
+            "state": {
+                "values": {
+                    "hint_block": {"hint_input": {"value": "read it as a credit note"}}
+                }
+            },
+        }
+    }
+
+    pfe = _RecordingPFE()
+    ack = AsyncMock()
+    with patch.object(slack_runner, "process_file_event", pfe):
+        asyncio.run(view_handler(ack=ack, body=body, client=MagicMock()))
+
+    ack.assert_awaited_once()
+    assert len(pfe.calls) == 1
+    call = pfe.calls[0]
+    assert call["file_id"] == "F-REDO-9"
+    assert call["hint"] == "read it as a credit note"
+    assert call["replace"] is True
+    assert call["channel_id"] == "C1"
+    assert call["runner"] is doc_runner
+
+
+def test_proactive_redo_view_submit_noop_without_hint():
+    """An empty hint submission must NOT dispatch a re-extract (nothing to steer)."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from accounting_agents import slack_runner
+
+    slack = FakeSlackClient()
+    slack._file_share_ts["F-REDO-9"] = {"C1": "111.222"}
+    with patch("slack_sdk.WebClient", return_value=slack):
+        _, view_handler = _capture_proactive_handlers(db_mock=FakeFirestore())
+
+    body = {
+        "view": {
+            "callback_id": "ledgr_proactive_redo",
+            "private_metadata": "F-REDO-9",
+            "state": {"values": {"hint_block": {"hint_input": {"value": "   "}}}},
+        }
+    }
+
+    pfe = _RecordingPFE()
+    ack = AsyncMock()
+    with patch.object(slack_runner, "process_file_event", pfe):
+        asyncio.run(view_handler(ack=ack, body=body, client=MagicMock()))
+
+    ack.assert_awaited_once()
+    assert pfe.calls == []

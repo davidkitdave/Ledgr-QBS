@@ -12,6 +12,8 @@ from app.blocks import (
     invoice_edit_modal,
     job_summary_text,
     onboarding_modal,
+    proactive_redo_blocks,
+    proactive_redo_modal,
     profile_summary_blocks,
     result_card,
     welcome_blocks,
@@ -621,4 +623,69 @@ class TestJobSummaryText:
         assert "2 posted" in t
         assert "2 already recorded" in t
         assert "1 rejected" in t
+
+
+# =========================================================================== #
+# Step 8: proactive post-delivery re-extract offer card + hint modal
+# =========================================================================== #
+
+
+class TestProactiveRedoBlocks:
+
+    def _text(self, blocks: list) -> str:
+        return blocks[0]["text"]["text"]
+
+    def test_humanizes_reasons_and_carries_file_id(self):
+        blocks = proactive_redo_blocks(
+            "F-123",
+            ["unreconciled: Invoice (FX off by 0.02)", "low_classify_confidence"],
+        )
+        text = self._text(blocks)
+        # Humanized phrases appear; raw machine prefixes do NOT leak through.
+        assert "the totals didn't reconcile" in text
+        assert "wasn't confident how to categorise it" in text
+        assert "unreconciled:" not in text
+        assert "low_classify_confidence" not in text
+        # The single action button carries the file_id as its value + the right id.
+        actions = [b for b in blocks if b.get("type") == "actions"][0]
+        button = actions["elements"][0]
+        assert button["action_id"] == "proactive_redo"
+        assert button["value"] == "F-123"
+        assert button["text"]["text"] == "Re-extract with a hint"
+
+    def test_dedupes_repeated_phrases(self):
+        # Two reasons that map to the same human phrase render the phrase once.
+        blocks = proactive_redo_blocks(
+            "F-9",
+            ["lines_empty: Invoice", "lines_empty: Receipt"],
+        )
+        text = self._text(blocks)
+        assert text.count("a document had no line items") == 1
+
+    def test_unknown_reason_falls_back_to_deslugged(self):
+        blocks = proactive_redo_blocks("F-1", ["some_new_signal"])
+        assert "some new signal" in self._text(blocks)
+
+    def test_empty_reasons_still_offers_button(self):
+        blocks = proactive_redo_blocks("F-1", [])
+        text = self._text(blocks)
+        assert "want me to re-read it" in text
+        actions = [b for b in blocks if b.get("type") == "actions"][0]
+        assert actions["elements"][0]["value"] == "F-1"
+
+
+class TestProactiveRedoModal:
+
+    def test_callback_id_and_private_metadata_carry_file_id(self):
+        view = proactive_redo_modal("F-XYZ")
+        assert view["type"] == "modal"
+        assert view["callback_id"] == "ledgr_proactive_redo"
+        assert view["private_metadata"] == "F-XYZ"
+
+    def test_has_single_hint_input(self):
+        view = proactive_redo_modal("F-1")
+        inputs = [b for b in view["blocks"] if b.get("type") == "input"]
+        assert len(inputs) == 1
+        assert inputs[0]["block_id"] == "hint_block"
+        assert inputs[0]["element"]["action_id"] == "hint_input"
 
