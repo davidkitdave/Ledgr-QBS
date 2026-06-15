@@ -3,8 +3,104 @@
 from __future__ import annotations
 
 import urllib.parse
+from dataclasses import dataclass
 
 from app.native_blocks_compat import supports_native_blocks
+
+
+@dataclass(frozen=True)
+class PreviewColumn:
+    """Spec for one column in a ledger preview data_table."""
+
+    header: str    # shown in the data_table column header
+    row_key: str   # dict key on each exporter row
+    cell_type: str  # "raw_text" or "raw_number"
+
+
+def _normalize_software(software: str) -> str:
+    """Normalise assorted software strings to ``"xero"`` or ``"qbs_ledger"``."""
+    s = (software or "").strip().lower()
+    if "xero" in s:
+        return "xero"
+    # "qbs", "qbs_ledger", "qbs ledger", "QBS Ledger" all map to qbs_ledger.
+    return "qbs_ledger"
+
+
+def software_label(software: str) -> str:
+    """Human-readable label for a software key (normalised or raw)."""
+    if _normalize_software(software) == "xero":
+        return "Xero"
+    return "QBS Ledger"
+
+
+_XERO_PURCHASE_COLS: list[PreviewColumn] = [
+    PreviewColumn("Contact",      "*ContactName",   "raw_text"),
+    PreviewColumn("Invoice #",    "*InvoiceNumber", "raw_text"),
+    PreviewColumn("Invoice Date", "*InvoiceDate",   "raw_text"),
+    PreviewColumn("Description",  "Description",    "raw_text"),
+    PreviewColumn("Account",      "*AccountCode",   "raw_text"),
+    PreviewColumn("Tax Type",     "*TaxType",       "raw_text"),
+    PreviewColumn("Unit Amount",  "*UnitAmount",    "raw_number"),
+    PreviewColumn("Total",        "Total",          "raw_number"),
+]
+
+_XERO_SALES_COLS: list[PreviewColumn] = [
+    PreviewColumn("Contact",      "*ContactName",   "raw_text"),
+    PreviewColumn("Invoice #",    "*InvoiceNumber", "raw_text"),
+    PreviewColumn("Invoice Date", "*InvoiceDate",   "raw_text"),
+    PreviewColumn("Description",  "*Description",   "raw_text"),
+    PreviewColumn("Account",      "*AccountCode",   "raw_text"),
+    PreviewColumn("Tax Type",     "*TaxType",       "raw_text"),
+    PreviewColumn("Unit Amount",  "*UnitAmount",    "raw_number"),
+    PreviewColumn("Total",        "Total",          "raw_number"),
+]
+
+_QBS_PURCHASE_COLS: list[PreviewColumn] = [
+    PreviewColumn("Invoice Date",  "Invoice Date",       "raw_text"),
+    PreviewColumn("Invoice #",     "Invoice Number",     "raw_text"),
+    PreviewColumn("Vendor",        "Vendor Name",        "raw_text"),
+    PreviewColumn("Description",   "Description",        "raw_text"),
+    PreviewColumn("Account / COA", "Account Code / COA", "raw_text"),
+    PreviewColumn("Sub Total",     "Sub Total",          "raw_number"),
+    PreviewColumn("Tax Amount",    "Tax Amount",         "raw_number"),
+    PreviewColumn("Total Amount",  "Total Amount",       "raw_number"),
+]
+
+_QBS_SALES_COLS: list[PreviewColumn] = [
+    PreviewColumn("Invoice Date",  "Invoice Date",       "raw_text"),
+    PreviewColumn("Invoice #",     "Invoice Number",     "raw_text"),
+    PreviewColumn("Customer",      "Customer Name",      "raw_text"),
+    PreviewColumn("Description",   "Description",        "raw_text"),
+    PreviewColumn("Account / COA", "Account Code / COA", "raw_text"),
+    PreviewColumn("Amount",        "Amount",             "raw_number"),
+    PreviewColumn("Tax Amount",    "Tax Amount",         "raw_number"),
+    PreviewColumn("Total",         "Total",              "raw_number"),
+]
+
+_BANK_COLS: list[PreviewColumn] = [
+    PreviewColumn("Date",        "Date",        "raw_text"),
+    PreviewColumn("Description", "Description", "raw_text"),
+    PreviewColumn("Withdrawal",  "Withdrawal",  "raw_number"),
+    PreviewColumn("Deposit",     "Deposit",     "raw_number"),
+    PreviewColumn("Balance",     "Balance",     "raw_number"),
+    PreviewColumn("Currency",    "Currency",    "raw_text"),
+]
+
+
+def preview_column_spec(*, software: str, sheet: str) -> list[PreviewColumn]:
+    """Return the curated preview columns for a (software, sheet) combination.
+
+    Bank sheets (anything other than ``"Purchase"`` or ``"Sales"``) always
+    use the 6-col bank spec regardless of software.  Unknown software defaults
+    to the QBS Ledger shape.
+    """
+    if sheet not in ("Purchase", "Sales"):
+        return _BANK_COLS
+    norm = _normalize_software(software)
+    if norm == "xero":
+        return _XERO_PURCHASE_COLS if sheet == "Purchase" else _XERO_SALES_COLS
+    # qbs_ledger (default)
+    return _QBS_PURCHASE_COLS if sheet == "Purchase" else _QBS_SALES_COLS
 
 # Ordered pipeline stage keys and their display titles.
 PIPELINE_STAGES: tuple[str, ...] = (
@@ -1513,24 +1609,35 @@ def ledger_preview_data_table(
     rows: list[dict],
     workbook_name: str,
     fy: int,
+    sheet: str = "Purchase",
+    software: str = "qbs_ledger",
     channel_id: str | None = None,
     max_rows: int = 10,
 ) -> list[dict]:
     """Build a preview of the last rows appended to the FY ledger.
 
-    Native path: a ``data_table`` block with Date · Description · Account ·
-    Tax · Net · Total columns, optionally preceded by a labelling section and
-    followed by a context block when ``len(rows) > max_rows``.
+    The column shape mirrors the .xlsx the user will download — Xero columns
+    for Xero workbooks, QBS Ledger columns for QBS, and a 6-col bank shape
+    for bank sheets (anything whose ``sheet`` is not ``"Purchase"`` or
+    ``"Sales"``).
+
+    Native path: a ``data_table`` block with per-software/per-sheet columns,
+    optionally preceded by a labelling section and followed by a context block
+    when ``len(rows) > max_rows``.
 
     Fallback path: a single ``section`` block with a fixed-width mrkdwn
-    pre-block showing Date | Description | Amount, capped at 3000 chars.
+    pre-block showing the first text column, a description column, and the
+    last numeric column (total/balance), capped at 3000 chars.
 
     Args:
-        rows:          List of appended row dicts.  Expected keys: ``date``,
-                       ``description``, ``account_code``, ``tax_code``,
-                       ``net``, ``total``.  Missing keys are rendered as empty.
+        rows:          List of exporter row dicts (same dicts SlackLedgerStore
+                       receives — not a parallel/flattened shape).
         workbook_name: Display name of the workbook (e.g. ``"Ledger_FY2025.xlsx"``).
         fy:            Financial year integer (e.g. 2025).
+        sheet:         Sheet name: ``"Purchase"``, ``"Sales"``, or a bank
+                       account name.  Drives column spec selection.
+        software:      Accounting software key (``"xero"``, ``"qbs_ledger"``,
+                       ``"qbs"``, ``"QBS Ledger"``, ``"Xero"``, etc.).
         channel_id:    Used by supports_native_blocks() for per-channel probe.
         max_rows:      Maximum data rows to show in the preview (default 10).
                        Capped internally at 100 (Slack's data_table row limit).
@@ -1538,50 +1645,40 @@ def ledger_preview_data_table(
     if not rows:
         return []
 
+    col_spec = preview_column_spec(software=software, sheet=sheet)
+    sw_label = software_label(software)
     effective_max = min(max_rows, _DATA_TABLE_MAX_ROWS)
     preview = rows[:effective_max]
     overflow = len(rows) - effective_max
 
     if supports_native_blocks(channel_id):
         header_row = [
-            {"type": "raw_text", "text": "Date"},
-            {"type": "raw_text", "text": "Description"},
-            {"type": "raw_text", "text": "Account"},
-            {"type": "raw_text", "text": "Tax"},
-            {"type": "raw_text", "text": "Net"},
-            {"type": "raw_text", "text": "Total"},
+            {"type": "raw_text", "text": col.header} for col in col_spec
         ]
 
         data_rows: list[list[dict]] = []
         for row in preview:
-            def _raw_text(key: str) -> dict:
-                return {"type": "raw_text", "text": str(row.get(key) or "")}
+            cells: list[dict] = []
+            for col in col_spec:
+                val = row.get(col.row_key)
+                if col.cell_type == "raw_number":
+                    try:
+                        f = float(val)  # type: ignore[arg-type]
+                        cells.append({"type": "raw_number", "text": f"{f:.2f}", "value": f})
+                    except (TypeError, ValueError):
+                        # Missing/non-numeric: emit empty raw_text (raw_number
+                        # without a value would be rejected by Slack).
+                        cells.append({"type": "raw_text", "text": ""})
+                else:
+                    cells.append({"type": "raw_text", "text": str(val) if val is not None else ""})
+            data_rows.append(cells)
 
-            def _raw_number(key: str) -> dict:
-                val = row.get(key)
-                try:
-                    f = float(val)  # type: ignore[arg-type]
-                except (TypeError, ValueError):
-                    f = 0.0
-                return {"type": "raw_number", "text": f"{f:.2f}", "value": f}
-
-            data_rows.append([
-                _raw_text("date"),
-                _raw_text("description"),
-                _raw_text("account_code"),
-                _raw_text("tax_code"),
-                _raw_number("net"),
-                _raw_number("total"),
-            ])
-
-        caption = f"Last {len(preview)} rows added to {workbook_name} (FY{fy})"
+        caption = f"{sheet} — last {len(preview)} rows added (FY{fy})"
+        preface = f"Recent {sheet} rows in *{workbook_name}* ({sw_label}, FY{fy}):"
         blocks: list[dict] = [
             {
                 "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"Recent ledger rows in *{workbook_name}* (FY{fy}):",
-                },
+                "text": {"type": "mrkdwn", "text": preface},
             },
             {
                 "type": "data_table",
@@ -1606,6 +1703,12 @@ def ledger_preview_data_table(
         return blocks
 
     # Fallback: fixed-width mrkdwn pre-block.
+    # Use first text col, second text col (description-ish), last numeric col.
+    text_cols = [c for c in col_spec if c.cell_type == "raw_text"]
+    num_cols = [c for c in col_spec if c.cell_type == "raw_number"]
+    key_date = text_cols[0].row_key if text_cols else "Date"
+    key_desc = text_cols[1].row_key if len(text_cols) > 1 else "Description"
+    key_total = num_cols[-1].row_key if num_cols else "Total"
     _COL_WIDTHS = (12, 36, 12)
     header_line = (
         f"{'Date':<{_COL_WIDTHS[0]}}  "
@@ -1615,10 +1718,10 @@ def ledger_preview_data_table(
     separator = "-" * (sum(_COL_WIDTHS) + 4)
     lines = [header_line, separator]
     for row in preview:
-        date_s = str(row.get("date") or "")[:_COL_WIDTHS[0]]
-        desc_s = str(row.get("description") or "")[:_COL_WIDTHS[1]]
+        date_s = str(row.get(key_date) or "")[:_COL_WIDTHS[0]]
+        desc_s = str(row.get(key_desc) or "")[:_COL_WIDTHS[1]]
         try:
-            total_f = float(row.get("total") or 0)  # type: ignore[arg-type]
+            total_f = float(row.get(key_total) or 0)  # type: ignore[arg-type]
             amt_s = f"{total_f:>{_COL_WIDTHS[2]}.2f}"
         except (TypeError, ValueError):
             amt_s = " " * _COL_WIDTHS[2]
@@ -1636,7 +1739,7 @@ def ledger_preview_data_table(
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"Recent ledger rows in *{workbook_name}* (FY{fy}):\n{table_text}",
+                "text": f"Recent {sheet} rows in *{workbook_name}* (FY{fy}):\n{table_text}",
             },
         }
     ]

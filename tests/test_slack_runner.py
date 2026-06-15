@@ -1113,24 +1113,42 @@ def _last_blocks(slack: FakeSlackClient):
 
 
 # =========================================================================== #
-# Commit 4: ledger preview data_table posted after delivery
+# Commit 4 (updated): ledger preview — per-software / per-sheet data_table
 # =========================================================================== #
 
 
-def test_delivery_posts_ledger_preview_data_table(monkeypatch):
-    """After a successful delivery, persist_and_deliver posts a follow-up
-    chat_postMessage carrying a data_table block preview of the appended rows."""
+def _run_delivery_with_state(state: dict, monkeypatch, channel_id: str = "C1"):
+    """Helper: run process_file_event with a fake state and return all post calls."""
     monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
-
     slack = FakeSlackClient()
     db = FakeFirestore()
     store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
-
     final_event = SimpleNamespace(
         content=SimpleNamespace(parts=[SimpleNamespace(text="done")]),
         get_function_calls=lambda: [],
     )
-    # Build a payload with one batch that has a row rich enough to preview.
+    runner = _FakeRunner([final_event], state)
+
+    asyncio.run(
+        process_file_event(
+            runner=runner,
+            ledger_store=store,
+            db=db,
+            slack_client=slack,
+            channel_id=channel_id,
+            file_id="F1",
+            app_name="acc",
+            download_fn=lambda client, file_id: b"%PDF-1.4 fake",
+            source_filename="invoice.pdf",
+            client_store=_seeded_client_store(db),
+        )
+    )
+    return _post_calls(slack)
+
+
+def test_delivery_posts_ledger_preview_data_table(monkeypatch):
+    """After a successful delivery, persist_and_deliver posts a data_table preview
+    that uses QBS Purchase column shape (Sub Total at col 5, Total Amount at col 7)."""
     state = {
         nodes.LEDGER_ROWS_KEY: {
             "client_id": "c1",
@@ -1145,9 +1163,12 @@ def test_delivery_posts_ledger_preview_data_table(monkeypatch):
                     "rows": [
                         {
                             "Invoice Date": "2025-09-15",
+                            "Invoice Number": "INV-042",
+                            "Vendor Name": "Acme Trading",
                             "Description": "Acme Trading INV-2025-0042",
                             "Account Code / COA": "6090",
                             "Sub Total": 1132.11,
+                            "Tax Amount": 102.39,
                             "Total Amount": 1234.50,
                         }
                     ],
@@ -1156,44 +1177,178 @@ def test_delivery_posts_ledger_preview_data_table(monkeypatch):
         },
         nodes.DELIVER_SUMMARY_KEY: "Added 1 line to your FY2025 ledger.",
     }
-    runner = _FakeRunner([final_event], state)
+    posts = _run_delivery_with_state(state, monkeypatch)
 
-    def fake_download(client, file_id):
-        return b"%PDF-1.4 fake"
-
-    asyncio.run(
-        process_file_event(
-            runner=runner,
-            ledger_store=store,
-            db=db,
-            slack_client=slack,
-            channel_id="C1",
-            file_id="F1",
-            app_name="acc",
-            download_fn=fake_download,
-            source_filename="invoice.pdf",
-            client_store=_seeded_client_store(db),
-        )
-    )
-
-    # Find the data_table follow-up message (separate from the delivery summary).
     data_table_posts = [
-        p for p in _post_calls(slack)
+        p for p in posts
         if any(b.get("type") == "data_table" for b in (p.get("blocks") or []))
     ]
     assert data_table_posts, "Expected at least one chat_postMessage with a data_table block"
-    preview_post = data_table_posts[0]
-    table_block = next(b for b in preview_post["blocks"] if b["type"] == "data_table")
-    # header + 1 data row
+    table_block = next(b for b in data_table_posts[0]["blocks"] if b["type"] == "data_table")
+    # 1 header + 1 data row
     assert len(table_block["rows"]) == 2
     assert table_block["row_header_column_index"] == 0
     assert table_block["page_size"] == 10
-    # The data row's Net/Total cells are raw_number with float value.
+    # QBS Purchase: col 5 = Sub Total, col 7 = Total Amount
     data_row = table_block["rows"][1]
-    assert data_row[4]["type"] == "raw_number"
-    assert data_row[4]["value"] == 1132.11
     assert data_row[5]["type"] == "raw_number"
-    assert data_row[5]["value"] == 1234.50
+    assert data_row[5]["value"] == 1132.11
+    assert data_row[7]["type"] == "raw_number"
+    assert data_row[7]["value"] == 1234.50
+
+
+def test_delivery_two_batches_posts_two_preview_messages(monkeypatch):
+    """A Purchase + Sales batch should result in TWO separate preview messages."""
+    state = {
+        nodes.LEDGER_ROWS_KEY: {
+            "client_id": "c1",
+            "fy": "2025",
+            "kind": "invoice",
+            "software": "qbs",
+            "client_name": "Acme",
+            "batches": [
+                {
+                    "sheet": "Purchase",
+                    "doc_key": "Purchase:INV-001",
+                    "rows": [{"Invoice Date": "15/09/2025", "Invoice Number": "INV-001",
+                              "Vendor Name": "Acme", "Description": "Consulting",
+                              "Account Code / COA": "6090", "Sub Total": 100.0,
+                              "Tax Amount": 9.0, "Total Amount": 109.0}],
+                },
+                {
+                    "sheet": "Sales",
+                    "doc_key": "Sales:SI-001",
+                    "rows": [{"Invoice Date": "15/09/2025", "Invoice Number": "SI-001",
+                              "Customer Name": "ClientX", "Description": "Services",
+                              "Account Code / COA": "4000", "Amount": 200.0,
+                              "Tax Amount": 18.0, "Total": 218.0}],
+                },
+            ],
+        },
+        nodes.DELIVER_SUMMARY_KEY: "Added rows to ledger.",
+    }
+    posts = _run_delivery_with_state(state, monkeypatch)
+
+    data_table_posts = [
+        p for p in posts
+        if any(b.get("type") == "data_table" for b in (p.get("blocks") or []))
+    ]
+    assert len(data_table_posts) == 2, (
+        f"Expected 2 preview messages (one per batch), got {len(data_table_posts)}"
+    )
+
+
+def test_delivery_bank_batch_posts_bank_shaped_preview(monkeypatch):
+    """A bank batch (sheet != Purchase/Sales) posts a 6-col bank-shaped preview."""
+    state = {
+        nodes.LEDGER_ROWS_KEY: {
+            "client_id": "c1",
+            "fy": "2025",
+            "kind": "bank",
+            "software": "qbs",
+            "client_name": "Acme",
+            "batches": [
+                {
+                    "sheet": "OCBC SGD",
+                    "doc_key": "OCBC SGD:2025-09",
+                    "rows": [
+                        {"Date": "15/09/2025", "Description": "Cheque deposit",
+                         "Withdrawal": 0.0, "Deposit": 5000.0,
+                         "Balance": 12340.50, "Currency": "SGD"},
+                    ],
+                }
+            ],
+        },
+        nodes.DELIVER_SUMMARY_KEY: "Bank statement processed.",
+    }
+    posts = _run_delivery_with_state(state, monkeypatch)
+
+    data_table_posts = [
+        p for p in posts
+        if any(b.get("type") == "data_table" for b in (p.get("blocks") or []))
+    ]
+    assert data_table_posts, "Expected a bank preview post"
+    table_block = next(b for b in data_table_posts[0]["blocks"] if b["type"] == "data_table")
+    header_texts = [c["text"] for c in table_block["rows"][0]]
+    assert header_texts == ["Date", "Description", "Withdrawal", "Deposit", "Balance", "Currency"]
+
+
+def test_delivery_xero_software_uses_xero_headers(monkeypatch):
+    """When software == 'xero', the preview headers match the Xero column shape."""
+    state = {
+        nodes.LEDGER_ROWS_KEY: {
+            "client_id": "c1",
+            "fy": "2025",
+            "kind": "invoice",
+            "software": "xero",
+            "client_name": "Acme",
+            "batches": [
+                {
+                    "sheet": "Purchase",
+                    "doc_key": "Purchase:INV-042",
+                    "rows": [
+                        {"*ContactName": "Acme Trading Pte Ltd",
+                         "*InvoiceNumber": "INV-2025-0042",
+                         "*InvoiceDate": "15/09/2025",
+                         "Description": "Consulting services",
+                         "*AccountCode": "6090", "*TaxType": "SR",
+                         "*UnitAmount": 1132.11, "Total": 1234.50},
+                    ],
+                }
+            ],
+        },
+        nodes.DELIVER_SUMMARY_KEY: "Added 1 Xero row.",
+    }
+    posts = _run_delivery_with_state(state, monkeypatch)
+
+    data_table_posts = [
+        p for p in posts
+        if any(b.get("type") == "data_table" for b in (p.get("blocks") or []))
+    ]
+    assert data_table_posts
+    table_block = next(b for b in data_table_posts[0]["blocks"] if b["type"] == "data_table")
+    header_texts = [c["text"] for c in table_block["rows"][0]]
+    assert header_texts[0] == "Contact"
+    assert "Invoice #" in header_texts
+    assert "Tax Type" in header_texts
+
+
+def test_delivery_qbs_software_uses_qbs_headers(monkeypatch):
+    """When software == 'qbs', the preview uses QBS Ledger Purchase headers."""
+    state = {
+        nodes.LEDGER_ROWS_KEY: {
+            "client_id": "c1",
+            "fy": "2025",
+            "kind": "invoice",
+            "software": "qbs",
+            "client_name": "Acme",
+            "batches": [
+                {
+                    "sheet": "Purchase",
+                    "doc_key": "Purchase:INV-001",
+                    "rows": [
+                        {"Invoice Date": "15/09/2025", "Invoice Number": "INV-001",
+                         "Vendor Name": "Acme", "Description": "Consulting",
+                         "Account Code / COA": "6090", "Sub Total": 100.0,
+                         "Tax Amount": 9.0, "Total Amount": 109.0},
+                    ],
+                }
+            ],
+        },
+        nodes.DELIVER_SUMMARY_KEY: "Added 1 QBS row.",
+    }
+    posts = _run_delivery_with_state(state, monkeypatch)
+
+    data_table_posts = [
+        p for p in posts
+        if any(b.get("type") == "data_table" for b in (p.get("blocks") or []))
+    ]
+    assert data_table_posts
+    table_block = next(b for b in data_table_posts[0]["blocks"] if b["type"] == "data_table")
+    header_texts = [c["text"] for c in table_block["rows"][0]]
+    assert header_texts[0] == "Invoice Date"
+    assert "Vendor" in header_texts
+    assert "Sub Total" in header_texts
 
 
 # =========================================================================== #

@@ -1179,21 +1179,109 @@ class TestDedupValue:
 
 
 # --------------------------------------------------------------------------- #
-# Commit 4: ledger_preview_data_table
+# Commit 4 (updated): ledger_preview_data_table — per-software / per-sheet
 # --------------------------------------------------------------------------- #
 
-_SAMPLE_ROWS = [
-    {"date": "2025-09-15", "description": "Acme INV-001", "account_code": "6090",
-     "tax_code": "SR", "net": 1132.11, "total": 1234.50},
-    {"date": "2025-09-18", "description": "BetaCo BIL-7788", "account_code": "6090",
-     "tax_code": "ZR", "net": 450.00, "total": 450.00},
-    {"date": "2025-09-22", "description": "Gamma Pte INV-001", "account_code": "4000",
-     "tax_code": "SR", "net": 920.00, "total": 1002.80},
-    {"date": "2025-09-25", "description": "Delta Co SVC-09", "account_code": "6100",
-     "tax_code": "SR", "net": 200.00, "total": 218.00},
-    {"date": "2025-09-28", "description": "Epsilon BIL-2025", "account_code": "6200",
-     "tax_code": "ZR", "net": 80.00, "total": 80.00},
+from app.blocks import PreviewColumn, preview_column_spec, software_label
+
+# QBS Purchase exporter row shape
+_QBS_PURCHASE_ROWS = [
+    {"Invoice Date": "15/09/2025", "Invoice Number": "INV-001", "Vendor Name": "Acme Trading",
+     "Description": "Consulting", "Account Code / COA": "6090",
+     "Sub Total": 1132.11, "Tax Amount": 102.39, "Total Amount": 1234.50},
+    {"Invoice Date": "18/09/2025", "Invoice Number": "BIL-7788", "Vendor Name": "BetaCo",
+     "Description": "SaaS", "Account Code / COA": "6090",
+     "Sub Total": 450.00, "Tax Amount": 0.00, "Total Amount": 450.00},
+    {"Invoice Date": "22/09/2025", "Invoice Number": "INV-002", "Vendor Name": "Gamma Pte",
+     "Description": "Equipment", "Account Code / COA": "4000",
+     "Sub Total": 920.00, "Tax Amount": 82.80, "Total Amount": 1002.80},
+    {"Invoice Date": "25/09/2025", "Invoice Number": "SVC-09", "Vendor Name": "Delta Co",
+     "Description": "Maintenance", "Account Code / COA": "6100",
+     "Sub Total": 200.00, "Tax Amount": 18.00, "Total Amount": 218.00},
+    {"Invoice Date": "28/09/2025", "Invoice Number": "BIL-2025", "Vendor Name": "Epsilon",
+     "Description": "Freight", "Account Code / COA": "6200",
+     "Sub Total": 80.00, "Tax Amount": 0.00, "Total Amount": 80.00},
 ]
+
+# Xero Purchase exporter row shape
+_XERO_PURCHASE_ROWS = [
+    {"*ContactName": "Acme Trading Pte Ltd", "*InvoiceNumber": "INV-2025-0042",
+     "*InvoiceDate": "15/09/2025", "Description": "Consulting services",
+     "*AccountCode": "6090", "*TaxType": "SR", "*UnitAmount": 1132.11, "Total": 1234.50},
+    {"*ContactName": "BetaCo", "*InvoiceNumber": "BIL-7788",
+     "*InvoiceDate": "18/09/2025", "Description": "SaaS subscription",
+     "*AccountCode": "6090", "*TaxType": "ZR", "*UnitAmount": 450.00, "Total": 450.00},
+]
+
+# Bank statement row shape
+_BANK_ROWS = [
+    {"Date": "15/09/2025", "Description": "Cheque deposit",
+     "Withdrawal": 0.0, "Deposit": 5000.00, "Balance": 12340.50, "Currency": "SGD"},
+    {"Date": "17/09/2025", "Description": "Vendor payment ACME",
+     "Withdrawal": 1234.50, "Deposit": 0.0, "Balance": 11106.00, "Currency": "SGD"},
+]
+
+
+# --------------------------------------------------------------------------- #
+# preview_column_spec
+# --------------------------------------------------------------------------- #
+
+class TestPreviewColumnSpec:
+
+    def test_xero_purchase_returns_8_cols_starting_with_contact(self):
+        spec = preview_column_spec(software="xero", sheet="Purchase")
+        assert len(spec) == 8
+        assert spec[0].row_key == "*ContactName"
+        assert spec[0].header == "Contact"
+
+    def test_xero_sales_uses_star_description(self):
+        spec = preview_column_spec(software="xero", sheet="Sales")
+        desc_col = next(c for c in spec if "Description" in c.header)
+        assert desc_col.row_key == "*Description"
+
+    def test_qbs_purchase_uses_vendor_name(self):
+        spec = preview_column_spec(software="qbs_ledger", sheet="Purchase")
+        vendor_col = next(c for c in spec if c.row_key == "Vendor Name")
+        assert vendor_col.header == "Vendor"
+
+    def test_qbs_sales_uses_customer_name(self):
+        spec = preview_column_spec(software="qbs_ledger", sheet="Sales")
+        cust_col = next(c for c in spec if c.row_key == "Customer Name")
+        assert cust_col.header == "Customer"
+
+    def test_bank_sheet_returns_6_col_spec(self):
+        spec = preview_column_spec(software="qbs_ledger", sheet="OCBC SGD")
+        assert len(spec) == 6
+        headers = [c.header for c in spec]
+        assert "Withdrawal" in headers
+        assert "Deposit" in headers
+
+    def test_bank_sheet_any_software(self):
+        spec_xero = preview_column_spec(software="xero", sheet="DBS MYR")
+        spec_qbs = preview_column_spec(software="qbs_ledger", sheet="DBS MYR")
+        assert spec_xero == spec_qbs  # bank spec is software-agnostic
+
+    def test_unknown_software_defaults_to_qbs_ledger_shape(self):
+        spec_unknown = preview_column_spec(software="some_future_tool", sheet="Purchase")
+        spec_qbs = preview_column_spec(software="qbs_ledger", sheet="Purchase")
+        assert spec_unknown == spec_qbs
+
+    def test_normalised_software_strings_resolve(self):
+        # "qbs" and "QBS Ledger" and "qbs_ledger" all map to the same spec.
+        assert (
+            preview_column_spec(software="qbs", sheet="Purchase")
+            == preview_column_spec(software="QBS Ledger", sheet="Purchase")
+            == preview_column_spec(software="qbs_ledger", sheet="Purchase")
+        )
+        assert (
+            preview_column_spec(software="Xero", sheet="Purchase")
+            == preview_column_spec(software="xero", sheet="Purchase")
+        )
+
+    def test_withdrawal_deposit_balance_are_raw_number(self):
+        spec = preview_column_spec(software="qbs_ledger", sheet="OCBC SGD")
+        num_keys = {c.row_key for c in spec if c.cell_type == "raw_number"}
+        assert {"Withdrawal", "Deposit", "Balance"} == num_keys
 
 
 class TestLedgerPreviewDataTableNative:
@@ -1204,116 +1292,193 @@ class TestLedgerPreviewDataTableNative:
 
     def test_empty_rows_returns_empty_list(self):
         assert ledger_preview_data_table(
-            rows=[], workbook_name="Ledger_FY2025.xlsx", fy=2025
+            rows=[], workbook_name="Ledger_FY2025.xlsx", fy=2025,
+            sheet="Purchase", software="qbs_ledger",
         ) == []
 
     def test_five_rows_produces_data_table_block(self):
         blocks = ledger_preview_data_table(
-            rows=_SAMPLE_ROWS, workbook_name="Ledger_FY2025.xlsx", fy=2025
+            rows=_QBS_PURCHASE_ROWS, workbook_name="Ledger_FY2025.xlsx", fy=2025,
+            sheet="Purchase", software="qbs_ledger",
         )
         table_blocks = [b for b in blocks if b.get("type") == "data_table"]
         assert len(table_blocks) == 1
 
-    def test_header_row_is_first_row(self):
+    def test_xero_purchase_header_order(self):
         blocks = ledger_preview_data_table(
-            rows=_SAMPLE_ROWS, workbook_name="Ledger_FY2025.xlsx", fy=2025
+            rows=_XERO_PURCHASE_ROWS, workbook_name="Purchase Ledger FY2025", fy=2025,
+            sheet="Purchase", software="xero",
+        )
+        table = next(b for b in blocks if b["type"] == "data_table")
+        header_texts = [c["text"] for c in table["rows"][0]]
+        assert header_texts == [
+            "Contact", "Invoice #", "Invoice Date", "Description",
+            "Account", "Tax Type", "Unit Amount", "Total",
+        ]
+
+    def test_xero_purchase_first_data_cell_is_contact_name(self):
+        blocks = ledger_preview_data_table(
+            rows=_XERO_PURCHASE_ROWS, workbook_name="Purchase Ledger FY2025", fy=2025,
+            sheet="Purchase", software="xero",
+        )
+        table = next(b for b in blocks if b["type"] == "data_table")
+        data_row = table["rows"][1]
+        assert data_row[0]["type"] == "raw_text"
+        assert data_row[0]["text"] == "Acme Trading Pte Ltd"
+
+    def test_qbs_purchase_header_starts_with_invoice_date(self):
+        blocks = ledger_preview_data_table(
+            rows=_QBS_PURCHASE_ROWS, workbook_name="Ledger_FY2025.xlsx", fy=2025,
+            sheet="Purchase", software="qbs_ledger",
         )
         table = next(b for b in blocks if b["type"] == "data_table")
         header = table["rows"][0]
-        header_texts = [c["text"] for c in header]
-        assert header_texts == ["Date", "Description", "Account", "Tax", "Net", "Total"]
+        assert header[0]["text"] == "Invoice Date"
+        assert header[2]["text"] == "Vendor"
+
+    def test_bank_preview_has_6_col_shape(self):
+        blocks = ledger_preview_data_table(
+            rows=_BANK_ROWS, workbook_name="Bank — OCBC SGD", fy=2025,
+            sheet="OCBC SGD", software="qbs_ledger",
+        )
+        table = next(b for b in blocks if b["type"] == "data_table")
+        header_texts = [c["text"] for c in table["rows"][0]]
+        assert header_texts == ["Date", "Description", "Withdrawal", "Deposit", "Balance", "Currency"]
+
+    def test_bank_withdrawal_deposit_are_raw_number(self):
+        blocks = ledger_preview_data_table(
+            rows=_BANK_ROWS, workbook_name="Bank — OCBC SGD", fy=2025,
+            sheet="OCBC SGD", software="qbs_ledger",
+        )
+        table = next(b for b in blocks if b["type"] == "data_table")
+        data_row = table["rows"][1]
+        # col 2 = Withdrawal, col 3 = Deposit
+        assert data_row[2]["type"] == "raw_number"
+        assert data_row[3]["type"] == "raw_number"
+        assert data_row[3]["value"] == 5000.00
 
     def test_five_data_rows_follow_header(self):
         blocks = ledger_preview_data_table(
-            rows=_SAMPLE_ROWS, workbook_name="Ledger_FY2025.xlsx", fy=2025
+            rows=_QBS_PURCHASE_ROWS, workbook_name="Ledger_FY2025.xlsx", fy=2025,
+            sheet="Purchase", software="qbs_ledger",
         )
         table = next(b for b in blocks if b["type"] == "data_table")
-        # total rows = 1 header + 5 data
-        assert len(table["rows"]) == 6
+        assert len(table["rows"]) == 6  # 1 header + 5 data
 
-    def test_date_description_account_tax_are_raw_text(self):
+    def test_text_cols_are_raw_text_number_cols_raw_number(self):
         blocks = ledger_preview_data_table(
-            rows=_SAMPLE_ROWS[:1], workbook_name="Ledger_FY2025.xlsx", fy=2025
+            rows=_QBS_PURCHASE_ROWS[:1], workbook_name="Ledger_FY2025.xlsx", fy=2025,
+            sheet="Purchase", software="qbs_ledger",
         )
         table = next(b for b in blocks if b["type"] == "data_table")
         data_row = table["rows"][1]
-        for col_idx in range(4):  # Date, Description, Account, Tax
-            assert data_row[col_idx]["type"] == "raw_text"
+        # QBS Purchase: cols 0-4 are text, cols 5-7 are numeric
+        for idx in range(5):
+            assert data_row[idx]["type"] == "raw_text"
+        for idx in range(5, 8):
+            assert data_row[idx]["type"] == "raw_number"
 
-    def test_net_and_total_are_raw_number_with_value_float(self):
+    def test_numeric_cells_have_float_value(self):
         blocks = ledger_preview_data_table(
-            rows=_SAMPLE_ROWS[:1], workbook_name="Ledger_FY2025.xlsx", fy=2025
+            rows=_QBS_PURCHASE_ROWS[:1], workbook_name="Ledger_FY2025.xlsx", fy=2025,
+            sheet="Purchase", software="qbs_ledger",
         )
         table = next(b for b in blocks if b["type"] == "data_table")
         data_row = table["rows"][1]
-        net_cell = data_row[4]
-        total_cell = data_row[5]
-        assert net_cell["type"] == "raw_number"
-        assert isinstance(net_cell["value"], float)
-        assert net_cell["text"] == "1132.11"
-        assert total_cell["type"] == "raw_number"
-        assert isinstance(total_cell["value"], float)
-        assert total_cell["text"] == "1234.50"
+        sub_total_cell = data_row[5]   # Sub Total
+        total_amt_cell = data_row[7]   # Total Amount
+        assert sub_total_cell["type"] == "raw_number"
+        assert isinstance(sub_total_cell["value"], float)
+        assert sub_total_cell["text"] == "1132.11"
+        assert total_amt_cell["type"] == "raw_number"
+        assert total_amt_cell["text"] == "1234.50"
 
-    def test_caption_contains_workbook_name_and_fy(self):
+    def test_caption_contains_sheet_and_fy(self):
         blocks = ledger_preview_data_table(
-            rows=_SAMPLE_ROWS, workbook_name="Purchase Ledger FY2025", fy=2025
+            rows=_QBS_PURCHASE_ROWS, workbook_name="Purchase Ledger FY2025", fy=2025,
+            sheet="Purchase", software="qbs_ledger",
         )
         table = next(b for b in blocks if b["type"] == "data_table")
-        assert "Purchase Ledger FY2025" in table["caption"]
+        assert "Purchase" in table["caption"]
         assert "FY2025" in table["caption"]
 
     def test_row_header_column_index_is_zero(self):
         blocks = ledger_preview_data_table(
-            rows=_SAMPLE_ROWS, workbook_name="Ledger_FY2025.xlsx", fy=2025
+            rows=_QBS_PURCHASE_ROWS, workbook_name="Ledger_FY2025.xlsx", fy=2025,
+            sheet="Purchase", software="qbs_ledger",
         )
         table = next(b for b in blocks if b["type"] == "data_table")
         assert table["row_header_column_index"] == 0
 
     def test_page_size_is_ten(self):
         blocks = ledger_preview_data_table(
-            rows=_SAMPLE_ROWS, workbook_name="Ledger_FY2025.xlsx", fy=2025
+            rows=_QBS_PURCHASE_ROWS, workbook_name="Ledger_FY2025.xlsx", fy=2025,
+            sheet="Purchase", software="qbs_ledger",
         )
         table = next(b for b in blocks if b["type"] == "data_table")
         assert table["page_size"] == 10
 
     def test_overflow_appends_context_block(self):
-        rows_15 = _SAMPLE_ROWS * 3  # 15 rows
+        rows_15 = _QBS_PURCHASE_ROWS * 3  # 15 rows
         blocks = ledger_preview_data_table(
-            rows=rows_15, workbook_name="Ledger_FY2025.xlsx", fy=2025, max_rows=10
+            rows=rows_15, workbook_name="Ledger_FY2025.xlsx", fy=2025,
+            sheet="Purchase", software="qbs_ledger", max_rows=10,
         )
         table = next(b for b in blocks if b["type"] == "data_table")
-        # 1 header + 10 data rows
-        assert len(table["rows"]) == 11
+        assert len(table["rows"]) == 11  # 1 header + 10 data
         context_blocks = [b for b in blocks if b["type"] == "context"]
         assert len(context_blocks) == 1
         assert "5 more" in context_blocks[0]["elements"][0]["text"]
 
     def test_no_overflow_no_context_block(self):
         blocks = ledger_preview_data_table(
-            rows=_SAMPLE_ROWS, workbook_name="Ledger_FY2025.xlsx", fy=2025, max_rows=10
+            rows=_QBS_PURCHASE_ROWS, workbook_name="Ledger_FY2025.xlsx", fy=2025,
+            sheet="Purchase", software="qbs_ledger", max_rows=10,
         )
         assert not any(b["type"] == "context" for b in blocks)
 
-    def test_missing_keys_handled_gracefully(self):
-        sparse_rows = [{"date": "2025-09-01"}]  # all other keys absent
+    def test_missing_keys_yield_empty_raw_text_not_raw_number(self):
+        # A row with no matching keys should produce empty raw_text for numeric cols
+        # (raw_number without a value is rejected by Slack).
+        sparse = [{}]
         blocks = ledger_preview_data_table(
-            rows=sparse_rows, workbook_name="Ledger_FY2025.xlsx", fy=2025
+            rows=sparse, workbook_name="Ledger_FY2025.xlsx", fy=2025,
+            sheet="Purchase", software="qbs_ledger",
         )
         table = next(b for b in blocks if b["type"] == "data_table")
         data_row = table["rows"][1]
-        # empty strings for missing text fields
-        assert data_row[1]["text"] == ""
-        # zero for missing numeric fields
-        assert data_row[4]["value"] == 0.0
+        for cell in data_row:
+            # Every cell must have a "text" key (raw_number also carries "text").
+            assert "text" in cell
+        # Missing numeric keys → raw_text (empty) rather than raw_number with no value.
+        for idx in range(5, 8):
+            assert data_row[idx]["type"] == "raw_text"
+            assert data_row[idx]["text"] == ""
 
     def test_preface_section_block_present(self):
         blocks = ledger_preview_data_table(
-            rows=_SAMPLE_ROWS, workbook_name="Ledger_FY2025.xlsx", fy=2025
+            rows=_QBS_PURCHASE_ROWS, workbook_name="Ledger_FY2025.xlsx", fy=2025,
+            sheet="Purchase", software="qbs_ledger",
         )
         section_blocks = [b for b in blocks if b["type"] == "section"]
         assert len(section_blocks) == 1
         assert "Ledger_FY2025.xlsx" in section_blocks[0]["text"]["text"]
+
+    def test_xero_software_label_in_preface(self):
+        blocks = ledger_preview_data_table(
+            rows=_XERO_PURCHASE_ROWS, workbook_name="Ledger_FY2025.xlsx", fy=2025,
+            sheet="Purchase", software="xero",
+        )
+        section = next(b for b in blocks if b["type"] == "section")
+        assert "Xero" in section["text"]["text"]
+
+    def test_qbs_software_label_in_preface(self):
+        blocks = ledger_preview_data_table(
+            rows=_QBS_PURCHASE_ROWS, workbook_name="Ledger_FY2025.xlsx", fy=2025,
+            sheet="Purchase", software="qbs_ledger",
+        )
+        section = next(b for b in blocks if b["type"] == "section")
+        assert "QBS Ledger" in section["text"]["text"]
 
 
 class TestLedgerPreviewDataTableFallback:
@@ -1324,12 +1489,14 @@ class TestLedgerPreviewDataTableFallback:
 
     def test_empty_rows_returns_empty_list(self):
         assert ledger_preview_data_table(
-            rows=[], workbook_name="Ledger_FY2025.xlsx", fy=2025
+            rows=[], workbook_name="Ledger_FY2025.xlsx", fy=2025,
+            sheet="Purchase", software="qbs_ledger",
         ) == []
 
     def test_returns_section_with_mrkdwn_preblock(self):
         blocks = ledger_preview_data_table(
-            rows=_SAMPLE_ROWS, workbook_name="Ledger_FY2025.xlsx", fy=2025
+            rows=_QBS_PURCHASE_ROWS, workbook_name="Ledger_FY2025.xlsx", fy=2025,
+            sheet="Purchase", software="qbs_ledger",
         )
         assert len(blocks) == 1
         assert blocks[0]["type"] == "section"
@@ -1337,19 +1504,31 @@ class TestLedgerPreviewDataTableFallback:
         assert "```" in blocks[0]["text"]["text"]
 
     def test_fallback_text_under_3000_chars(self):
-        rows_many = _SAMPLE_ROWS * 20  # 100 rows
+        rows_many = _QBS_PURCHASE_ROWS * 20  # 100 rows
         blocks = ledger_preview_data_table(
-            rows=rows_many, workbook_name="Ledger_FY2025.xlsx", fy=2025, max_rows=100
+            rows=rows_many, workbook_name="Ledger_FY2025.xlsx", fy=2025,
+            sheet="Purchase", software="qbs_ledger", max_rows=100,
         )
         assert len(blocks[0]["text"]["text"]) <= 3000
 
-    def test_fallback_shows_date_and_description(self):
+    def test_fallback_shows_invoice_date_and_invoice_number(self):
         blocks = ledger_preview_data_table(
-            rows=_SAMPLE_ROWS[:1], workbook_name="Ledger_FY2025.xlsx", fy=2025
+            rows=_QBS_PURCHASE_ROWS[:1], workbook_name="Ledger_FY2025.xlsx", fy=2025,
+            sheet="Purchase", software="qbs_ledger",
         )
         text = blocks[0]["text"]["text"]
-        assert "2025-09-15" in text
-        assert "Acme INV-001" in text
+        assert "15/09/2025" in text
+        assert "INV-001" in text
+
+    def test_xero_fallback_shows_contact_name_and_invoice_number(self):
+        blocks = ledger_preview_data_table(
+            rows=_XERO_PURCHASE_ROWS[:1], workbook_name="Ledger_FY2025.xlsx", fy=2025,
+            sheet="Purchase", software="xero",
+        )
+        text = blocks[0]["text"]["text"]
+        # Fallback truncates the date col to 12 chars — "Acme Trading" appears.
+        assert "Acme Trading" in text
+        assert "INV-2025-0042" in text
 
 
 # --------------------------------------------------------------------------- #

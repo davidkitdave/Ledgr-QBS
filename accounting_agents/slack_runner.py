@@ -704,35 +704,44 @@ async def persist_and_deliver(
     summary = state.get(nodes.DELIVER_SUMMARY_KEY) or "Document processed."
     _post_message(slack_client, channel_id, summary, thread_ts=thread_ts)
 
-    # Post a data_table preview of the rows just appended (best-effort; never
-    # breaks delivery if it fails).
+    # Post one data_table preview per batch (best-effort; never breaks delivery).
+    # Each batch maps to one .xlsx tab, so one preview message per batch gives
+    # the user a per-tab window on exactly the rows SlackLedgerStore appended.
     if append_result.get("appended", 0) > 0 and batches:
+        workbook_name = append_result.get("filename") or "Ledger.xlsx"
+        fy_str = append_result.get("fy") or str(payload.get("fy") or "")
         try:
-            preview_rows = _build_preview_rows(batches)
-            if preview_rows:
-                workbook_name = append_result.get("filename") or "Ledger.xlsx"
-                fy_str = append_result.get("fy") or str(payload.get("fy") or "")
-                try:
-                    fy_int = int(fy_str)
-                except (TypeError, ValueError):
-                    fy_int = 0
+            fy_int = int(fy_str)
+        except (TypeError, ValueError):
+            fy_int = 0
+        software = str(payload.get("software") or "qbs_ledger")
+        for batch in batches:
+            batch_rows = batch.get("rows") or []
+            if not batch_rows:
+                continue
+            sheet = str(batch.get("sheet") or "Purchase")
+            try:
                 preview_blocks = ledger_preview_data_table(
-                    rows=preview_rows,
+                    rows=batch_rows,
                     workbook_name=workbook_name,
                     fy=fy_int,
+                    sheet=sheet,
+                    software=software,
                     channel_id=channel_id,
                 )
                 if preview_blocks:
                     preview_kwargs: dict = {
                         "channel": channel_id,
-                        "text": f"Ledger preview — {workbook_name}",
+                        "text": f"Ledger preview — {sheet} ({workbook_name})",
                         "blocks": preview_blocks,
                     }
                     if thread_ts:
                         preview_kwargs["thread_ts"] = thread_ts
                     slack_client.chat_postMessage(**preview_kwargs)
-        except Exception:  # noqa: BLE001 — preview is cosmetic; never break delivery
-            logger.warning("ledger preview post failed (non-fatal)", exc_info=True)
+            except Exception:  # noqa: BLE001 — preview is cosmetic; never break delivery
+                logger.warning(
+                    "ledger preview post failed for sheet %s (non-fatal)", sheet, exc_info=True
+                )
 
     return append_result
 
