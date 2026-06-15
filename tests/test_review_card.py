@@ -27,6 +27,8 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from accounting_agents import nodes
 from accounting_agents.hitl import write_interrupt
 from accounting_agents.ledger_store import SlackLedgerStore
@@ -35,6 +37,7 @@ from accounting_agents.slack_runner import (
     process_file_event,
 )
 from app.blocks import review_card_blocks, review_hint_modal, review_outcome_blocks
+from app.native_blocks_compat import _reset_for_tests
 from tests._fake_firestore import FakeFirestore
 from tests.test_ledger_store import FakeSlackClient
 from tests.test_slack_runner import (
@@ -43,6 +46,22 @@ from tests.test_slack_runner import (
     _posted_texts,
     _seeded_client_store,
 )
+
+
+# ---------------------------------------------------------------------------
+# Module-level autouse fixture: pin all pre-existing tests to the FALLBACK
+# (section + actions) shape so they continue to assert exactly what they did
+# before Commit 6.  Native-mode tests opt in explicitly by overriding the env.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _force_fallback_blocks(monkeypatch):
+    """Pin LEDGR_NATIVE_BLOCKS=0 for every test in this module."""
+    monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "0")
+    _reset_for_tests()
+    yield
+    _reset_for_tests()
 
 
 # =========================================================================== #
@@ -718,3 +737,173 @@ def test_review_hint_submit_empty_hint_passes_none(monkeypatch):
     asyncio.run(handler(ack=AsyncMock(), body={"view": view}, client=MagicMock()))
 
     assert captured["hint"] is None
+
+
+# =========================================================================== #
+# Native-mode tests (LEDGR_NATIVE_BLOCKS=1) — assert the card block shape
+# =========================================================================== #
+
+
+@pytest.fixture()
+def _native_blocks(monkeypatch):
+    """Override the module autouse fixture: enable native blocks for these tests."""
+    monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
+    _reset_for_tests()
+    yield
+    _reset_for_tests()
+
+
+class TestReviewCardBlocksNative:
+    """review_card_blocks with native blocks enabled emits a single card block."""
+
+    def _card(self, blocks):
+        return next((b for b in blocks if b.get("type") == "card"), None)
+
+    def _action_ids(self, blocks):
+        card = self._card(blocks)
+        if card is None:
+            return set()
+        return {el["action_id"] for el in card.get("actions", [])}
+
+    def _button_values(self, blocks):
+        card = self._card(blocks)
+        if card is None:
+            return {}
+        return {el["action_id"]: el["value"] for el in card.get("actions", [])}
+
+    def test_has_three_action_buttons(self, _native_blocks):
+        blocks = review_card_blocks("What is this?", "C1:F1:review")
+        assert self._action_ids(blocks) == {
+            "review_reextract", "review_confirm", "review_reject"
+        }
+
+    def test_each_button_carries_op_id_as_value(self, _native_blocks):
+        op_id = "C2:F2:review"
+        blocks = review_card_blocks("question", op_id)
+        values = self._button_values(blocks)
+        assert values["review_reextract"] == op_id
+        assert values["review_confirm"] == op_id
+        assert values["review_reject"] == op_id
+
+    def test_question_appears_in_body(self, _native_blocks):
+        question = "Could you clarify what this document represents?"
+        blocks = review_card_blocks(question, "X:Y:review")
+        card = self._card(blocks)
+        assert card is not None
+        body_text = card.get("body", {}).get("text", "")
+        assert question in body_text
+
+    def test_title_is_card_type(self, _native_blocks):
+        blocks = review_card_blocks("q", "X:Y:review")
+        card = self._card(blocks)
+        assert card is not None
+        assert card["type"] == "card"
+
+    def test_reasons_rendered_in_context_block(self, _native_blocks):
+        reasons = ["low confidence: 0.32", "missing vendor name"]
+        blocks = review_card_blocks("question", "X:Y:review", reasons=reasons)
+        context_texts = [
+            el["text"]
+            for b in blocks
+            if b.get("type") == "context"
+            for el in b.get("elements", [])
+            if el.get("type") == "mrkdwn"
+        ]
+        combined = " ".join(context_texts)
+        assert "low confidence: 0.32" in combined
+        assert "missing vendor name" in combined
+
+    def test_reextract_button_is_primary(self, _native_blocks):
+        blocks = review_card_blocks("q", "X:Y:review")
+        card = self._card(blocks)
+        assert card is not None
+        for el in card.get("actions", []):
+            if el["action_id"] == "review_reextract":
+                assert el.get("style") == "primary"
+
+    def test_reject_button_is_danger(self, _native_blocks):
+        blocks = review_card_blocks("q", "X:Y:review")
+        card = self._card(blocks)
+        assert card is not None
+        for el in card.get("actions", []):
+            if el["action_id"] == "review_reject":
+                assert el.get("style") == "danger"
+
+    def test_returns_list(self, _native_blocks):
+        assert isinstance(review_card_blocks("q", "X:Y:review"), list)
+
+
+class TestApprovalCardBlocksNative:
+    """approval_card_blocks with native blocks enabled emits a single card block."""
+
+    def _card(self, blocks):
+        return next((b for b in blocks if b.get("type") == "card"), None)
+
+    def _action_ids(self, blocks):
+        card = self._card(blocks)
+        if card is None:
+            return set()
+        return {el["action_id"] for el in card.get("actions", [])}
+
+    def test_has_three_action_buttons(self, _native_blocks):
+        from app.blocks import approval_card_blocks
+        blocks = approval_card_blocks("needs review: line X", "C1:F1")
+        assert self._action_ids(blocks) == {"approve", "edit", "reject"}
+
+    def test_each_button_carries_op_id_as_value(self, _native_blocks):
+        from app.blocks import approval_card_blocks
+        op_id = "C2:F2"
+        blocks = approval_card_blocks("summary text", op_id)
+        card = self._card(blocks)
+        assert card is not None
+        values = {el["action_id"]: el["value"] for el in card.get("actions", [])}
+        assert values["approve"] == op_id
+        assert values["edit"] == op_id
+        assert values["reject"] == op_id
+
+    def test_card_has_title(self, _native_blocks):
+        from app.blocks import approval_card_blocks
+        blocks = approval_card_blocks("summary", "op")
+        card = self._card(blocks)
+        assert card is not None
+        assert card.get("title", {}).get("text")
+
+    def test_returns_list(self, _native_blocks):
+        from app.blocks import approval_card_blocks
+        assert isinstance(approval_card_blocks("summary", "op"), list)
+
+
+class TestProactiveRedoBlocksNative:
+    """proactive_redo_blocks with native blocks enabled emits a single card block."""
+
+    def _card(self, blocks):
+        return next((b for b in blocks if b.get("type") == "card"), None)
+
+    def test_has_proactive_redo_button(self, _native_blocks):
+        from app.blocks import proactive_redo_blocks
+        blocks = proactive_redo_blocks("F1", reasons=["unreconciled: Invoice (FX off)"])
+        card = self._card(blocks)
+        assert card is not None
+        action_ids = {el["action_id"] for el in card.get("actions", [])}
+        assert "proactive_redo" in action_ids
+
+    def test_button_value_is_file_id(self, _native_blocks):
+        from app.blocks import proactive_redo_blocks
+        blocks = proactive_redo_blocks("F42")
+        card = self._card(blocks)
+        assert card is not None
+        for el in card.get("actions", []):
+            if el["action_id"] == "proactive_redo":
+                assert el["value"] == "F42"
+
+    def test_humanized_reason_in_body(self, _native_blocks):
+        from app.blocks import proactive_redo_blocks
+        blocks = proactive_redo_blocks("F1", reasons=["unreconciled: Invoice (FX off)"])
+        card = self._card(blocks)
+        assert card is not None
+        body_text = card.get("body", {}).get("text", "")
+        assert "the totals didn't reconcile" in body_text
+
+    def test_returns_list(self, _native_blocks):
+        from app.blocks import proactive_redo_blocks
+        assert isinstance(proactive_redo_blocks("F1"), list)

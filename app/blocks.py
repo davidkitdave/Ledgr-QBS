@@ -928,7 +928,12 @@ def job_summary_text(
     return head + " — nothing new to add"
 
 
-def approval_card_blocks(summary: str, op_id: str, doc_label: str | None = None) -> list:
+def approval_card_blocks(
+    summary: str,
+    op_id: str,
+    doc_label: str | None = None,
+    channel_id: str | None = None,
+) -> list:
     """HITL Approve / Edit / Reject card for a document that needs human review.
 
     Args:
@@ -942,7 +947,54 @@ def approval_card_blocks(summary: str, op_id: str, doc_label: str | None = None)
                  supplied, it is rendered as the leading line of the header so a
                  user dropping many documents can tell the cards apart. None (or
                  absent) preserves the original card layout for backward compat.
+        channel_id: Used by supports_native_blocks() for per-channel probe.
     """
+    approve_btn = {
+        "type": "button",
+        "text": {"type": "plain_text", "text": "Approve", "emoji": True},
+        "action_id": "approve",
+        "style": "primary",
+        "value": op_id,
+    }
+    edit_btn = {
+        "type": "button",
+        "text": {"type": "plain_text", "text": "Edit", "emoji": True},
+        "action_id": "edit",
+        "value": op_id,
+    }
+    reject_btn = {
+        "type": "button",
+        "text": {"type": "plain_text", "text": "Reject", "emoji": True},
+        "action_id": "reject",
+        "style": "danger",
+        "value": op_id,
+    }
+
+    if supports_native_blocks(channel_id):
+        title_text = "📒 Review needed before adding to the ledger"
+        subtitle_text = doc_label or ""
+        body_text = _truncate(summary, _MAX_CARD_BODY)
+        card: dict = {
+            "type": "card",
+            "title": {"type": "mrkdwn", "text": title_text},
+            "actions": [approve_btn, edit_btn, reject_btn],
+        }
+        if subtitle_text:
+            card["subtitle"] = {"type": "mrkdwn", "text": subtitle_text}
+        if body_text:
+            card["body"] = {"type": "mrkdwn", "text": body_text}
+        blocks: list[dict] = [card]
+        # If summary was truncated, emit the full text in a context block.
+        if len(summary) > _MAX_CARD_BODY:
+            blocks.append(
+                {
+                    "type": "context",
+                    "elements": [{"type": "mrkdwn", "text": summary}],
+                }
+            )
+        return blocks
+
+    # Fallback: existing section + actions shape (unchanged).
     header = ":mag: *Review needed before adding to the ledger*"
     if doc_label:
         header = f"{doc_label}\n{header}"
@@ -957,28 +1009,7 @@ def approval_card_blocks(summary: str, op_id: str, doc_label: str | None = None)
         {
             "type": "actions",
             "block_id": "ledgr_approval",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "Approve", "emoji": True},
-                    "action_id": "approve",
-                    "style": "primary",
-                    "value": op_id,
-                },
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "Edit", "emoji": True},
-                    "action_id": "edit",
-                    "value": op_id,
-                },
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "Reject", "emoji": True},
-                    "action_id": "reject",
-                    "style": "danger",
-                    "value": op_id,
-                },
-            ],
+            "elements": [approve_btn, edit_btn, reject_btn],
         },
     ]
 
@@ -999,7 +1030,12 @@ def approval_outcome_blocks(summary: str, decision: str) -> list:
     ]
 
 
-def review_card_blocks(question: str, op_id: str, reasons: list[str] | None = None) -> list:
+def review_card_blocks(
+    question: str,
+    op_id: str,
+    reasons: list[str] | None = None,
+    channel_id: str | None = None,
+) -> list:
     """Mid-flow HITL card for a :review interrupt from ``review_extraction_node``.
 
     Shows the reviewer's precise question + a short bullet summary of the
@@ -1021,14 +1057,68 @@ def review_card_blocks(question: str, op_id: str, reasons: list[str] | None = No
         reasons:  List of struggle signals from ``state[REVIEW_REASON_KEY]``.
                   Rendered as bullets under the question; ``None`` or empty hides
                   the bullets section.
+        channel_id: Used by supports_native_blocks() for per-channel probe.
     """
+    reextract_btn = {
+        "type": "button",
+        "text": {"type": "plain_text", "text": "Re-extract with a hint", "emoji": True},
+        "action_id": "review_reextract",
+        "style": "primary",
+        "value": op_id,
+    }
+    confirm_btn = {
+        "type": "button",
+        "text": {"type": "plain_text", "text": "Looks right, keep it", "emoji": True},
+        "action_id": "review_confirm",
+        "value": op_id,
+    }
+    reject_btn = {
+        "type": "button",
+        "text": {"type": "plain_text", "text": "Reject this doc", "emoji": True},
+        "action_id": "review_reject",
+        "style": "danger",
+        "value": op_id,
+    }
+
+    if supports_native_blocks(channel_id):
+        title_text = "🔍 Extraction needs your input"
+        body_text = _truncate(question, _MAX_CARD_BODY)
+        card: dict = {
+            "type": "card",
+            "title": {"type": "mrkdwn", "text": title_text},
+            "body": {"type": "mrkdwn", "text": body_text},
+            "actions": [reextract_btn, confirm_btn, reject_btn],
+        }
+        blocks: list[dict] = [card]
+        # Full question overflow goes into context block.
+        if len(question) > _MAX_CARD_BODY:
+            blocks.append(
+                {
+                    "type": "context",
+                    "elements": [{"type": "mrkdwn", "text": question}],
+                }
+            )
+        # Struggle reasons always go into a separate context block (untruncated).
+        if reasons:
+            bullets = "\n".join(f"• {r}" for r in reasons)
+            blocks.append(
+                {
+                    "type": "context",
+                    "elements": [
+                        {"type": "mrkdwn", "text": f"*Signals detected:*\n{bullets}"}
+                    ],
+                }
+            )
+        return blocks
+
+    # Fallback: existing section + actions shape (unchanged).
     header = ":mag: *Extraction needs your input*"
     body = question
     if reasons:
         bullets = "\n".join(f"  • {r}" for r in reasons)
         body = f"{question}\n\n*Signals detected:*\n{bullets}"
 
-    blocks: list[dict] = [
+    blocks = [
         {
             "type": "section",
             "text": {
@@ -1039,28 +1129,7 @@ def review_card_blocks(question: str, op_id: str, reasons: list[str] | None = No
         {
             "type": "actions",
             "block_id": "ledgr_review",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "Re-extract with a hint", "emoji": True},
-                    "action_id": "review_reextract",
-                    "style": "primary",
-                    "value": op_id,
-                },
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "Looks right, keep it", "emoji": True},
-                    "action_id": "review_confirm",
-                    "value": op_id,
-                },
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "Reject this doc", "emoji": True},
-                    "action_id": "review_reject",
-                    "style": "danger",
-                    "value": op_id,
-                },
-            ],
+            "elements": [reextract_btn, confirm_btn, reject_btn],
         },
     ]
     return blocks
@@ -1158,7 +1227,11 @@ def _humanize_review_reason(reason: str) -> str:
     return prefix.replace("_", " ") or "something looked off"
 
 
-def proactive_redo_blocks(file_id: str, reasons: list[str] | None = None) -> list:
+def proactive_redo_blocks(
+    file_id: str,
+    reasons: list[str] | None = None,
+    channel_id: str | None = None,
+) -> list:
     """Post-delivery offer card: this doc looked off — want me to re-read it?
 
     Surfaced AFTER a flagged document has already been filed (the extract
@@ -1171,6 +1244,7 @@ def proactive_redo_blocks(file_id: str, reasons: list[str] | None = None) -> lis
         file_id: Slack file id of the delivered document (button value).
         reasons: STABLE machine reason strings from ``state[REVIEW_REASON_KEY]``.
                  Humanized + de-duplicated for the friendly line.
+        channel_id: Used by supports_native_blocks() for per-channel probe.
     """
     phrases: list[str] = []
     for r in reasons or []:
@@ -1188,6 +1262,35 @@ def proactive_redo_blocks(file_id: str, reasons: list[str] | None = None) -> lis
             ":thinking_face: This one looked a little off. I filed it anyway, "
             "but want me to re-read it with a hint?"
         )
+
+    reextract_btn = {
+        "type": "button",
+        "text": {"type": "plain_text", "text": "Re-extract with a hint", "emoji": True},
+        "action_id": "proactive_redo",
+        "value": file_id,
+    }
+
+    if supports_native_blocks(channel_id):
+        title_text = "🔄 Want to re-extract this with a hint?"
+        body_text = _truncate(body, _MAX_CARD_BODY)
+        card: dict = {
+            "type": "card",
+            "title": {"type": "mrkdwn", "text": title_text},
+            "body": {"type": "mrkdwn", "text": body_text},
+            "actions": [reextract_btn],
+        }
+        blocks: list[dict] = [card]
+        # If body was truncated, emit full text in context block.
+        if len(body) > _MAX_CARD_BODY:
+            blocks.append(
+                {
+                    "type": "context",
+                    "elements": [{"type": "mrkdwn", "text": body}],
+                }
+            )
+        return blocks
+
+    # Fallback: existing section + actions shape (unchanged).
     return [
         {
             "type": "section",
@@ -1196,14 +1299,7 @@ def proactive_redo_blocks(file_id: str, reasons: list[str] | None = None) -> lis
         {
             "type": "actions",
             "block_id": "ledgr_proactive_redo",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "Re-extract with a hint", "emoji": True},
-                    "action_id": "proactive_redo",
-                    "value": file_id,
-                }
-            ],
+            "elements": [reextract_btn],
         },
     ]
 

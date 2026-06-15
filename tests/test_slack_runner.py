@@ -18,6 +18,7 @@ import asyncio
 
 from types import SimpleNamespace
 from unittest.mock import patch
+import pytest
 from google.adk.apps import App, ResumabilityConfig
 from google.adk.events.event import Event
 from google.adk.runners import Runner
@@ -46,6 +47,22 @@ from accounting_agents.slack_runner import (
 from invoice_processing.export.models import InvoiceLine, NormalizedInvoice
 from tests._fake_firestore import FakeFirestore
 from tests.test_ledger_store import FakeSlackClient
+from app.native_blocks_compat import _reset_for_tests
+
+
+# ---------------------------------------------------------------------------
+# Module-level autouse fixture: pin all tests in this module to the FALLBACK
+# (section + actions) shape unless a test explicitly overrides the env var.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _force_fallback_blocks(monkeypatch):
+    """Pin LEDGR_NATIVE_BLOCKS=0 for every test in this module."""
+    monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "0")
+    _reset_for_tests()
+    yield
+    _reset_for_tests()
 
 
 # =========================================================================== #

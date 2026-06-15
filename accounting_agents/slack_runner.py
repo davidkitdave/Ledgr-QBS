@@ -1589,7 +1589,7 @@ def _post_proactive_redo_card(
     """Post the Step-8 proactive re-extract offer (threaded under the delivery)."""
     kwargs = {
         "channel": channel_id,
-        "blocks": proactive_redo_blocks(file_id, reasons),
+        "blocks": proactive_redo_blocks(file_id, reasons, channel_id=channel_id),
         "text": "This document looked off — want me to re-read it?",
     }
     if thread_ts:
@@ -1607,7 +1607,7 @@ def _post_approval_card(
 ) -> Optional[str]:
     kwargs = {
         "channel": channel_id,
-        "blocks": approval_card_blocks(summary, op_id, doc_label=doc_label),
+        "blocks": approval_card_blocks(summary, op_id, doc_label=doc_label, channel_id=channel_id),
         "text": "Review needed before adding to the ledger.",
     }
     if thread_ts:
@@ -1630,7 +1630,7 @@ def _post_review_card(
     """Post the mid-flow review card and return its Slack ``ts``."""
     kwargs = {
         "channel": channel_id,
-        "blocks": review_card_blocks(question, op_id, reasons),
+        "blocks": review_card_blocks(question, op_id, reasons, channel_id=channel_id),
         "text": "Extraction needs your input before continuing.",
     }
     if thread_ts:

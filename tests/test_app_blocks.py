@@ -25,6 +25,7 @@ from app.blocks import (
     proactive_redo_modal,
     profile_summary_blocks,
     result_card,
+    review_card_blocks,
     welcome_blocks,
 )
 from invoice_processing.export.models import NormalizedInvoice, PartyInfo
@@ -438,6 +439,10 @@ def test_profile_summary_accepts_string_fye_month():
 
 class TestApprovalCardBlocks:
 
+    @pytest.fixture(autouse=True)
+    def _force_fallback(self, monkeypatch):
+        monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "0")
+
     def _head_text(self, blocks: list) -> str:
         """First section's mrkdwn text — the visible header on the card."""
         for b in blocks:
@@ -640,6 +645,10 @@ class TestJobSummaryText:
 
 
 class TestProactiveRedoBlocks:
+
+    @pytest.fixture(autouse=True)
+    def _force_fallback(self, monkeypatch):
+        monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "0")
 
     def _text(self, blocks: list) -> str:
         return blocks[0]["text"]["text"]
@@ -1533,4 +1542,248 @@ class TestResultCardFeedbackFallback:
             and any(el.get("action_id") in feedback_ids for el in b.get("elements", []))
         ]
         assert len(feedback_blocks) == 0
+
+
+# --------------------------------------------------------------------------- #
+# Commit 6: approval_card_blocks native card
+# --------------------------------------------------------------------------- #
+
+
+class TestApprovalCardBlocksNative:
+
+    @pytest.fixture(autouse=True)
+    def _force_native(self, monkeypatch):
+        monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
+
+    def test_returns_one_card_block(self):
+        blocks = approval_card_blocks(summary="not reconciled", op_id="OP-1")
+        card_blocks = [b for b in blocks if b["type"] == "card"]
+        assert len(card_blocks) == 1
+
+    def test_title_is_mrkdwn_object(self):
+        card = approval_card_blocks(summary="x", op_id="OP-1")[0]
+        assert isinstance(card["title"], dict)
+        assert card["title"]["type"] == "mrkdwn"
+        assert "Review needed" in card["title"]["text"]
+
+    def test_body_is_mrkdwn_object_with_summary(self):
+        card = approval_card_blocks(summary="lines off by $5", op_id="OP-1")[0]
+        assert card["body"]["type"] == "mrkdwn"
+        assert "lines off by $5" in card["body"]["text"]
+
+    def test_doc_label_becomes_subtitle_mrkdwn_object(self):
+        card = approval_card_blocks(
+            summary="x", op_id="OP-1", doc_label="📄 INV-001.pdf"
+        )[0]
+        assert card["subtitle"]["type"] == "mrkdwn"
+        assert "INV-001.pdf" in card["subtitle"]["text"]
+
+    def test_no_doc_label_no_subtitle(self):
+        card = approval_card_blocks(summary="x", op_id="OP-1")[0]
+        assert "subtitle" not in card
+
+    def test_three_actions_same_order_and_ids(self):
+        card = approval_card_blocks(summary="x", op_id="OP-2")[0]
+        action_ids = [a["action_id"] for a in card["actions"]]
+        assert action_ids == ["approve", "edit", "reject"]
+
+    def test_all_actions_carry_op_id_as_value(self):
+        card = approval_card_blocks(summary="x", op_id="OP-99")[0]
+        for btn in card["actions"]:
+            assert btn["value"] == "OP-99"
+
+    def test_long_summary_overflow_in_context_block(self):
+        long_summary = "A" * 250
+        blocks = approval_card_blocks(summary=long_summary, op_id="OP-1")
+        assert len(blocks) == 2
+        assert blocks[1]["type"] == "context"
+        ctx_text = blocks[1]["elements"][0]["text"]
+        assert ctx_text == long_summary
+
+    def test_short_summary_no_context_block(self):
+        blocks = approval_card_blocks(summary="short", op_id="OP-1")
+        assert len(blocks) == 1
+
+
+class TestApprovalCardBlocksFallback:
+
+    @pytest.fixture(autouse=True)
+    def _force_fallback(self, monkeypatch):
+        monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "0")
+
+    def test_returns_section_plus_actions(self):
+        blocks = approval_card_blocks(summary="x", op_id="OP-1")
+        assert blocks[0]["type"] == "section"
+        assert blocks[1]["type"] == "actions"
+
+    def test_section_contains_review_header(self):
+        blocks = approval_card_blocks(summary="x", op_id="OP-1")
+        assert "Review needed" in blocks[0]["text"]["text"]
+
+    def test_doc_label_in_section_text(self):
+        blocks = approval_card_blocks(
+            summary="x", op_id="OP-1", doc_label="📄 foo.pdf"
+        )
+        assert "foo.pdf" in blocks[0]["text"]["text"]
+
+    def test_three_actions(self):
+        blocks = approval_card_blocks(summary="x", op_id="OP-1")
+        ids = {el["action_id"] for el in blocks[1]["elements"]}
+        assert ids == {"approve", "edit", "reject"}
+
+
+# --------------------------------------------------------------------------- #
+# Commit 6: review_card_blocks native card
+# --------------------------------------------------------------------------- #
+
+
+class TestReviewCardBlocksNative:
+
+    @pytest.fixture(autouse=True)
+    def _force_native(self, monkeypatch):
+        monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
+
+    def test_returns_at_least_one_card_block(self):
+        blocks = review_card_blocks(question="What is this doc?", op_id="RV-1")
+        card_blocks = [b for b in blocks if b["type"] == "card"]
+        assert len(card_blocks) == 1
+
+    def test_title_is_mrkdwn_object(self):
+        card = review_card_blocks(question="q", op_id="RV-1")[0]
+        assert card["title"]["type"] == "mrkdwn"
+        assert "Extraction needs" in card["title"]["text"]
+
+    def test_body_is_mrkdwn_object_with_question(self):
+        card = review_card_blocks(question="Is this a receipt?", op_id="RV-1")[0]
+        assert card["body"]["type"] == "mrkdwn"
+        assert "Is this a receipt?" in card["body"]["text"]
+
+    def test_three_actions_same_order_and_ids(self):
+        card = review_card_blocks(question="q", op_id="RV-1")[0]
+        action_ids = [a["action_id"] for a in card["actions"]]
+        assert action_ids == ["review_reextract", "review_confirm", "review_reject"]
+
+    def test_all_actions_carry_op_id_as_value(self):
+        card = review_card_blocks(question="q", op_id="RV-77")[0]
+        for btn in card["actions"]:
+            assert btn["value"] == "RV-77"
+
+    def test_reasons_appear_in_context_block_untruncated(self):
+        reasons = ["unreconciled: FX off", "low_classify_confidence"]
+        blocks = review_card_blocks(question="q", op_id="RV-1", reasons=reasons)
+        context_blocks = [b for b in blocks if b["type"] == "context"]
+        assert len(context_blocks) >= 1
+        ctx_text = " ".join(el["text"] for b in context_blocks for el in b["elements"])
+        assert "unreconciled: FX off" in ctx_text
+        assert "low_classify_confidence" in ctx_text
+
+    def test_no_reasons_no_context_block(self):
+        blocks = review_card_blocks(question="q", op_id="RV-1")
+        assert not any(b["type"] == "context" for b in blocks)
+
+    def test_long_question_overflow_in_context_block(self):
+        long_q = "Q" * 250
+        blocks = review_card_blocks(question=long_q, op_id="RV-1")
+        context_blocks = [b for b in blocks if b["type"] == "context"]
+        assert any(long_q in el["text"] for b in context_blocks for el in b["elements"])
+
+
+class TestReviewCardBlocksFallback:
+
+    @pytest.fixture(autouse=True)
+    def _force_fallback(self, monkeypatch):
+        monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "0")
+
+    def test_returns_section_plus_actions(self):
+        blocks = review_card_blocks(question="q", op_id="RV-1")
+        assert blocks[0]["type"] == "section"
+        assert blocks[1]["type"] == "actions"
+
+    def test_section_contains_header_and_question(self):
+        blocks = review_card_blocks(question="Is this a receipt?", op_id="RV-1")
+        text = blocks[0]["text"]["text"]
+        assert "Extraction needs your input" in text
+        assert "Is this a receipt?" in text
+
+    def test_reasons_bullets_in_section_text(self):
+        blocks = review_card_blocks(
+            question="q", op_id="RV-1", reasons=["unreconciled: FX"]
+        )
+        assert "unreconciled: FX" in blocks[0]["text"]["text"]
+
+    def test_three_actions(self):
+        blocks = review_card_blocks(question="q", op_id="RV-1")
+        ids = {el["action_id"] for el in blocks[1]["elements"]}
+        assert ids == {"review_reextract", "review_confirm", "review_reject"}
+
+
+# --------------------------------------------------------------------------- #
+# Commit 6: proactive_redo_blocks native card
+# --------------------------------------------------------------------------- #
+
+
+class TestProactiveRedoBlocksNative:
+
+    @pytest.fixture(autouse=True)
+    def _force_native(self, monkeypatch):
+        monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
+
+    def test_returns_one_card_block(self):
+        blocks = proactive_redo_blocks("F-1")
+        card_blocks = [b for b in blocks if b["type"] == "card"]
+        assert len(card_blocks) == 1
+
+    def test_title_is_mrkdwn_object(self):
+        card = proactive_redo_blocks("F-1")[0]
+        assert card["title"]["type"] == "mrkdwn"
+        assert "re-extract" in card["title"]["text"].lower()
+
+    def test_body_is_mrkdwn_object_with_offer_text(self):
+        card = proactive_redo_blocks("F-1")[0]
+        assert card["body"]["type"] == "mrkdwn"
+        assert "re-read it" in card["body"]["text"]
+
+    def test_humanized_reasons_in_body(self):
+        card = proactive_redo_blocks(
+            "F-1", ["unreconciled: FX off", "low_classify_confidence"]
+        )[0]
+        assert "the totals didn't reconcile" in card["body"]["text"]
+        assert "wasn't confident how to categorise it" in card["body"]["text"]
+
+    def test_one_action_with_correct_id_and_file_id_value(self):
+        card = proactive_redo_blocks("F-XYZ")[0]
+        assert len(card["actions"]) == 1
+        btn = card["actions"][0]
+        assert btn["action_id"] == "proactive_redo"
+        assert btn["value"] == "F-XYZ"
+
+    def test_short_body_no_context_block(self):
+        blocks = proactive_redo_blocks("F-1", [])
+        assert len(blocks) == 1
+
+    def test_empty_reasons_still_has_card(self):
+        blocks = proactive_redo_blocks("F-1", [])
+        assert blocks[0]["type"] == "card"
+
+
+class TestProactiveRedoBlocksFallback:
+
+    @pytest.fixture(autouse=True)
+    def _force_fallback(self, monkeypatch):
+        monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "0")
+
+    def test_returns_section_plus_actions(self):
+        blocks = proactive_redo_blocks("F-1")
+        assert blocks[0]["type"] == "section"
+        assert blocks[1]["type"] == "actions"
+
+    def test_section_text_contains_offer(self):
+        blocks = proactive_redo_blocks("F-1")
+        assert "re-read it" in blocks[0]["text"]["text"]
+
+    def test_action_button_carries_file_id(self):
+        blocks = proactive_redo_blocks("F-XYZ")
+        btn = blocks[1]["elements"][0]
+        assert btn["action_id"] == "proactive_redo"
+        assert btn["value"] == "F-XYZ"
 
