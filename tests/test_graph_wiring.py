@@ -25,6 +25,7 @@ from accounting_agents.agent import (
     coordinator,
     coordinator_graph,
     document_workflow,
+    document_workflow_driver,
     dynamic_router,
 )
 
@@ -48,6 +49,43 @@ class _FakeContext:
 
     def __init__(self, state: dict):
         self.state = dict(state)
+
+
+class _RecordingContext:
+    """Fake Context that records ``ctx.run_node`` calls in program order.
+
+    Drives the dynamic ``document_workflow_driver`` WITHOUT a real scheduler:
+    each ``run_node(node, ...)`` is recorded as a ``(node_name, node_input)``
+    pair and resolved with a per-node scripted return value (default ``None``).
+    A ``state_writes`` map lets a test simulate what a node would write to state
+    (e.g. ``classify_node`` setting ``DOC_TYPE_KEY``) so the driver's branch +
+    terminal-decision threading can be asserted deterministically.
+    """
+
+    def __init__(self, state: dict, *, returns: dict | None = None,
+                 state_writes: dict | None = None, resume_inputs: dict | None = None):
+        self.state = dict(state)
+        self.calls: list[tuple[str, object]] = []
+        self._returns = returns or {}
+        self._state_writes = state_writes or {}
+        self.resume_inputs = dict(resume_inputs or {})
+
+    async def run_node(self, node, node_input=None, **_kwargs):
+        name = getattr(node, "name", getattr(node, "__name__", str(node)))
+        self.calls.append((name, node_input))
+        if name in self._state_writes:
+            self.state.update(self._state_writes[name])
+        return self._returns.get(name)
+
+    @property
+    def call_names(self) -> list[str]:
+        return [name for name, _inp in self.calls]
+
+
+def _drive_driver(ctx: _RecordingContext):
+    """Run the real ``document_workflow_driver`` against a recording ctx."""
+    fn = document_workflow_driver._func
+    return asyncio.run(fn(ctx))
 
 
 # =========================================================================== #
@@ -125,59 +163,165 @@ def test_qa_agent_not_imported_from_agent():
 
 
 # =========================================================================== #
-# DocumentWorkflow wiring
+# DocumentWorkflow wiring — Step 6: a single dynamic driver replaces the static
+# DAG. The wiring is now an IMPERATIVE node-run SEQUENCE inside
+# ``document_workflow_driver`` (not declarative edges), so we assert the order of
+# ``ctx.run_node`` calls for each branch instead of (from, to, route) triples.
 # =========================================================================== #
 
 
-def test_document_workflow_nodes_present():
-    names = _node_names(document_workflow)
-    assert {
-        "__START__",
+def test_document_workflow_is_single_driver_edge():
+    # The Workflow now holds exactly one edge: START -> the driver node.
+    assert _node_names(document_workflow) == {"__START__", "document_workflow_driver"}
+    assert _edges(document_workflow) == [("__START__", "document_workflow_driver", None)]
+    # The driver MUST rerun on resume (ctx.run_node requires it; it is what lets
+    # a HITL resume replay the driver while sub-nodes are fast-forwarded).
+    assert document_workflow_driver.rerun_on_resume is True
+
+
+def test_driver_runs_all_nodes_present():
+    """Driving the invoice branch touches every spine node exactly once."""
+    ctx = _RecordingContext(
+        state={},
+        state_writes={"classify_node": {nodes.DOC_TYPE_KEY: nodes.ROUTE_INVOICE}},
+    )
+    _drive_driver(ctx)
+    assert set(ctx.call_names) == {
         "classify_node",
         "extract_invoice_node",
         "review_extraction_node",
         "categorize_node",
         "tax_node",
-        "extract_bank_node",
         "approval_gate",
         "apply_decision_node",
         "route_node",
         "consolidate_node",
         "deliver_node",
-    } <= names
+    }
 
 
-def test_document_workflow_classify_fanout_routes():
-    edges = _edges(document_workflow)
-    assert ("__START__", "classify_node", None) in edges
-    # classify fans out by document type.
-    assert ("classify_node", "extract_invoice_node", nodes.ROUTE_INVOICE) in edges
-    assert ("classify_node", "extract_bank_node", nodes.ROUTE_BANK) in edges
+def test_driver_classify_fanout_invoice_branch():
+    """classify writing a non-bank doc_type drives the invoice lane (NOT bank)."""
+    ctx = _RecordingContext(
+        state={},
+        state_writes={"classify_node": {nodes.DOC_TYPE_KEY: nodes.ROUTE_INVOICE}},
+    )
+    _drive_driver(ctx)
+    assert ctx.call_names[0] == "classify_node"
+    assert "extract_invoice_node" in ctx.call_names
+    assert "extract_bank_node" not in ctx.call_names
 
 
-def test_document_workflow_invoice_lane_chain():
-    edges = _edges(document_workflow)
-    # The extract reviewer sits between extraction and categorization.
-    assert ("extract_invoice_node", "review_extraction_node", None) in edges
-    assert ("review_extraction_node", "categorize_node", None) in edges
-    assert ("categorize_node", "tax_node", None) in edges
+def test_driver_classify_fanout_bank_branch():
+    """classify writing ``bank_statement`` drives the single bank extraction node."""
+    ctx = _RecordingContext(
+        state={},
+        state_writes={"classify_node": {nodes.DOC_TYPE_KEY: nodes.ROUTE_BANK}},
+    )
+    _drive_driver(ctx)
+    assert ctx.call_names[0] == "classify_node"
+    assert "extract_bank_node" in ctx.call_names
+    # Invoice-lane nodes never run on the bank branch.
+    for n in ("extract_invoice_node", "review_extraction_node",
+              "categorize_node", "tax_node"):
+        assert n not in ctx.call_names
 
 
-def test_document_workflow_branches_converge_on_approval_gate():
-    edges = _edges(document_workflow)
-    # Both lane tails edge into the shared approval_gate (convergence point).
-    assert ("tax_node", "approval_gate", None) in edges
-    assert ("extract_bank_node", "approval_gate", None) in edges
+def test_driver_invoice_lane_chain_order():
+    """The invoice lane runs extract -> review -> categorize -> tax in order."""
+    ctx = _RecordingContext(
+        state={},
+        state_writes={"classify_node": {nodes.DOC_TYPE_KEY: nodes.ROUTE_INVOICE}},
+    )
+    _drive_driver(ctx)
+    names = ctx.call_names
+    chain = ["extract_invoice_node", "review_extraction_node", "categorize_node", "tax_node"]
+    idxs = [names.index(n) for n in chain]
+    assert idxs == sorted(idxs)
+    # The reviewer sits BETWEEN extraction and categorization.
+    assert names.index("review_extraction_node") > names.index("extract_invoice_node")
+    assert names.index("review_extraction_node") < names.index("categorize_node")
 
 
-def test_document_workflow_post_approval_spine_to_terminal():
-    edges = _edges(document_workflow)
-    assert ("approval_gate", "apply_decision_node", None) in edges
-    assert ("apply_decision_node", "route_node", None) in edges
-    assert ("route_node", "consolidate_node", None) in edges
-    assert ("consolidate_node", "deliver_node", None) in edges
-    # deliver_node is terminal (no outgoing edges).
-    assert all(frm != "deliver_node" for frm, _to, _r in edges)
+def test_driver_branches_converge_on_approval_gate():
+    """Both lanes reach approval_gate before the post-approval spine."""
+    for write, lane_tail in (
+        ({nodes.DOC_TYPE_KEY: nodes.ROUTE_INVOICE}, "tax_node"),
+        ({nodes.DOC_TYPE_KEY: nodes.ROUTE_BANK}, "extract_bank_node"),
+    ):
+        ctx = _RecordingContext(state={}, state_writes={"classify_node": write})
+        _drive_driver(ctx)
+        names = ctx.call_names
+        assert "approval_gate" in names
+        # The gate runs after the lane tail and before apply_decision_node.
+        assert names.index(lane_tail) < names.index("approval_gate")
+        assert names.index("approval_gate") < names.index("apply_decision_node")
+
+
+def test_driver_post_approval_spine_order():
+    """approval_gate -> apply_decision_node -> route -> consolidate -> deliver."""
+    ctx = _RecordingContext(
+        state={},
+        state_writes={"classify_node": {nodes.DOC_TYPE_KEY: nodes.ROUTE_INVOICE}},
+    )
+    _drive_driver(ctx)
+    names = ctx.call_names
+    spine = ["approval_gate", "apply_decision_node", "route_node",
+             "consolidate_node", "deliver_node"]
+    idxs = [names.index(n) for n in spine]
+    assert idxs == sorted(idxs)
+    # deliver_node is terminal (last node the driver runs).
+    assert names[-1] == "deliver_node"
+
+
+def test_driver_threads_terminal_decision_to_apply_decision_node():
+    """The terminal gate's return value is threaded into apply_decision_node.
+
+    On resume, ``ctx.run_node(approval_gate)`` returns the human's ApproveDecision
+    (ADK's replay interceptor completes the non-rerun gate with the resolved
+    response as its output). The driver must pass that SAME object as
+    apply_decision_node's ``node_input`` — mirroring the former static edge
+    ``(approval_gate, apply_decision_node)``.
+    """
+    decision = {"decision": "approve"}
+    ctx = _RecordingContext(
+        state={},
+        state_writes={"classify_node": {nodes.DOC_TYPE_KEY: nodes.ROUTE_INVOICE}},
+        returns={"approval_gate": decision},
+    )
+    _drive_driver(ctx)
+    apply_inputs = [inp for name, inp in ctx.calls if name == "apply_decision_node"]
+    assert apply_inputs == [decision]
+
+
+def test_driver_auto_approve_threads_none_to_apply_decision_node():
+    """On the auto-approve / first-pass path the gate returns None → node_input None."""
+    ctx = _RecordingContext(
+        state={},
+        state_writes={"classify_node": {nodes.DOC_TYPE_KEY: nodes.ROUTE_INVOICE}},
+        # approval_gate returns None (no decision yet).
+    )
+    _drive_driver(ctx)
+    apply_inputs = [inp for name, inp in ctx.calls if name == "apply_decision_node"]
+    assert apply_inputs == [None]
+
+
+def test_driver_recovers_decision_from_resume_inputs_fallback():
+    """If the gate output is None but resume_inputs holds the decision, recover it.
+
+    Defensive belt-and-braces path: keyed by the gate's interrupt id.
+    """
+    decision = {"decision": "edit"}
+    gate_id = "C9:F9"
+    ctx = _RecordingContext(
+        state={"op_id": gate_id},
+        state_writes={"classify_node": {nodes.DOC_TYPE_KEY: nodes.ROUTE_INVOICE}},
+        resume_inputs={gate_id: decision},
+        # approval_gate returns None, forcing the resume_inputs fallback.
+    )
+    _drive_driver(ctx)
+    apply_inputs = [inp for name, inp in ctx.calls if name == "apply_decision_node"]
+    assert apply_inputs == [decision]
 
 
 # =========================================================================== #

@@ -15,23 +15,44 @@ The chat lane runs OUTSIDE this graph on ``assistant_app`` — a standalone root
 ``LlmAgent`` (multi-turn, sees per-thread session history). See
 ``docs/adr/0008-chat-lane-standalone-root-agent.md``.
 
-DocumentWorkflow (resumable, dynamic)::
+DocumentWorkflow (resumable, dynamic — Step 6)::
 
-    START -> classify_node
-      -> { "invoice":        extract_invoice_node -> categorize_node -> tax_node,
-           "bank_statement": extract_bank_node }
-      -> approval_gate -> apply_decision_node -> route_node -> consolidate_node -> deliver_node
+    START -> document_workflow_driver   (single @node(rerun_on_resume=True))
 
-Convergence note: ``classify_node`` emits exactly one route per document, so only
-ONE branch fires. A plain graph node runs when ANY predecessor triggers it (it
-does not require all predecessors), so both the invoice tail (``tax_node``) and
-the bank tail (``extract_bank_node``) can simply edge into the shared
-``approval_gate`` successor — no JoinNode needed.
+The driver runs the SAME node functions in program order via ``ctx.run_node``::
+
+    classify_node
+      -> { invoice:        extract_invoice_node -> review_extraction_node (may pause)
+                           -> categorize_node -> tax_node,
+           bank_statement: extract_bank_node }
+      -> approval_gate (may pause) -> apply_decision_node -> route_node
+      -> consolidate_node -> deliver_node
+
+This is a behavior-preserving refactor of the former static DAG (Option (c)): the
+node BODIES are untouched; only the scheduling moves from a declarative edge list
+into an imperative driver. ``ctx.run_node`` dedups already-checkpointed sub-nodes
+on resume, so side-effecting nodes (extract / consolidate) run exactly once even
+though the ``rerun_on_resume=True`` driver replays from the top after every pause.
+
+HITL is preserved unchanged because interrupt correlation is by ``interrupt_id``
+string (independent of scheduling):
+- Mid-flow ``:review`` pause: ``review_extraction_node`` is itself
+  ``rerun_on_resume=True`` and reads its decision from ``ctx.resume_inputs`` — the
+  driver simply re-runs it on resume and it applies its own decision.
+- Terminal pause: ``approval_gate`` is a default node, so on resume ADK's replay
+  interceptor completes it with the human's ``ApproveDecision`` as its OUTPUT
+  (``_replay_interceptor.check_interception`` Case 4 — ``rerun_on_resume=False``
+  → resolved response becomes the node output). ``ctx.run_node(approval_gate)``
+  therefore RETURNS that decision, which the driver threads into
+  ``apply_decision_node`` as its ``node_input`` — exactly the shape the former
+  static edge ``(approval_gate, apply_decision_node)`` delivered.
 
 API facts grounded in the installed 2.2.0 source (see the task report for detail):
 - ``Workflow(name=..., edges=[...])``; chains are tuples ``(START, a, b)``; a
   conditional fan-out is a dict element ``{"route": node_or_(tuple)}``; a node
   reached by multiple edges is the convergence point.
+- ``ctx.run_node(fn, node_input=...)`` runs a node dynamically and returns its
+  output; the calling node MUST be ``@node(rerun_on_resume=True)``.
 - ``App(root_agent=<BaseNode|BaseAgent>, name=..., resumability_config=...)``;
   ``ResumabilityConfig(is_resumable=True)``.
 - ``LlmAgent(mode="single_turn")`` is REQUIRED for agents used as graph nodes
@@ -188,51 +209,69 @@ async def help_node(ctx) -> Event:
 
 
 # --------------------------------------------------------------------------- #
-# DocumentWorkflow — deterministic spine (resumable / dynamic)
+# DocumentWorkflow — deterministic spine (resumable / dynamic driver, Step 6)
+#
+# Option (c): a thin dynamic driver that wraps the existing node functions
+# UNCHANGED. The driver runs each node via ``ctx.run_node`` in program order;
+# ADK's dynamic scheduler dedups already-checkpointed sub-nodes on resume, so the
+# side-effecting nodes run exactly once even though the driver replays from the
+# top after every HITL pause. See the module docstring for the HITL-preservation
+# argument (interrupt correlation is by ``interrupt_id`` string, unchanged).
 # --------------------------------------------------------------------------- #
+
+
+@node(rerun_on_resume=True)
+async def document_workflow_driver(ctx, node_input=None):
+    """Imperative driver replacing the former static DocumentWorkflow DAG.
+
+    ``rerun_on_resume=True`` is MANDATORY: ``ctx.run_node`` requires it, and it is
+    what lets a HITL resume replay the driver from the top while the scheduler
+    fast-forwards already-completed sub-nodes (so ``extract`` / ``consolidate``
+    run exactly once across a pause→resume).
+
+    Branch on ``state[DOC_TYPE_KEY]`` (the value ``classify_node`` persists:
+    ``"bank_statement"`` for the bank lane, the lowercased doc type otherwise) —
+    NOT on the classify route Event, since the driver schedules nodes directly.
+    """
+    await ctx.run_node(nodes.classify_node)
+
+    if ctx.state.get(nodes.DOC_TYPE_KEY) == nodes.ROUTE_BANK:
+        # Bank-statement lane (MODEL_STD): single extraction node.
+        await ctx.run_node(nodes.extract_bank_node)
+    else:
+        # Invoice / receipt lane (MODEL_LITE): extract -> review -> categorize ->
+        # tax. ``review_extraction_node`` (itself rerun_on_resume=True) may pause
+        # mid-flow with the ``:review`` interrupt; on resume it applies its own
+        # ``ReviewClarifyDecision`` from ``ctx.resume_inputs`` and falls through.
+        await ctx.run_node(nodes.extract_invoice_node)
+        await ctx.run_node(nodes.review_extraction_node)
+        await ctx.run_node(nodes.categorize_node)
+        await ctx.run_node(nodes.tax_node)
+
+    # Terminal HITL gate. ``approval_gate`` is a default node (rerun_on_resume=
+    # False): on the human's resume, ADK's replay interceptor completes it with
+    # the ``ApproveDecision`` as its OUTPUT (Case 4 — a non-rerun node's resolved
+    # response becomes its output), which ``ctx.run_node`` returns here. On the
+    # auto-approve / first pass it returns None. Either way we thread the result
+    # into ``apply_decision_node`` exactly as the former static edge did.
+    decision = await ctx.run_node(nodes.approval_gate)
+    if decision is None and getattr(ctx, "resume_inputs", None):
+        # Defensive belt-and-braces: if a future ADK build ever surfaces the
+        # gate decision via the driver's resume_inputs instead of the node
+        # output, recover it by the gate's interrupt id rather than silently
+        # dropping the human's choice.
+        decision = ctx.resume_inputs.get(nodes._approval_interrupt_id(ctx.state))
+
+    await ctx.run_node(nodes.apply_decision_node, node_input=decision)
+    await ctx.run_node(nodes.route_node)
+    await ctx.run_node(nodes.consolidate_node)
+    return await ctx.run_node(nodes.deliver_node)
+
 
 document_workflow = Workflow(
     name="document_workflow",
     description="Classify a document, extract+enrich it, gate, route, and deliver.",
-    edges=[
-        # Entry: classify the uploaded PDF, then fan out by document type.
-        (
-            START,
-            nodes.classify_node,
-            {
-                # Invoice / receipt lane (MODEL_LITE): extract -> categorize -> tax.
-                nodes.ROUTE_INVOICE: nodes.extract_invoice_node,
-                # Bank-statement lane (MODEL_STD): single extraction node.
-                nodes.ROUTE_BANK: nodes.extract_bank_node,
-            },
-        ),
-        # Invoice lane chain. The extract reviewer ("smart inspector") sits
-        # between extraction and categorization: a deterministic pass-through on
-        # the happy path (ZERO extra LLM), it only spends a critic call / asks
-        # the human mid-flow when the reader struggled (Step 2 engine half).
-        (
-            nodes.extract_invoice_node,
-            nodes.review_extraction_node,
-            nodes.categorize_node,
-            nodes.tax_node,
-        ),
-        # Convergence: both lane tails edge into the shared approval gate. Only
-        # one lane fires per document (classify emits a single route), so the
-        # gate runs exactly once.
-        (nodes.tax_node, nodes.approval_gate),
-        (nodes.extract_bank_node, nodes.approval_gate),
-        # Post-approval spine: apply_decision -> route -> consolidate -> deliver
-        # (terminal). ``apply_decision_node`` is the first downstream node after
-        # ``approval_gate``'s RequestInput, so ADK delivers the resume
-        # ``ApproveDecision`` here as its ``node_input`` (Task 6).
-        (
-            nodes.approval_gate,
-            nodes.apply_decision_node,
-            nodes.route_node,
-            nodes.consolidate_node,
-            nodes.deliver_node,
-        ),
-    ],
+    edges=[(START, document_workflow_driver)],
 )
 
 
