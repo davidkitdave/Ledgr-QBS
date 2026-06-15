@@ -1553,3 +1553,217 @@ def test_amend_row_legacy_pointer_without_client_name_does_not_crash():
     # seen_doc_keys still intact.
     ptr_after = store.get_pointer("c1", "2026")
     assert "k1" in (ptr_after.get("seen_doc_keys") or [])
+
+
+# --------------------------------------------------------------------------- #
+# remove_rows_for_month (Step 7 / C-3)
+# --------------------------------------------------------------------------- #
+
+
+def _make_invoice_workbook_with_months() -> bytes:
+    """Build a Purchase + Sales workbook with rows in Sep and Oct 2025."""
+    from openpyxl import Workbook as _WB
+    wb = _WB()
+    # Purchase sheet
+    ws_p = wb.active
+    ws_p.title = "Purchase"
+    ws_p.append(["Date", "Invoice Number", "Description", "Source Amount", "Account Code / COA"])
+    ws_p.append(["05/09/2025", "INV-P1", "AWS Sep",  100.0, "6090"])
+    ws_p.append(["20/09/2025", "INV-P2", "Zoom Sep", 50.0,  "6090"])
+    ws_p.append(["03/10/2025", "INV-P3", "AWS Oct",  120.0, "6090"])
+    # Sales sheet
+    ws_s = wb.create_sheet("Sales")
+    ws_s.append(["Date", "Invoice Number", "Description", "Source Amount", "Account Code / COA"])
+    ws_s.append(["10/09/2025", "INV-S1", "Consulting Sep", 500.0, "4000"])
+    ws_s.append(["15/10/2025", "INV-S2", "Consulting Oct", 600.0, "4000"])
+    import io
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _store_with_workbook(xlsx_bytes: bytes, *, client_id: str = "c1", fy: str = "2026") -> tuple:
+    """Return (slack, store) with the given workbook already uploaded + pointer seeded."""
+    slack = FakeSlackClient()
+    db = FakeFirestore()
+    store = SlackLedgerStore(db, opener=slack.opener())
+    # Manually upload + seed pointer + seen_doc_keys.
+    file_id = "F" + "a" * 10
+    import uuid
+    file_id = "F" + uuid.uuid4().hex[:10]
+    slack.files[file_id] = xlsx_bytes
+    url = f"https://files.slack.com/{file_id}/ledger.xlsx"
+    slack.urls[url] = xlsx_bytes
+    seen = [
+        "Purchase:INV-P1", "Purchase:INV-P2", "Purchase:INV-P3",
+        "Sales:INV-S1", "Sales:INV-S2",
+        "OtherKey:SHOULD-SURVIVE",
+    ]
+    store._pointer_ref(client_id, fy).set({
+        "slack_file_id": file_id,
+        "client_id": client_id,
+        "fy": fy,
+        "kind": "invoice",
+        "seen_doc_keys": seen,
+    })
+    return slack, store
+
+
+def test_remove_rows_for_month_removes_matching_rows():
+    xlsx = _make_invoice_workbook_with_months()
+    slack, store = _store_with_workbook(xlsx)
+
+    result = store.remove_rows_for_month(
+        "c1", "2026", slack, "C1",
+        year=2025, month=9,
+    )
+
+    # Two Purchase + one Sales row removed.
+    assert result["sheets"]["Purchase"] == 2
+    assert result["sheets"]["Sales"] == 1
+    assert len(result["removed"]) == 3
+
+    # Verify the new workbook only contains Oct rows.
+    from openpyxl import load_workbook
+    import io
+    latest_id = store.get_pointer("c1", "2026")["slack_file_id"]
+    wb = load_workbook(io.BytesIO(slack.files[latest_id]))
+    p_rows = list(wb["Purchase"].iter_rows(min_row=2, values_only=True))
+    s_rows = list(wb["Sales"].iter_rows(min_row=2, values_only=True))
+    # Only Oct row remains in Purchase.
+    assert len([r for r in p_rows if r[0] is not None]) == 1
+    assert p_rows[0][2] == "AWS Oct"
+    # Only Oct row remains in Sales.
+    assert len([r for r in s_rows if r[0] is not None]) == 1
+    assert s_rows[0][2] == "Consulting Oct"
+
+
+def test_remove_rows_for_month_leaves_other_months_intact():
+    xlsx = _make_invoice_workbook_with_months()
+    slack, store = _store_with_workbook(xlsx)
+
+    store.remove_rows_for_month("c1", "2026", slack, "C1", year=2025, month=9)
+
+    # Oct rows must survive.
+    rows = store.read_rows("c1", "2026", slack, "C1")
+    dates = [r.get("Date") for r in rows if r.get("_sheet") in ("Purchase", "Sales")]
+    assert all("10/2025" in str(d) for d in dates if d), dates
+
+
+def test_remove_rows_for_month_purges_doc_keys_for_cleared_month():
+    xlsx = _make_invoice_workbook_with_months()
+    slack, store = _store_with_workbook(xlsx)
+
+    result = store.remove_rows_for_month("c1", "2026", slack, "C1", year=2025, month=9)
+
+    # Sep keys must be purged.
+    purged = set(result["purged_keys"])
+    assert "Purchase:INV-P1" in purged
+    assert "Purchase:INV-P2" in purged
+    assert "Sales:INV-S1" in purged
+
+    # Oct keys and unrelated keys must survive in Firestore.
+    ptr = store.get_pointer("c1", "2026")
+    surviving = set(ptr.get("seen_doc_keys") or [])
+    assert "Purchase:INV-P3" in surviving
+    assert "Sales:INV-S2" in surviving
+    assert "OtherKey:SHOULD-SURVIVE" in surviving
+    # Sep keys gone.
+    assert "Purchase:INV-P1" not in surviving
+    assert "Purchase:INV-P2" not in surviving
+    assert "Sales:INV-S1" not in surviving
+
+
+def test_remove_rows_for_month_seen_doc_keys_regression_guard():
+    """Purged doc_keys allow re-drop; surviving keys still block double-append."""
+    xlsx = _make_invoice_workbook_with_months()
+    slack, store = _store_with_workbook(xlsx)
+
+    # Clear September.
+    store.remove_rows_for_month("c1", "2026", slack, "C1", year=2025, month=9)
+
+    ptr = store.get_pointer("c1", "2026")
+    surviving = set(ptr.get("seen_doc_keys") or [])
+
+    # Sep keys gone — a re-drop would NOT be deduped.
+    assert "Purchase:INV-P1" not in surviving
+    assert "Purchase:INV-P2" not in surviving
+    assert "Sales:INV-S1" not in surviving
+
+    # Oct keys still present — a re-drop would be correctly deduped.
+    assert "Purchase:INV-P3" in surviving
+    assert "Sales:INV-S2" in surviving
+
+
+def test_remove_rows_for_month_deletes_bottom_up():
+    """Bottom-up deletion: removing two rows must not corrupt row indices."""
+    from openpyxl import Workbook as _WB
+    import io
+    wb = _WB()
+    ws = wb.active
+    ws.title = "Purchase"
+    ws.append(["Date", "Invoice Number", "Description", "Source Amount"])
+    ws.append(["01/09/2025", "INV-A", "Alpha", 10.0])
+    ws.append(["02/09/2025", "INV-B", "Beta",  20.0])
+    ws.append(["03/09/2025", "INV-C", "Gamma", 30.0])
+    ws.append(["03/10/2025", "INV-D", "Delta", 40.0])  # different month — must survive
+    buf = io.BytesIO(); wb.save(buf)
+    xlsx = buf.getvalue()
+
+    slack, store = _store_with_workbook(xlsx)
+    store.remove_rows_for_month("c1", "2026", slack, "C1", year=2025, month=9)
+
+    latest_id = store.get_pointer("c1", "2026")["slack_file_id"]
+    from openpyxl import load_workbook
+    wb2 = load_workbook(io.BytesIO(slack.files[latest_id]))
+    rows = list(wb2["Purchase"].iter_rows(min_row=2, values_only=True))
+    non_blank = [r for r in rows if r[0] is not None]
+    assert len(non_blank) == 1
+    assert non_blank[0][2] == "Delta"
+
+
+def test_remove_rows_for_month_refuses_bank_sheet():
+    import pytest
+    xlsx = _make_invoice_workbook_with_months()
+    slack, store = _store_with_workbook(xlsx)
+    with pytest.raises(ValueError, match="bank"):
+        store.remove_rows_for_month(
+            "c1", "2026", slack, "C1",
+            year=2025, month=9,
+            sheets=("OCBC - 0001",),
+        )
+
+
+def test_remove_rows_for_month_raises_on_invalid_month():
+    import pytest
+    xlsx = _make_invoice_workbook_with_months()
+    slack, store = _store_with_workbook(xlsx)
+    with pytest.raises(ValueError, match="month"):
+        store.remove_rows_for_month("c1", "2026", slack, "C1", year=2025, month=13)
+    with pytest.raises(ValueError, match="month"):
+        store.remove_rows_for_month("c1", "2026", slack, "C1", year=2025, month=0)
+
+
+def test_remove_rows_for_month_no_pointer_raises():
+    import pytest
+    slack = FakeSlackClient()
+    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+    with pytest.raises(ValueError, match="no ledger pointer"):
+        store.remove_rows_for_month("nobody", "2026", slack, "C1", year=2025, month=9)
+
+
+def test_remove_rows_for_month_missing_sheet_returns_zero_count():
+    """A sheet that doesn't exist in the workbook → count 0, no crash."""
+    xlsx = _make_invoice_workbook_with_months()
+    slack, store = _store_with_workbook(xlsx)
+    # Only clear Purchase; Sales rows survive.
+    result = store.remove_rows_for_month(
+        "c1", "2026", slack, "C1",
+        year=2025, month=9,
+        sheets=("Purchase",),
+    )
+    assert result["sheets"]["Purchase"] == 2
+    # Sales untouched — read_rows should still have the Sep sales row.
+    rows = store.read_rows("c1", "2026", slack, "C1")
+    sep_sales = [r for r in rows if r.get("_sheet") == "Sales" and "09/2025" in str(r.get("Date", ""))]
+    assert len(sep_sales) == 1

@@ -1613,6 +1613,48 @@ async def _execute_pending_writes(
                     result.get("removed"),
                 )
                 any_committed = True
+            elif op == "replace_month":
+                import calendar
+                year = spec.get("year")
+                month_num = spec.get("month")
+                try:
+                    result = await asyncio.to_thread(
+                        ledger_store.remove_rows_for_month,
+                        client_id,
+                        fy,
+                        slack_client,
+                        channel_id,
+                        year=year,
+                        month=month_num,
+                    )
+                    month_name = calendar.month_name[month_num] if month_num else "?"
+                    total_removed = len(result.get("removed") or [])
+                    _post_message(
+                        slack_client, channel_id,
+                        f"Cleared {total_removed} rows for {month_name} {year} — "
+                        "re-drop those documents to re-record them.",
+                        thread_ts=thread_ts,
+                    )
+                    logger.info(
+                        "CHAT_WRITE_AUDIT op=replace_month session=%s channel=%s "
+                        "client=%s fy=%s year=%s month=%s removed=%d purged_keys=%r",
+                        session_id, channel_id, client_id, fy,
+                        year, month_num, total_removed,
+                        result.get("purged_keys"),
+                    )
+                    any_committed = True
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "replace_month failed: year=%s month=%s channel=%s",
+                        year, month_num, channel_id,
+                    )
+                    _post_message(
+                        slack_client, channel_id,
+                        "⚠️ I couldn't clear that month from the ledger. Nothing was modified.",
+                        thread_ts=thread_ts,
+                    )
+                continue  # skip the outer except below — already handled
+
         except Exception:  # noqa: BLE001 — a failed write must not crash the lane
             logger.exception(
                 "chat write failed: op=%s sheet=%s row=%s channel=%s",

@@ -701,10 +701,15 @@ class SlackLedgerStore:
         client_id: str,
         fy: str,
         channel_id: str,
+        *,
+        seen_doc_keys_override: Optional[list] = None,
     ) -> str:
         """Serialize *wb*, upload as a new Slack file, update the Firestore pointer.
 
-        Leaves ``seen_doc_keys`` intact (mutation does not un-see source docs).
+        By default leaves ``seen_doc_keys`` intact (mutation does not un-see
+        source docs).  Pass ``seen_doc_keys_override`` to replace the stored set
+        — used by :meth:`remove_rows_for_month` to purge the cleared month's keys
+        so re-dropped documents are not silently deduped.
         Returns the new ``slack_file_id``.
         """
         prev_file_id: Optional[str] = pointer.get("slack_file_id")
@@ -730,13 +735,18 @@ class SlackLedgerStore:
         )
         new_file_id = self._extract_uploaded_file_id(result)
         if new_file_id:
-            # Preserve seen_doc_keys and all existing pointer fields; only
-            # swap slack_file_id.
+            # Use the caller-supplied override when provided (month-clear purge);
+            # otherwise preserve the pointer's existing seen_doc_keys.
+            persisted_keys = (
+                seen_doc_keys_override
+                if seen_doc_keys_override is not None
+                else pointer.get("seen_doc_keys")
+            )
             self._set_pointer(
                 client_id,
                 fy,
                 new_file_id,
-                seen_doc_keys=pointer.get("seen_doc_keys"),
+                seen_doc_keys=persisted_keys,
                 channel_id=channel_id,
                 kind=kind,
             )
@@ -929,6 +939,156 @@ class SlackLedgerStore:
             self._upload_and_reroute(slack_client, wb, pointer, client_id, fy, channel_id)
 
         return {"sheet": sheet, "row": row, "removed": removed}
+
+    # ------------------------------------------------------------------ #
+    # Month-clear mutation (Step 7 / C-3)
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _parse_row_date(value) -> Optional[tuple[int, int]]:
+        """Return ``(year, month)`` from a Date cell (``DD/MM/YYYY`` or date obj).
+
+        Returns ``None`` when the cell is absent or unparseable.
+        """
+        if value is None:
+            return None
+        # datetime.date / datetime.datetime objects.
+        month = getattr(value, "month", None)
+        year = getattr(value, "year", None)
+        if month and year:
+            return (int(year), int(month))
+        # String "DD/MM/YYYY" (or "DD/MM/YY").
+        parts = str(value).strip().split("/")
+        if len(parts) == 3:
+            try:
+                m = int(parts[1])
+                y = int(parts[2])
+                if y < 100:
+                    y += 2000
+                return (y, m)
+            except ValueError:
+                return None
+        return None
+
+    def remove_rows_for_month(
+        self,
+        client_id: str,
+        fy: str,
+        slack_client: Any,
+        channel_id: str,
+        *,
+        year: int,
+        month: int,
+        sheets: tuple[str, ...] = ("Purchase", "Sales"),
+    ) -> dict:
+        """Delete all invoice rows for ``(year, month)`` across Purchase + Sales.
+
+        Downloads the current workbook, finds every data row whose ``Date``
+        column parses to ``(year, month)``, deletes them BOTTOM-UP (highest row
+        index first so openpyxl row-shifts don't invalidate earlier indices), and
+        purges the reconstructed ``doc_key`` values from the Firestore pointer's
+        ``seen_doc_keys`` so re-dropped documents are not silently deduped.
+        Uploads the trimmed workbook and updates the pointer.
+
+        Args:
+            client_id: Client whose ledger pointer to look up.
+            fy: Financial-year label.
+            slack_client: Slack WebClient (or fake) for download + upload.
+            channel_id: Channel the new workbook version is posted to.
+            year: 4-digit year to clear.
+            month: Month number 1–12 to clear.
+            sheets: Invoice sheet names to search.  Bank sheets are refused.
+
+        Returns:
+            ``{"removed": [row_desc, ...], "purged_keys": [...], "sheets": {sheet: count}}``.
+
+        Raises:
+            ValueError: if no pointer/workbook exists; ``year`` / ``month``
+                are out of range; or any entry in ``sheets`` is a bank sheet.
+        """
+        if not 1 <= month <= 12:
+            raise ValueError(f"month must be 1–12, got {month!r}")
+        if year < 1:
+            raise ValueError(f"year must be a positive integer, got {year!r}")
+
+        for sheet_name in sheets:
+            if self._is_bank_sheet(sheet_name):
+                raise ValueError(
+                    f"bank-statement sheets are read-only from chat; "
+                    f"only Purchase / Sales sheets can be cleared (sheet={sheet_name!r})."
+                )
+
+        lock = self._lock_for(channel_id, fy)
+        with lock:
+            pointer, data = self._download_current_workbook(slack_client, client_id, fy)
+            wb = self._load_workbook(data)
+
+            existing_keys: set = self._get_seen_doc_keys(pointer)
+            purged_keys: list[str] = []
+            removed_descs: list[str] = []
+            sheet_counts: dict[str, int] = {}
+
+            for sheet_name in sheets:
+                if sheet_name not in wb.sheetnames:
+                    sheet_counts[sheet_name] = 0
+                    continue
+
+                ws = wb[sheet_name]
+                if ws.max_row < 2:
+                    sheet_counts[sheet_name] = 0
+                    continue
+
+                col_map = self._header_col_map(ws)
+                date_col = col_map.get("Date")
+                inv_col = col_map.get("Invoice Number")
+
+                # Collect matching row numbers in ascending order, then delete bottom-up.
+                matching_rows: list[int] = []
+                for row_num in range(2, ws.max_row + 1):
+                    date_val = (
+                        ws.cell(row=row_num, column=date_col).value
+                        if date_col else None
+                    )
+                    parsed = self._parse_row_date(date_val)
+                    if parsed is not None and parsed == (year, month):
+                        matching_rows.append(row_num)
+
+                count = len(matching_rows)
+                sheet_counts[sheet_name] = count
+
+                # Reconstruct doc_keys for the matching rows BEFORE deletion.
+                for row_num in matching_rows:
+                    inv_num = (
+                        ws.cell(row=row_num, column=inv_col).value
+                        if inv_col else None
+                    )
+                    # Mirror the nodes._doc_key format: f"{sheet}:{invoice_number}"
+                    # (no index suffix for a single-row-per-doc batch).
+                    if inv_num is not None:
+                        key = f"{sheet_name}:{str(inv_num).strip()}"
+                        if key in existing_keys:
+                            purged_keys.append(key)
+                    removed_descs.append(
+                        f"{sheet_name} row {row_num}"
+                    )
+
+                # Delete bottom-up so row shifts don't corrupt earlier indices.
+                for row_num in sorted(matching_rows, reverse=True):
+                    ws.delete_rows(row_num, 1)
+
+            # Rebuild the surviving seen_doc_keys (purge the cleared month's keys).
+            surviving_keys = list(existing_keys - set(purged_keys))
+
+            self._upload_and_reroute(
+                slack_client, wb, pointer, client_id, fy, channel_id,
+                seen_doc_keys_override=surviving_keys,
+            )
+
+        return {
+            "removed": removed_descs,
+            "purged_keys": purged_keys,
+            "sheets": sheet_counts,
+        }
 
     @staticmethod
     def _extract_uploaded_file_id(result: Any) -> Optional[str]:

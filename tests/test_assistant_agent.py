@@ -477,17 +477,17 @@ class TestModelInfo:
 
 
 def test_assistant_agent_is_root_multi_turn():
-    """A root LlmAgent carries no ``mode`` (multi-turn default) and exposes 15 tools.
+    """A root LlmAgent carries no ``mode`` (multi-turn default) and exposes 16 tools.
 
     See ADR-0008: in ADK 2.2.0 a root agent must not set ``mode``, so the
     runtime uses ``include_contents='default'`` and the agent sees full
     session history. Step 4 (ADR-0009) adds the two gated write tools (14);
-    Step 7 (C-3) adds learn_mapping (15).
+    Step 7 (C-3) adds learn_mapping (15) and replace_recorded_month (16).
     """
     from accounting_agents.assistant import assistant_agent
 
     assert assistant_agent.mode is None
-    assert len(assistant_agent.tools) == 15
+    assert len(assistant_agent.tools) == 16
 
 
 def test_write_tools_registered_with_confirmation():
@@ -1025,3 +1025,142 @@ def test_learn_mapping_registered_as_plain_function_not_confirmed():
         elif isinstance(t, FunctionTool) and getattr(t, "func", None) is not None:
             tool_fns.add(t.func)
     assert _lm_fn in tool_fns, "learn_mapping must be present in assistant_agent.tools"
+
+
+# --------------------------------------------------------------------------- #
+# replace_recorded_month (Step 7 / C-3)
+# --------------------------------------------------------------------------- #
+
+
+class _FakeToolContextWithConfirm:
+    """Stub that can simulate Turn-1 (no confirmation) and Turn-2 (confirmed/denied)."""
+
+    def __init__(self, state: dict, *, confirmed: bool | None = None):
+        self.state = dict(state)
+        self._confirmed = confirmed
+        self.confirmation_requested: dict | None = None
+        if confirmed is not None:
+            self.tool_confirmation = _FakeConfirmation(confirmed=confirmed)
+        # no tool_confirmation attr on Turn-1
+
+    def request_confirmation(self, *, hint: str, payload: dict) -> None:
+        self.confirmation_requested = {"hint": hint, "payload": payload}
+
+
+class _FakeConfirmation:
+    def __init__(self, *, confirmed: bool):
+        self.confirmed = confirmed
+        self.payload: dict = {}
+
+
+def _invoice_rows_two_months() -> list[dict]:
+    """Two months (Sep 2025 = 3 rows, Oct 2025 = 1 row) of invoice data."""
+    return [
+        {"_sheet": "Purchase", "_row": 2, "Date": "05/09/2025",
+         "Description": "AWS", "Source Amount": 100.0},
+        {"_sheet": "Purchase", "_row": 3, "Date": "20/09/2025",
+         "Description": "Zoom", "Source Amount": 50.0},
+        {"_sheet": "Sales",    "_row": 2, "Date": "10/09/2025",
+         "Description": "Consulting", "Source Amount": 500.0},
+        {"_sheet": "Purchase", "_row": 4, "Date": "03/10/2025",
+         "Description": "AWS Oct", "Source Amount": 120.0},
+    ]
+
+
+from accounting_agents.assistant import replace_recorded_month, LEDGER_DATA_KEY, PENDING_WRITE_KEY
+
+
+class TestReplaceRecordedMonth:
+    def _state(self, rows=None, software="QBS Ledger", fy="2026"):
+        return {
+            LEDGER_DATA_KEY: rows if rows is not None else _invoice_rows_two_months(),
+            "software": software,
+            "fy": fy,
+        }
+
+    def test_software_gate_refuses_non_qbs(self):
+        ctx = _FakeToolContextWithConfirm(self._state(software="Xero"))
+        result = replace_recorded_month(ctx, "September 2025")
+        assert "isn't supported" in result
+
+    def test_ledger_not_loaded_gate(self):
+        ctx = _FakeToolContextWithConfirm({LEDGER_DATA_KEY: [], "fy": "2026"})
+        result = replace_recorded_month(ctx, "September 2025")
+        assert "not loaded" in result.lower()
+
+    def test_turn1_counts_rows_and_writes_nothing(self):
+        ctx = _FakeToolContextWithConfirm(self._state())
+        result = replace_recorded_month(ctx, "September 2025")
+        # Should have requested confirmation.
+        assert ctx.confirmation_requested is not None
+        hint = ctx.confirmation_requested["hint"]
+        assert "2 Purchase" in hint or "Purchase" in hint
+        assert "1 Sales" in hint or "Sales" in hint
+        assert "September 2025" in hint
+        # Nothing written to state.
+        assert PENDING_WRITE_KEY not in ctx.state
+
+    def test_turn1_no_match_returns_message(self):
+        ctx = _FakeToolContextWithConfirm(self._state())
+        result = replace_recorded_month(ctx, "January 2025")
+        assert ctx.confirmation_requested is None
+        assert "don't see" in result.lower() or "nothing to clear" in result.lower()
+        assert PENDING_WRITE_KEY not in ctx.state
+
+    def test_turn2_confirmed_appends_spec(self):
+        ctx = _FakeToolContextWithConfirm(self._state(), confirmed=True)
+        replace_recorded_month(ctx, "September 2025")
+        pending = ctx.state.get(PENDING_WRITE_KEY)
+        assert isinstance(pending, list) and len(pending) == 1
+        spec = pending[0]
+        assert spec["op"] == "replace_month"
+        assert spec["year"] == 2025
+        assert spec["month"] == 9
+
+    def test_turn2_denied_writes_nothing(self):
+        ctx = _FakeToolContextWithConfirm(self._state(), confirmed=False)
+        result = replace_recorded_month(ctx, "September 2025")
+        assert "won't clear" in result.lower() or "won't" in result.lower()
+        assert PENDING_WRITE_KEY not in ctx.state
+
+    # Month-parser coverage
+
+    def test_parse_month_name_full(self):
+        ctx = _FakeToolContextWithConfirm(self._state(), confirmed=True)
+        replace_recorded_month(ctx, "September 2025")
+        spec = ctx.state[PENDING_WRITE_KEY][0]
+        assert spec["month"] == 9 and spec["year"] == 2025
+
+    def test_parse_month_name_abbrev(self):
+        ctx = _FakeToolContextWithConfirm(self._state(), confirmed=True)
+        replace_recorded_month(ctx, "Sep 2025")
+        spec = ctx.state[PENDING_WRITE_KEY][0]
+        assert spec["month"] == 9 and spec["year"] == 2025
+
+    def test_parse_iso_format(self):
+        ctx = _FakeToolContextWithConfirm(self._state(), confirmed=True)
+        replace_recorded_month(ctx, "2025-09")
+        spec = ctx.state[PENDING_WRITE_KEY][0]
+        assert spec["month"] == 9 and spec["year"] == 2025
+
+    def test_parse_slash_format(self):
+        ctx = _FakeToolContextWithConfirm(self._state(), confirmed=True)
+        replace_recorded_month(ctx, "09/2025")
+        spec = ctx.state[PENDING_WRITE_KEY][0]
+        assert spec["month"] == 9 and spec["year"] == 2025
+
+    def test_parse_bare_name_infers_year_from_fy(self):
+        """Month name without year → year inferred from state["fy"]."""
+        ctx = _FakeToolContextWithConfirm(
+            {LEDGER_DATA_KEY: _invoice_rows_two_months(), "software": "QBS Ledger", "fy": "2025"},
+            confirmed=True,
+        )
+        replace_recorded_month(ctx, "September")
+        spec = ctx.state[PENDING_WRITE_KEY][0]
+        assert spec["month"] == 9 and spec["year"] == 2025
+
+    def test_bad_month_string_returns_error(self):
+        ctx = _FakeToolContextWithConfirm(self._state())
+        result = replace_recorded_month(ctx, "NotAMonth")
+        assert "couldn't parse" in result.lower() or "parse" in result.lower()
+        assert ctx.confirmation_requested is None

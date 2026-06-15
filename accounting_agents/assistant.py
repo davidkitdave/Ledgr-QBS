@@ -1258,6 +1258,233 @@ def remove_ledger_row(tool_context: ToolContext, row_index: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Replace-recorded-month write tool (Step 7 / C-3) — gated confirmation
+# --------------------------------------------------------------------------- #
+
+#: Month-name / abbreviation → month number for ``replace_recorded_month``.
+#: Re-uses the same mapping already defined for ``bank_totals`` (``_MONTHS``).
+
+
+def _parse_month_arg(month: str, *, fy: str | None = None) -> tuple[int, int]:
+    """Parse a flexible ``month`` string into ``(year, month_number)``.
+
+    Accepts:
+    - ``"September"`` / ``"Sep"`` / ``"sept"`` (year inferred from *fy*)
+    - ``"September 2025"`` / ``"Sep 2025"``
+    - ``"2025-09"``
+    - ``"09/2025"``
+
+    Args:
+        month: The user-supplied month string.
+        fy: The loaded FY label (e.g. ``"2026"``).  Used to infer the year when
+            the user supplies only a month name with no year.
+
+    Returns:
+        ``(year, month_number)`` as ints.
+
+    Raises:
+        ValueError: When the month string cannot be parsed or the month number
+            is out of range 1–12.
+    """
+    raw = (month or "").strip()
+    if not raw:
+        raise ValueError("month must not be empty")
+
+    year_inferred: int | None = None
+    month_num: int | None = None
+
+    # "2025-09"
+    if "-" in raw and raw.replace("-", "").isdigit():
+        parts = raw.split("-")
+        if len(parts) == 2 and len(parts[0]) == 4:
+            try:
+                year_inferred = int(parts[0])
+                month_num = int(parts[1])
+            except ValueError:
+                pass
+
+    # "09/2025"
+    if month_num is None and "/" in raw:
+        parts = raw.split("/")
+        if len(parts) == 2:
+            try:
+                a, b = int(parts[0]), int(parts[1])
+                # "09/2025": first part is month, second is year
+                if b > 99:
+                    month_num, year_inferred = a, b
+                else:
+                    month_num, year_inferred = b, a
+            except ValueError:
+                pass
+
+    # "September 2025" / "Sep 2025"
+    if month_num is None:
+        tokens = raw.split()
+        if len(tokens) == 2:
+            name_tok, year_tok = tokens[0], tokens[1]
+            mnum = _MONTHS.get(name_tok.lower())
+            try:
+                yr = int(year_tok)
+                if mnum and yr > 0:
+                    month_num, year_inferred = mnum, yr
+            except ValueError:
+                pass
+        elif len(tokens) == 1:
+            # Pure month name or abbreviation
+            mnum = _MONTHS.get(tokens[0].lower())
+            if mnum:
+                month_num = mnum
+            else:
+                # Could be a bare number "9" or "09"
+                try:
+                    month_num = int(tokens[0])
+                except ValueError:
+                    pass
+
+    if month_num is None:
+        raise ValueError(
+            f"I couldn't parse {month!r} as a month. "
+            "Try formats like \"September\", \"Sep\", \"September 2025\", "
+            "\"2025-09\", or \"09/2025\"."
+        )
+
+    if not 1 <= month_num <= 12:
+        raise ValueError(
+            f"Month number {month_num} is out of range (must be 1–12)."
+        )
+
+    # Infer year from FY label when the user supplied only a month name.
+    if year_inferred is None:
+        try:
+            year_inferred = int(str(fy).strip()) if fy and str(fy).strip().isdigit() else None
+        except (TypeError, ValueError):
+            year_inferred = None
+        if year_inferred is None:
+            from datetime import date as _date
+            year_inferred = _date.today().year
+
+    return (year_inferred, month_num)
+
+
+def replace_recorded_month(tool_context: ToolContext, month: str) -> str:
+    """Clear all invoice rows for a month from the FY ledger (gated — asks you to confirm first).
+
+    Use this when you want to re-drop a month's documents (e.g. because you
+    uploaded the wrong files) and need the dedup gate to let them through
+    again.  The FIRST call counts the rows to be removed and asks for your OK
+    — nothing is written.  After you confirm, the month's Purchase and Sales
+    rows are cleared and their dedupe keys are purged so re-dropped documents
+    will be recorded fresh.
+
+    Only QBS Ledger workbooks are supported.  Bank sheets are unaffected.
+
+    Args:
+        tool_context: Injected by ADK; provides session state + confirmation.
+        month: The month to clear — flexible format: "September", "Sep",
+            "September 2025", "2025-09", "09/2025".
+
+    Returns:
+        A short status string.  The commit appends a write spec to
+        ``state["pending_ledger_write"]`` for the runner to execute.
+    """
+    # Software gate — same check as amend/remove.
+    software = str(tool_context.state.get("software") or "").strip()
+    if software and software not in _SUPPORTED_WRITE_SOFTWARE:
+        return (
+            f"Editing this ledger layout ({software!r}) from chat isn't supported yet "
+            "— only QBS Ledger workbooks can be cleared here."
+        )
+
+    # Ledger-loaded gate.
+    rows = _get_rows(tool_context)
+    if not rows:
+        return "The ledger data is not loaded yet. Please upload the FY ledger first."
+
+    # Parse the month arg.
+    fy = str(tool_context.state.get("fy") or "").strip() or None
+    try:
+        year, month_num = _parse_month_arg(month, fy=fy)
+    except ValueError as exc:
+        return str(exc)
+
+    confirmation = getattr(tool_context, "tool_confirmation", None)
+
+    # ----- Turn 1: count matching rows + request confirmation -----
+    if not confirmation:
+        # Count matching invoice rows in the in-state ledger snapshot.
+        purchase_count = 0
+        sales_count = 0
+        for row in rows:
+            if row.get("_sheet") not in _INVOICE_SHEETS:
+                continue
+            date_val = row.get("Date")
+            if date_val is None:
+                continue
+            parsed = _parse_row_date(date_val)
+            if parsed is None:
+                continue
+            row_year, row_month = parsed.year, parsed.month
+            if row_year == year and row_month == month_num:
+                if row.get("_sheet") == "Purchase":
+                    purchase_count += 1
+                else:
+                    sales_count += 1
+
+        total = purchase_count + sales_count
+        if total == 0:
+            import calendar
+            month_name = calendar.month_name[month_num]
+            return (
+                f"I don't see any invoice rows dated {month_name} {year} in the "
+                "loaded ledger — nothing to clear."
+            )
+
+        import calendar
+        month_name = calendar.month_name[month_num]
+        parts: list[str] = []
+        if purchase_count:
+            parts.append(f"{purchase_count} Purchase")
+        if sales_count:
+            parts.append(f"{sales_count} Sales")
+        rows_desc = " + ".join(parts)
+
+        hint = (
+            f"I'll remove {rows_desc} rows dated {month_name} {year} from your ledger "
+            f"and clear their dedupe keys so you can re-drop those documents. "
+            f"Reply 'yes' to confirm, or 'no' to cancel."
+        )
+        spec = {"op": "replace_month", "year": year, "month": month_num}
+        try:
+            tool_context.request_confirmation(hint=hint, payload=spec)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "replace_recorded_month: request_confirmation failed "
+                "(year=%s month=%s)", year, month_num,
+            )
+            return "I couldn't open the confirmation step. Please try again."
+        return "Awaiting your confirmation before I clear the month."
+
+    # ----- Turn 2: the user answered -----
+    if not getattr(confirmation, "confirmed", False):
+        return "Okay, I won't clear anything."
+
+    # Re-derive the write spec from the SAME original args (ADR-0009).
+    # Re-parse in case state changed between turns (defensive).
+    try:
+        year2, month_num2 = _parse_month_arg(month, fy=fy)
+    except ValueError as exc:
+        return str(exc)
+
+    spec = {"op": "replace_month", "year": year2, "month": month_num2}
+    pending = tool_context.state.get(PENDING_WRITE_KEY)
+    if not isinstance(pending, list):
+        pending = []
+    pending.append(spec)
+    tool_context.state[PENDING_WRITE_KEY] = pending
+    return "Confirmed — clearing that month from your ledger now."
+
+
+# --------------------------------------------------------------------------- #
 # Learn-mapping write tool (Step 7 / C-3) — direct write, no confirmation gate
 # --------------------------------------------------------------------------- #
 
@@ -1390,17 +1617,23 @@ Explain + lookup tools (when the user asks *why* or *where*):
 - ``lookup_row``: find ledger rows matching a text query (vendor, description, account).
 - ``list_recent_documents``: list source documents grouped from the loaded FY ledger.
 
-Write tools (when the user asks you to FIX or DELETE a ledger line):
+Write tools (when the user asks you to FIX, DELETE, or CLEAR a ledger line or month):
 - ``amend_ledger_row``: change one field (``account`` / ``amount`` / ``description``
   / ``tax``) of an invoice ledger row.
 - ``remove_ledger_row``: delete an invoice ledger row.
-BEFORE calling either write tool you MUST call ``lookup_row`` to get the exact
-``row_index`` of the line the user means — never guess an index. Both write
-tools are GATED: the first call only PROPOSES the change and asks the user to
-confirm; nothing is written until the user replies "yes". Only invoice rows
-(Purchase / Sales) can be edited — bank rows are read-only. The tax treatment is
-always re-derived by the engine (a non-GST-registered client is forced to NT),
-so do not promise a specific tax code the user typed.
+- ``replace_recorded_month``: clear ALL invoice rows for a given month (e.g.
+  "clear September so I can re-drop those docs"). This is GATED — the first call
+  shows a count and asks for confirmation; nothing is written until the user
+  replies "yes". After clearing, the user can re-drop the original documents and
+  they will be recorded fresh (the dedupe keys are purged too).
+BEFORE calling ``amend_ledger_row`` or ``remove_ledger_row`` you MUST call
+``lookup_row`` to get the exact ``row_index`` of the line the user means —
+never guess an index. All write tools are GATED: the first call only PROPOSES
+the change and asks the user to confirm; nothing is written until the user
+replies "yes". Only invoice rows (Purchase / Sales) can be edited — bank rows
+are read-only. The tax treatment is always re-derived by the engine (a
+non-GST-registered client is forced to NT), so do not promise a specific tax
+code the user typed.
 
 Learning tool (when the user says "remember X goes to Y" or "always code X as Y"):
 - ``learn_mapping``: record a vendor→account or vendor→tax rule so the next
@@ -1480,6 +1713,7 @@ assistant_agent = LlmAgent(
         list_recent_documents,
         FunctionTool(amend_ledger_row, require_confirmation=True),
         FunctionTool(remove_ledger_row, require_confirmation=True),
+        FunctionTool(replace_recorded_month, require_confirmation=True),
         learn_mapping,
     ],
 )
@@ -1493,6 +1727,7 @@ __all__ = [
     "GST_THRESHOLD_SGD",
     "amend_ledger_row",
     "remove_ledger_row",
+    "replace_recorded_month",
     "learn_mapping",
     "bank_totals",
     "summarize_by_category",

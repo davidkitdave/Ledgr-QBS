@@ -3001,3 +3001,138 @@ def test_runner_drains_pending_learn_mapping():
     # object; _apply_state_delta appends an Event — but since our fake doesn't
     # actually mutate state from events, we verify via the store call count instead.)
     assert len(fake_store.corrections) == 1  # idempotency: not doubled
+
+
+# =========================================================================== #
+# replace_month drain (Step 7 / C-3)
+# =========================================================================== #
+
+
+def _seed_month_ledger():
+    """Seed a Purchase+Sales workbook with Sep+Oct rows; return (slack, store)."""
+    from openpyxl import Workbook
+    import io
+
+    wb = Workbook()
+    ws_p = wb.active
+    ws_p.title = "Purchase"
+    ws_p.append(["Date", "Invoice Number", "Description", "Source Amount", "Account Code / COA"])
+    ws_p.append(["05/09/2025", "INV-P1", "AWS Sep",  100.0, "6090"])
+    ws_p.append(["03/10/2025", "INV-P2", "AWS Oct",  120.0, "6090"])
+    ws_s = wb.create_sheet("Sales")
+    ws_s.append(["Date", "Invoice Number", "Description", "Source Amount", "Account Code / COA"])
+    ws_s.append(["10/09/2025", "INV-S1", "Consult Sep", 500.0, "4000"])
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    xlsx = buf.getvalue()
+
+    slack = FakeSlackClient()
+    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+
+    import uuid
+    file_id = "F" + uuid.uuid4().hex[:10]
+    slack.files[file_id] = xlsx
+    url = f"https://files.slack.com/{file_id}/ledger.xlsx"
+    slack.urls[url] = xlsx
+    store._pointer_ref("c1", "2026").set({
+        "slack_file_id": file_id,
+        "client_id": "c1",
+        "fy": "2026",
+        "kind": "invoice",
+        "seen_doc_keys": ["Purchase:INV-P1", "Purchase:INV-P2", "Sales:INV-S1"],
+    })
+    return slack, store
+
+
+def test_execute_pending_writes_replace_month_drains_and_posts():
+    from accounting_agents.slack_runner import _execute_pending_writes
+
+    slack, store = _seed_month_ledger()
+    state = {
+        "pending_ledger_write": [
+            {"op": "replace_month", "year": 2025, "month": 9},
+        ],
+    }
+    committed = asyncio.run(_execute_pending_writes(
+        state=state,
+        ledger_store=store,
+        slack_client=slack,
+        channel_id="C1",
+        client_id="c1",
+        fy="2026",
+        session_id="S1",
+        fc_id="fc-rm-month",
+    ))
+
+    assert committed is True
+    # Workbook trimmed — Sep rows gone.
+    rows = store.read_rows("c1", "2026", slack, "C1")
+    dates = [r.get("Date") for r in rows if r.get("Date")]
+    assert all("10/2025" in str(d) for d in dates), dates
+
+    # Summary message posted.
+    assert any("September 2025" in m.get("text", "") for m in slack._posts), slack._posts
+    assert any("re-drop" in m.get("text", "").lower() for m in slack._posts)
+
+    # Audit logged + idempotency marker set.
+    assert state["pending_ledger_write"] == []
+    assert "fc-rm-month" in state["committed_confirmations"]
+
+
+def test_execute_pending_writes_replace_month_purges_doc_keys():
+    from accounting_agents.slack_runner import _execute_pending_writes
+
+    slack, store = _seed_month_ledger()
+    state = {"pending_ledger_write": [{"op": "replace_month", "year": 2025, "month": 9}]}
+    asyncio.run(_execute_pending_writes(
+        state=state, ledger_store=store, slack_client=slack, channel_id="C1",
+        client_id="c1", fy="2026", session_id="S1", fc_id="fc-keys",
+    ))
+
+    ptr = store.get_pointer("c1", "2026")
+    surviving = set(ptr.get("seen_doc_keys") or [])
+    assert "Purchase:INV-P1" not in surviving   # Sep purged
+    assert "Sales:INV-S1" not in surviving      # Sep purged
+    assert "Purchase:INV-P2" in surviving       # Oct survives
+
+
+def test_execute_pending_writes_replace_month_idempotent_double_yes():
+    from accounting_agents.slack_runner import _execute_pending_writes
+
+    slack, store = _seed_month_ledger()
+    spec = {"op": "replace_month", "year": 2025, "month": 9}
+
+    state = {"pending_ledger_write": [spec]}
+    asyncio.run(_execute_pending_writes(
+        state=state, ledger_store=store, slack_client=slack, channel_id="C1",
+        client_id="c1", fy="2026", session_id="S1", fc_id="fc-idem",
+    ))
+    posts_after_first = len(slack._posts)
+
+    # Second "yes" for same fc_id — must NOT re-apply.
+    state["pending_ledger_write"] = [spec]
+    committed2 = asyncio.run(_execute_pending_writes(
+        state=state, ledger_store=store, slack_client=slack, channel_id="C1",
+        client_id="c1", fy="2026", session_id="S1", fc_id="fc-idem",
+    ))
+    assert committed2 is False
+    assert len(slack._posts) == posts_after_first  # no extra message
+    assert state["pending_ledger_write"] == []
+
+
+def test_execute_pending_writes_replace_month_refreshes_ledger_data():
+    """After replace_month commits, state ledger_data reflects the trimmed workbook."""
+    from accounting_agents.slack_runner import _execute_pending_writes
+
+    slack, store = _seed_month_ledger()
+    state = {"pending_ledger_write": [{"op": "replace_month", "year": 2025, "month": 9}]}
+    asyncio.run(_execute_pending_writes(
+        state=state, ledger_store=store, slack_client=slack, channel_id="C1",
+        client_id="c1", fy="2026", session_id="S1", fc_id="fc-refresh",
+    ))
+    # The runner drains + marks committed; the real answer_question refreshes
+    # ledger_data via read_rows post-commit. Here we verify the workbook is correct.
+    rows = store.read_rows("c1", "2026", slack, "C1")
+    assert len(rows) == 1  # only Oct Purchase row
+    assert rows[0].get("Date") == "03/10/2025"
