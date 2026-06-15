@@ -1305,6 +1305,143 @@ def dedup_callout_card(
     ]
 
 
+_DATA_TABLE_MAX_ROWS = 100  # Slack hard cap for data_table rows (excl. header)
+
+
+def ledger_preview_data_table(
+    *,
+    rows: list[dict],
+    workbook_name: str,
+    fy: int,
+    channel_id: str | None = None,
+    max_rows: int = 10,
+) -> list[dict]:
+    """Build a preview of the last rows appended to the FY ledger.
+
+    Native path: a ``data_table`` block with Date · Description · Account ·
+    Tax · Net · Total columns, optionally preceded by a labelling section and
+    followed by a context block when ``len(rows) > max_rows``.
+
+    Fallback path: a single ``section`` block with a fixed-width mrkdwn
+    pre-block showing Date | Description | Amount, capped at 3000 chars.
+
+    Args:
+        rows:          List of appended row dicts.  Expected keys: ``date``,
+                       ``description``, ``account_code``, ``tax_code``,
+                       ``net``, ``total``.  Missing keys are rendered as empty.
+        workbook_name: Display name of the workbook (e.g. ``"Ledger_FY2025.xlsx"``).
+        fy:            Financial year integer (e.g. 2025).
+        channel_id:    Used by supports_native_blocks() for per-channel probe.
+        max_rows:      Maximum data rows to show in the preview (default 10).
+                       Capped internally at 100 (Slack's data_table row limit).
+    """
+    if not rows:
+        return []
+
+    effective_max = min(max_rows, _DATA_TABLE_MAX_ROWS)
+    preview = rows[:effective_max]
+    overflow = len(rows) - effective_max
+
+    if supports_native_blocks(channel_id):
+        header_row = [
+            {"type": "raw_text", "text": "Date"},
+            {"type": "raw_text", "text": "Description"},
+            {"type": "raw_text", "text": "Account"},
+            {"type": "raw_text", "text": "Tax"},
+            {"type": "raw_text", "text": "Net"},
+            {"type": "raw_text", "text": "Total"},
+        ]
+
+        data_rows: list[list[dict]] = []
+        for row in preview:
+            def _raw_text(key: str) -> dict:
+                return {"type": "raw_text", "text": str(row.get(key) or "")}
+
+            def _raw_number(key: str) -> dict:
+                val = row.get(key)
+                try:
+                    f = float(val)  # type: ignore[arg-type]
+                except (TypeError, ValueError):
+                    f = 0.0
+                return {"type": "raw_number", "text": f"{f:.2f}", "value": f}
+
+            data_rows.append([
+                _raw_text("date"),
+                _raw_text("description"),
+                _raw_text("account_code"),
+                _raw_text("tax_code"),
+                _raw_number("net"),
+                _raw_number("total"),
+            ])
+
+        caption = f"Last {len(preview)} rows added to {workbook_name} (FY{fy})"
+        blocks: list[dict] = [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"Recent ledger rows in *{workbook_name}* (FY{fy}):",
+                },
+            },
+            {
+                "type": "data_table",
+                "caption": caption,
+                "page_size": 10,
+                "row_header_column_index": 0,
+                "rows": [header_row] + data_rows,
+            },
+        ]
+
+        if overflow > 0:
+            blocks.append({
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"… and {overflow} more rows in the workbook above.",
+                    }
+                ],
+            })
+
+        return blocks
+
+    # Fallback: fixed-width mrkdwn pre-block.
+    _COL_WIDTHS = (12, 36, 12)
+    header_line = (
+        f"{'Date':<{_COL_WIDTHS[0]}}  "
+        f"{'Description':<{_COL_WIDTHS[1]}}  "
+        f"{'Amount':>{_COL_WIDTHS[2]}}"
+    )
+    separator = "-" * (sum(_COL_WIDTHS) + 4)
+    lines = [header_line, separator]
+    for row in preview:
+        date_s = str(row.get("date") or "")[:_COL_WIDTHS[0]]
+        desc_s = str(row.get("description") or "")[:_COL_WIDTHS[1]]
+        try:
+            total_f = float(row.get("total") or 0)  # type: ignore[arg-type]
+            amt_s = f"{total_f:>{_COL_WIDTHS[2]}.2f}"
+        except (TypeError, ValueError):
+            amt_s = " " * _COL_WIDTHS[2]
+        lines.append(
+            f"{date_s:<{_COL_WIDTHS[0]}}  {desc_s:<{_COL_WIDTHS[1]}}  {amt_s}"
+        )
+    if overflow > 0:
+        lines.append(f"… and {overflow} more rows in the workbook above.")
+    table_text = "```\n" + "\n".join(lines) + "\n```"
+    # Slack section text ceiling is 3000 chars; truncate if needed.
+    if len(table_text) > _MAX_SECTION:
+        table_text = table_text[: _MAX_SECTION - 4] + "\n```"
+    return [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"Recent ledger rows in *{workbook_name}* (FY{fy}):\n{table_text}",
+            },
+        }
+    ]
+
+
 def profile_summary_blocks(profile: dict) -> list:
     """Confirmation card summarising the client profile that was just registered."""
     name = profile.get("client_name") or "(unnamed client)"

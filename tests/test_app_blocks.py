@@ -16,6 +16,7 @@ from app.blocks import (
     dedup_callout_card,
     invoice_edit_modal,
     job_summary_text,
+    ledger_preview_data_table,
     onboarding_modal,
     per_doc_card,
     proactive_redo_blocks,
@@ -1164,4 +1165,178 @@ class TestDedupValue:
         val = _dedup_value("", 2025, "Jan 2025", None)
         parts = val.split("|")
         assert parts[0] == "-"
+
+
+# --------------------------------------------------------------------------- #
+# Commit 4: ledger_preview_data_table
+# --------------------------------------------------------------------------- #
+
+_SAMPLE_ROWS = [
+    {"date": "2025-09-15", "description": "Acme INV-001", "account_code": "6090",
+     "tax_code": "SR", "net": 1132.11, "total": 1234.50},
+    {"date": "2025-09-18", "description": "BetaCo BIL-7788", "account_code": "6090",
+     "tax_code": "ZR", "net": 450.00, "total": 450.00},
+    {"date": "2025-09-22", "description": "Gamma Pte INV-001", "account_code": "4000",
+     "tax_code": "SR", "net": 920.00, "total": 1002.80},
+    {"date": "2025-09-25", "description": "Delta Co SVC-09", "account_code": "6100",
+     "tax_code": "SR", "net": 200.00, "total": 218.00},
+    {"date": "2025-09-28", "description": "Epsilon BIL-2025", "account_code": "6200",
+     "tax_code": "ZR", "net": 80.00, "total": 80.00},
+]
+
+
+class TestLedgerPreviewDataTableNative:
+
+    @pytest.fixture(autouse=True)
+    def _force_native(self, monkeypatch):
+        monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
+
+    def test_empty_rows_returns_empty_list(self):
+        assert ledger_preview_data_table(
+            rows=[], workbook_name="Ledger_FY2025.xlsx", fy=2025
+        ) == []
+
+    def test_five_rows_produces_data_table_block(self):
+        blocks = ledger_preview_data_table(
+            rows=_SAMPLE_ROWS, workbook_name="Ledger_FY2025.xlsx", fy=2025
+        )
+        table_blocks = [b for b in blocks if b.get("type") == "data_table"]
+        assert len(table_blocks) == 1
+
+    def test_header_row_is_first_row(self):
+        blocks = ledger_preview_data_table(
+            rows=_SAMPLE_ROWS, workbook_name="Ledger_FY2025.xlsx", fy=2025
+        )
+        table = next(b for b in blocks if b["type"] == "data_table")
+        header = table["rows"][0]
+        header_texts = [c["text"] for c in header]
+        assert header_texts == ["Date", "Description", "Account", "Tax", "Net", "Total"]
+
+    def test_five_data_rows_follow_header(self):
+        blocks = ledger_preview_data_table(
+            rows=_SAMPLE_ROWS, workbook_name="Ledger_FY2025.xlsx", fy=2025
+        )
+        table = next(b for b in blocks if b["type"] == "data_table")
+        # total rows = 1 header + 5 data
+        assert len(table["rows"]) == 6
+
+    def test_date_description_account_tax_are_raw_text(self):
+        blocks = ledger_preview_data_table(
+            rows=_SAMPLE_ROWS[:1], workbook_name="Ledger_FY2025.xlsx", fy=2025
+        )
+        table = next(b for b in blocks if b["type"] == "data_table")
+        data_row = table["rows"][1]
+        for col_idx in range(4):  # Date, Description, Account, Tax
+            assert data_row[col_idx]["type"] == "raw_text"
+
+    def test_net_and_total_are_raw_number_with_value_float(self):
+        blocks = ledger_preview_data_table(
+            rows=_SAMPLE_ROWS[:1], workbook_name="Ledger_FY2025.xlsx", fy=2025
+        )
+        table = next(b for b in blocks if b["type"] == "data_table")
+        data_row = table["rows"][1]
+        net_cell = data_row[4]
+        total_cell = data_row[5]
+        assert net_cell["type"] == "raw_number"
+        assert isinstance(net_cell["value"], float)
+        assert net_cell["text"] == "1132.11"
+        assert total_cell["type"] == "raw_number"
+        assert isinstance(total_cell["value"], float)
+        assert total_cell["text"] == "1234.50"
+
+    def test_caption_contains_workbook_name_and_fy(self):
+        blocks = ledger_preview_data_table(
+            rows=_SAMPLE_ROWS, workbook_name="Purchase Ledger FY2025", fy=2025
+        )
+        table = next(b for b in blocks if b["type"] == "data_table")
+        assert "Purchase Ledger FY2025" in table["caption"]
+        assert "FY2025" in table["caption"]
+
+    def test_row_header_column_index_is_zero(self):
+        blocks = ledger_preview_data_table(
+            rows=_SAMPLE_ROWS, workbook_name="Ledger_FY2025.xlsx", fy=2025
+        )
+        table = next(b for b in blocks if b["type"] == "data_table")
+        assert table["row_header_column_index"] == 0
+
+    def test_page_size_is_ten(self):
+        blocks = ledger_preview_data_table(
+            rows=_SAMPLE_ROWS, workbook_name="Ledger_FY2025.xlsx", fy=2025
+        )
+        table = next(b for b in blocks if b["type"] == "data_table")
+        assert table["page_size"] == 10
+
+    def test_overflow_appends_context_block(self):
+        rows_15 = _SAMPLE_ROWS * 3  # 15 rows
+        blocks = ledger_preview_data_table(
+            rows=rows_15, workbook_name="Ledger_FY2025.xlsx", fy=2025, max_rows=10
+        )
+        table = next(b for b in blocks if b["type"] == "data_table")
+        # 1 header + 10 data rows
+        assert len(table["rows"]) == 11
+        context_blocks = [b for b in blocks if b["type"] == "context"]
+        assert len(context_blocks) == 1
+        assert "5 more" in context_blocks[0]["elements"][0]["text"]
+
+    def test_no_overflow_no_context_block(self):
+        blocks = ledger_preview_data_table(
+            rows=_SAMPLE_ROWS, workbook_name="Ledger_FY2025.xlsx", fy=2025, max_rows=10
+        )
+        assert not any(b["type"] == "context" for b in blocks)
+
+    def test_missing_keys_handled_gracefully(self):
+        sparse_rows = [{"date": "2025-09-01"}]  # all other keys absent
+        blocks = ledger_preview_data_table(
+            rows=sparse_rows, workbook_name="Ledger_FY2025.xlsx", fy=2025
+        )
+        table = next(b for b in blocks if b["type"] == "data_table")
+        data_row = table["rows"][1]
+        # empty strings for missing text fields
+        assert data_row[1]["text"] == ""
+        # zero for missing numeric fields
+        assert data_row[4]["value"] == 0.0
+
+    def test_preface_section_block_present(self):
+        blocks = ledger_preview_data_table(
+            rows=_SAMPLE_ROWS, workbook_name="Ledger_FY2025.xlsx", fy=2025
+        )
+        section_blocks = [b for b in blocks if b["type"] == "section"]
+        assert len(section_blocks) == 1
+        assert "Ledger_FY2025.xlsx" in section_blocks[0]["text"]["text"]
+
+
+class TestLedgerPreviewDataTableFallback:
+
+    @pytest.fixture(autouse=True)
+    def _force_fallback(self, monkeypatch):
+        monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "0")
+
+    def test_empty_rows_returns_empty_list(self):
+        assert ledger_preview_data_table(
+            rows=[], workbook_name="Ledger_FY2025.xlsx", fy=2025
+        ) == []
+
+    def test_returns_section_with_mrkdwn_preblock(self):
+        blocks = ledger_preview_data_table(
+            rows=_SAMPLE_ROWS, workbook_name="Ledger_FY2025.xlsx", fy=2025
+        )
+        assert len(blocks) == 1
+        assert blocks[0]["type"] == "section"
+        assert blocks[0]["text"]["type"] == "mrkdwn"
+        assert "```" in blocks[0]["text"]["text"]
+
+    def test_fallback_text_under_3000_chars(self):
+        rows_many = _SAMPLE_ROWS * 20  # 100 rows
+        blocks = ledger_preview_data_table(
+            rows=rows_many, workbook_name="Ledger_FY2025.xlsx", fy=2025, max_rows=100
+        )
+        assert len(blocks[0]["text"]["text"]) <= 3000
+
+    def test_fallback_shows_date_and_description(self):
+        blocks = ledger_preview_data_table(
+            rows=_SAMPLE_ROWS[:1], workbook_name="Ledger_FY2025.xlsx", fy=2025
+        )
+        text = blocks[0]["text"]["text"]
+        assert "2025-09-15" in text
+        assert "Acme INV-001" in text
 

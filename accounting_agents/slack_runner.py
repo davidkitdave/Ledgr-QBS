@@ -75,6 +75,7 @@ from app.blocks import (
     approval_outcome_blocks,
     dedup_callout_card,
     invoice_edit_modal,
+    ledger_preview_data_table,
     proactive_redo_blocks,
     proactive_redo_modal,
     processing_plan_blocks,
@@ -702,7 +703,102 @@ async def persist_and_deliver(
 
     summary = state.get(nodes.DELIVER_SUMMARY_KEY) or "Document processed."
     _post_message(slack_client, channel_id, summary, thread_ts=thread_ts)
+
+    # Post a data_table preview of the rows just appended (best-effort; never
+    # breaks delivery if it fails).
+    if append_result.get("appended", 0) > 0 and batches:
+        try:
+            preview_rows = _build_preview_rows(batches)
+            if preview_rows:
+                workbook_name = append_result.get("filename") or "Ledger.xlsx"
+                fy_str = append_result.get("fy") or str(payload.get("fy") or "")
+                try:
+                    fy_int = int(fy_str)
+                except (TypeError, ValueError):
+                    fy_int = 0
+                preview_blocks = ledger_preview_data_table(
+                    rows=preview_rows,
+                    workbook_name=workbook_name,
+                    fy=fy_int,
+                    channel_id=channel_id,
+                )
+                if preview_blocks:
+                    preview_kwargs: dict = {
+                        "channel": channel_id,
+                        "text": f"Ledger preview — {workbook_name}",
+                        "blocks": preview_blocks,
+                    }
+                    if thread_ts:
+                        preview_kwargs["thread_ts"] = thread_ts
+                    slack_client.chat_postMessage(**preview_kwargs)
+        except Exception:  # noqa: BLE001 — preview is cosmetic; never break delivery
+            logger.warning("ledger preview post failed (non-fatal)", exc_info=True)
+
     return append_result
+
+
+def _build_preview_rows(batches: list[dict]) -> list[dict]:
+    """Convert exporter-column batch rows to the canonical preview shape.
+
+    Accepts both QBS and Xero exporter column names.  Returns a flat list of
+    dicts with keys: ``date``, ``description``, ``account_code``, ``tax_code``,
+    ``net``, ``total``.
+    """
+    result: list[dict] = []
+    for batch in batches:
+        for row in batch.get("rows") or []:
+            if not isinstance(row, dict):
+                continue
+            date_val = (
+                row.get("date")
+                or row.get("Invoice Date")
+                or row.get("*InvoiceDate")
+                or row.get("Date")
+                or ""
+            )
+            desc_val = (
+                row.get("description")
+                or row.get("Description")
+                or row.get("*Description")
+                or ""
+            )
+            acct_val = (
+                row.get("account_code")
+                or row.get("Account Code / COA")
+                or row.get("*AccountCode")
+                or ""
+            )
+            tax_val = (
+                row.get("tax_code")
+                or row.get("Tax Code")
+                or row.get("*TaxType")
+                or ""
+            )
+            # Net: Sub Total (QBS purchase), Amount (QBS sales/Xero purchase)
+            net_val = (
+                row.get("net")
+                or row.get("Sub Total")
+                or row.get("Source Amount")
+                or row.get("Amount")
+                or row.get("*UnitAmount")
+                or 0
+            )
+            # Total: Total Amount (QBS purchase), Total (QBS sales/Xero)
+            total_val = (
+                row.get("total")
+                or row.get("Total Amount")
+                or row.get("Total")
+                or 0
+            )
+            result.append({
+                "date": str(date_val) if date_val else "",
+                "description": str(desc_val) if desc_val else "",
+                "account_code": str(acct_val) if acct_val else "",
+                "tax_code": str(tax_val) if tax_val else "",
+                "net": net_val,
+                "total": total_val,
+            })
+    return result
 
 
 def _post_message(slack_client: Any, channel_id: str, text: str, thread_ts=None) -> None:

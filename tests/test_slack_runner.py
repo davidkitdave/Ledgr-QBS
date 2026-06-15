@@ -1096,6 +1096,90 @@ def _last_blocks(slack: FakeSlackClient):
 
 
 # =========================================================================== #
+# Commit 4: ledger preview data_table posted after delivery
+# =========================================================================== #
+
+
+def test_delivery_posts_ledger_preview_data_table(monkeypatch):
+    """After a successful delivery, persist_and_deliver posts a follow-up
+    chat_postMessage carrying a data_table block preview of the appended rows."""
+    monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
+
+    slack = FakeSlackClient()
+    db = FakeFirestore()
+    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+
+    final_event = SimpleNamespace(
+        content=SimpleNamespace(parts=[SimpleNamespace(text="done")]),
+        get_function_calls=lambda: [],
+    )
+    # Build a payload with one batch that has a row rich enough to preview.
+    state = {
+        nodes.LEDGER_ROWS_KEY: {
+            "client_id": "c1",
+            "fy": "2025",
+            "kind": "invoice",
+            "software": "qbs",
+            "client_name": "Acme",
+            "batches": [
+                {
+                    "sheet": "Purchase",
+                    "doc_key": "Purchase:INV-042",
+                    "rows": [
+                        {
+                            "Invoice Date": "2025-09-15",
+                            "Description": "Acme Trading INV-2025-0042",
+                            "Account Code / COA": "6090",
+                            "Sub Total": 1132.11,
+                            "Total Amount": 1234.50,
+                        }
+                    ],
+                }
+            ],
+        },
+        nodes.DELIVER_SUMMARY_KEY: "Added 1 line to your FY2025 ledger.",
+    }
+    runner = _FakeRunner([final_event], state)
+
+    def fake_download(client, file_id):
+        return b"%PDF-1.4 fake"
+
+    asyncio.run(
+        process_file_event(
+            runner=runner,
+            ledger_store=store,
+            db=db,
+            slack_client=slack,
+            channel_id="C1",
+            file_id="F1",
+            app_name="acc",
+            download_fn=fake_download,
+            source_filename="invoice.pdf",
+            client_store=_seeded_client_store(db),
+        )
+    )
+
+    # Find the data_table follow-up message (separate from the delivery summary).
+    data_table_posts = [
+        p for p in _post_calls(slack)
+        if any(b.get("type") == "data_table" for b in (p.get("blocks") or []))
+    ]
+    assert data_table_posts, "Expected at least one chat_postMessage with a data_table block"
+    preview_post = data_table_posts[0]
+    table_block = next(b for b in preview_post["blocks"] if b["type"] == "data_table")
+    # header + 1 data row
+    assert len(table_block["rows"]) == 2
+    assert table_block["row_header_column_index"] == 0
+    assert table_block["page_size"] == 10
+    # The data row's Net/Total cells are raw_number with float value.
+    data_row = table_block["rows"][1]
+    assert data_row[4]["type"] == "raw_number"
+    assert data_row[4]["value"] == 1132.11
+    assert data_row[5]["type"] == "raw_number"
+    assert data_row[5]["value"] == 1234.50
+
+
+# =========================================================================== #
 # message/file_share wiring: uploads delivered via the message event path
 # =========================================================================== #
 
