@@ -65,6 +65,7 @@ from invoice_processing.extract.bank_statement_extractor import (
 )
 from invoice_processing.extract.invoice_extractor import (
     ExtractedInvoiceBundle,
+    _is_soa_summary_invoice,
     extract_invoice_bundle,
     reconcile,
     to_normalized,
@@ -368,6 +369,18 @@ def _normalize_bundle(ctx, bundle: ExtractedInvoiceBundle) -> list[NormalizedInv
 
     normalized: list[NormalizedInvoice] = []
     for ex in bundle.invoices:
+        # Hard-gate: drop phantom SOA-summary invoices hallucinated from the
+        # SOA cover table (same predicate as to_normalized_bundle).
+        if _is_soa_summary_invoice(ex):
+            logger.warning(
+                "hard-gate: dropping SOA-summary phantom invoice",
+                extra={
+                    "invoice_number": ex.invoice_number,
+                    "line_count": len(ex.lines),
+                    "reason": "all_lines_summary_shaped",
+                },
+            )
+            continue
         ok, _detail = reconcile(ex)
         inv = to_normalized(
             ex,

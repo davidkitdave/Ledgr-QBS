@@ -225,6 +225,73 @@ def test_soa_skip_extracts_only_embedded_invoice():
     assert normalized[0]["invoice_number"] == "EMBEDDED-INV"
 
 
+def test_soa_phantom_invoices_dropped_by_normalize_bundle():
+    """Regression: _normalize_bundle (nodes.py path) must apply the SOA hard-gate.
+
+    This captures the live failure where the bot reported "18 sub-documents /
+    30 total lines" for COOL POWER DEC 2025 (expected 10/22).  The extractor
+    returns a bundle with 8 phantom invoices whose lines all have a bare
+    'INVOICE' description and gst_amount==0 — the exact shape hallucinated from
+    the SOA cover table.  They must be dropped before NORMALIZED_KEY is written.
+    """
+    phantom_line = ExtractedLine(description="INVOICE", net_amount=100.0, gst_amount=0.0)
+    phantom_inv_a = ExtractedInvoice(
+        doc_type="invoice",
+        invoice_number="IA-07316",
+        invoice_date="2025-12-01",
+        currency="MYR",
+        issuer_name="COOL POWER SDN BHD",
+        bill_to_name="JBI PLUS AUTO ENTERPRISE",
+        lines=[phantom_line],
+        subtotal=100.0,
+        gst_total=0.0,
+        total=100.0,
+    )
+    phantom_inv_b = ExtractedInvoice(
+        doc_type="invoice",
+        invoice_number="IA-07330",
+        invoice_date="2025-12-01",
+        currency="MYR",
+        issuer_name="COOL POWER SDN BHD",
+        bill_to_name="JBI PLUS AUTO ENTERPRISE",
+        lines=[phantom_line],
+        subtotal=200.0,
+        gst_total=0.0,
+        total=200.0,
+    )
+    real_inv = ExtractedInvoice(
+        doc_type="invoice",
+        invoice_number="IA-07465",
+        invoice_date="2025-12-05",
+        currency="MYR",
+        issuer_name="COOL POWER SDN BHD",
+        bill_to_name="JBI PLUS AUTO ENTERPRISE",
+        lines=[ExtractedLine(description="Electricity supply Dec 2025", net_amount=100.0, gst_amount=9.0, tax_label="SR")],
+        subtotal=100.0,
+        gst_total=9.0,
+        total=109.0,
+    )
+    bundle = ExtractedInvoiceBundle(
+        invoices=[phantom_inv_a, phantom_inv_b, real_inv],
+        skipped_pages=[1],
+    )
+    nodes.EXTRACT_BUNDLE_FN = lambda data, mime, **kw: bundle
+
+    ctx = FakeContext(_base_state(**{nodes.DIRECTION_KEY: "purchase"}))
+    event = asyncio.run(nodes.extract_invoice_node(ctx))
+
+    # Gate must have dropped the 2 phantoms — only the real invoice survives.
+    assert event.output == {"count": 1}, (
+        f"Expected count=1 after SOA gate, got {event.output}"
+    )
+    normalized = ctx.state[nodes.NORMALIZED_KEY]
+    assert len(normalized) == 1, (
+        f"Expected 1 normalized invoice, got {len(normalized)}: "
+        f"{[n['invoice_number'] for n in normalized]}"
+    )
+    assert normalized[0]["invoice_number"] == "IA-07465"
+
+
 def test_invoice_node_defaults_direction_to_purchase():
     nodes.EXTRACT_BUNDLE_FN = lambda data, mime, **kw: ExtractedInvoiceBundle(
         invoices=[_ex_invoice("INV-X")]
