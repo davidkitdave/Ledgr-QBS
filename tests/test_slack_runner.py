@@ -911,6 +911,138 @@ def test_process_file_event_posts_status_once_and_updates_per_stage():
     assert all(u["ts"] == status_ts for u in slack.updates)
 
 
+def test_processing_status_uses_compact_header_not_accordion():
+    """Initial status post must be a plain one-liner — no plan/section/accordion blocks.
+
+    Step 12: the accordion (processing_plan_blocks) is dropped; the first message
+    posted to Slack when a file is received must have simple text and NO block-kit
+    plan, no Classifying/Extracting/Categorizing/Applying-tax section, and no
+    "Awaiting approval" text.
+    """
+    slack = FakeSlackClient()
+    db = FakeFirestore()
+    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+
+    runner = _FakeRunner(
+        [_node_event("deliver_node", text="done")],
+        _ledger_payload(),
+    )
+
+    asyncio.run(
+        process_file_event(
+            runner=runner,
+            ledger_store=store,
+            db=db,
+            slack_client=slack,
+            channel_id="C1",
+            file_id="F1",
+            app_name="acc",
+            download_fn=lambda c, f: b"%PDF fake",
+            source_filename="invoice.pdf",
+            client_store=_seeded_client_store(db),
+        )
+    )
+
+    # The first post must be the compact "Received" one-liner.
+    received_posts = [p for p in _post_calls(slack) if "Received" in p.get("text", "")]
+    assert len(received_posts) == 1, "exactly one 'Received' message must be posted"
+    first_post = received_posts[0]
+
+    # Must contain the filename.
+    assert "invoice.pdf" in first_post["text"]
+
+    # Must NOT carry any block-kit accordion blocks.
+    blocks = first_post.get("blocks", [])
+    block_types = [b.get("type") for b in blocks]
+    assert "plan" not in block_types, "initial post must not include a 'plan' accordion block"
+
+    # Must not contain stage-label strings anywhere in the blocks payload.
+    blocks_str = str(blocks)
+    for forbidden in ("Classifying", "Extracting", "Categorizing", "Applying tax", "Awaiting approval"):
+        assert forbidden not in blocks_str, (
+            f"initial post must not contain accordion stage text '{forbidden}'"
+        )
+
+
+def test_clean_path_summary_line_still_emits():
+    """Clean path must still emit the enriched '📒 Added N lines…' summary after processing.
+
+    Step 12: removing the accordion must not regress the delivery summary post.
+    """
+    slack = FakeSlackClient()
+    db = FakeFirestore()
+    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+
+    runner = _FakeRunner(
+        [_node_event("deliver_node", text="done")],
+        _ledger_payload(),
+    )
+
+    asyncio.run(
+        process_file_event(
+            runner=runner,
+            ledger_store=store,
+            db=db,
+            slack_client=slack,
+            channel_id="C1",
+            file_id="F1",
+            app_name="acc",
+            download_fn=lambda c, f: b"%PDF fake",
+            source_filename="invoice.pdf",
+            client_store=_seeded_client_store(db),
+        )
+    )
+
+    posted_texts = _posted_texts(slack)
+    # The delivery summary from DELIVER_SUMMARY_KEY must appear.
+    assert any("Added" in t and "ledger" in t for t in posted_texts), (
+        "delivery summary line ('Added N lines … ledger') must be posted after clean-path processing"
+    )
+
+
+def test_reviewer_card_still_emits():
+    """Interrupt path must still post the reviewer block-kit card (approve/edit/reject).
+
+    Step 12: dropping the accordion must not remove the actionable reviewer card.
+    """
+    slack = FakeSlackClient()
+    db = FakeFirestore()
+    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+
+    interrupt_event = SimpleNamespace(
+        content=SimpleNamespace(parts=[]),
+        get_function_calls=lambda: [SimpleNamespace(name="adk_request_input", id="C1:F1")],
+    )
+    runner = _FakeRunner([interrupt_event], {"approval_message": "needs review: line X"})
+
+    result = asyncio.run(
+        process_file_event(
+            runner=runner,
+            ledger_store=store,
+            db=db,
+            slack_client=slack,
+            channel_id="C1",
+            file_id="F1",
+            app_name="acc",
+            download_fn=lambda c, f: b"%PDF fake",
+            client_store=_seeded_client_store(db),
+        )
+    )
+
+    assert result["status"] == "paused"
+    # The reviewer card (approve / edit / reject buttons) must still be posted.
+    card = _last_blocks(slack)
+    action_ids = {
+        e["action_id"]
+        for b in card
+        if b.get("type") == "actions"
+        for e in b["elements"]
+    }
+    assert action_ids == {"approve", "edit", "reject"}, (
+        "reviewer card with approve/edit/reject actions must be posted on interrupt"
+    )
+
+
 def test_instant_ack_reaction_and_status_before_semaphore_heavy_work():
     """👀 reaction + initial status message fire BEFORE the download (semaphore-guarded).
 

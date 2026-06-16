@@ -79,7 +79,6 @@ from app.blocks import (
     ledger_preview_data_table,
     proactive_redo_blocks,
     proactive_redo_modal,
-    processing_plan_blocks,
     review_card_blocks,
     review_hint_modal,
     review_outcome_blocks,
@@ -1051,20 +1050,15 @@ async def process_file_event(
     # working, then edit it in place through the run (see _update_status). Both
     # the reaction and this post are OUTSIDE the semaphore so even a queued drop
     # that is waiting on _SEM still shows an instant "on it" signal to the user.
+    # Step 12: the per-stage processing accordion is dropped. The status message
+    # is a single compact one-liner that is edited in place to the final summary;
+    # the chat agent (assistant_agent) answers "what stage is this in?" on demand.
     _stage_state = _StageState()
-    # plan_label is used for ALL processing_plan_blocks calls in this run so the
-    # plan block title stays consistent as the status message is edited in place.
-    plan_label = f"{_env_prefix()}{source_filename}"
     status_ts = _post_status(
         slack_client,
         channel_id,
         f"{_env_prefix()}📥 Received `{source_filename}` — on it…",
         thread_ts,
-        blocks=processing_plan_blocks(
-            plan_label,
-            stages=_stage_state.snapshot(),
-            channel_id=channel_id,
-        ),
     )
 
     async with _SEM:
@@ -1085,11 +1079,6 @@ async def process_file_event(
                 channel_id,
                 status_ts,
                 "❌ Couldn't read this file",
-                blocks=processing_plan_blocks(
-                    plan_label,
-                    stages=_stage_state.snapshot(),
-                    channel_id=channel_id,
-                ),
             )
             _post_message(
                 slack_client, channel_id,
@@ -1159,11 +1148,6 @@ async def process_file_event(
                     channel_id,
                     status_ts,
                     stage,
-                    blocks=processing_plan_blocks(
-                        plan_label,
-                        stages=_stage_state.snapshot(),
-                        channel_id=channel_id,
-                    ),
                 )
             iid = find_interrupt_id(event)
             if iid is not None:
@@ -1196,11 +1180,6 @@ async def process_file_event(
                 channel_id,
                 status_ts,
                 "⏳ Needs your review",
-                blocks=processing_plan_blocks(
-                    plan_label,
-                    stages=_stage_state.snapshot(),
-                    channel_id=channel_id,
-                ),
             )
             return outcome
 
@@ -1213,11 +1192,6 @@ async def process_file_event(
                 channel_id,
                 status_ts,
                 "📋 Already recorded",
-                blocks=processing_plan_blocks(
-                    plan_label,
-                    stages=_stage_state.snapshot(),
-                    channel_id=channel_id,
-                ),
             )
             _remove_reaction(slack_client, channel_id, upload_msg_ts, "eyes")
             _add_reaction(slack_client, channel_id, upload_msg_ts, "ballot_box_with_check")
@@ -1232,11 +1206,6 @@ async def process_file_event(
             channel_id,
             status_ts,
             "✅ Processed",
-            blocks=processing_plan_blocks(
-                plan_label,
-                stages=_stage_state.snapshot(),
-                channel_id=channel_id,
-            ),
         )
         # Swap the 👀 reaction for ✅ on the user's original upload message.
         _remove_reaction(slack_client, channel_id, upload_msg_ts, "eyes")
