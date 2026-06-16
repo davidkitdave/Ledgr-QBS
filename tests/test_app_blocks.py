@@ -162,20 +162,22 @@ class TestCoaPromptBlocks:
         assert isinstance(blocks, list)
         assert len(blocks) >= 1
 
-    def test_has_ledgr_use_standard_coa_action(self):
+    def test_upload_only_no_standard_coa_button(self):
         blocks = coa_prompt_blocks()
         action_ids = []
         for block in blocks:
             for el in block.get("elements", []):
                 action_ids.append(el.get("action_id"))
-        assert "ledgr_use_standard_coa" in action_ids
+        assert "ledgr_use_standard_coa" not in action_ids
+        assert not any(b.get("type") == "actions" for b in blocks)
 
-    def test_mentions_profile_saved(self):
+    def test_mentions_upload_coa(self):
         blocks = coa_prompt_blocks()
         text = " ".join(
             str(b.get("text", {}).get("text", "")) for b in blocks
         )
         assert "Profile saved" in text
+        assert ".xlsx/.csv" in text
 
 
 # --------------------------------------------------------------------------- #
@@ -388,13 +390,13 @@ def _flat_text(blocks):
 
 def test_profile_summary_shows_all_registered_fields():
     blocks = profile_summary_blocks({
-        "client_name": "Auditair International Pte. Ltd.",
+        "client_name": "Acme Client Pte. Ltd.",
         "accounting_software": "Xero",
         "fye_month": 10,
         "gst_registered": False,
     })
     text = _flat_text(blocks)
-    assert "Auditair International Pte. Ltd." in text
+    assert "Acme Client Pte. Ltd." in text
     assert "Xero" in text
     assert "October" in text          # fye_month 10 -> month name
     assert "Not GST-registered" in text
@@ -1228,11 +1230,12 @@ _BANK_ROWS = [
 
 class TestPreviewColumnSpec:
 
-    def test_xero_purchase_returns_8_cols_starting_with_contact(self):
+    def test_xero_purchase_returns_9_cols_starting_with_contact(self):
         spec = preview_column_spec(software="xero", sheet="Purchase")
-        assert len(spec) == 8
+        assert len(spec) == 9
         assert spec[0].row_key == "*ContactName"
         assert spec[0].header == "Contact"
+        assert spec[-1].header == "Currency"
 
     def test_xero_sales_uses_star_description(self):
         spec = preview_column_spec(software="xero", sheet="Sales")
@@ -1313,7 +1316,7 @@ class TestLedgerPreviewDataTableNative:
         header_texts = [c["text"] for c in table["rows"][0]]
         assert header_texts == [
             "Contact", "Invoice #", "Invoice Date", "Description",
-            "Account", "Tax Type", "Unit Amount", "Total",
+            "Account", "Tax Type", "Unit Amount", "Total", "Currency",
         ]
 
     def test_xero_purchase_first_data_cell_is_contact_name(self):
@@ -1450,35 +1453,35 @@ class TestLedgerPreviewDataTableNative:
         for cell in data_row:
             # Every cell must have a "text" key (raw_number also carries "text").
             assert "text" in cell
-        # Missing numeric keys → raw_text (empty) rather than raw_number with no value.
+        # Missing keys → em dash (Slack rejects zero-length raw_text).
         for idx in range(5, 8):
             assert data_row[idx]["type"] == "raw_text"
-            assert data_row[idx]["text"] == ""
+            assert data_row[idx]["text"] == "—"
 
-    def test_preface_section_block_present(self):
+    def test_caption_includes_software_and_fy(self):
         blocks = ledger_preview_data_table(
             rows=_QBS_PURCHASE_ROWS, workbook_name="Ledger_FY2025.xlsx", fy=2025,
             sheet="Purchase", software="qbs_ledger",
         )
-        section_blocks = [b for b in blocks if b["type"] == "section"]
-        assert len(section_blocks) == 1
-        assert "Ledger_FY2025.xlsx" in section_blocks[0]["text"]["text"]
+        table = next(b for b in blocks if b["type"] == "data_table")
+        assert "FY2025" in table["caption"]
+        assert "QBS Ledger" in table["caption"]
 
-    def test_xero_software_label_in_preface(self):
+    def test_xero_software_label_in_caption(self):
         blocks = ledger_preview_data_table(
             rows=_XERO_PURCHASE_ROWS, workbook_name="Ledger_FY2025.xlsx", fy=2025,
             sheet="Purchase", software="xero",
         )
-        section = next(b for b in blocks if b["type"] == "section")
-        assert "Xero" in section["text"]["text"]
+        table = next(b for b in blocks if b["type"] == "data_table")
+        assert "Xero" in table["caption"]
 
-    def test_qbs_software_label_in_preface(self):
+    def test_qbs_software_label_in_caption(self):
         blocks = ledger_preview_data_table(
             rows=_QBS_PURCHASE_ROWS, workbook_name="Ledger_FY2025.xlsx", fy=2025,
             sheet="Purchase", software="qbs_ledger",
         )
-        section = next(b for b in blocks if b["type"] == "section")
-        assert "QBS Ledger" in section["text"]["text"]
+        table = next(b for b in blocks if b["type"] == "data_table")
+        assert "QBS Ledger" in table["caption"]
 
 
 class TestLedgerPreviewDataTableFallback:
@@ -1965,4 +1968,26 @@ class TestProactiveRedoBlocksFallback:
         btn = blocks[1]["elements"][0]
         assert btn["action_id"] == "proactive_redo"
         assert btn["value"] == "F-XYZ"
+
+
+class TestSummaryTableBlocks:
+
+    def test_renders_category_details_rows(self, monkeypatch):
+        monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "0")
+        from app.blocks import summary_table_blocks
+
+        rows = [
+            {"category": "Vendor Name", "details": "Sample Vendor Pte Ltd"},
+            {"category": "Invoice Number", "details": "2026/0210"},
+        ]
+        blocks = summary_table_blocks(rows)
+        assert blocks[0]["type"] == "section"
+        text = blocks[0]["text"]["text"]
+        assert "Sample Vendor Pte Ltd" in text
+        assert "2026/0210" in text
+
+    def test_empty_returns_empty_list(self):
+        from app.blocks import summary_table_blocks
+
+        assert summary_table_blocks([]) == []
 

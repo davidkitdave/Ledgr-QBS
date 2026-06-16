@@ -189,11 +189,11 @@ direct-tools path lets us learn what tools actually need to exist before we pack
 - Drop `mode="single_turn"` (`qa_agent.py:406`) → multi-turn.
 - Switch chat session id `_per_question_session_id(channel, ts)` → use `thread_ts` (or
   `channel_id` for top-level) so the agent recalls prior turns.
-- Add `show_client_profile`, `show_learned_mappings`, `model_info`. Live-verify on Akar.
+- Add `show_client_profile`, `show_learned_mappings`, `model_info`. Live-verify on Sample Bank Client.
 
 **Phase 1 — explain + lookup (read-only)**
 - `explain_categorization`, `explain_tax_treatment`, `summarize_recent_activity`,
-  `list_recent_documents`, `lookup_row`. All pure / read. Live-verify on Akar history.
+  `list_recent_documents`, `lookup_row`. All pure / read. Live-verify on Sample Bank Client history.
 
 **Phase 2 — write gate + amend (uses ADK's native confirmation)**
 - Smoke-test ADK confirmation on our `FirestoreSessionService` first (the documented limitation).

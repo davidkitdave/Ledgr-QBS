@@ -386,7 +386,7 @@ class SlackLedgerStore:
 
         # Collapse duplicate statement blocks (safety net + one-shot cleanup of
         # any pre-existing duplication already in the sheet, e.g. the doc_key
-        # format transition that duplicated September in the Akar workbook).
+        # format transition that duplicated September in the Sample Bank Client workbook).
         before = len(existing_blocks) + len(new_blocks)
         deduped_blocks = BankStatementExporter.dedupe_blocks(existing_blocks + new_blocks)
         existing_sig = {

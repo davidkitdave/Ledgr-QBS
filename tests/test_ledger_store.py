@@ -173,21 +173,21 @@ def test_filename_is_client_scoped_bank_and_invoice():
 
     inv = store.append_rows(
         client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
-        software="qbs", kind="invoice", client_name="Auditair International Pte. Ltd.",
+        software="qbs", kind="invoice", client_name="Acme Client Pte. Ltd.",
         batches=[{"sheet": "Purchase", "doc_key": "k1", "rows": [_row("first")]}],
     )
-    assert inv["filename"] == "Auditair International Pte. Ltd. - Ledger_FY2026.xlsx"
+    assert inv["filename"] == "Acme Client Pte. Ltd. - Ledger_FY2026.xlsx"
 
     bank = store.append_rows(
         client_id="c2", fy="2025", slack_client=slack, channel_id="C2",
-        software="qbs", kind="bank", client_name="Akar Enterprises Pte. Ltd.",
+        software="qbs", kind="bank", client_name="Sample Bank Client Pte Ltd",
         batches=[{"sheet": "OCBC - 0001", "doc_key": "b1", "rows": [
             {"Description": "BALANCE B/F", "Balance": 100.0, "Currency": "SGD"},
             {"Date": "01/10/2025", "Description": "PAYMENT", "Withdrawal": 20.0,
              "Balance": 80.0, "Currency": "SGD"},
         ]}],
     )
-    assert bank["filename"] == "Akar Enterprises Pte. Ltd. - BankStatement_FY2025.xlsx"
+    assert bank["filename"] == "Sample Bank Client Pte Ltd - BankStatement_FY2025.xlsx"
 
 
 def test_filename_falls_back_to_bare_name_without_client():
@@ -457,7 +457,7 @@ def _bank_batch(exporter, stmt, doc_key):
 def test_duplicate_statement_collapses_even_under_different_doc_keys():
     """Same statement appended under two different doc_keys → one block (F2).
 
-    Reproduces the Akar September duplication: the doc_key format transition let
+    Reproduces the Sample Bank Client September duplication: the doc_key format transition let
     the SAME statement through twice (old F<id>:... key vs new content key). The
     block-level dedup in _merge_bank_statement must collapse them so the sheet
     has a single BALANCE B/F + one copy of each transaction.
@@ -498,7 +498,7 @@ def test_bank_export_no_legacy_columns():
     assert "Source File ID" not in header
     assert "Stated Balance" not in header
     assert "Check" not in header
-    # Rosebery-pattern columns present.
+    # Sample Partner-pattern columns present.
     assert "Balance" in header
     assert "Math_Check" in header
     assert "Currency" in header
@@ -817,7 +817,7 @@ import openpyxl  # noqa: E402
 
 
 def _make_mixed_formula_workbook() -> bytes:
-    """Build a workbook that mimics Akar's corrupted BankStatement_FY2025.
+    """Build a workbook that mimics Sample Bank Client's corrupted BankStatement_FY2025.
 
     Jan–Mar blocks have Balance cells stored as Excel formula strings
     (``="=E2+D3-C3"`` style — the OLD layout that commit 6ca4e48 replaced).
@@ -899,12 +899,12 @@ def test_formula_balance_cells_are_recomputed_on_append():
 
     db = FakeFirestore()
     # Point Firestore at the seeded file so the store fetches it.
-    db.collection("clients").document("akar").collection("ledgers").document("2025").set({
+    db.collection("clients").document("sample-bank").collection("ledgers").document("2025").set({
         "slack_file_id": seed_id,
         "fy": "2025",
-        "client_id": "akar",
-        "seen_doc_keys": ["akar:jan2025", "akar:feb2025", "akar:apr2025"],
-        "channel_id": "C_AKAR",
+        "client_id": "sample-bank",
+        "seen_doc_keys": ["sample-bank:jan2025", "sample-bank:feb2025", "sample-bank:apr2025"],
+        "channel_id": "C_SAMPLE_BANK",
         "kind": "bank",
     })
 
@@ -927,12 +927,12 @@ def test_formula_balance_cells_are_recomputed_on_append():
         ],
     )
     result = store.append_rows(
-        client_id="akar",
+        client_id="sample-bank",
         fy="2025",
         slack_client=slack,
-        channel_id="C_AKAR",
+        channel_id="C_SAMPLE_BANK",
         kind="bank",
-        batches=[{"sheet": "OCBC - 5001", "doc_key": "akar:may2025",
+        batches=[{"sheet": "OCBC - 5001", "doc_key": "sample-bank:may2025",
                   "rows": exp.bank_rows(may_stmt)}],
     )
 

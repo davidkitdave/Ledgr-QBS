@@ -7,7 +7,7 @@ except ImportError:
     print("Please install reportlab: uv pip install reportlab")
     exit(1)
 
-vendors = ["Acme Corp", "Global Tech Supplies", "Consulting LLC", "Cloud Hosting Inc", "Office Depot", "Legal Services LLP", "Cleaning Co", "Marketing Agency", "Logistics Partners", "Design Studio", "AuditAir", "Xero Services", "AWS", "Google Cloud", "Wework"]
+vendors = ["Acme Corp", "Global Tech Supplies", "Consulting LLC", "Cloud Hosting Inc", "Office Depot", "Legal Services LLP", "Cleaning Co", "Marketing Agency", "Logistics Partners", "Design Studio", "Acme Services", "Xero Services", "AWS", "Google Cloud", "Wework"]
 descriptions = ["Software License", "Server Hosting", "Consulting Fee", "Office Supplies", "Legal Consultation", "Cleaning Services", "Ad Campaign", "Shipping", "Graphic Design", "Hardware Purchase", "Audit Management", "Subscription"]
 
 os.makedirs("tests/eval_invoices", exist_ok=True)

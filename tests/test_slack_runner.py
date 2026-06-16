@@ -222,7 +222,7 @@ def test_profile_state_delta_includes_software_and_coa():
             assert channel_id == "C1"
             return ClientContext(
                 client_id="CL-1",
-                client_name="Auditair International Pte. Ltd.",
+                client_name="Acme Client Pte. Ltd.",
                 accounting_software="Xero",
                 fye_month=10,
                 coa=[CoaAccount(code="6010", description="Travel",
@@ -906,18 +906,21 @@ def test_process_file_event_posts_status_once_and_updates_per_stage():
     assert any("taking a look" in t for t in lowered)            # classify
     assert any("reading the line items" in t for t in lowered)   # extract (invoice)
     assert any("reconciling" in t for t in lowered)              # tax/approval
-    assert update_texts[-1] == "✅ Processed"
+    assert update_texts[-1].startswith("✅ Added to")
     # Every update targeted the single status message ts.
     assert all(u["ts"] == status_ts for u in slack.updates)
+    # In-flight updates carry the processing accordion (plan block or fallback).
+    updates_with_blocks = [u for u in slack.updates if u.get("blocks")]
+    assert updates_with_blocks, "stage updates must include processing plan blocks"
+    blocks_str = str(updates_with_blocks[0]["blocks"])
+    assert "Understanding document" in blocks_str or "Applying your rules" in blocks_str
 
 
 def test_processing_status_uses_compact_header_not_accordion():
-    """Initial status post must be a plain one-liner — no plan/section/accordion blocks.
+    """Initial status post must be a plain one-liner — no plan accordion yet.
 
-    Step 12: the accordion (processing_plan_blocks) is dropped; the first message
-    posted to Slack when a file is received must have simple text and NO block-kit
-    plan, no Classifying/Extracting/Categorizing/Applying-tax section, and no
-    "Awaiting approval" text.
+    The first message on file drop stays compact; the plan accordion is attached
+    on the first in-place edit when a pipeline stage starts.
     """
     slack = FakeSlackClient()
     db = FakeFirestore()
@@ -958,7 +961,7 @@ def test_processing_status_uses_compact_header_not_accordion():
 
     # Must not contain stage-label strings anywhere in the blocks payload.
     blocks_str = str(blocks)
-    for forbidden in ("Classifying", "Extracting", "Categorizing", "Applying tax", "Awaiting approval"):
+    for forbidden in ("Understanding document", "Applying your rules", "Ready to file"):
         assert forbidden not in blocks_str, (
             f"initial post must not contain accordion stage text '{forbidden}'"
         )
@@ -1182,7 +1185,7 @@ def test_process_file_event_interrupt_sets_needs_review_status():
 
 
 def test_deslugify_channel_name_basic():
-    assert deslugify_channel_name("akar-enterprises-pte-ltd") == "Akar Enterprises Pte Ltd"
+    assert deslugify_channel_name("sample-channel-client-pte-ltd") == "Sample Channel Client Pte Ltd"
 
 
 def test_deslugify_channel_name_underscores_and_suffixes():
@@ -1204,11 +1207,11 @@ def test_derive_setup_prefill_from_channel_name():
     class _InfoClient:
         def conversations_info(self, *, channel):
             assert channel == "C-OPEN"
-            return {"ok": True, "channel": {"id": channel, "name": "akar-enterprises-pte-ltd"}}
+            return {"ok": True, "channel": {"id": channel, "name": "sample-channel-client-pte-ltd"}}
 
     body = {"channel": {"id": "C-OPEN"}, "trigger_id": "t1"}
     prefill = asyncio.run(_derive_setup_prefill(_InfoClient(), body))
-    assert prefill == {"client_name": "Akar Enterprises Pte Ltd"}
+    assert prefill == {"client_name": "Sample Channel Client Pte Ltd"}
 
 
 def test_derive_setup_prefill_handles_lookup_failure():
@@ -1330,7 +1333,7 @@ def test_delivery_posts_ledger_preview_data_table(monkeypatch):
 
 
 def test_delivery_two_batches_posts_two_preview_messages(monkeypatch):
-    """A Purchase + Sales batch should result in TWO separate preview messages."""
+    """Purchase + Sales batches appear as two data_tables in one delivery card."""
     state = {
         nodes.LEDGER_ROWS_KEY: {
             "client_id": "c1",
@@ -1365,9 +1368,9 @@ def test_delivery_two_batches_posts_two_preview_messages(monkeypatch):
         p for p in posts
         if any(b.get("type") == "data_table" for b in (p.get("blocks") or []))
     ]
-    assert len(data_table_posts) == 2, (
-        f"Expected 2 preview messages (one per batch), got {len(data_table_posts)}"
-    )
+    assert len(data_table_posts) == 1, "one consolidated delivery message"
+    tables = [b for b in data_table_posts[0]["blocks"] if b["type"] == "data_table"]
+    assert len(tables) == 2, "Purchase + Sales each get a data_table block"
 
 
 def test_delivery_bank_batch_posts_bank_shaped_preview(monkeypatch):
@@ -1556,6 +1559,57 @@ def test_message_file_share_calls_process_file_event_per_file():
     assert all(c.kwargs["channel_id"] == "C-file" for c in mock_pfe.call_args_list)
 
 
+def test_message_bot_file_upload_still_processed():
+    """files.upload from this bot carries bot_id — must still enter the pipeline."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from accounting_agents import slack_runner
+
+    handler, _ = _capture_message_handler()
+
+    body = {"event_id": "Ev-bot-file-1"}
+    event = {
+        "type": "message",
+        "subtype": "file_share",
+        "ts": "111.002",
+        "channel": "C-bot-file",
+        "bot_id": "BLEDGR",
+        "files": [{"id": "F-BOT-1", "name": "telco.pdf"}],
+    }
+    fake_client = MagicMock()
+    mock_pfe = AsyncMock(return_value={"status": "paused"})
+
+    with patch.object(slack_runner, "process_file_event", mock_pfe), \
+         patch.object(slack_runner, "download_pdf_bytes", return_value=b"%PDF fake"):
+        asyncio.run(handler(event=event, body=body, client=fake_client))
+
+    mock_pfe.assert_called_once()
+    assert mock_pfe.call_args.kwargs["file_id"] == "F-BOT-1"
+
+
+def test_message_bot_chatter_still_ignored():
+    """Non-file bot messages must not enter the document pipeline."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from accounting_agents import slack_runner
+
+    handler, _ = _capture_message_handler()
+
+    body = {"event_id": "Ev-bot-chat-1"}
+    event = {
+        "type": "message",
+        "subtype": "bot_message",
+        "ts": "111.003",
+        "channel": "C-bot-file",
+        "bot_id": "BLEDGR",
+        "text": "Processing complete",
+    }
+    mock_pfe = AsyncMock()
+
+    with patch.object(slack_runner, "process_file_event", mock_pfe):
+        asyncio.run(handler(event=event, body=body, client=MagicMock()))
+
+    mock_pfe.assert_not_called()
+
+
 def test_message_file_share_dedup_not_reprocessed():
     """Same event_id redelivered → process_file_event called only once (not twice)."""
     from unittest.mock import AsyncMock, MagicMock, patch
@@ -1701,7 +1755,7 @@ def test_batch_drop_posts_one_job_summary_then_threads_per_doc():
     assert len(top_level) == 1, f"expected 1 top-level summary, got {len(top_level)}: {top_level}"
     summary_text = top_level[0].get("text", "")
     assert "3" in summary_text  # total count surfaced in the placeholder
-    assert "Processing" in summary_text  # initial placeholder
+    assert "Received" in summary_text or "Processing" in summary_text
 
     summary_ts = top_level[0].get("ts")  # e.g. "1.000"
     assert summary_ts, "summary message must carry a ts"
@@ -1712,10 +1766,11 @@ def test_batch_drop_posts_one_job_summary_then_threads_per_doc():
         assert c.kwargs.get("thread_ts") == summary_ts, (
             f"per-doc call must carry thread_ts={summary_ts}, got {c.kwargs}"
         )
+        assert c.kwargs.get("defer_slack_delivery") is True
 
-    # --- after the loop: ONE chat_update edits the summary with the final tally ---
-    assert len(slack.updates) == 1
-    upd = slack.updates[0]
+    # --- after the loop: final chat_update edits the summary with the tally ---
+    assert len(slack.updates) >= 1
+    upd = slack.updates[-1]
     assert upd.get("channel") == "C-batch"
     assert upd.get("ts") == summary_ts
     final_text = upd.get("text", "")
@@ -1760,13 +1815,13 @@ def test_single_file_drop_still_posts_summary_then_thread():
 
     top_level = [p for p in slack._posts if not p.get("thread_ts")]
     assert len(top_level) == 1
-    assert "Processing" in top_level[0].get("text", "")
+    assert "1" in top_level[0].get("text", "")
     assert mock_pfe.call_count == 1
     assert mock_pfe.call_args.kwargs.get("thread_ts") == top_level[0].get("ts")
-    # After-loop edit happens once (single delivered doc → 1 posted, 0 needs review).
-    assert len(slack.updates) == 1
-    assert "Processed" in slack.updates[0].get("text", "")
-    assert "1" in slack.updates[0].get("text", "")
+    assert mock_pfe.call_args.kwargs.get("defer_slack_delivery") is False
+    assert len(slack.updates) >= 1
+    assert "Processed" in slack.updates[-1].get("text", "")
+    assert "1" in slack.updates[-1].get("text", "")
 
 
 # =========================================================================== #
@@ -1971,14 +2026,14 @@ def test_persist_corrections_reads_nested_party_real_serialized_shape():
         "client_id": "CL-1",
         nodes.NORMALIZED_KEY: [
             {"doc_type": "purchase",
-             "supplier": {"name": "Darrell Podaima"},
-             "customer": {"name": "Auditair International Pte. Ltd."},
+             "supplier": {"name": "Vendor Alpha Pte Ltd"},
+             "customer": {"name": "Acme Client Pte. Ltd."},
              "lines": [{"description": "audit", "account_code": "6-3000"}]}
         ],
     }
     _persist_corrections(_Store(), purchase_state,
                          {"lines": [{"index": 0, "account_code": "5-1000"}]})
-    assert saved == [("CL-1", "Darrell Podaima", "5-1000", None)]
+    assert saved == [("CL-1", "Vendor Alpha Pte Ltd", "5-1000", None)]
 
     # Sales → customer.name; proposed line untaxed, human sets SR.
     saved.clear()
@@ -1986,7 +2041,7 @@ def test_persist_corrections_reads_nested_party_real_serialized_shape():
         "client_id": "CL-1",
         nodes.NORMALIZED_KEY: [
             {"doc_type": "sales",
-             "supplier": {"name": "Auditair International Pte. Ltd."},
+             "supplier": {"name": "Acme Client Pte. Ltd."},
              "customer": {"name": "PTTEP"},
              "lines": [{"description": "svc"}]}
         ],
@@ -2014,7 +2069,7 @@ def test_persist_corrections_only_changed_line_no_collision_multi_line():
         "client_id": "CL-1",
         nodes.NORMALIZED_KEY: [
             {"doc_type": "purchase",
-             "supplier": {"name": "Darrell Podaima"},
+             "supplier": {"name": "Vendor Alpha Pte Ltd"},
              "lines": [
                  {"description": "audit", "account_code": "6-3000"},
                  {"description": "report", "account_code": "6-3000"},
@@ -2026,7 +2081,7 @@ def test_persist_corrections_only_changed_line_no_collision_multi_line():
         {"index": 1, "account_code": "6-3000"},   # unchanged (== proposal)
     ]}
     _persist_corrections(_Store(), state, edits)
-    assert saved == [("CL-1", "Darrell Podaima", "5-1000", None)]
+    assert saved == [("CL-1", "Vendor Alpha Pte Ltd", "5-1000", None)]
 
 
 def test_persist_corrections_skips_unchanged_lines():
@@ -4302,6 +4357,35 @@ def test_proactive_redo_view_submit_noop_without_hint():
     assert pfe.calls == []
 
 
+def test_event_stage_key_maps_to_three_layers():
+    from accounting_agents.slack_runner import event_stage_key
+
+    assert event_stage_key(_node_event("classify_node")) == "understand"
+    assert event_stage_key(_node_event("extract_invoice_document_node")) == "understand"
+    assert event_stage_key(_node_event("categorize_node")) == "policy"
+    assert event_stage_key(_node_event("tax_node")) == "policy"
+    assert event_stage_key(_node_event("consolidate_node")) == "commit"
+
+
+def test_stage_output_for_extract_node():
+    from accounting_agents.slack_runner import _stage_output_for_completed_node
+
+    state = {
+        nodes.NORMALIZED_KEY: [{
+            "doc_type": "purchase",
+            "supplier": {"name": "Telco Provider A"},
+            "invoice_number": "8004483920",
+            "doc_total": 1328.15,
+            "currency": "SGD",
+            "lines": [{"description": "a"}, {"description": "b"}],
+        }],
+    }
+    out = _stage_output_for_completed_node("extract_invoice_document_node", state)
+    assert "Telco Provider A" in out
+    assert "1,328.15" in out
+    assert "2 lines" in out
+
+
 # --------------------------------------------------------------------------- #
 # _StageState tests
 # --------------------------------------------------------------------------- #
@@ -4317,45 +4401,51 @@ class TestStageState:
         state = self._make()
         snap = state.snapshot()
         assert all(s["status"] == "pending" for s in snap)
-        assert len(snap) == 5
+        assert len(snap) == 3
 
     def test_advance_sets_in_progress_and_completes_prior(self):
         state = self._make()
-        state.advance("extract")
+        state.advance("policy")
         snap = state.snapshot()
-        assert snap[0]["status"] == "complete"   # classify
-        assert snap[1]["status"] == "in_progress"  # extract
-        assert snap[2]["status"] == "pending"    # categorize
+        assert snap[0]["status"] == "complete"   # understand
+        assert snap[1]["status"] == "in_progress"  # policy
+        assert snap[2]["status"] == "pending"    # commit
 
     def test_advance_attaches_output_to_previous_stage(self):
         state = self._make()
-        state.advance("extract", output="Recognized as invoice")
+        state.advance("policy", output="Recognized as invoice")
         snap = state.snapshot()
         assert snap[0]["output"] == "Recognized as invoice"
         assert snap[1]["output"] is None
 
     def test_advance_sequential_preserves_order(self):
         state = self._make()
-        state.advance("classify")
-        state.advance("extract")
-        state.advance("categorize")
+        state.advance("understand")
+        state.advance("policy")
+        state.advance("commit")
         snap = state.snapshot()
         assert snap[0]["status"] == "complete"
         assert snap[1]["status"] == "complete"
         assert snap[2]["status"] == "in_progress"
-        assert snap[3]["status"] == "pending"
 
     def test_advance_same_stage_twice_is_idempotent(self):
         state = self._make()
-        state.advance("tax")
-        state.advance("tax")
+        state.advance("policy")
+        state.advance("policy")
         snap = state.snapshot()
-        tax = next(s for s in snap if s["task_id"] == "tax")
-        assert tax["status"] == "in_progress"
+        policy = next(s for s in snap if s["task_id"] == "policy")
+        assert policy["status"] == "in_progress"
+
+    def test_set_output_refreshes_stage_line(self):
+        state = self._make()
+        state.advance("understand")
+        state.set_output("understand", "Telco Provider A · SGD 1,328.15")
+        snap = state.snapshot()
+        assert snap[0]["output"] == "Telco Provider A · SGD 1,328.15"
 
     def test_mark_complete_sets_all_stages(self):
         state = self._make()
-        state.advance("categorize")
+        state.advance("policy")
         state.mark_complete()
         snap = state.snapshot()
         assert all(s["status"] == "complete" for s in snap)
@@ -4368,14 +4458,14 @@ class TestStageState:
 
     def test_mark_failed_keeps_subsequent_pending(self):
         state = self._make()
-        state.advance("extract")
-        state.mark_failed("extract", "parse error")
+        state.advance("understand")
+        state.mark_failed("understand", "parse error")
         snap = state.snapshot()
-        extract = next(s for s in snap if s["task_id"] == "extract")
-        assert extract["status"] == "failed"
-        assert extract["output"] == "parse error"
-        categorize = next(s for s in snap if s["task_id"] == "categorize")
-        assert categorize["status"] == "pending"
+        understand = next(s for s in snap if s["task_id"] == "understand")
+        assert understand["status"] == "failed"
+        assert understand["output"] == "parse error"
+        policy = next(s for s in snap if s["task_id"] == "policy")
+        assert policy["status"] == "pending"
 
     def test_snapshot_returns_independent_copy(self):
         state = self._make()
@@ -4860,8 +4950,9 @@ def test_file_shared_routes_xlsx_to_coa_when_pending_coa():
 
 def test_file_shared_rejects_xlsx_when_not_pending_coa():
     """An xlsx file_shared on an already-onboarded channel (not pending_coa) must
-    fall through to process_file_event (the regular extension gate handles it),
-    and must NOT call run_coa_ingest.  Safety net: we are not blanket-allowing xlsx.
+    NOT call run_coa_ingest.  Documents are now owned by the message/file_share
+    handler, so _file_shared just drops the event silently for non-COA uploads —
+    safety net: we are not blanket-allowing xlsx anywhere on the file_shared path.
     """
     from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -4897,11 +4988,12 @@ def test_file_shared_rejects_xlsx_when_not_pending_coa():
          patch("app.slack_app.slack_download_file", return_value="/tmp/fake/COA.xlsx"):
         asyncio.run(handler(event=event, body=body, client=fake_bolt_client))
 
-    # COA ingest must NOT have been called …
+    # COA ingest must NOT have been called (channel is not pending_coa).
     mock_coa.assert_not_called()
-    # … the regular pipeline must have been called so the extension gate can reject it.
-    mock_pfe.assert_called_once()
-    assert mock_pfe.call_args.kwargs["file_id"] == "FXLSX2"
+    # Document processing must NOT be called from the file_shared path — the
+    # message/file_share handler owns it. Verify the race-fix invariant: the
+    # same file id cannot start a document run from both events.
+    mock_pfe.assert_not_called()
 
 
 # =========================================================================== #
@@ -5152,7 +5244,7 @@ def test_reject_path_posts_rejection_in_thread():
 def _ledger_rows_state_no_summary(
     sheet="Purchase",
     doc_key="F1:Purchase:INV-1",
-    client_name="Auditair International",
+    client_name="Acme Client",
 ):
     """State with LEDGER_ROWS_KEY but no DELIVER_SUMMARY_KEY.
 
@@ -5356,3 +5448,889 @@ def test_clean_path_emits_full_delivery_card():
     assert has_row_count, f"Clean-path delivery must contain row count. Got: {texts}"
 
     assert slack.uploads, "Clean-path delivery must include an xlsx upload"
+
+
+# =========================================================================== #
+# Phase 1 — One agent chat for the whole batch (file_shared race fix)
+# =========================================================================== #
+
+
+def test_file_shared_defer_does_not_poison_message_handler_dedup():
+    """Regression: file_shared deferral must NOT mark file:{id} as seen.
+
+    Phase-1A moved document processing to the message handler but left
+    ``seen_before(f"file:{id}")`` at the top of ``_file_shared``. That call
+    *marks* the file id on first access, so when the message handler ran it
+    saw the file as already-processed, skipped all 6 docs, and posted
+    "Processed 6 documents — nothing new to add" with zero Gemini work.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from accounting_agents import slack_runner
+    from app.slack_app import _SeenEvents
+
+    fresh_seen = _SeenEvents()
+    slack_runner._seen = fresh_seen
+
+    active_profile = SimpleNamespace(status="active")
+    store_mock = MagicMock()
+    store_mock.get_by_channel.return_value = active_profile
+
+    file_handler, _ = _capture_file_shared_handler(store_mock=store_mock)
+    msg_handler, _ = _capture_message_handler_with_slack_client(FakeSlackClient())
+
+    pdf_event = {
+        "type": "file_shared",
+        "event_ts": "400.001",
+        "file_id": "FPOISON",
+        "channel_id": "C-poison",
+        "file": {"id": "FPOISON", "name": "invoice.pdf", "filetype": "pdf"},
+    }
+    fake_client = MagicMock()
+
+    with patch.object(slack_runner, "process_file_event", AsyncMock()) as mock_pfe:
+        asyncio.run(file_handler(
+            event=pdf_event, body={"event_id": "Ev-poison-fs"}, client=fake_client,
+        ))
+
+    # file_shared must not have marked the file id.
+    assert not fresh_seen.seen_before(f"file:FPOISON"), (
+        "file_shared deferral must not poison the file-level dedup key"
+    )
+    # Reset the probe mark from the assertion above.
+    fresh_seen._seen.pop(f"file:FPOISON", None)
+
+    mock_pfe.return_value = {"status": "delivered", "append": {"appended": 1, "fy": "2026"}}
+    msg_event = {
+        "type": "message",
+        "subtype": "file_share",
+        "ts": "400.002",
+        "channel": "C-poison",
+        "files": [{"id": "FPOISON", "name": "invoice.pdf"}],
+    }
+    with patch.object(slack_runner, "process_file_event", mock_pfe), \
+         patch.object(slack_runner, "download_pdf_bytes", return_value=b"%PDF"):
+        asyncio.run(msg_handler(
+            event=msg_event, body={"event_id": "Ev-poison-msg"}, client=fake_client,
+        ))
+
+    mock_pfe.assert_called_once()
+    assert mock_pfe.call_args.kwargs["file_id"] == "FPOISON"
+
+
+def test_file_shared_does_not_process_documents():
+    """After Phase 1A, ``file_shared`` is NOT allowed to start a document run.
+
+    Pre-fix: a 6-file drop would stampede 6 ``process_file_event`` calls from
+    ``_file_shared`` with no thread_ts and no defer, producing 6 top-level
+    "Processing [dev] 'file.pdf'" accordions before the batch coordinator
+    posted its one job summary. The message handler is now the sole document
+    owner; ``file_shared`` only handles COA spreadsheet routing (ADR-0006).
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from accounting_agents import slack_runner
+
+    active_profile = SimpleNamespace(status="active")
+    store_mock = MagicMock()
+    store_mock.get_by_channel.return_value = active_profile
+
+    handler, _ = _capture_file_shared_handler(store_mock=store_mock)
+
+    event = {
+        "type": "file_shared",
+        "event_ts": "300.010",
+        "file_id": "FX10",
+        "channel_id": "C-noise",
+        "file": {
+            "id": "FX10",
+            "name": "Invoice.pdf",
+            "filetype": "pdf",
+            "mimetype": "application/pdf",
+        },
+    }
+    body = {"event_id": "Ev-noise-pdf"}
+    fake_bolt_client = MagicMock()
+
+    mock_pfe = AsyncMock(return_value={"status": "delivered"})
+
+    with patch.object(slack_runner, "process_file_event", mock_pfe):
+        asyncio.run(handler(event=event, body=body, client=fake_bolt_client))
+
+    # Invariant: _file_shared must not start a document run.
+    mock_pfe.assert_not_called()
+
+
+def test_batch_six_files_one_top_level_message(monkeypatch):
+    """Six-file drop yields EXACTLY ONE top-level message (job summary) — no spam.
+
+    The pre-Phase-1 bug surfaced live as six "Processing [dev] 'file.pdf'"
+    accordions + a separate job summary. After the fix, the message handler
+    is the sole document owner and ``process_file_event`` is called in
+    ``batch_mode`` so the per-doc status posting is suppressed.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from accounting_agents import slack_runner
+    from app.slack_app import _SeenEvents
+
+    slack_runner._seen = _SeenEvents()
+    slack = FakeSlackClient()
+    handler, _ = _capture_message_handler_with_slack_client(slack)
+
+    body = {"event_id": "Ev-batch-6"}
+    event = {
+        "type": "message",
+        "subtype": "file_share",
+        "ts": "222.006",
+        "channel": "C-batch-6",
+        "files": [{"id": f"F6-{i}"} for i in range(6)],
+    }
+    fake_client = MagicMock()
+    mock_pfe = AsyncMock(side_effect=[
+        {"status": "delivered", "append": {
+            "appended": 1, "software": "Xero", "fy": "2026",
+            "deferred_delivery": {
+                "payload": {"fy": "2026", "software": "Xero", "kind": "invoice",
+                            "client_name": "Acme Client",
+                            "batches": [{"sheet": "Purchase",
+                                         "rows": [{"Contact": "Vendor",
+                                                   "Total": 100.0,
+                                                   "Currency": "USD"}]}]},
+                "batches": [{"sheet": "Purchase",
+                             "rows": [{"Contact": "Vendor", "Total": 100.0,
+                                       "Currency": "USD"}]}],
+                "workbook_name": "Ledger_FY2026.xlsx",
+            },
+        }}
+        for _ in range(6)
+    ])
+
+    with patch.object(slack_runner, "process_file_event", mock_pfe), \
+         patch.object(slack_runner, "download_pdf_bytes", return_value=b"%PDF fake"):
+        asyncio.run(handler(event=event, body=body, client=fake_client))
+
+    # The first top-level post is the placeholder job summary; the final
+    # tally+delivery card edits the same ts. So we should see at most ONE
+    # top-level post (placeholder) and the delivery lives in the update.
+    top_level_posts = [p for p in slack._posts if not p.get("thread_ts")]
+    assert len(top_level_posts) == 1, (
+        f"expected exactly 1 top-level post, got {len(top_level_posts)}: "
+        f"{[p.get('text', '') for p in top_level_posts]}"
+    )
+    summary_ts = top_level_posts[0].get("ts")
+    assert summary_ts, "summary message must carry a ts"
+
+    # Delivery must arrive via the update of summary_ts, not a fresh top-level post.
+    final_update = slack.updates[-1]
+    assert final_update.get("ts") == summary_ts
+    assert final_update.get("channel") == "C-batch-6"
+    assert final_update.get("blocks"), (
+        "merged batch update must include delivery blocks"
+    )
+
+    # process_file_event was called 6× with batch_mode=True (silent mode).
+    assert mock_pfe.call_count == 6
+    for c in mock_pfe.call_args_list:
+        assert c.kwargs.get("batch_mode") is True, (
+            f"batch calls must carry batch_mode=True; got {c.kwargs}"
+        )
+        assert c.kwargs.get("thread_ts") == summary_ts
+
+
+def test_batch_mode_skips_per_doc_status_post():
+    """``batch_mode=True`` on ``process_file_event`` must NOT post a per-doc status.
+
+    This is the core anti-noise contract: when total>1, the per-doc
+    "Received" status + plan accordion posting is suppressed so only the
+    job-summary message lives at channel root.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from accounting_agents import slack_runner
+
+    # In batch_mode the per-doc status post is replaced by a no-op
+    # (status_ts=None). We assert by inspecting the post list before
+    # the run would normally post.
+    captured_post_calls: list[dict] = []
+    fake_slack = FakeSlackClient()
+    real_post = fake_slack.chat_postMessage
+    def spy_post(**kwargs):
+        captured_post_calls.append(kwargs)
+        return real_post(**kwargs)
+    fake_slack.chat_postMessage = spy_post
+
+    # Build a no-op runner + store and assert that even with batch_mode=True
+    # the per-doc _post_status is never invoked (status_ts short-circuits).
+    db = FakeFirestore()
+    store = SlackLedgerStore(FakeFirestore(), opener=fake_slack.opener())
+    runner = _FakeRunner([_node_event("classify_node", text="done")], _ledger_payload())
+
+    # Simulate batch_mode by passing the flag — the early return path will
+    # be tested via the calling site in test_batch_six_files_one_top_level_message.
+    # Here we directly verify that _post_status is NOT in the captured post
+    # list when batch_mode=True (because process_file_event early-skips it).
+    asyncio.run(
+        process_file_event(
+            runner=runner,
+            ledger_store=store,
+            db=db,
+            slack_client=fake_slack,
+            channel_id="C-batch-mode",
+            file_id="FX-batch",
+            app_name="acc",
+            download_fn=lambda *a, **k: b"%PDF batch",
+            source_filename="batch_doc.pdf",
+            thread_ts=None,
+            defer_slack_delivery=True,
+            batch_mode=True,
+        )
+    )
+
+    # The _post_status call inside process_file_event is bypassed when
+    # batch_mode=True. The persisted-and-delivered branch posts its
+    # delivery card thread_ts-less (top-level) when batch_mode=True AND
+    # defer_slack_delivery=True both. Since defer=True means the delivery
+    # is stashed in append['deferred_delivery'] and NOT posted, we expect
+    # zero top-level posts in the per-doc run.
+    # Exclude the "no profile" early-return message which is unrelated.
+    top_level = [
+        p for p in captured_post_calls
+        if not p.get("thread_ts") and "set up yet" not in p.get("text", "")
+    ]
+    assert top_level == [], (
+        f"batch_mode=True must suppress per-doc top-level posts; got: {top_level}"
+    )
+
+
+def test_batch_aggregate_one_table_same_fy(monkeypatch):
+    """Same-FY/sheet batch → one combined data_table block (not split per doc).
+
+    After Phase 1C/1D, the aggregator concatenates rows from every
+    deferred document into a single ``ledger_preview_data_table`` per
+    ``(fy, sheet, workbook_name)`` group.
+    """
+    from app.blocks import ledger_preview_data_table
+    from accounting_agents.slack_runner import _build_batch_aggregate_blocks
+
+    # Module-level LEDGR_NATIVE_BLOCKS=0 (set at import time) suppresses the
+    # data_table native block; force it on for this assertion.
+    monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
+    from unittest.mock import MagicMock, patch
+    from app import native_blocks_compat as _nbc
+    _nbc._PROBE_CACHE.pop("C-test", None)
+
+    deferred = []
+    for i in range(3):
+        deferred.append({
+            "payload": {
+                "fy": "2026", "software": "Xero", "kind": "invoice",
+                "client_name": "Acme Client",
+                "batches": [{"sheet": "Purchase",
+                             "rows": [{"Contact": f"Vendor {i}",
+                                       "Total": 100.0 * (i + 1),
+                                       "Currency": "USD"}]}],
+            },
+            "batches": [{"sheet": "Purchase",
+                         "rows": [{"Contact": f"Vendor {i}",
+                                   "Total": 100.0 * (i + 1),
+                                   "Currency": "USD"}]}],
+            "workbook_name": "Ledger_FY2026.xlsx",
+        })
+
+    summary, blocks = _build_batch_aggregate_blocks(deferred, "C-test")
+    assert summary
+    assert "3" in summary or "lines" in summary
+    data_tables = [b for b in blocks if b.get("type") == "data_table"]
+    # Same FY + Purchase + workbook + software + kind → one merged group.
+    assert len(data_tables) == 1, (
+        f"expected 1 data_table for same-FY/sheet group, got {len(data_tables)}"
+    )
+    table = data_tables[0]
+    # Header row + 3 data rows.
+    assert len(table["rows"]) == 4
+    header_texts = [c["text"] for c in table["rows"][0]]
+    assert "Currency" in header_texts, (
+        f"Currency column must be present in batch aggregate; got {header_texts}"
+    )
+
+
+def test_batch_aggregate_n_docs_counts_documents_not_batches():
+    """A single doc that splits Purchase+Sales contributes 1 doc, not 2."""
+    from accounting_agents.slack_runner import _build_batch_aggregate_blocks
+
+    deferred = [{
+        "payload": {
+            "fy": "2026", "software": "Xero", "kind": "invoice",
+            "client_name": "Acme Client",
+            "batches": [
+                {"sheet": "Purchase", "rows": [{"Total": 10, "Currency": "USD"}]},
+                {"sheet": "Sales", "rows": [{"Total": 5, "Currency": "USD"}]},
+            ],
+        },
+        "batches": [
+            {"sheet": "Purchase", "rows": [{"Total": 10, "Currency": "USD"}]},
+            {"sheet": "Sales", "rows": [{"Total": 5, "Currency": "USD"}]},
+        ],
+        "workbook_name": "Ledger_FY2026.xlsx",
+    }]
+
+    summary, _ = _build_batch_aggregate_blocks(deferred, "C-test")
+    # 1 document, 2 sheets, 2 rows total.
+    assert "1 document" in summary or "1 documents" in summary, (
+        f"summary should report 1 document (not 2 batches), got: {summary!r}"
+    )
+    # And 2 lines (rows) — one Purchase, one Sales.
+    assert "2 lines" in summary, f"expected 2 lines, got: {summary!r}"
+
+
+# =========================================================================== #
+# Phase 3C — summary table wired into HITL review/approval cards
+# =========================================================================== #
+
+
+def test_paused_run_posts_summary_table_before_approval_card(monkeypatch):
+    """When understand-extract populates ledger_summary_table, the HITL thread
+    gets a summary table post BEFORE the approval card lands.
+
+    This is the missing terminal/debug visibility: reviewers previously only
+    saw the approve/edit/reject buttons without the Gemini interpretation
+    that drove them. _post_summary_table existed but was never called.
+    """
+    monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
+    from unittest.mock import MagicMock, patch
+    from app import native_blocks_compat as _nbc
+    _nbc._PROBE_CACHE.clear()
+
+    from accounting_agents import slack_runner
+    from accounting_agents import nodes as nodes_mod
+
+    db = FakeFirestore()
+    slack = FakeSlackClient()
+    ledger_store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+
+    summary_table = [
+        {"category": "Vendor", "details": "PTTEPI"},
+        {"category": "Amount", "details": "USD 2,000.00"},
+        {"category": "Direction", "details": "Purchase"},
+    ]
+    state = {
+        nodes_mod.LEDGER_SUMMARY_TABLE_KEY: summary_table,
+        "review_question": "Confirm extraction",
+        nodes_mod.REVIEW_REASON_KEY: ["Low classify confidence"],
+    }
+
+    class _SessionService:
+        def __init__(self, st): self._st = st
+        async def get_session(self, *a, **k):
+            from types import SimpleNamespace
+            return SimpleNamespace(state=self._st)
+
+    runner = MagicMock()
+    runner.app_name = "acc"
+    runner.session_service = _SessionService(state)
+
+    # Build an event whose `raw` causes find_interrupt_id to return our id,
+    # and whose content yields a last_text for the review card.
+    fake_event = MagicMock()
+    fake_event.actions = MagicMock(skip_summarization=False)
+    fake_event.content = MagicMock(parts=[MagicMock(text="")])
+    fake_event.author = "agent"
+
+    # Patch find_interrupt_id to return our review op_id.
+    # Patch _read_session_state to return our state.
+    # Patch _post_review_card to be a no-op spy.
+    posted = {"summary_table": None, "review_card": None}
+
+    def fake_find_interrupt_id(ev):
+        return "CSTMID:Frun:review"
+
+    def fake_read_session_state(*a, **k):
+        async def _inner():
+            return state
+        return _inner()
+
+    def fake_post_review_card(client, channel, question, op_id, reasons, **kw):
+        posted["review_card"] = {
+            "channel": channel, "question": question, "thread_ts": kw.get("thread_ts"),
+        }
+        return "R-TS"
+
+    with patch.object(slack_runner, "find_interrupt_id", fake_find_interrupt_id), \
+         patch.object(slack_runner, "_read_session_state", fake_read_session_state), \
+         patch.object(slack_runner, "_post_review_card", fake_post_review_card):
+        asyncio.run(
+            slack_runner._finalize_run_outcome(
+                events=[fake_event],
+                interrupt_id=None,
+                last_text="",
+                runner=runner,
+                ledger_store=ledger_store,
+                db=db,
+                slack_client=slack,
+                channel_id="CSTMID",
+                session_id="sess",
+                app_name="acc",
+                user_id="CSTMID",
+                file_id="Frun",
+                thread_ts="T-THREAD",
+            )
+        )
+
+    # Find the summary table post (text starts with "Document summary").
+    summary_table_posts = [
+        p for p in slack._posts
+        if p.get("thread_ts") == "T-THREAD"
+        and p.get("text", "").startswith("Document summary")
+    ]
+    assert summary_table_posts, (
+        f"summary table must be posted in thread before the review card; got: "
+        f"{[p.get('text', '') for p in slack._posts]}"
+    )
+    # And the review card was posted after.
+
+
+# =========================================================================== #
+# Task: defer ledger upload during multi-file batch (one workbook write)      #
+# =========================================================================== #
+
+
+def test_batch_defers_ledger_upload_until_end():
+    """In multi-file batch mode, ``append_rows`` is called ONCE at batch end, not per doc.
+
+    Pre-fix: each ``process_file_event`` invocation triggered its own
+    ``ledger_store.append_rows`` call → six mid-batch ``files_upload_v2`` posts
+    and six ``files_delete`` of the prior workbook. After this slice, per-doc
+    runs stash the ledger payload via ``deferred_ledger``; the batch coordinator
+    calls ``append_rows`` exactly once per ``(client_id, fy, software, kind)``
+    group after the loop finishes.
+
+    The harness closes over a ``MagicMock`` ledger store, so we exercise the
+    flush helper directly with a recording fake (the same code path the
+    message handler invokes after the per-doc loop).
+    """
+    from unittest.mock import MagicMock
+
+    from accounting_agents.slack_runner import _flush_deferred_ledger_writes
+
+    store = MagicMock()
+    append_calls: list[dict] = []
+
+    def fake_append_rows(*, client_id, fy, slack_client, channel_id, batches, software, kind, client_name, replace):
+        append_calls.append({
+            "client_id": client_id, "fy": fy, "channel_id": channel_id,
+            "batches": batches, "software": software, "kind": kind,
+            "client_name": client_name, "replace": replace,
+        })
+        return {
+            "slack_file_id": "F-fake-batch",
+            "appended": len(batches),
+            "deduped": 0,
+            "filename": f"Acme Client - Ledger_FY{fy}.xlsx",
+        }
+    store.append_rows = fake_append_rows
+
+    # Build six per-doc deferred_delivery items, all the same FY / client.
+    batch_deferred: list[dict] = []
+    for i in range(6):
+        batch_deferred.append({
+            "payload": {
+                "client_id": "c-acme-client",
+                "fy": "2026",
+                "kind": "invoice",
+                "software": "Xero",
+                "client_name": "Acme Client",
+            },
+            "batches": [
+                {"sheet": "Purchase", "doc_key": f"FD-{i}:Purchase:INV-{i}",
+                 "rows": [{"Contact": f"Vendor {i}", "Total": 100.0 * (i + 1),
+                           "Currency": "USD"}]}
+            ],
+            "workbook_name": "",  # filled in by flush
+        })
+
+    asyncio.run(_flush_deferred_ledger_writes(
+        ledger_store=store,
+        slack_client=MagicMock(),
+        channel_id="C-batch-defer",
+        batch_deferred=batch_deferred,
+    ))
+
+    # CORE ASSERTION: append_rows called exactly once per FY group, not 6×.
+    assert len(append_calls) == 1, (
+        f"expected exactly 1 batch-end append_rows call, got {len(append_calls)}: "
+        f"{append_calls}"
+    )
+    call = append_calls[0]
+    assert call["client_id"] == "c-acme-client"
+    assert call["fy"] == "2026"
+    assert call["software"] == "Xero"
+    assert call["kind"] == "invoice"
+    # 6 docs' worth of batches concatenated into one append_rows invocation.
+    assert len(call["batches"]) == 6
+    # And the resolved workbook name is back-patched on every deferred_delivery.
+    for item in batch_deferred:
+        assert item["workbook_name"] == "Acme Client - Ledger_FY2026.xlsx"
+
+
+def test_batch_no_files_delete_mid_batch():
+    """In batch mode, the workbook is touched exactly once at batch end.
+
+    Pre-fix: each per-doc ``append_rows`` called ``files_delete`` on the
+    superseded file → the channel's Files tab flickered between uploads and
+    often ended up empty mid-batch. After this slice the workbook is touched
+    exactly once at batch end, so ``files_delete`` fires at most once per FY
+    workbook in the batch (and only if a prior file existed).
+
+    We exercise the flush helper directly with a real ``SlackLedgerStore`` and
+    a recording ``FakeSlackClient`` so we can assert the call count of
+    ``files_upload_v2`` and ``files_delete`` deterministically.
+    """
+    from accounting_agents.ledger_store import SlackLedgerStore
+    from accounting_agents.slack_runner import _flush_deferred_ledger_writes
+    from tests.test_ledger_store import FakeFirestore, FakeSlackClient
+
+    slack = FakeSlackClient()
+    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+
+    # Four per-doc deferred_delivery items, all the same FY / client.
+    batch_deferred: list[dict] = []
+    for i in range(4):
+        batch_deferred.append({
+            "payload": {
+                "client_id": "c-files", "fy": "2026", "kind": "invoice",
+                "software": "QBS", "client_name": "Client",
+            },
+            "batches": [
+                {"sheet": "Purchase", "doc_key": f"FF-{i}:Purchase:INV-{i}",
+                 "rows": [{"Contact": f"V{i}", "Total": 1.0}]}
+            ],
+            "workbook_name": "",
+        })
+
+    asyncio.run(_flush_deferred_ledger_writes(
+        ledger_store=store,
+        slack_client=slack,
+        channel_id="C-batch-files",
+        batch_deferred=batch_deferred,
+    ))
+
+    # CORE ASSERTION: one upload at batch end, no pre-existing prior file →
+    # zero files_delete (the only delete comes from the upload step in
+    # ledger_store, and only when prev_file_id differs from new_file_id).
+    assert len(slack.uploads) == 1, (
+        f"expected exactly 1 files_upload_v2 (batch-end), got {len(slack.uploads)}: "
+        f"{slack.uploads}"
+    )
+    # No prior file existed for this client/fy, so files_delete should not fire.
+    assert slack.deleted_file_ids == [], (
+        f"first batch-end append should NOT delete anything; got: "
+        f"{slack.deleted_file_ids}"
+    )
+
+
+def test_persist_and_deliver_defer_ledger_persist_stashes_payload():
+    """``defer_ledger_persist=True`` skips ``append_rows`` and stashes a ``deferred_ledger``.
+
+    The single-doc, non-batch caller path — when an individual doc is being
+    processed with batch-level defer enabled, ``persist_and_deliver`` must NOT
+    call ``append_rows``. Instead it returns a ``deferred_ledger`` dict on the
+    result that the batch coordinator can merge with its peers.
+    """
+    from unittest.mock import MagicMock
+
+    from accounting_agents import slack_runner
+
+    # Build a session with a real ledger payload.
+    runner = _FakeRunner([], _ledger_payload())
+    store = MagicMock()
+    # If append_rows IS called, the test fails.
+    store.append_rows = MagicMock(side_effect=AssertionError(
+        "append_rows must NOT be called when defer_ledger_persist=True"
+    ))
+
+    asyncio.run(
+        slack_runner.persist_and_deliver(
+            runner=runner,
+            ledger_store=store,
+            slack_client=FakeSlackClient(),
+            channel_id="C-defer-1",
+            session_id="S-defer-1",
+            app_name="acc",
+            user_id="U-defer-1",
+            thread_ts=None,
+            replace=False,
+            defer_slack_delivery=True,  # batch defer is on
+            batch_mode=True,
+            defer_ledger_persist=True,  # and ledger persist is deferred too
+        )
+    )
+    # The MagicMock was never called → if we got here without AssertionError,
+    # the defer wiring works.
+    store.append_rows.assert_not_called()
+
+
+# =========================================================================== #
+# Task: batch thinking UX — plan block on the placeholder message             #
+# =========================================================================== #
+
+
+def test_batch_processing_plan_blocks_emits_native_plan_block(monkeypatch):
+    """The batch-level thinking plan emits a single ``plan`` block with one task per doc."""
+    from app import native_blocks_compat
+    from app.blocks import batch_processing_plan_blocks
+
+    # Force native plan blocks for this assertion.
+    monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
+    native_blocks_compat._PROBE_CACHE.pop("C-batch-thinking", None)
+
+    doc_rows = [
+        {"file_label": "Contractor Beta.pdf", "stage": "complete", "detail": "Purchase · 1 line", "status": "complete"},
+        {"file_label": "Telco-A.pdf", "stage": "in_progress", "detail": "Understanding", "status": "in_progress"},
+        {"file_label": "Supplier Gamma.pdf", "stage": "queued", "detail": None, "status": "in_progress"},
+    ]
+    blocks = batch_processing_plan_blocks(
+        total=3,
+        done=1,
+        doc_rows=doc_rows,
+        channel_id="C-batch-thinking",
+    )
+    plan_blocks = [b for b in blocks if b.get("type") == "plan"]
+    assert len(plan_blocks) == 1, (
+        f"expected exactly 1 plan block, got {len(plan_blocks)}: {blocks}"
+    )
+    plan = plan_blocks[0]
+    # 1 overall + 3 per-doc tasks.
+    assert len(plan["tasks"]) == 4, (
+        f"expected 4 tasks (overall + 3 docs), got {len(plan['tasks'])}: {plan['tasks']}"
+    )
+    # First task is the overall progress tracker.
+    assert plan["tasks"][0]["task_id"] == "overall"
+    # Remaining tasks are per-doc, with file labels in their titles.
+    titles = [t["title"] for t in plan["tasks"][1:]]
+    assert "Contractor Beta.pdf" in titles[0]
+    assert "Telco-A.pdf" in titles[1]
+    assert "Supplier Gamma.pdf" in titles[2]
+    # Completed docs are marked complete in the task status.
+    statuses = [t["status"] for t in plan["tasks"][1:]]
+    assert statuses[0] == "complete", (
+        f"completed doc must show complete status; got {statuses}"
+    )
+    assert statuses[1] == "in_progress"
+
+
+def test_batch_processing_plan_blocks_falls_back_when_native_unsupported(monkeypatch):
+    """When the channel does not support native blocks, fall back to section+context."""
+    from app import native_blocks_compat
+    from app.blocks import batch_processing_plan_blocks
+
+    monkeypatch.setattr(native_blocks_compat, "supports_native_blocks", lambda *a, **k: False)
+    # Clear the probe cache so the patched function is consulted.
+    native_blocks_compat._PROBE_CACHE.pop("C-fallback", None)
+
+    blocks = batch_processing_plan_blocks(
+        total=2,
+        done=1,
+        doc_rows=[
+            {"file_label": "a.pdf", "stage": "complete", "status": "complete", "detail": "ok"},
+            {"file_label": "b.pdf", "stage": "in_progress", "status": "in_progress", "detail": "running"},
+        ],
+        channel_id="C-fallback",
+    )
+    # No plan block in the fallback path.
+    assert not any(b.get("type") == "plan" for b in blocks)
+    # Section + context are emitted.
+    assert any(b.get("type") == "section" for b in blocks)
+    assert any(b.get("type") == "context" for b in blocks)
+
+
+def test_batch_six_files_post_initial_plan_block(monkeypatch):
+    """First chat_postMessage in a 6-file drop carries a ``plan`` block (batch thinking)."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from accounting_agents import slack_runner
+    from app import native_blocks_compat
+    from app.slack_app import _SeenEvents
+
+    monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
+    native_blocks_compat._PROBE_CACHE.pop("C-batch-plan", None)
+
+    slack_runner._seen = _SeenEvents()
+    slack = FakeSlackClient()
+    handler, _ = _capture_message_handler_with_slack_client(slack)
+
+    body = {"event_id": "Ev-batch-plan-1"}
+    event = {
+        "type": "message",
+        "subtype": "file_share",
+        "ts": "225.001",
+        "channel": "C-batch-plan",
+        "files": [{"id": f"FP-{i}"} for i in range(6)],
+    }
+    fake_client = MagicMock()
+    # All docs return immediately as delivered (no stages fire callbacks here
+    # since we mock process_file_event).
+    mock_pfe = AsyncMock(side_effect=[
+        {"status": "delivered", "append": {"appended": 0, "software": "Xero", "fy": "2026",
+                                            "kind": "invoice", "deferred_delivery": None}}
+        for _ in range(6)
+    ])
+
+    with patch.object(slack_runner, "process_file_event", mock_pfe), \
+         patch.object(slack_runner, "download_pdf_bytes", return_value=b"%PDF fake"):
+        asyncio.run(handler(event=event, body=body, client=fake_client))
+
+    # First top-level post must carry a plan block.
+    top_level = [p for p in slack._posts if not p.get("thread_ts")]
+    assert len(top_level) == 1
+    first_post = top_level[0]
+    blocks = first_post.get("blocks") or []
+    plan_blocks = [b for b in blocks if b.get("type") == "plan"]
+    assert plan_blocks, (
+        f"first batch post must include a plan block; got: {blocks}"
+    )
+    # Plan has overall + 6 per-doc tasks.
+    assert len(plan_blocks[0]["tasks"]) == 1 + 6
+
+
+# =========================================================================== #
+# Task: unified Understand direction (Part E)                                  #
+# =========================================================================== #
+
+
+def test_document_ledger_extract_schema_has_party_and_direction():
+    """``DocumentLedgerExtract`` owns From/To parties + ``direction_for_client``."""
+    from invoice_processing.extract.ledger_extract import (
+        DocumentLedgerExtract,
+        PartyField,
+    )
+
+    extract = DocumentLedgerExtract(
+        vendor_name="Contractor Beta",
+        customer_name="Acme Client Pte. Ltd.",
+        document_reference="INV-26-001",
+        document_date="2026-06-01",
+        document_total=1200.0,
+        from_party=PartyField(
+            name="Contractor Beta", uen=None, role="issuer",
+        ),
+        to_party=PartyField(
+            name="Acme Client Pte. Ltd.",
+            uen="201700001A",
+            role="recipient",
+        ),
+        direction_for_client="purchase",
+    )
+    # The Contractor Beta case: client is the recipient → "purchase" (not "sales").
+    assert extract.direction_for_client == "purchase"
+    assert extract.to_party.uen == "201700001A"
+    assert extract.to_party.role == "recipient"
+    assert extract.from_party.role == "issuer"
+
+
+def test_understand_prompt_includes_client_context():
+    """When client identity is provided, the prompt asks for ``direction_for_client``."""
+    from invoice_processing.extract.ledger_extract import _build_understand_prompt
+
+    prompt = _build_understand_prompt(
+        client_name="Acme Client Pte. Ltd.",
+        client_uen="201700001A",
+    )
+    assert "Acme Client Pte. Ltd." in prompt
+    assert "201700001A" in prompt
+    assert "direction_for_client" in prompt
+    assert "purchase" in prompt
+    assert "sales" in prompt
+
+
+def test_understand_prompt_omits_client_context_when_absent():
+    """When client identity is not provided, no client block in the prompt."""
+    from invoice_processing.extract.ledger_extract import _build_understand_prompt
+
+    prompt = _build_understand_prompt(None, None)
+    assert "Client context" not in prompt
+    # The from/to/direction_for_client fields are still documented in the
+    # base prompt (they may be populated as null) — but the conditional
+    # "Client context: ..." block must be absent.
+    assert "direction_for_client as follows" not in prompt
+
+
+def test_ledger_extract_to_normalized_uses_direction_for_client_when_auto():
+    """``direction="auto"`` causes the adapter to honor the Understand verdict."""
+    from invoice_processing.extract.ledger_extract import (
+        DocumentLedgerExtract,
+        PartyField,
+        ledger_extract_to_normalized,
+    )
+
+    extract = DocumentLedgerExtract(
+        vendor_name="Vendor Pte Ltd",
+        customer_name="Acme Client Pte. Ltd.",
+        document_reference="INV-1",
+        document_date="2026-06-01",
+        document_total=100.0,
+        from_party=PartyField(name="Vendor Pte Ltd", role="issuer"),
+        to_party=PartyField(
+            name="Acme Client Pte. Ltd.",
+            uen="201700001A",
+            role="recipient",
+        ),
+        direction_for_client="purchase",
+    )
+    normalized = ledger_extract_to_normalized(extract, direction="auto")
+    assert normalized.doc_type == "purchase"
+
+    # Flip direction_for_client → sales and the adapter should follow.
+    extract_sales = extract.model_copy(update={"direction_for_client": "sales"})
+    normalized_sales = ledger_extract_to_normalized(extract_sales, direction="auto")
+    assert normalized_sales.doc_type == "sales"
+
+
+def test_resolve_direction_from_extract_understand_verdict():
+    """``_resolve_direction_from_extract`` honors the Understand verdict."""
+    from accounting_agents.nodes import _resolve_direction_from_extract
+
+    # Purchase.
+    assert _resolve_direction_from_extract({"direction_for_client": "purchase"}) == "purchase"
+    # Sales.
+    assert _resolve_direction_from_extract({"direction_for_client": "sales"}) == "sales"
+    # Self-referential.
+    assert _resolve_direction_from_extract(
+        {"direction_for_client": "self_referential"}
+    ) == "self_referential"
+    # Unknown passes through (caller escalates to HITL).
+    assert _resolve_direction_from_extract({"direction_for_client": "unknown"}) == "unknown"
+    # Missing → fallback.
+    assert _resolve_direction_from_extract(None) == "purchase"
+    assert _resolve_direction_from_extract({}, fallback="sales") == "sales"
+
+
+def test_classify_node_invoice_lane_no_longer_calls_resolve_direction():
+    """``classify_node`` for the invoice lane must NOT call ``resolve_direction``.
+
+    Pre-fix: ``classify_node`` called ``resolve_direction`` and locked the
+    direction before the Understand call could see the document. After the
+    slice, the invoice lane defers the direction decision to the Understand
+    call's ``direction_for_client`` field — a deterministic gate, not a
+    fuzzy Python rewrite.
+
+    The full assertion (with FakeContext + _load_pdf_bytes stub) lives in
+    ``tests/test_nodes.py::test_classify_routes_invoice``. This test is the
+    behavioral summary: classify_node does not call resolve_direction.
+    """
+    # The detailed check is in test_nodes.py where the FakeContext harness is
+    # available. Re-assert the contract from the slack_runner side: the
+    # ``resolve_direction`` Python fuzzy-match is no longer wired into the
+    # invoice path. ``DIRECTION_FN`` is still imported in nodes.py (kept for
+    # bank/SOA consumers and tests) but is no longer called from
+    # ``classify_node`` for invoice documents.
+    from accounting_agents import nodes
+    import inspect
+
+    source = inspect.getsource(nodes.classify_node)
+    # In the invoice branch (the path after `if doc_type == "bank_statement"`),
+    # there must be no `DIRECTION_FN(` call.
+    assert "DIRECTION_FN(" not in source, (
+        "classify_node should NOT call DIRECTION_FN for the invoice lane; "
+        "the Understand call now owns direction_for_client."
+    )

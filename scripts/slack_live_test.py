@@ -5,8 +5,8 @@ Prereqs:
   2. `.env` has SLACK_BOT_TOKEN (xoxb-…), SLACK_SIGNING_SECRET, SLACK_APP_TOKEN (xapp-…).
   3. The bot is RUNNING (in another terminal):  uv run python -m python -m accounting_agents.slack_runner
   4. The bot is invited to a test channel; set its id in LEDGR_TEST_CHANNEL.
-  5. (First time in that channel) run /ledgr settings + add a COA, or tap
-     "Use standard SG SME COA", so the client is active.
+  5. (First time in that channel) run /ledgr settings and upload a COA xlsx/csv,
+     so the client is active.
 
 Then:  LEDGR_TEST_CHANNEL=C0123 uv run python scripts/slack_live_test.py
 

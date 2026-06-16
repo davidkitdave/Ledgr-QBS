@@ -82,23 +82,26 @@ def _tripped_state(channel: str) -> dict:
     }
 
 
-def _fake_clean_bundle(*_a, **_k) -> ExtractedInvoiceBundle:
-    """Re-extraction yields a clean, reconciled invoice."""
-    return ExtractedInvoiceBundle(
-        invoices=[
-            ExtractedInvoice(
-                doc_type="invoice",
-                invoice_number="INV-LO",
-                invoice_date="2025-01-15",
-                currency="SGD",
-                issuer_name="Acme Supplier",
-                bill_to_name="Client",
-                lines=[ExtractedLine(description="Goods", net_amount=100.0, gst_amount=9.0)],
-                subtotal=100.0,
-                gst_total=9.0,
-                total=109.0,
-            )
-        ]
+def _fake_clean_bundle(*_a, **_k):
+    from tests.test_nodes import _legacy_result_from_ex_bundle
+
+    return _legacy_result_from_ex_bundle(
+        ExtractedInvoiceBundle(
+            invoices=[
+                ExtractedInvoice(
+                    doc_type="invoice",
+                    invoice_number="INV-LO",
+                    invoice_date="2025-01-15",
+                    currency="SGD",
+                    issuer_name="Acme Supplier",
+                    bill_to_name="Client",
+                    lines=[ExtractedLine(description="Goods", net_amount=100.0, gst_amount=9.0)],
+                    subtotal=100.0,
+                    gst_total=9.0,
+                    total=109.0,
+                )
+            ]
+        )
     )
 
 
@@ -108,15 +111,33 @@ def _force_clarify(state, reasons, *, model):
 
 def setup_function(_):
     nodes.REVIEWER_FN = _force_clarify
-    nodes.EXTRACT_BUNDLE_FN = _fake_clean_bundle
+    from tests.test_nodes import _legacy_result_from_ex_bundle
+
+    nodes.EXTRACT_INVOICE_DOCUMENT_FN = lambda *a, **k: _legacy_result_from_ex_bundle(
+        ExtractedInvoiceBundle(
+            invoices=[
+                ExtractedInvoice(
+                    doc_type="invoice",
+                    invoice_number="INV-LO",
+                    invoice_date="2025-01-15",
+                    currency="SGD",
+                    issuer_name="Acme Supplier",
+                    bill_to_name="Client",
+                    lines=[ExtractedLine(description="Goods", net_amount=100.0, gst_amount=9.0)],
+                    subtotal=100.0,
+                    gst_total=9.0,
+                    total=109.0,
+                )
+            ]
+        )
+    )
 
 
 def teardown_function(_):
     nodes.REVIEWER_FN = nodes._reviewer_llm
-    nodes.EXTRACT_BUNDLE_FN = __import__(
-        "invoice_processing.extract.invoice_extractor",
-        fromlist=["extract_invoice_bundle"],
-    ).extract_invoice_bundle
+    from invoice_processing.extract.process_invoice_document import process_invoice_document
+
+    nodes.EXTRACT_INVOICE_DOCUMENT_FN = process_invoice_document
 
 
 def _new_runner(session_id: str):
@@ -282,29 +303,27 @@ from invoice_processing.classify.document_classifier import (  # noqa: E402
 )
 
 
-def _unreconciled_bundle(*_a, **_k) -> ExtractedInvoiceBundle:
-    """Extraction yields an UNRECONCILED invoice (total ≠ subtotal+gst).
+def _unreconciled_bundle(*_a, **_k):
+    """Extraction yields an UNRECONCILED invoice (total ≠ subtotal+gst)."""
+    from tests.test_nodes import _legacy_result_from_ex_bundle
 
-    This makes ``detect_struggle`` trip on the REAL extract output (the driver
-    runs ``extract_invoice_node`` BEFORE ``review_extraction_node``, so a
-    pre-seeded unreconciled invoice would be overwritten — the extractor itself
-    must produce the struggle signal).
-    """
-    return ExtractedInvoiceBundle(
-        invoices=[
-            ExtractedInvoice(
-                doc_type="invoice",
-                invoice_number="INV-DRV",
-                invoice_date="2025-01-15",
-                currency="SGD",
-                issuer_name="Acme Supplier",
-                bill_to_name="Client",
-                lines=[ExtractedLine(description="Goods", net_amount=100.0, gst_amount=9.0)],
-                subtotal=100.0,
-                gst_total=9.0,
-                total=999.0,  # deliberately wrong → reconcile fails
-            )
-        ]
+    return _legacy_result_from_ex_bundle(
+        ExtractedInvoiceBundle(
+            invoices=[
+                ExtractedInvoice(
+                    doc_type="invoice",
+                    invoice_number="INV-DRV",
+                    invoice_date="2025-01-15",
+                    currency="SGD",
+                    issuer_name="Acme Supplier",
+                    bill_to_name="Client",
+                    lines=[ExtractedLine(description="Goods", net_amount=100.0, gst_amount=9.0)],
+                    subtotal=100.0,
+                    gst_total=9.0,
+                    total=999.0,  # deliberately wrong → reconcile fails
+                )
+            ]
+        )
     )
 
 
@@ -389,7 +408,7 @@ def test_driver_full_pass_both_interrupts_side_effects_once():
 
     nodes.CLASSIFY_FN = _count_classify
     nodes.DIRECTION_FN = lambda cls, **k: "purchase"
-    nodes.EXTRACT_BUNDLE_FN = _count_extract
+    nodes.EXTRACT_INVOICE_DOCUMENT_FN = _count_extract
     nodes.REVIEWER_FN = _force_clarify
     nodes.consolidate_node = _count_consolidate
     try:
@@ -455,7 +474,7 @@ def test_driver_full_pass_auto_approve_no_pause():
         doc_type="invoice", confidence=0.95, reason="test"
     )
     nodes.DIRECTION_FN = lambda cls, **k: "purchase"
-    nodes.EXTRACT_BUNDLE_FN = _count_extract
+    nodes.EXTRACT_INVOICE_DOCUMENT_FN = _count_extract
     nodes.consolidate_node = _count_consolidate
     try:
         runner, svc = _new_driver_runner("D2", counters)

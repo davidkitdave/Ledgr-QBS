@@ -239,11 +239,9 @@ async def document_workflow_driver(ctx, node_input=None):
         # Bank-statement lane (MODEL_STD): single extraction node.
         await ctx.run_node(nodes.extract_bank_node)
     else:
-        # Invoice / receipt lane (MODEL_LITE): extract -> review -> categorize ->
-        # tax. ``review_extraction_node`` (itself rerun_on_resume=True) may pause
-        # mid-flow with the ``:review`` interrupt; on resume it applies its own
-        # ``ReviewClarifyDecision`` from ``ctx.resume_inputs`` and falls through.
-        await ctx.run_node(nodes.extract_invoice_node)
+        # Invoice / receipt lane: understand-extract (Drive parity) -> review ->
+        # categorize -> tax.
+        await ctx.run_node(nodes.extract_invoice_document_node)
         await ctx.run_node(nodes.review_extraction_node)
         await ctx.run_node(nodes.categorize_node)
         await ctx.run_node(nodes.tax_node)
@@ -314,6 +312,13 @@ app = App(
     resumability_config=ResumabilityConfig(is_resumable=True),
 )
 
+#: Direct document workflow App — skips coordinator LLM on file uploads (P2-2).
+document_app = App(
+    name="accounting_agents_document",
+    root_agent=document_workflow,
+    resumability_config=ResumabilityConfig(is_resumable=True),
+)
+
 #: Standalone chat-lane App: a root ``LlmAgent`` with no ``mode`` so it sees
 #: full per-thread session history (multi-turn). Has its own Runner built by
 #: ``slack_runner.build_chat_runner``. No ``resumability_config`` — chat has no
@@ -325,6 +330,7 @@ assistant_app = App(
 
 __all__ = [
     "app",
+    "document_app",
     "assistant_app",
     "assistant_agent",
     "coordinator",

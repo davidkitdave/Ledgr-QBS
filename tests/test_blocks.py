@@ -85,12 +85,12 @@ class TestNativePath:
         assert all(t["status"] == "complete" for t in tasks)
 
     def test_failed_maps_to_complete_with_x_prefix(self):
-        stages = _with_failed("tax")
+        stages = _with_failed("policy")
         blocks = processing_plan_blocks("r.pdf", stages=stages)
         tasks = blocks[0]["tasks"]
-        tax_task = next(t for t in tasks if t["task_id"] == "tax")
-        assert tax_task["status"] == "complete"
-        assert tax_task["title"].startswith(":x:")
+        policy_task = next(t for t in tasks if t["task_id"] == "policy")
+        assert policy_task["status"] == "complete"
+        assert policy_task["title"].startswith(":x:")
 
     def test_output_none_omits_key(self):
         stages = _all_pending()
@@ -143,7 +143,7 @@ class TestFallbackPath:
         assert ":large_blue_circle:" in ctx
 
     def test_failed_uses_x(self):
-        stages = _with_failed("extract")
+        stages = _with_failed("understand")
         blocks = processing_plan_blocks("f.pdf", stages=stages)
         ctx = blocks[1]["elements"][0]["text"]
         assert ":x:" in ctx

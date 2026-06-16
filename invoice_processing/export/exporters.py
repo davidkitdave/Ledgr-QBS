@@ -39,7 +39,21 @@ def _num(x: Optional[float]) -> Optional[float]:
     return None if x is None else round(float(x), 2)
 
 
+def _line_net_amount(line: InvoiceLine, inv: NormalizedInvoice) -> float:
+    """Exportable line subtotal.
+
+    GST-registered clients: ex-GST net. Non-registered clients absorb irrecoverable
+    input GST into the line cost (no separate tax column on export).
+    """
+    net = float(line.net_amount or 0.0)
+    if not inv.our_gst_registered:
+        return round(net + float(line.gst_amount or 0.0), 2)
+    return round(net, 2)
+
+
 def _tax_amount(line: InvoiceLine, inv: NormalizedInvoice, clf: TaxClassifier) -> float:
+    if not inv.our_gst_registered:
+        return 0.0
     if line.tax_treatment != "SR":
         return 0.0
     if line.gst_amount:
@@ -148,7 +162,7 @@ class QbsLedgerExporter(LedgerExporter):
         ]
 
     def _purchase_row(self, inv, line):
-        net = _num(line.net_amount) or 0
+        net = _line_net_amount(line, inv)
         tax = _tax_amount(line, inv, self.clf)
         fx = inv.fx_rate if inv.fx_rate is not None else 1.0
         return {
@@ -167,7 +181,7 @@ class QbsLedgerExporter(LedgerExporter):
         }
 
     def _sales_row(self, inv, line):
-        net = _num(line.net_amount) or 0
+        net = _line_net_amount(line, inv)
         tax = _tax_amount(line, inv, self.clf)
         fx = inv.fx_rate if inv.fx_rate is not None else 1.0
         return {
@@ -221,8 +235,9 @@ class XeroLedgerExporter(LedgerExporter):
         # so the invoice ties out on Xero import. Prefer the effective amount derived from
         # net_amount; the raw unit_amount is the pre-discount sticker price and over-states
         # discounted lines. Fall back to unit_amount only when net_amount is absent.
-        if line.net_amount is not None:
-            unit = line.net_amount / qty if qty else line.net_amount
+        line_net = _line_net_amount(line, inv)
+        if line.net_amount is not None or (not inv.our_gst_registered and line.gst_amount):
+            unit = line_net / qty if qty else line_net
         else:
             unit = line.unit_amount
         return {
@@ -471,7 +486,7 @@ class BankStatementExporter:
         ``(Date, Description, Withdrawal, Deposit)`` transactions are the SAME
         statement re-uploaded (Balance is excluded — it is recomputed). Used to
         collapse statements that were appended more than once (e.g. during the
-        doc_key format transition that duplicated months in the Akar sheet).
+        doc_key format transition that duplicated months in the Sample Bank Client sheet).
         """
         def _norm(v):
             if v is None:

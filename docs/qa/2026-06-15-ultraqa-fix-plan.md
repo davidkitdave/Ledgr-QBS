@@ -39,7 +39,7 @@ Four `Explore` sub-agents fan out concurrently. Each produces a ≤250-word repo
 
 ### Inv-4 — Locate the multi-entity approval-gate skip (P1-3)
 - Trace from `approval_gate` node to its emit-card logic. When the document is multi-entity (N>1 sub-docs), does it skip the card?
-- The JBI run showed the accordion checkmarked "Awaiting approval" but no Approve/Edit/Reject buttons appeared.
+- The Sample Auto Enterprise run showed the accordion checkmarked "Awaiting approval" but no Approve/Edit/Reject buttons appeared.
 - Report: condition that's making the gate auto-pass, file:line, and the smallest fix — most likely: emit ONE summary review card for the multi-entity bundle (not per-sub-doc).
 
 **Gate at end of Round 1:** I review all 4 reports, sequence the fixes, and write per-fix TDD specs for Round 2. If any investigation surfaces a deeper architectural issue (e.g. P0-2 turns out to be a Session vs Firestore confusion that needs an ADR), we pause and decide.
@@ -80,7 +80,7 @@ Each fix follows the same pattern, executed by an `executor` sub-agent (Sonnet) 
 - For `summarize_recent_activity`: if the "last 30 days" filter is on transaction date, that's correct for accounting Q&A — leave it. But test that the tool's empty-result message tells the user the window and how to expand it ("no transactions in the last 30 days; ask me for a specific month or FY for older periods").
 
 **Acceptance (live, not just unit):**
-- After Fix-2 lands: in `#rosebery-partner` (data already there from this sweep), ask `@Ledgr-dev list recent documents`. Bot returns the Dec 2025 bank statement. Ask `@Ledgr-dev what's in the ledger for December 2025?`. Bot returns the 4 transactions.
+- After Fix-2 lands: in `#sample-partner` (data already there from this sweep), ask `@Ledgr-dev list recent documents`. Bot returns the Dec 2025 bank statement. Ask `@Ledgr-dev what's in the ledger for December 2025?`. Bot returns the 4 transactions.
 
 ### Fix-3 (P1-1) — HITL-approve path delivery card parity
 
@@ -89,7 +89,7 @@ Each fix follows the same pattern, executed by an `executor` sub-agent (Sonnet) 
 - Mirror against the existing clean-path test if one exists; if not, add one for both to keep them in lockstep going forward.
 
 **Acceptance:**
-- Re-run Phase 2B with another Auditair invoice: HITL-approve emits full delivery card.
+- Re-run Phase 2B with another Acme Client invoice: HITL-approve emits full delivery card.
 - Unit test stays green.
 
 ### Fix-4 (P1-3) — Multi-entity approval-gate review card
@@ -100,7 +100,7 @@ Each fix follows the same pattern, executed by an `executor` sub-agent (Sonnet) 
 
 **Acceptance:**
 - Re-run a smaller multi-entity case (don't need full 11pp SOA — can use 2 invoices crammed in one PDF if available, or fabricate one in fixtures).
-- Live re-test JBI COOL POWER SOA — approval card appears with the bundle summary.
+- Live re-test Sample Auto Enterprise Sample Vendor Inc SOA — approval card appears with the bundle summary.
 
 ---
 
@@ -121,13 +121,13 @@ Per memory `restart-bot-before-qa`: kill the dev bot, restart from HEAD, then ru
 
 | Test | Channel | Expected (post-fix) |
 |---|---|---|
-| Drop JBI `COA & List.xlsx` | `#jbi-plus-auto` | Bot routes to COA ingest, replies "Ingested N accounts" (Fix-1) |
-| Ask `@Ledgr-dev list recent documents` | `#rosebery-partner` | Bot returns the Dec 2025 bank statement (Fix-2) |
-| Ask `@Ledgr-dev what's in the ledger for December 2025` | `#rosebery-partner` | Bot returns 4 transactions (Fix-2) |
-| Drop another small Auditair invoice (`25-D15-Podaima Paid.pdf`) | `#auditair-international` | Review card → Approve → **full delivery card** with row count + xlsx (Fix-3) |
-| Drop JBI COOL POWER SOA again | `#jbi-plus-auto` | Approval-gate review card surfaces ONCE with the 18-doc bundle summary; user approves explicitly; then full delivery card (Fix-4) |
+| Drop Sample Auto Enterprise `COA & List.xlsx` | `#sample-auto-enterprise` | Bot routes to COA ingest, replies "Ingested N accounts" (Fix-1) |
+| Ask `@Ledgr-dev list recent documents` | `#sample-partner` | Bot returns the Dec 2025 bank statement (Fix-2) |
+| Ask `@Ledgr-dev what's in the ledger for December 2025` | `#sample-partner` | Bot returns 4 transactions (Fix-2) |
+| Drop another small Acme Client invoice (`INV-2025-015-sample.pdf`) | `#acme-client-test` | Review card → Approve → **full delivery card** with row count + xlsx (Fix-3) |
+| Drop Sample Auto Enterprise Sample Vendor Inc SOA again | `#sample-auto-enterprise` | Approval-gate review card surfaces ONCE with the 18-doc bundle summary; user approves explicitly; then full delivery card (Fix-4) |
 
-**No regressions check:** the original Phase 2A (Akar bank) and Phase 2C (Rosebery bank) flows must still pass clean — re-drop one statement each if anything in Round 2 touched bank-lane code.
+**No regressions check:** the original Phase 2A (Sample Bank Client bank) and Phase 2C (Sample Partner bank) flows must still pass clean — re-drop one statement each if anything in Round 2 touched bank-lane code.
 
 **Round 4 exit criteria:** all 5 cells in the table land green. If any fail, that bug stays P0/P1 and Phase 4/5 stays gated.
 

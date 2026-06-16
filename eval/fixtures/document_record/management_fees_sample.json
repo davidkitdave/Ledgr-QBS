@@ -1,0 +1,17 @@
+{
+  "fixture_id": "management_fees_sample",
+  "description": "MGT-2025-011-INV — From inference + payment stamp",
+  "expected_fields": [
+    {"label": "Invoice Number", "value_contains": "MGT-2025-011-INV"},
+    {"label": "From", "value_contains": "ACME REGIONAL"},
+    {"label": "To", "value_contains": "Acme Client"},
+    {"label": "Subject", "value_contains": "Consultation"},
+    {"label": "Currency", "value_contains": "USD"}
+  ],
+  "min_line_items": 1,
+  "min_annotations": 1,
+  "parties": [
+    {"role_hint": "letterhead", "name_contains": "ACME REGIONAL"},
+    {"role_hint": "to_block", "name_contains": "Acme Client"}
+  ]
+}

@@ -85,6 +85,11 @@ MODEL_LITE: str = _resolve_model("lite")
 #: Stronger model for complex documents: bank statements.
 MODEL_STD: str = _resolve_model("std")
 
+#: Phase 1 faithful-read model (Drive-like DocumentRecord capture). Defaults to flash.
+MODEL_READ: str = (
+    os.environ.get("LEDGR_MODEL_READ") or "gemini-2.5-flash"
+)
+
 
 # ---------------------------------------------------------------------------
 # Firestore namespace helper

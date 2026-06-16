@@ -535,6 +535,77 @@ _DEFAULT_CLIENTS = (
 )
 
 
+def _report_to_dict(report: ClientReport) -> dict:
+    """Serialize a :class:`ClientReport` to a JSON-safe dict.
+
+    Used by the ``--output`` flag to save a baseline report that can be
+    compared against a future run via :func:`_compare_reports`. The dict
+    shape is deliberately stable: every field is a primitive or a list of
+    primitives so the report round-trips through ``json.dumps``.
+    """
+    out = {
+        "client_id": report.client_id,
+        "setup_path": report.setup_path,
+        "n_docs": report.n_docs,
+        "direction_total": report.direction_total,
+        "direction_correct": report.direction_correct,
+        "direction_rate": report.direction_rate,
+        "classify_ok": report.classify_ok,
+        "recon_eligible": report.recon_eligible,
+        "recon_pass": report.recon_pass,
+        "recon_rate": report.recon_rate,
+        "errors": report.errors,
+        "placement": {
+            "scored": report.placement.scored,
+            "correct": report.placement.correct,
+            "missed": report.placement.missed,
+            "na": report.placement.na,
+            "total": report.placement.total,
+            "rate": report.placement.rate,
+        },
+        "completeness": {
+            tname: {
+                "target": table.target,
+                "n_rows": table.n_rows,
+                "headers": {
+                    h: {"filled": hf.filled, "total": hf.total, "rate": hf.rate}
+                    for h, hf in table.headers.items()
+                },
+            }
+            for tname, table in report.completeness.items()
+        },
+        "rows": report.rows,
+    }
+    return out
+
+
+def _compare_reports(baseline: dict, current: dict) -> dict:
+    """Diff two serialized ClientReports — used for regression detection.
+
+    Returns a dict with per-metric ``delta`` (current - baseline) and
+    ``regressed`` flag. Direction accuracy is the headline regression signal;
+    a drop of more than 5 percentage points flags ``regressed=True`` so the
+    CI gate fails loudly. Completeness + recon deltas are reported as
+    auxiliary context.
+    """
+    out: dict = {
+        "baseline_client": baseline.get("client_id"),
+        "current_client": current.get("client_id"),
+        "metrics": {},
+        "regressed": False,
+    }
+    for metric in ("direction_rate", "recon_rate"):
+        b = baseline.get(metric, 0.0)
+        c = current.get(metric, 0.0)
+        delta = c - b
+        out["metrics"][metric] = {"baseline": b, "current": c, "delta": delta}
+    # Direction accuracy is the regression gate. Drop > 5% = regressed.
+    dir_delta = out["metrics"]["direction_rate"]["delta"]
+    if dir_delta < -0.05:
+        out["regressed"] = True
+    return out
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Per-client invoice eval harness")
     parser.add_argument(
@@ -552,8 +623,22 @@ def main() -> None:
     parser.add_argument(
         "--root",
         type=str,
-        default="~/Desktop/LocalTest/TestDoc/Cast Unity",
+        default="~/Desktop/LocalTest/TestDoc/Sample Test Group",
         help="Root directory containing per-client folders",
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="If set, write a JSON baseline of the run to this path "
+             "(used as the regression comparison artifact).",
+    )
+    parser.add_argument(
+        "--compare-to",
+        type=str,
+        default=None,
+        help="If set with --output, diff the current run against this "
+             "baseline JSON and append a regression summary to the output.",
     )
     args = parser.parse_args()
 
@@ -580,7 +665,43 @@ def main() -> None:
 
     if reports:
         _print_overall(reports)
-    else:
+
+    if args.output:
+        import json as _json
+        from datetime import datetime, timezone
+
+        output_path = Path(args.output).expanduser()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        baseline_payload: dict = {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "root": str(root),
+            "limit_per_client": args.limit_per_client,
+            "clients": [_report_to_dict(r) for r in reports],
+        }
+        if args.compare_to and Path(args.compare_to).exists():
+            with open(args.compare_to) as fp:
+                prior = _json.load(fp)
+            prior_by_client = {c["client_id"]: c for c in prior.get("clients", [])}
+            diffs: list[dict] = []
+            for current in baseline_payload["clients"]:
+                prior_match = prior_by_client.get(current["client_id"])
+                if prior_match is None:
+                    continue
+                diffs.append(_compare_reports(prior_match, current))
+            baseline_payload["regression_diffs"] = diffs
+            any_regressed = any(d.get("regressed") for d in diffs)
+            baseline_payload["any_regressed"] = any_regressed
+        with open(output_path, "w") as fp:
+            _json.dump(baseline_payload, fp, indent=2, default=str)
+        print(f"\nWrote JSON baseline → {output_path}")
+        if args.compare_to:
+            regressed = baseline_payload.get("any_regressed")
+            if regressed:
+                print(
+                    f"[REGRESSION] Direction accuracy dropped >5% vs {args.compare_to}; "
+                    f"see 'regression_diffs' in the output JSON."
+                )
+    elif not reports:
         print("[WARN] No clients evaluated. Check --root / --clients.")
 
 

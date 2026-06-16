@@ -62,6 +62,71 @@ def _two_line_invoice(*, doc_total=None, due_date=date(2025, 2, 15), account_cod
     )
 
 
+class TestNonRegisteredGstAbsorption:
+    """Non-GST-registered client: all lines No Tax; input GST absorbed into amounts."""
+
+    def _sr_line_invoice(self, *, our_gst_registered: bool) -> NormalizedInvoice:
+        return NormalizedInvoice(
+            doc_type="purchase",
+            invoice_number="INV-ABS",
+            invoice_date=date(2025, 1, 15),
+            currency="SGD",
+            supplier=PartyInfo(name="Supplier Pte Ltd", gst_regno="200012345A"),
+            our_gst_registered=our_gst_registered,
+            doc_total=109.0,
+            lines=[
+                InvoiceLine(
+                    description="Office supplies",
+                    net_amount=100.0,
+                    gst_amount=9.0,
+                    account_code="500",
+                ),
+            ],
+        )
+
+    def test_xero_non_registered_absorbs_gst(self):
+        inv = self._sr_line_invoice(our_gst_registered=False)
+        rows = XeroLedgerExporter().rows([inv], "purchase")
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["*TaxType"] == "No Tax"
+        assert row["TaxAmount"] == 0.0
+        assert float(row["*UnitAmount"]) == 109.0
+        assert float(row["Total"]) == 109.0
+
+    def test_xero_registered_splits_sr_tax(self):
+        inv = self._sr_line_invoice(our_gst_registered=True)
+        rows = XeroLedgerExporter().rows([inv], "purchase")
+        row = rows[0]
+        assert row["*TaxType"] == "SR"
+        assert row["TaxAmount"] == 9.0
+        assert float(row["*UnitAmount"]) == 100.0
+
+    def test_qbs_non_registered_absorbs_gst(self):
+        inv = self._sr_line_invoice(our_gst_registered=False)
+        rows = QbsLedgerExporter().rows([inv], "purchase")
+        row = rows[0]
+        assert row["Sub Total"] == 109.0
+        assert row["Tax Amount"] == 0.0
+        assert row["Total Amount"] == 109.0
+
+    def test_telco_split_registered_keeps_sr_and_zr(self):
+        inv = _two_line_invoice(doc_total=2090.0, account_codes=("500", "500"))
+        inv.our_gst_registered = True
+        rows = XeroLedgerExporter().rows([inv], "purchase")
+        assert [r["*TaxType"] for r in rows] == ["SR", "ZR"]
+        assert [r["TaxAmount"] for r in rows] == [90.0, 0.0]
+
+    def test_telco_split_non_registered_all_no_tax_gross(self):
+        inv = _two_line_invoice(doc_total=2090.0, account_codes=("500", "500"))
+        inv.our_gst_registered = False
+        rows = XeroLedgerExporter().rows([inv], "purchase")
+        assert [r["*TaxType"] for r in rows] == ["No Tax", "No Tax"]
+        assert [r["TaxAmount"] for r in rows] == [0.0, 0.0]
+        assert float(rows[0]["*UnitAmount"]) == 1090.0  # 1000 + 90 absorbed
+        assert float(rows[1]["*UnitAmount"]) == 1000.0
+
+
 # =========================================================================== #
 # WS3 — Xero Total per-line rule
 # =========================================================================== #

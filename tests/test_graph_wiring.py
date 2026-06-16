@@ -188,7 +188,7 @@ def test_driver_runs_all_nodes_present():
     _drive_driver(ctx)
     assert set(ctx.call_names) == {
         "classify_node",
-        "extract_invoice_node",
+        "extract_invoice_document_node",
         "review_extraction_node",
         "categorize_node",
         "tax_node",
@@ -208,7 +208,7 @@ def test_driver_classify_fanout_invoice_branch():
     )
     _drive_driver(ctx)
     assert ctx.call_names[0] == "classify_node"
-    assert "extract_invoice_node" in ctx.call_names
+    assert "extract_invoice_document_node" in ctx.call_names
     assert "extract_bank_node" not in ctx.call_names
 
 
@@ -222,7 +222,7 @@ def test_driver_classify_fanout_bank_branch():
     assert ctx.call_names[0] == "classify_node"
     assert "extract_bank_node" in ctx.call_names
     # Invoice-lane nodes never run on the bank branch.
-    for n in ("extract_invoice_node", "review_extraction_node",
+    for n in ("extract_invoice_document_node", "review_extraction_node",
               "categorize_node", "tax_node"):
         assert n not in ctx.call_names
 
@@ -235,11 +235,10 @@ def test_driver_invoice_lane_chain_order():
     )
     _drive_driver(ctx)
     names = ctx.call_names
-    chain = ["extract_invoice_node", "review_extraction_node", "categorize_node", "tax_node"]
+    chain = ["extract_invoice_document_node", "review_extraction_node", "categorize_node", "tax_node"]
     idxs = [names.index(n) for n in chain]
     assert idxs == sorted(idxs)
-    # The reviewer sits BETWEEN extraction and categorization.
-    assert names.index("review_extraction_node") > names.index("extract_invoice_node")
+    assert names.index("review_extraction_node") > names.index("extract_invoice_document_node")
     assert names.index("review_extraction_node") < names.index("categorize_node")
 
 

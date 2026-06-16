@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-06-15
-- **Deciders:** David (developer)
+- **Deciders:** Ledgr team
 - **Relates to:** ADR-0002 (Slack as system of record), ADR-0009 (chat write tools), Step 7 of the intelligent-agent master plan
 
 ## Context

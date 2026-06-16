@@ -4,7 +4,7 @@
 
 ### Issue tracker
 
-Issues live in GitHub Issues for davidkitdave/Ledgr-QBS. See `docs/agents/issue-tracker.md`.
+Issues live in GitHub Issues for your-org/Ledgr-QBS. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

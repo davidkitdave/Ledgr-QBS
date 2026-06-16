@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-06-15
-- **Deciders:** David (developer)
+- **Deciders:** Ledgr team
 - **Supersedes/extends:** ADR-0007 (HITL surface), ADR-0008 (chat lane standalone root agent)
 
 ## Context

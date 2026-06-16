@@ -1,7 +1,7 @@
 # Ledgr-QBS — Live Smoke QA Checklist (2026-06-14)
 
 Verifies Plan A (template/onboarding/HITL) + Plan B (extraction accuracy) against a **live** Slack
-workspace (`qbs-ai.slack.com`, socket-mode bot) using Cast Unity test firms in `~/Desktop/LocalTest`.
+workspace (`example-workspace.slack.com`, socket-mode bot) using Sample Test Group test firms in `~/Desktop/LocalTest`.
 
 Status legend: [ ] pending · [~] in progress · [x] pass · [!] FAIL (file follow-up)
 
@@ -14,12 +14,12 @@ Status legend: [ ] pending · [~] in progress · [x] pass · [!] FAIL (file foll
 
 ## 1. Client onboarding (Plan A T3–T4, T2)
 - [x] `/ledgr profile` recognized (FAILED on stale bot → "Ledgr slash commands"; PASS on fresh bot)
-- [x] Profile card shows software=Xero, FYE=October, GST=Not registered (Auditair) — echo works
+- [x] Profile card shows software=Xero, FYE=October, GST=Not registered (Acme Client) — echo works
 
 ## 1. Client onboarding (Plan A T3–T4, T2)
 - [ ] `/ledgr settings` on a fresh channel → onboarding modal opens
 - [ ] Submit profile (e.g. Xero, FYE month, region, GST-registered) → **profile-summary card** posts
-- [ ] COA: upload COA xlsx **or** tap "Use standard SG SME COA" → client shows active
+- [ ] COA: upload COA xlsx/csv → client shows active
 - [ ] `/ledgr profile` → echoes saved profile incl. accounting software
 - [ ] Delivery summary later names the chosen software ("…to your Xero FY… ledger")
 
@@ -28,7 +28,7 @@ Status legend: [ ] pending · [~] in progress · [x] pass · [!] FAIL (file foll
 - [ ] Invoice number + date populated (Xero `*InvoiceNumber`/`*InvoiceDate`/`*DueDate` non-blank)
 - [ ] Discount + tax invoice → reconciles (Σ lines == subtotal)
 - [ ] Dividend doc → NOT booked as a purchase with client as vendor
-- [ ] Auditair docs → reconcile (was 0%)
+- [ ] Acme Client docs → reconcile (was 0%)
 
 ## 3. Multi-currency / FX (Plan B T3/T3b)
 - [ ] IDR/USD multi-receipt bundle → split into separate lines, each correct
@@ -53,12 +53,12 @@ Status legend: [ ] pending · [~] in progress · [x] pass · [!] FAIL (file foll
 - [ ] Follow-up correction in same thread → bot adjusts
 
 ## 8. Bank-ledger continuity (Plan B T7, memory: continuous+sorted)
-- [ ] Drop another Akar month → running balance continues; B/F + cross-month check holds; gaps flagged
+- [ ] Drop another Sample Bank Client month → running balance continues; B/F + cross-month check holds; gaps flagged
 
 ## 9. Robustness
 - [ ] Unreadable / empty / unsupported file → "❌ Couldn't read this file" (NOT "Processed")
 
-## Live results (fresh bot, Auditair channel — Xero / FYE Oct / non-GST)
+## Live results (fresh bot, Acme Client channel — Xero / FYE Oct / non-GST)
 
 ### PASS
 - `/ledgr profile` returns profile card w/ software=Xero, FYE, GST status (Plan A T2/T4)
@@ -73,12 +73,12 @@ Status legend: [ ] pending · [~] in progress · [x] pass · [!] FAIL (file foll
 - No errors/tracebacks in bot log across multiple docs
 
 ### FAIL / PARTIAL
-- [!] **Learning loop did NOT apply** (Plan A T8 / ADR-0004): edited D37 Podaima → 5-1000 Cost of
-  Sales, posted; then dropped D36 (same vendor Darrell Podaima) → bot STILL proposed 6-3000
+- [!] **Learning loop did NOT apply** (Plan A T8 / ADR-0004): edited D37 Vendor Alpha → 5-1000 Cost of
+  Sales, posted; then dropped D36 (same vendor Vendor Alpha Pte Ltd) → bot STILL proposed 6-3000
   Professional Fees. Correction not auto-applied. → background investigation dispatched.
 - [~] **Filename not captured**: status + review card show generic `document.pdf` instead of the
   uploaded filename (Plan A T5 intent). Line is named by content (25-D37-SFS) but doc label is generic.
-- [~] **Direction low-confidence**: clear "To: Auditair" bill-to invoice still flagged "direction
+- [~] **Direction low-confidence**: clear "To: Acme Client" bill-to invoice still flagged "direction
   unknown" (Plan B T2 gap on this doc shape).
 - [~] **FX resolution path in HITL**: Edit modal has no FX-rate field; posting "Approved with edits"
   pushed the doc through despite unresolved USD→SGD (need to verify what amount/currency landed).
@@ -90,7 +90,7 @@ Status legend: [ ] pending · [~] in progress · [x] pass · [!] FAIL (file foll
   "Processed 4 documents"), NO per-doc spam (Plan A T9) ✅
 - Multi-invoice bundle split: combined "EXP25-D03 transfer" doc → invoices #2/#3 with mixed
   currencies THB + USD detected separately (Plan B T3) ✅
-- Tax classifier with reasoning: AAA-25-011 line flagged "NT: supplier not GST-registered /
+- Tax classifier with reasoning: MGT-2025-011 line flagged "NT: supplier not GST-registered /
   no GST line" — correct for non-GST client (Plan B T6) ✅
 
 ### CONFIRMED BUGS (root-caused)
@@ -112,11 +112,11 @@ Status legend: [ ] pending · [~] in progress · [x] pass · [!] FAIL (file foll
 
 ### MINOR / UX
 - Doc label `document.pdf` instead of uploaded filename on status + review cards (Plan A T5 intent)
-- Direction "unknown" on every Auditair purchase invoice despite clear "To: Auditair" (Plan B T2)
+- Direction "unknown" on every Acme Client purchase invoice despite clear "To: Acme Client" (Plan B T2)
 - Status wording self-contradicts: "not reconciled (reconciled; …)"
 
 ## Not yet tested live (deferred)
-- Akar bank-statement continuity on fresh bot (drop jun-2025) — Plan B T7
+- Sample Bank Client bank-statement continuity on fresh bot (drop jun-2025) — Plan B T7
 - Robustness: unreadable/empty/unsupported upload rejection — §9
 - Verify actual numbers/currency landed in the Xero workbook (esp. unconverted USD after edit-approve)
 
@@ -126,12 +126,12 @@ Status legend: [ ] pending · [~] in progress · [x] pass · [!] FAIL (file foll
   non-existent flat `vendor_name`/`issuer_name`. Corrected the masking test fixture + added a
   real-serialized-shape test (purchase + sales). Suite: **831 passed**, no new lint.
 - **PROVEN live**: after restart + an edit, Firestore `clients/client-97b148846c8f/entity_memory`
-  went 0 → 1 doc `{name: "Darrell Podaima", mapping_code: …}`. Corrections now persist. ✅
+  went 0 → 1 doc `{name: "Vendor Alpha Pte Ltd", mapping_code: …}`. Corrections now persist. ✅
 
 ## ✅ LEARNING LOOP VERIFIED END-TO-END (post-fix)
-- Taught vendor "Darrell Podaima" → 5-1000 Cost of Sales (distinctive, ≠ LLM default 6-3000).
-- Firestore entity_memory updated to `{name: "Darrell Podaima", mapping_code: "5-1000"}`.
-- Dropped a BRAND-NEW Podaima invoice (25-D31, never edited) → Edit modal auto-filled
+- Taught vendor "Vendor Alpha Pte Ltd" → 5-1000 Cost of Sales (distinctive, ≠ LLM default 6-3000).
+- Firestore entity_memory updated to `{name: "Vendor Alpha Pte Ltd", mapping_code: "5-1000"}`.
+- Dropped a BRAND-NEW Vendor Alpha invoice (INV-2026-031, never edited) → Edit modal auto-filled
   **5-1000 — Cost of Sales** on both lines (not 6-3000). The bot applied the learned correction.
 - "Getting smarter" now works. (Was fully broken: stale bot + vendor-key bug.)
 
@@ -145,7 +145,7 @@ Status legend: [ ] pending · [~] in progress · [x] pass · [!] FAIL (file foll
 ## Live re-verification still pending (Mac screen locked mid-session)
 - Q&A: ask a real question → expect a grounded, tool-backed answer (not the menu)
 - Multi-line collision: edit ONE line of a 2-line invoice → expect only that line learned
-- Akar bank continuity: drop jun-2025 → running-balance continuity
+- Sample Bank Client bank continuity: drop jun-2025 → running-balance continuity
 - Unreadable-file rejection: `/tmp/QA Unreadable Test.exe` staged → expect "❌ Couldn't read this file"
 
 ## ✅ Fixes 4–5 DONE + LIVE-VERIFIED (this session)
@@ -154,7 +154,7 @@ Status legend: [ ] pending · [~] in progress · [x] pass · [!] FAIL (file foll
   got `.exe` … supported: .pdf/.png/…" (rejected BEFORE Gemini; real name shown). Was: silent
   "Processed" + 400 error + `document.pdf` label.
 - **Bank recompute** (`d56259c`): `_is_formula_or_missing` now treats non-numeric balance cells
-  (currency strings) as untrusted. Live: re-dropped Akar jun-2025 → "Added Jun 2025 (39
+  (currency strings) as untrusted. Live: re-dropped Sample Bank Client jun-2025 → "Added Jun 2025 (39
   transactions) to your QBS Ledger FY2025 ledger", no crash. Was: ValueError on `float('SGD')`.
 - **Pre-fill amount+tax (#6/feature) — DEFERRED:** investigation showed the whole edit pipeline
   (modal → _edits_from_view_state → apply_decision → _dict_to_inv) is keyed on `tax_code`/`amount`,
@@ -164,7 +164,7 @@ Status legend: [ ] pending · [~] in progress · [x] pass · [!] FAIL (file foll
   in the modal pre-fill (blocks.py). NOT done now (rushing it at session-end risks the core HITL path).
 
 ## §8 Bank continuity FAIL (found 2026-06-14 — FIXED, see above)
-- [!] Dropping a new month (Akar jun-2025) onto an existing FY bank ledger CRASHES:
+- [!] Dropping a new month (Sample Bank Client jun-2025) onto an existing FY bank ledger CRASHES:
   `ledger_store.py:296 _recompute_balances → running = float(bal) → ValueError: could not
   convert string to float: 'SGD'`. Month never posts (stuck "Finalising… 0 posted").
 - ROOT CAUSE: `_recompute_balances` assumes every balance cell is numeric, but the sheet has

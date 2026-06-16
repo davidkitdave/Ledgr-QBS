@@ -42,7 +42,7 @@ import logging
 import os
 import tempfile
 import urllib.parse
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 # FastAPI Request/Response imported at module level so FastAPI can resolve
 # the string annotations produced by `from __future__ import annotations`.
@@ -77,8 +77,14 @@ from app.blocks import (
     dedup_callout_card,
     invoice_edit_modal,
     ledger_preview_data_table,
+    summary_table_blocks,
+    delivery_card_blocks,
+    compose_batch_delivery_summary,
+    job_progress_text,
+    software_label,
     proactive_redo_blocks,
     proactive_redo_modal,
+    processing_plan_blocks,
     review_card_blocks,
     review_hint_modal,
     review_outcome_blocks,
@@ -443,6 +449,9 @@ def _synthesize_confirmation_message(fc_id: str, confirmation: Any, *, confirmed
 #: pulls the trailing node name and we look it up here to drive the live status.
 _STAGE_LABELS: dict[str, str] = {
     "classify_node": "🔍 Taking a look at this document…",
+    "extract_document_node": "📄 Reading every field on the document…",
+    "normalize_document_node": "🧾 Mapping fields to ledger shape…",
+    "extract_invoice_document_node": "📄 Understanding this document…",
     "extract_invoice_node": "🧾 Looks like an invoice — reading the line items…",
     "extract_bank_node": "🏦 Looks like a bank statement — reading each transaction…",
     "categorize_node": "🗂️ Matching each line to your chart of accounts…",
@@ -484,13 +493,39 @@ def event_stage_label(event: Any) -> Optional[str]:
 
 #: Maps graph node name → canonical pipeline stage key used by _StageState.
 _STAGE_KEY_MAP: dict[str, str] = {
-    "classify_node": "classify",
-    "extract_invoice_node": "extract",
-    "extract_bank_node": "extract",
-    "categorize_node": "categorize",
-    "tax_node": "tax",
-    "approval_gate": "approve",
+    "classify_node": "understand",
+    "extract_document_node": "understand",
+    "normalize_document_node": "understand",
+    "extract_invoice_document_node": "understand",
+    "extract_invoice_node": "understand",
+    "extract_bank_node": "understand",
+    "categorize_node": "policy",
+    "tax_node": "policy",
+    "approval_gate": "policy",
+    "consolidate_node": "commit",
+    "deliver_node": "commit",
 }
+
+#: Nodes whose plan-block output belongs to the understand stage (not policy).
+_UNDERSTAND_OUTPUT_NODES: frozenset[str] = frozenset({
+    "classify_node",
+    "extract_document_node",
+    "normalize_document_node",
+    "extract_invoice_document_node",
+    "extract_invoice_node",
+    "extract_bank_node",
+})
+
+
+def _output_stage_for_node(node_name: str) -> Optional[str]:
+    """Map a graph node to the plan stage that should receive its output line."""
+    if node_name in _UNDERSTAND_OUTPUT_NODES:
+        return "understand"
+    if node_name in ("categorize_node", "tax_node", "approval_gate"):
+        return "policy"
+    if node_name in ("consolidate_node", "deliver_node"):
+        return "commit"
+    return _STAGE_KEY_MAP.get(node_name)
 
 
 def event_stage_key(event: Any) -> Optional[str]:
@@ -557,6 +592,12 @@ class _StageState:
                 s["status"] = "failed"
                 s["output"] = error
 
+    def set_output(self, stage_key: str, output: str) -> None:
+        """Attach or refresh the output line on an in-progress or complete stage."""
+        idx = self._index(stage_key)
+        if idx is not None:
+            self._stages[idx]["output"] = output
+
     def snapshot(self) -> list[dict]:
         """Return a copy of the current stage list."""
         return [dict(s) for s in self._stages]
@@ -565,7 +606,7 @@ class _StageState:
 def deslugify_channel_name(name: str) -> str:
     """Turn a Slack channel slug into a human client name for modal pre-fill.
 
-    ``"akar-enterprises-pte-ltd"`` → ``"Akar Enterprises Pte Ltd"``. Splits on
+    ``"sample-channel-client-pte-ltd"`` → ``"Sample Channel Client Pte Ltd"``. Splits on
     ``-``/``_``, title-cases each word, then restores conventional casing for
     common company-suffix tokens (``Pte Ltd``, ``LLP``, ``Pte``, ``Ltd``…).
     Returns ``""`` for an empty/whitespace-only name.
@@ -601,6 +642,9 @@ async def persist_and_deliver(
     user_id: Optional[str] = None,
     thread_ts: Optional[str] = None,
     replace: bool = False,
+    defer_slack_delivery: bool = False,
+    batch_mode: bool = False,  # noqa: ARG001 - threaded for symmetry; not used here
+    defer_ledger_persist: bool = False,
 ) -> dict:
     """Read the finished session's ledger payload → append to the FY workbook → post.
 
@@ -613,6 +657,13 @@ async def persist_and_deliver(
     ``session_id`` is the per-document session id; ``user_id`` is the ADK user id
     the session is stored under (the ``channel_id`` by convention). It defaults to
     ``session_id`` for backward-compatible single-id callers.
+
+    When ``defer_ledger_persist=True`` (set by the batch coordinator in
+    ``accounting_agents/slack_runner._message`` for multi-file drops so the
+    workbook is rewritten exactly ONCE at batch end), this function skips the
+    ``append_rows`` call and instead returns a ``deferred_ledger`` entry on the
+    result so the batch coordinator can merge it with the other stashed rows and
+    write the workbook in a single pass.
     """
     if user_id is None:
         user_id = session_id
@@ -639,7 +690,7 @@ async def persist_and_deliver(
         )
 
     append_result: dict = {}
-    if batches:
+    if batches and not defer_ledger_persist:
         append_result = await asyncio.to_thread(
             ledger_store.append_rows,
             client_id=payload.get("client_id") or "unknown",
@@ -657,8 +708,29 @@ async def persist_and_deliver(
         append_result.setdefault("kind", payload.get("kind") or "invoice")
         append_result.setdefault("software", payload.get("software") or "")
         append_result.setdefault("fy", str(payload.get("fy") or ""))
+    elif batches and defer_ledger_persist:
+        # Stash the ledger payload so the batch coordinator can merge with peers
+        # and call ``append_rows`` once per FY workbook. The ``deferred_ledger``
+        # key mirrors the existing ``deferred_delivery`` shape: the coordinator
+        # reads it after the per-doc loop, calls ledger_store.append_rows with the
+        # merged batches, and threads the final workbook name into
+        # ``deferred_delivery["workbook_name"]`` so the aggregate delivery card
+        # references the right file.
+        summary = state.get(nodes.DELIVER_SUMMARY_KEY) or nodes.compose_delivery_summary(payload)
+        append_result = {
+            "deferred_ledger": {
+                "summary": summary,
+                "batches": batches,
+                "payload": payload,
+                "effective_replace": effective_replace,
+            },
+            "kind": payload.get("kind") or "invoice",
+            "software": payload.get("software") or "",
+            "fy": str(payload.get("fy") or ""),
+            "appended": 0,  # not yet appended; batch-end call will set this
+        }
 
-    # When every batch was deduped (already in seen_doc_keys), post a native
+    # When every batch was deduped
     # dedup callout card with [Replace recorded month] and [Keep existing] buttons
     # so the user can take action without re-uploading.
     if append_result.get("deduped", 0) > 0 and append_result.get("appended", 0) == 0:
@@ -705,26 +777,60 @@ async def persist_and_deliver(
     # Derive the summary from the LEDGER_ROWS_KEY payload so the HITL path emits
     # the SAME rich delivery card as the clean path — never the bare fallback.
     summary = state.get(nodes.DELIVER_SUMMARY_KEY) or nodes.compose_delivery_summary(payload)
-    _post_message(slack_client, channel_id, summary, thread_ts=thread_ts)
 
-    # Post one data_table preview per batch (best-effort; never breaks delivery).
-    # Each batch maps to one .xlsx tab, so one preview message per batch gives
-    # the user a per-tab window on exactly the rows SlackLedgerStore appended.
+    if defer_slack_delivery:
+        if append_result.get("appended", 0) > 0 or append_result.get("deferred_ledger"):
+            append_result["deferred_delivery"] = {
+                "summary": summary,
+                "batches": batches,
+                "payload": payload,
+                "workbook_name": append_result.get("filename") or "",
+            }
+        return append_result
+
     if append_result.get("appended", 0) > 0 and batches:
-        workbook_name = append_result.get("filename") or "Ledger.xlsx"
-        fy_str = append_result.get("fy") or str(payload.get("fy") or "")
+        _post_delivery_card(
+            slack_client,
+            channel_id,
+            summary=summary,
+            batches=batches,
+            payload=payload,
+            append_result=append_result,
+            thread_ts=thread_ts,
+        )
+    elif summary and not append_result.get("all_deduped"):
+        _post_message(slack_client, channel_id, summary, thread_ts=thread_ts)
+
+    return append_result
+
+
+def _post_delivery_card(
+    slack_client: Any,
+    channel_id: str,
+    *,
+    summary: str,
+    batches: list[dict],
+    payload: dict,
+    append_result: dict,
+    thread_ts: Optional[str] = None,
+) -> None:
+    """Post one delivery message: summary + ledger preview data_table(s)."""
+    workbook_name = append_result.get("filename") or "Ledger.xlsx"
+    fy_str = append_result.get("fy") or str(payload.get("fy") or "")
+    try:
+        fy_int = int(fy_str)
+    except (TypeError, ValueError):
+        fy_int = 0
+    software = str(payload.get("software") or "qbs_ledger")
+    preview_blocks: list[dict] = []
+    for batch in batches:
+        batch_rows = batch.get("rows") or []
+        if not batch_rows:
+            continue
+        sheet = str(batch.get("sheet") or "Purchase")
         try:
-            fy_int = int(fy_str)
-        except (TypeError, ValueError):
-            fy_int = 0
-        software = str(payload.get("software") or "qbs_ledger")
-        for batch in batches:
-            batch_rows = batch.get("rows") or []
-            if not batch_rows:
-                continue
-            sheet = str(batch.get("sheet") or "Purchase")
-            try:
-                preview_blocks = ledger_preview_data_table(
+            preview_blocks.extend(
+                ledger_preview_data_table(
                     rows=batch_rows,
                     workbook_name=workbook_name,
                     fy=fy_int,
@@ -732,21 +838,223 @@ async def persist_and_deliver(
                     software=software,
                     channel_id=channel_id,
                 )
-                if preview_blocks:
-                    preview_kwargs: dict = {
-                        "channel": channel_id,
-                        "text": f"Ledger preview — {sheet} ({workbook_name})",
-                        "blocks": preview_blocks,
-                    }
-                    if thread_ts:
-                        preview_kwargs["thread_ts"] = thread_ts
-                    slack_client.chat_postMessage(**preview_kwargs)
-            except Exception:  # noqa: BLE001 — preview is cosmetic; never break delivery
-                logger.warning(
-                    "ledger preview post failed for sheet %s (non-fatal)", sheet, exc_info=True
-                )
+            )
+        except Exception:  # noqa: BLE001 — preview is cosmetic
+            logger.warning(
+                "ledger preview build failed for sheet %s (non-fatal)", sheet, exc_info=True
+            )
+    blocks = (
+        delivery_card_blocks(summary, preview_blocks)
+        if preview_blocks
+        else [{"type": "section", "text": {"type": "mrkdwn", "text": summary}}]
+    )
+    kwargs: dict = {"channel": channel_id, "text": summary, "blocks": blocks}
+    if thread_ts:
+        kwargs["thread_ts"] = thread_ts
+    try:
+        slack_client.chat_postMessage(**kwargs)
+    except Exception:  # noqa: BLE001 — cosmetic; never break delivery
+        logger.warning("delivery card post failed (non-fatal)", exc_info=True)
 
-    return append_result
+
+def _build_batch_aggregate_blocks(
+    deferred_items: list[dict],
+    channel_id: str,
+) -> tuple[str, list[dict]]:
+    """Build the aggregate delivery summary + data-table blocks for a batch.
+
+    Returns ``(summary_text, blocks)``. Caller is responsible for posting
+    (single post) or appending (chat.update merging with the job-summary
+    message so the whole batch lives in ONE top-level message).
+    """
+    if not deferred_items:
+        return "", []
+
+    sheet_groups: dict[tuple, dict] = {}
+    summary_groups: dict[str, dict] = {}
+    client_name = ""
+
+    for item in deferred_items:
+        payload = item.get("payload") or {}
+        batches = item.get("batches") or []
+        workbook_name = item.get("workbook_name") or "Ledger.xlsx"
+        fy = str(payload.get("fy") or "")
+        software = str(payload.get("software") or "")
+        kind = str(payload.get("kind") or "invoice")
+        client_name = client_name or str(payload.get("client_name") or "")
+
+        sg = summary_groups.setdefault(
+            fy,
+            {"fy": fy, "software": software, "kind": kind, "n_rows": 0, "n_docs": 0,
+             "client_name": client_name},
+        )
+        sg["n_rows"] += sum(len(b.get("rows") or []) for b in batches)
+        # n_docs counts documents, not per-sheet batches — a single doc that
+        # splits into Purchase+Sales sheets is one document, not two.
+        sg["n_docs"] += 1
+
+        for batch in batches:
+            batch_rows = batch.get("rows") or []
+            if not batch_rows:
+                continue
+            sheet = str(batch.get("sheet") or "Purchase")
+            key = (fy, sheet, workbook_name, software, kind)
+            grp = sheet_groups.setdefault(
+                key,
+                {"rows": [], "fy": fy, "sheet": sheet, "workbook_name": workbook_name,
+                 "software": software},
+            )
+            grp["rows"].extend(batch_rows)
+
+    summary = compose_batch_delivery_summary(
+        groups=list(summary_groups.values()),
+        client_name=client_name,
+    )
+    preview_blocks: list[dict] = []
+    for grp in sheet_groups.values():
+        try:
+            fy_int = int(grp["fy"])
+        except (TypeError, ValueError):
+            fy_int = 0
+        preview_blocks.extend(
+            ledger_preview_data_table(
+                rows=grp["rows"],
+                workbook_name=grp["workbook_name"],
+                fy=fy_int,
+                sheet=grp["sheet"],
+                software=grp["software"],
+                channel_id=channel_id,
+            )
+        )
+
+    blocks = (
+        delivery_card_blocks(summary, preview_blocks)
+        if preview_blocks
+        else [{"type": "section", "text": {"type": "mrkdwn", "text": summary}}]
+    )
+    return summary, blocks
+
+
+def _post_batch_aggregate_delivery(
+    slack_client: Any,
+    channel_id: str,
+    deferred_items: list[dict],
+) -> None:
+    """One aggregate delivery card after a multi-file batch completes."""
+    summary, blocks = _build_batch_aggregate_blocks(deferred_items, channel_id)
+    if not summary:
+        return
+    try:
+        slack_client.chat_postMessage(
+            channel=channel_id,
+            text=summary,
+            blocks=blocks,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("batch aggregate delivery post failed (non-fatal)", exc_info=True)
+
+
+async def _flush_deferred_ledger_writes(
+    *,
+    ledger_store: SlackLedgerStore,
+    slack_client: Any,
+    channel_id: str,
+    batch_deferred: list[dict],
+) -> None:
+    """Merge stashed ledger payloads across the batch and write the workbook ONCE.
+
+    Each per-doc run in batch mode added a ``deferred_ledger`` to its result
+    (carrying its own ``batches`` list, ``payload`` and ``effective_replace``
+    flag). We group by ``(client_id, fy, software, kind)`` and call
+    :meth:`SlackLedgerStore.append_rows` once per group. The merged
+    ``workbook_name`` is then back-patched onto each ``deferred_delivery`` entry
+    so the aggregate delivery card references the right file.
+
+    Errors here are non-fatal: the delivery message still posts; the workbook
+    may simply miss the late write until a later file drop re-runs the same FY.
+    """
+    # Group deferred_ledger entries by (client_id, fy, software, kind).
+    # ``client_id`` and ``software`` may be missing on some payloads; fall back
+    # to the "hint" values collected on the result for that doc.
+    groups: dict[tuple[str, str, str, str], dict] = {}
+    for item in batch_deferred:
+        payload = item.get("payload") or {}
+        client_id = payload.get("client_id") or "unknown"
+        fy = str(payload.get("fy") or "unknown")
+        software = payload.get("software") or "qbs"
+        kind = payload.get("kind") or "invoice"
+        key = (client_id, fy, software, kind)
+        grp = groups.setdefault(
+            key,
+            {
+                "client_id": client_id,
+                "fy": fy,
+                "software": software,
+                "kind": kind,
+                "client_name": payload.get("client_name") or "",
+                "batches": [],
+                "effective_replace": False,
+            },
+        )
+        # Concatenate this doc's batches into the group. The ledger store
+        # dedupes on doc_key, so even if we re-stash the same doc_id twice
+        # (rare) it won't double-write.
+        grp["batches"].extend(item.get("batches") or [])
+        if item.get("effective_replace"):
+            grp["effective_replace"] = True
+
+    if not groups:
+        return
+
+    for grp in groups.values():
+        if not grp["batches"]:
+            continue
+        try:
+            append_result = await asyncio.to_thread(
+                ledger_store.append_rows,
+                client_id=grp["client_id"],
+                fy=grp["fy"],
+                slack_client=slack_client,
+                channel_id=channel_id,
+                batches=grp["batches"],
+                software=grp["software"],
+                kind=grp["kind"],
+                client_name=grp["client_name"],
+                replace=grp["effective_replace"],
+            )
+        except Exception:  # noqa: BLE001 — non-fatal; delivery card still posts
+            logger.exception(
+                "batch-end workbook append failed for client=%s fy=%s kind=%s",
+                grp["client_id"], grp["fy"], grp["kind"],
+            )
+            continue
+        workbook_name = (append_result or {}).get("filename") or ""
+        if not workbook_name:
+            continue
+        # Back-patch the resolved workbook name onto every deferred delivery
+        # entry that belongs to this (client, fy) group.
+        for item in batch_deferred:
+            payload = item.get("payload") or {}
+            if (
+                (payload.get("client_id") or "unknown") == grp["client_id"]
+                and str(payload.get("fy") or "unknown") == grp["fy"]
+                and (payload.get("kind") or "invoice") == grp["kind"]
+            ):
+                item["workbook_name"] = workbook_name
+
+
+def _terminal_status_line(append_result: dict, _payload: Optional[dict] = None) -> str:
+    """One-line status after delivery — no plan accordion."""
+    fy = append_result.get("fy") or (_payload or {}).get("fy") or "?"
+    sw = software_label(str(append_result.get("software") or (_payload or {}).get("software") or ""))
+    kind = append_result.get("kind") or (_payload or {}).get("kind") or "invoice"
+    noun = "Bank Statement" if kind == "bank" else "Ledger"
+    sw_bit = f" ({sw})" if sw else ""
+    return f"✅ Added to {noun} FY{fy}{sw_bit}"
+
+
+def _simple_status_blocks(text: str) -> list[dict]:
+    return [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
 
 
 def _build_preview_rows(batches: list[dict]) -> list[dict]:
@@ -957,6 +1265,20 @@ def _post_status(
     return None
 
 
+def _plan_status_blocks(
+    stage_state: _StageState,
+    source_filename: str,
+    channel_id: str,
+) -> list:
+    """Block Kit accordion for live pipeline progress (plan block or fallback)."""
+    label = f"{_env_prefix()}`{source_filename}`"
+    return processing_plan_blocks(
+        label,
+        stages=stage_state.snapshot(),
+        channel_id=channel_id,
+    )
+
+
 def _update_status(
     slack_client: Any,
     channel_id: str,
@@ -1001,6 +1323,10 @@ async def process_file_event(
     client_store=None,
     hint: str = "",
     replace: bool = False,
+    defer_slack_delivery: bool = False,
+    batch_mode: bool = False,
+    defer_ledger_persist: bool = False,
+    status_callback: Optional[Callable[[dict], None]] = None,
 ) -> dict:
     """Download the dropped PDF, run the workflow, and persist OR pause for HITL.
 
@@ -1050,16 +1376,21 @@ async def process_file_event(
     # working, then edit it in place through the run (see _update_status). Both
     # the reaction and this post are OUTSIDE the semaphore so even a queued drop
     # that is waiting on _SEM still shows an instant "on it" signal to the user.
-    # Step 12: the per-stage processing accordion is dropped. The status message
-    # is a single compact one-liner that is edited in place to the final summary;
-    # the chat agent (assistant_agent) answers "what stage is this in?" on demand.
+    # Initial post is a compact one-liner; stage updates swap in the plan accordion.
+    # In batch_mode the job-summary message owns the per-batch UX — posting a
+    # per-doc "Received" + plan accordion here would stampede the channel with
+    # N top-level messages (the pre-1B bug). Suppress both, leave status_ts=None
+    # so _update_status no-ops, and let HITL cards still thread under the job.
     _stage_state = _StageState()
-    status_ts = _post_status(
-        slack_client,
-        channel_id,
-        f"{_env_prefix()}📥 Received `{source_filename}` — on it…",
-        thread_ts,
-    )
+    if batch_mode:
+        status_ts = None
+    else:
+        status_ts = _post_status(
+            slack_client,
+            channel_id,
+            f"{_env_prefix()}📥 Received `{source_filename}` — on it…",
+            thread_ts,
+        )
 
     async with _SEM:
         data = download_fn(slack_client, file_id)
@@ -1073,12 +1404,13 @@ async def process_file_event(
                 "rejected unreadable upload: file=%s channel=%s reason=%s",
                 file_id, channel_id, rejection_reason,
             )
-            _stage_state.mark_failed("classify", "Couldn't read this file")
+            _stage_state.mark_failed("understand", "Couldn't read this file")
             _update_status(
                 slack_client,
                 channel_id,
                 status_ts,
                 "❌ Couldn't read this file",
+                blocks=_plan_status_blocks(_stage_state, source_filename, channel_id),
             )
             _post_message(
                 slack_client, channel_id,
@@ -1086,6 +1418,13 @@ async def process_file_event(
                 "Please re-upload a supported document (PDF, PNG, JPG, WEBP, or GIF).",
                 thread_ts=thread_ts,
             )
+            if batch_mode and status_callback is not None:
+                status_callback({
+                    "file_label": source_filename,
+                    "stage": "Couldn't read this file",
+                    "detail": rejection_reason,
+                    "status": "failed",
+                })
             return {
                 "status": "rejected_unreadable",
                 "channel_id": channel_id,
@@ -1095,13 +1434,19 @@ async def process_file_event(
 
         artifact_name = ARTIFACT_NAME_FMT.format(file_id=file_id)
 
+        from invoice_processing.extract.invoice_extractor import mime_for
+
+        artifact_mime = mime_for(source_filename)
+        if artifact_mime == "application/octet-stream":
+            artifact_mime = "application/pdf"
+
         await runner.artifact_service.save_artifact(
             app_name=app_name,
             user_id=channel_id,
             session_id=session_id,
             filename=artifact_name,
             artifact=types.Part(
-                inline_data=types.Blob(data=data, mime_type="application/pdf")
+                inline_data=types.Blob(data=data, mime_type=artifact_mime)
             ),
         )
 
@@ -1126,6 +1471,8 @@ async def process_file_event(
         interrupt_id: Optional[str] = None
         last_text = ""
         last_stage: Optional[str] = None
+        last_node: Optional[str] = None
+        understand_output: Optional[str] = None
         async for event in runner.run_async(
             user_id=channel_id,
             session_id=session_id,
@@ -1135,20 +1482,64 @@ async def process_file_event(
             state_delta=state_delta,
         ):
             # Drive the live status off the real event stream: each node tags its
-            # events with node_info.path → friendly stage label. Only edit on an
-            # actual stage change to avoid redundant chat_update calls.
+            # events with node_info.path → friendly stage label. Edit on stage
+            # transitions and when a new node completes within the same stage.
+            node_name = event_node_name(event)
             stage = event_stage_label(event)
             stage_key = event_stage_key(event)
-            if stage is not None and stage != last_stage:
-                last_stage = stage
+            if node_name is not None and node_name != last_node:
+                last_node = node_name
+                run_state: dict = {}
+                try:
+                    session = await runner.session_service.get_session(
+                        app_name=app_name, user_id=channel_id, session_id=session_id
+                    )
+                    if session and getattr(session, "state", None):
+                        run_state = dict(session.state)
+                except Exception:  # noqa: BLE001 — cosmetic status only
+                    pass
+                node_output = _stage_output_for_completed_node(node_name, run_state)
+                output_stage = _output_stage_for_node(node_name)
+                if output_stage == "understand" and node_output:
+                    understand_output = node_output
                 if stage_key is not None:
-                    _stage_state.advance(stage_key)
-                _update_status(
-                    slack_client,
-                    channel_id,
-                    status_ts,
-                    stage,
-                )
+                    if stage_key != last_stage:
+                        last_stage = stage_key
+                        handoff_output = None
+                        if stage_key == "policy" and understand_output:
+                            handoff_output = understand_output
+                        elif stage_key != "understand" and node_output and output_stage != "understand":
+                            handoff_output = node_output
+                        _stage_state.advance(stage_key, output=handoff_output)
+                    if node_output and output_stage:
+                        _stage_state.set_output(output_stage, node_output)
+                if stage is not None:
+                    _update_status(
+                        slack_client,
+                        channel_id,
+                        status_ts,
+                        stage,
+                        blocks=_plan_status_blocks(
+                            _stage_state, source_filename, channel_id
+                        ),
+                    )
+                    if batch_mode and status_callback is not None:
+                        # Surface the live stage onto the shared batch plan block
+                        # so the user sees per-doc thinking in the placeholder.
+                        try:
+                            _snapshot = _stage_state.snapshot()
+                            current_stage = next(
+                                (s for s in _snapshot if s.get("status") == "in_progress"),
+                                None,
+                            )
+                            status_callback({
+                                "file_label": source_filename,
+                                "stage": (current_stage or {}).get("title") or stage,
+                                "detail": (current_stage or {}).get("output"),
+                                "status": "in_progress",
+                            })
+                        except Exception:  # noqa: BLE001 - cosmetic only
+                            logger.debug("batch status callback failed", exc_info=True)
             iid = find_interrupt_id(event)
             if iid is not None:
                 interrupt_id = iid
@@ -1171,45 +1562,75 @@ async def process_file_event(
             file_id=file_id,
             thread_ts=thread_ts,
             replace=replace,
+            status_ts=status_ts,
+            source_filename=source_filename,
+            stage_state=_stage_state,
+            defer_slack_delivery=defer_slack_delivery,
+            batch_mode=batch_mode,
+            defer_ledger_persist=defer_ledger_persist,
         )
 
         if outcome["status"] == "paused":
-            _stage_state.advance("approve")
+            _stage_state.advance("commit")
+            _stage_state.set_output("policy", "Waiting for your approval")
             _update_status(
                 slack_client,
                 channel_id,
                 status_ts,
                 "⏳ Needs your review",
+                blocks=_plan_status_blocks(
+                    _stage_state, source_filename, channel_id
+                ),
             )
+            if batch_mode and status_callback is not None:
+                status_callback({
+                    "file_label": source_filename,
+                    "stage": "Awaiting your review",
+                    "detail": "paused for approval",
+                    "status": "in_progress",
+                })
             return outcome
 
-        # Delivery branch — decorate the status line and reactions.
+        # Delivery branch — collapse status to one line (delivery card is the headline).
         append_result = outcome.get("append", {})
+        payload = append_result  # fy/software/kind carried on append result
         if append_result.get("all_deduped"):
-            _stage_state.mark_complete()
             _update_status(
                 slack_client,
                 channel_id,
                 status_ts,
                 "📋 Already recorded",
+                blocks=_simple_status_blocks("📋 Already recorded"),
             )
             _remove_reaction(slack_client, channel_id, upload_msg_ts, "eyes")
             _add_reaction(slack_client, channel_id, upload_msg_ts, "ballot_box_with_check")
+            if batch_mode and status_callback is not None:
+                status_callback({
+                    "file_label": source_filename,
+                    "stage": "Already recorded",
+                    "detail": "duplicate of a prior entry",
+                    "status": "complete",
+                })
             return {"status": "duplicate", "append": append_result}
 
-        # Final state: collapse the evolving status to a terminal ✅. The full
-        # delivery summary is posted by persist_and_deliver, so keep this short
-        # to avoid double-posting the same detail.
-        _stage_state.mark_complete()
+        terminal = _terminal_status_line(append_result, payload)
         _update_status(
             slack_client,
             channel_id,
             status_ts,
-            "✅ Processed",
+            terminal,
+            blocks=_simple_status_blocks(terminal),
         )
         # Swap the 👀 reaction for ✅ on the user's original upload message.
         _remove_reaction(slack_client, channel_id, upload_msg_ts, "eyes")
         _add_reaction(slack_client, channel_id, upload_msg_ts, "white_check_mark")
+        if batch_mode and status_callback is not None:
+            status_callback({
+                "file_label": source_filename,
+                "stage": "Added to ledger",
+                "detail": terminal,
+                "status": "complete",
+            })
         return outcome
 
 
@@ -1324,6 +1745,117 @@ def _vendor_from_inv_dict(first: dict) -> Optional[str]:
     party = first.get("supplier") if doc_type == "purchase" else first.get("customer")
     name = (party or {}).get("name") if isinstance(party, dict) else None
     return name or first.get("vendor_name") or first.get("issuer_name")
+
+
+_DOC_TYPE_LABELS: dict[str, str] = {
+    "invoice": "Invoice",
+    "purchase": "Purchase invoice",
+    "sales": "Sales invoice",
+    "receipt": "Receipt",
+    "telco": "Telco bill",
+    "utility": "Utility bill",
+    "bank_statement": "Bank statement",
+    "statement_of_account": "Statement of account",
+    "other": "Document",
+}
+
+
+def _stage_output_for_completed_node(node_name: str, state: dict) -> Optional[str]:
+    """Build a short plan-block output line after a graph node finishes."""
+    if not node_name or not state:
+        return None
+
+    doc_type = (state.get(nodes.DOC_TYPE_KEY) or "invoice").strip().lower()
+    direction = (state.get(nodes.DIRECTION_KEY) or "purchase").strip().lower()
+    invs = state.get(nodes.NORMALIZED_KEY) or []
+
+    if node_name == "classify_node":
+        label = _DOC_TYPE_LABELS.get(doc_type, doc_type.replace("_", " ").title())
+        if doc_type not in ("bank_statement", "statement_of_account", "other"):
+            label = f"{direction.title()} {label.lower()}" if direction else label
+        return label
+
+    if node_name in (
+        "extract_document_node",
+        "normalize_document_node",
+        "extract_invoice_document_node",
+        "extract_invoice_node",
+    ):
+        if not invs:
+            return None
+        first = invs[0] if isinstance(invs[0], dict) else {}
+        vendor = _vendor_from_inv_dict(first) or "Unknown vendor"
+        inv_no = (first.get("invoice_number") or "").strip()
+        total = first.get("doc_total")
+        cur = (first.get("currency") or "SGD").strip().upper()
+        lines = first.get("lines") or []
+        n_lines = len(lines)
+        parts = [vendor]
+        if inv_no:
+            parts.append(f"#{inv_no[:24]}")
+        if isinstance(total, (int, float)):
+            parts.append(f"{cur} {total:,.2f}")
+        if n_lines:
+            parts.append(f"{n_lines} line{'s' if n_lines != 1 else ''}")
+        return " · ".join(parts)
+
+    if node_name == "extract_bank_node":
+        banks = state.get(nodes.BANK_STATEMENTS_KEY) or []
+        if not banks:
+            return "Bank statement"
+        first = banks[0] if isinstance(banks[0], dict) else {}
+        bank = (first.get("bank_name") or first.get("bank") or "Bank").strip()
+        txns = first.get("transactions") or []
+        return f"{bank} · {len(txns)} transaction{'s' if len(txns) != 1 else ''}"
+
+    if node_name == "categorize_node":
+        if not invs:
+            return None
+        first = invs[0] if isinstance(invs[0], dict) else {}
+        codes = {
+            (ln.get("account_code") or "").strip()
+            for ln in (first.get("lines") or [])
+            if isinstance(ln, dict) and (ln.get("account_code") or "").strip()
+        }
+        if not codes:
+            return "Chart of accounts matched"
+        if len(codes) == 1:
+            return f"Account {next(iter(codes))}"
+        return f"{len(codes)} account codes"
+
+    if node_name in ("tax_node", "approval_gate"):
+        if not invs:
+            return None
+        first = invs[0] if isinstance(invs[0], dict) else {}
+        taxes = {
+            (ln.get("tax_treatment") or ln.get("tax_code") or "").strip()
+            for ln in (first.get("lines") or [])
+            if isinstance(ln, dict)
+        }
+        taxes = {t for t in taxes if t}
+        tax_label = next(iter(taxes)) if len(taxes) == 1 else (
+            f"{len(taxes)} tax codes" if taxes else "Tax applied"
+        )
+        if first.get("reconciled", True):
+            return f"{tax_label} · reconciled"
+        note = (first.get("reconcile_note") or "needs review").strip()
+        if len(note) > 60:
+            note = note[:59] + "…"
+        return f"{tax_label} · {note}"
+
+    if node_name in ("consolidate_node", "deliver_node"):
+        payload = state.get(nodes.LEDGER_ROWS_KEY) or {}
+        fy = payload.get("fy")
+        kind = payload.get("kind") or doc_type
+        batches = payload.get("batches") or []
+        n_rows = sum(len(b.get("rows") or []) for b in batches)
+        if fy and n_rows:
+            return f"FY{fy} · {n_rows} row{'s' if n_rows != 1 else ''} · {kind}"
+        if n_rows:
+            return f"{n_rows} row{'s' if n_rows != 1 else ''} ready"
+        return None
+
+    return None
 
 
 def _doc_label_from_state(state: dict) -> str:
@@ -1449,6 +1981,12 @@ async def _finalize_run_outcome(
     file_id: str,
     thread_ts: Optional[str] = None,
     replace: bool = False,
+    status_ts: Optional[str] = None,
+    source_filename: Optional[str] = None,
+    stage_state: Optional[_StageState] = None,
+    defer_slack_delivery: bool = False,
+    batch_mode: bool = False,
+    defer_ledger_persist: bool = False,
 ) -> dict:
     """Shared post-run tail: post the right card or deliver, based on the event stream.
 
@@ -1488,6 +2026,22 @@ async def _finalize_run_outcome(
             {"user_id": user_id, "session_id": session_id},
         )
 
+        # Wire the understand-extract summary table into the reviewer-facing
+        # thread before the approval/review card lands, so the human sees
+        # Gemini's category/details interpretation alongside the Approve/Edit
+        # decision. This was the missing terminal/debug visibility for the
+        # "why is this booked as Sales?" complaints — previously
+        # ``_post_summary_table`` was defined but never called.
+        summary_table = paused_state.get(nodes.LEDGER_SUMMARY_TABLE_KEY) or []
+        if summary_table:
+            try:
+                _post_summary_table(
+                    slack_client, channel_id, summary_table,
+                    thread_ts=thread_ts,
+                )
+            except Exception:  # noqa: BLE001 - cosmetic; never break the gate
+                logger.debug("summary table post failed (non-fatal)", exc_info=True)
+
         if interrupt_id.endswith(":review"):
             # Mid-flow extract-review interrupt from ``review_extraction_node``.
             question = paused_state.get("review_question") or last_text or ""
@@ -1519,6 +2073,10 @@ async def _finalize_run_outcome(
             extra: dict = {"summary": summary, "doc_label": doc_label}
             if thread_ts:
                 extra["thread_ts"] = thread_ts
+            if status_ts:
+                extra["status_ts"] = status_ts
+            if source_filename:
+                extra["source_filename"] = source_filename
             write_interrupt(
                 db,
                 interrupt_id,
@@ -1542,6 +2100,9 @@ async def _finalize_run_outcome(
         user_id=user_id,
         thread_ts=thread_ts,
         replace=replace,
+        defer_slack_delivery=defer_slack_delivery,
+        batch_mode=batch_mode,
+        defer_ledger_persist=defer_ledger_persist,
     )
     status = "duplicate" if append_result.get("all_deduped") else "delivered"
 
@@ -1579,6 +2140,29 @@ def _post_proactive_redo_card(
         "channel": channel_id,
         "blocks": proactive_redo_blocks(file_id, reasons, channel_id=channel_id),
         "text": "This document looked off — want me to re-read it?",
+    }
+    if thread_ts:
+        kwargs["thread_ts"] = thread_ts
+    resp = slack_client.chat_postMessage(**kwargs)
+    data = resp.data if hasattr(resp, "data") else resp
+    if isinstance(data, dict):
+        return data.get("ts")
+    return None
+
+
+def _post_summary_table(
+    slack_client: Any,
+    channel_id: str,
+    summary_table: list,
+    thread_ts=None,
+) -> Optional[str]:
+    """Post Drive-style summary table when understand-extract populated it."""
+    if not summary_table:
+        return None
+    kwargs = {
+        "channel": channel_id,
+        "blocks": summary_table_blocks(summary_table, channel_id=channel_id),
+        "text": "Document summary",
     }
     if thread_ts:
         kwargs["thread_ts"] = thread_ts
@@ -1709,6 +2293,32 @@ async def handle_approval_action(
         _post_message(slack_client, channel_id, "Document rejected — nothing was added to the ledger.", thread_ts=thread_ts)
 
     _update_card(slack_client, interrupt, summary, decision)
+
+    status_ts = interrupt.get("status_ts")
+    source_filename = interrupt.get("source_filename") or "document"
+    if status_ts:
+        stage_state = _StageState()
+        stage_state.mark_complete(
+            output="Approved" if decision == "approve" else (
+                "Rejected" if decision == "reject" else "Updated"
+            ),
+        )
+        terminal = "✅ Processed" if decision == "approve" else (
+            "❌ Rejected" if decision == "reject" else "✅ Processed"
+        )
+        try:
+            _update_status(
+                slack_client,
+                channel_id,
+                status_ts,
+                terminal,
+                blocks=_plan_status_blocks(
+                    stage_state, source_filename, channel_id
+                ),
+            )
+        except Exception:  # noqa: BLE001 — cosmetic
+            logger.debug("failed to finalize plan status after approval", exc_info=True)
+
     return {"status": "resumed", "op_id": op_id, "events": len(events), "append": append_result}
 
 
@@ -2473,19 +3083,35 @@ def download_pdf_bytes(slack_client: Any, file_id: str) -> bytes:
 # --------------------------------------------------------------------------- #
 
 
-def build_runner(*, session_service=None, artifact_service=None):
+def build_runner(*, session_service=None, artifact_service=None, direct_document: bool = True):
     """Construct the ADK ``Runner`` bound to the accounting App + Firestore sessions.
+
+    When ``direct_document`` is True (default), file uploads use ``document_app``
+    and skip the coordinator LLM (P2-2). Set ``LEDGR_USE_COORDINATOR=1`` to
+    route uploads through the full coordinator graph instead.
 
     Imports are deferred so importing this module never touches the network.
     """
     from google.adk.artifacts.in_memory_artifact_service import InMemoryArtifactService
     from google.adk.runners import Runner
 
+    import os
+
     from accounting_agents.agent import app as adk_app
+    from accounting_agents.agent import document_app
     from accounting_agents.sessions import FirestoreSessionService
 
+    use_coordinator = os.environ.get("LEDGR_USE_COORDINATOR", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    bound = adk_app if (use_coordinator or not direct_document) else document_app
+    if not use_coordinator and direct_document:
+        logger.info("build_runner: using document_app (coordinator bypass for uploads)")
+
     return Runner(
-        app=adk_app,
+        app=bound,
         session_service=session_service or FirestoreSessionService(),
         artifact_service=artifact_service or InMemoryArtifactService(),
     )
@@ -2524,7 +3150,7 @@ def _setup_channel_id(body: dict) -> str:
 async def _derive_setup_prefill(slack_client: Any, body: dict) -> Optional[dict]:
     """Build the onboarding-modal prefill from the channel name (best-effort).
 
-    The channel is already named after the client (e.g. ``akar-enterprises-pte-ltd``),
+    The channel is already named after the client (e.g. ``sample-channel-client-pte-ltd``),
     so we look up its name via ``conversations_info`` and de-slugify it into a
     ``client_name`` prefill. Returns ``None`` when the name can't be resolved, so
     the modal simply opens empty (a lookup failure must not block setup).
@@ -2579,7 +3205,6 @@ def build_async_app(
         handle_member_joined,
         handle_onboarding_submit,
         handle_setup_open,
-        handle_use_standard_coa,
     )
 
     if store is None:
@@ -2614,11 +3239,6 @@ def build_async_app(
         channel_id = event.get("channel_id") or event.get("channel")
         if not file_id or not channel_id:
             return
-        # File-level dedup: Slack sends BOTH file_shared and message/file_share for
-        # one upload (distinct event_ids), so guard on the file id to process once.
-        if _seen.seen_before(f"file:{file_id}"):
-            logger.debug("dedup: file %s already being processed", file_id)
-            return
         # COA-routing path B (ADR-0006): mirror the message-handler gate so that
         # drag-dropped xlsx/csv files land in run_coa_ingest when the channel is
         # not-yet-onboarded / pending_coa.  Without this check _is_coa_upload is
@@ -2629,6 +3249,10 @@ def build_async_app(
         file_payload = event.get("file") or {"id": file_id}
 
         if _is_coa_upload(file_payload, coa_pending=_coa_pending):
+            # File-level dedup only when this handler actually processes the file.
+            if _seen.seen_before(f"file:{file_id}"):
+                logger.debug("dedup: file %s already being processed", file_id)
+                return
             logger.info(
                 "file_shared: routing spreadsheet %s to COA ingest for channel %s",
                 file_id, channel_id,
@@ -2656,24 +3280,17 @@ def build_async_app(
                 _shutil.rmtree(task_dir, ignore_errors=True)
             return
 
-        fut: asyncio.Future = asyncio.get_event_loop().create_future()
-        _file_futures[file_id] = fut
-        try:
-            result = await process_file_event(
-                runner=runner,
-                ledger_store=ledger_store,
-                db=db,
-                slack_client=sync_client,
-                channel_id=channel_id,
-                file_id=file_id,
-                app_name=app_name,
-                download_fn=download_pdf_bytes,
-                source_filename=_resolve_file_name(sync_client, file_id, event.get("file")),
-            )
-            fut.set_result(result)
-        except Exception as exc:
-            fut.set_exception(exc)
-            raise
+        # Document uploads: the message/file_share handler is the sole owner of
+        # document processing. file_shared firing first used to stampede Gemini
+        # with N parallel process_file_event calls (no thread_ts, no
+        # defer_slack_delivery) before the batch coordinator could post its single
+        # job summary. Now we drop the event silently — the message handler
+        # carries thread_ts + defer flags and the dedup via `file:{id}` in
+        # message handler ensures no double-processing if a future race appears.
+        logger.debug(
+            "file_shared: deferring document %s to message/file_share handler for channel %s",
+            file_id, channel_id,
+        )
 
     async def _run_action(ack, body, client, decision):
         await ack()
@@ -3165,13 +3782,6 @@ def build_async_app(
             handle_setup_open, body, lambda *a, **k: None, sync_client, prefill
         )
 
-    @async_app.action("ledgr_use_standard_coa")
-    async def _use_standard(body, ack, client):
-        await ack()
-        await asyncio.to_thread(
-            handle_use_standard_coa, body, lambda *a, **k: None, sync_client, store
-        )
-
     @async_app.view("ledgr_onboarding")
     async def _onboarding(body, ack, client):
         await ack()
@@ -3212,11 +3822,16 @@ def build_async_app(
             logger.debug("dedup: dropping duplicate message event %s", eid)
             return
 
-        # Ignore bot messages and edit/delete noise regardless of subtype.
+        # Ignore bot messages and edit/delete noise — but still process file
+        # uploads posted by this app (files.upload / API tests carry bot_id).
         subtype = event.get("subtype") or ""
-        if subtype in ("bot_message", "message_changed", "message_deleted"):
+        files = event.get("files") or []
+        is_file_upload = subtype == "file_share" or bool(files)
+        if subtype in ("message_changed", "message_deleted"):
             return
-        if event.get("bot_id"):
+        if subtype == "bot_message" and not is_file_upload:
+            return
+        if event.get("bot_id") and not is_file_upload:
             return
 
         channel_id = event.get("channel")
@@ -3228,7 +3843,6 @@ def build_async_app(
         # include the files array).  Process each file independently; the shared
         # _seen guard above already prevents double-processing if the same
         # event_id is redelivered.
-        files = event.get("files") or []
         if subtype == "file_share" or files:
             # ADR-0007: one Job summary message per batch drop, threaded.
             # Post the summary up-front (initial text), pass its ``ts`` as
@@ -3238,11 +3852,38 @@ def build_async_app(
             from app.blocks import job_summary_text
 
             total = len(files)
-            # Post the placeholder summary (top-level, no thread_ts).
+            # Per-doc row tracker for the batch plan block. Each entry is a
+            # dict {file_label, stage, detail, status} updated by the per-doc
+            # status_callback as the run advances. Initial state: queued.
+            doc_rows: list[dict] = []
+            for f in files:
+                fid = f.get("id") if isinstance(f, dict) else None
+                fname = _resolve_file_name(sync_client, fid, f) if fid else ""
+                doc_rows.append({
+                    "file_label": fname or f"doc {len(doc_rows) + 1}",
+                    "stage": "queued",
+                    "detail": None,
+                    "status": "in_progress",
+                })
+
+            # Post the placeholder summary (top-level, no thread_ts). In
+            # batch mode the message carries a BatchKit ``plan`` block listing
+            # every document as a task; in single-doc mode we fall back to
+            # the plain text job summary for compatibility.
+            initial_blocks: Optional[list] = None
+            from app.blocks import batch_processing_plan_blocks
+            if total > 1:
+                initial_blocks = batch_processing_plan_blocks(
+                    total=total,
+                    done=0,
+                    doc_rows=list(doc_rows),
+                    channel_id=channel_id,
+                )
             try:
                 resp = sync_client.chat_postMessage(
                     channel=channel_id,
-                    text=f"📥 Processing {total} document{'s' if total != 1 else ''}…",
+                    text=job_progress_text(total=total, done=0),
+                    **({"blocks": initial_blocks} if initial_blocks else {}),
                 )
             except Exception:  # noqa: BLE001 - cosmetic; never abort the upload
                 logger.exception("failed to post Job summary in %s", channel_id)
@@ -3257,9 +3898,72 @@ def build_async_app(
             needs_review = 0
             rejected = 0
             duplicates = 0
+            done = 0
             software_hint = ""
             fy_hint = ""
             kind_hint = ""
+            batch_defer = total > 1
+            batch_deferred: list[dict] = []
+
+            def _refresh_job_progress() -> None:
+                if not summary_ts:
+                    return
+                try:
+                    if total > 1:
+                        blocks = batch_processing_plan_blocks(
+                            total=total,
+                            done=done,
+                            doc_rows=list(doc_rows),
+                            channel_id=channel_id,
+                        )
+                        sync_client.chat_update(
+                            channel=channel_id,
+                            ts=summary_ts,
+                            text=job_progress_text(
+                                total=total,
+                                done=done,
+                                posted=posted,
+                                needs_review=needs_review,
+                                rejected=rejected,
+                                duplicates=duplicates,
+                            ),
+                            blocks=blocks,
+                        )
+                    else:
+                        sync_client.chat_update(
+                            channel=channel_id,
+                            ts=summary_ts,
+                            text=job_progress_text(
+                                total=total,
+                                done=done,
+                                posted=posted,
+                                needs_review=needs_review,
+                                rejected=rejected,
+                                duplicates=duplicates,
+                            ),
+                        )
+                except Exception:  # noqa: BLE001
+                    logger.debug("job progress update failed", exc_info=True)
+
+            def _batch_status_cb(update: dict) -> None:
+                """Callback fired by process_file_event on each stage change.
+
+                Finds the row matching the doc's filename and updates its
+                stage/detail/status in place; then refreshes the placeholder
+                with the live plan block.
+                """
+                if total <= 1:
+                    return
+                label = update.get("file_label") or ""
+                for row in doc_rows:
+                    if row.get("file_label") == label:
+                        row.update({
+                            "stage": update.get("stage") or row.get("stage"),
+                            "detail": update.get("detail"),
+                            "status": update.get("status") or row.get("status"),
+                        })
+                        break
+                _refresh_job_progress()
 
             # COA-routing path A (ADR-0006): resolve once per batch whether
             # spreadsheets should be treated as COA uploads.  A channel with no
@@ -3283,7 +3987,7 @@ def build_async_app(
                 if _seen.seen_before(f"file:{file_id}"):
                     logger.debug("dedup: file %s already being processed", file_id)
                     # Await the Future from the file_shared handler so the batch
-                    # tally counts this file's outcome.
+                    # tally counts this file's outcome (legacy COA path only).
                     fut = _file_futures.pop(file_id, None)
                     if fut is not None:
                         try:
@@ -3307,6 +4011,8 @@ def build_async_app(
                             needs_review += 1
                         elif status == "rejected_unreadable":
                             rejected += 1
+                        done += 1
+                        _refresh_job_progress()
                     continue
                 logger.info(
                     "file upload received via message: file=%s channel=%s",
@@ -3347,14 +4053,20 @@ def build_async_app(
                     download_fn=download_pdf_bytes,
                     thread_ts=summary_ts,
                     source_filename=_resolve_file_name(sync_client, file_id, f),
+                    defer_slack_delivery=batch_defer,
+                    batch_mode=batch_defer,
+                    defer_ledger_persist=batch_defer,
+                    status_callback=_batch_status_cb if batch_defer else None,
                 )
+                done += 1
                 # Aggregate per-doc outcomes for the final tally edit.
                 status = (result or {}).get("status")
                 if status == "delivered":
                     posted += 1
-                    # Borrow the first delivered doc's software + fy for the tally
-                    # (mixed-FY drops are rare and ambiguous — first wins).
                     append = (result or {}).get("append") or {}
+                    deferred = append.get("deferred_delivery")
+                    if deferred:
+                        batch_deferred.append(deferred)
                     if not software_hint and append.get("software"):
                         software_hint = str(append["software"])
                     if not fy_hint and append.get("fy"):
@@ -3367,8 +4079,26 @@ def build_async_app(
                     needs_review += 1
                 elif status == "rejected_unreadable":
                     rejected += 1
+                _refresh_job_progress()
 
-            # Edit the summary in-place with the final tally (ADR-0007).
+            # Batch-end: in multi-file mode, run the workbook append exactly ONCE
+            # per (client, fy, kind) group. Each per-doc run stashed a
+            # ``deferred_ledger`` carrying its batches + payload + effective_replace;
+            # we merge here and call ``append_rows`` so the user sees ONE
+            # files_upload_v2 + ONE files_delete (per FY) instead of N mid-batch
+            # re-uploads. Single-file drops short-circuit (batch_deferred is empty).
+            if batch_deferred and ledger_store is not None:
+                await _flush_deferred_ledger_writes(
+                    ledger_store=ledger_store,
+                    slack_client=sync_client,
+                    channel_id=channel_id,
+                    batch_deferred=batch_deferred,
+                )
+
+            # Edit the summary in-place with the final tally (ADR-0007). For
+            # multi-file batches we ALSO append the aggregate delivery blocks
+            # so the whole batch — job progress, tally, and ledger preview —
+            # lives in ONE top-level message instead of two.
             if summary_ts:
                 try:
                     final_text = job_summary_text(
@@ -3381,13 +4111,30 @@ def build_async_app(
                         fy=fy_hint,
                         kind=kind_hint,
                     )
-                    sync_client.chat_update(
-                        channel=channel_id,
-                        ts=summary_ts,
-                        text=final_text,
-                    )
+                    update_kwargs: dict = {
+                        "channel": channel_id,
+                        "ts": summary_ts,
+                        "text": final_text,
+                    }
+                    if batch_deferred:
+                        # Merge: job summary section + delivery card.
+                        _, agg_blocks = _build_batch_aggregate_blocks(
+                            batch_deferred, channel_id,
+                        )
+                        update_kwargs["blocks"] = [
+                            {"type": "section",
+                             "text": {"type": "mrkdwn", "text": final_text}},
+                            *agg_blocks,
+                        ]
+                    sync_client.chat_update(**update_kwargs)
                 except Exception:  # noqa: BLE001 - cosmetic
                     logger.exception("failed to update Job summary in %s", channel_id)
+            elif batch_deferred:
+                # No summary_ts (rare — placeholder post failed) — fall back to a
+                # separate delivery post for backwards-compat.
+                _post_batch_aggregate_delivery(
+                    sync_client, channel_id, batch_deferred,
+                )
 
             return
 

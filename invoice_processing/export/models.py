@@ -84,8 +84,8 @@ class NormalizedInvoice:
     #   - 1.0 when doc currency == base currency (no conversion needed).
     #   - None when currency != base currency and no rate was derivable — see needs_fx_review.
     # original_currency / original_total: the raw doc currency + total BEFORE conversion.
-    # needs_fx_review: True when doc is non-base-currency and no fx_rate could be derived;
-    #   the doc must NOT be silently booked at rate=1 — it is flagged for human review.
+    # needs_fx_review: True when the same document mixes currencies and amounts
+    #   cannot be booked without human confirmation.
     fx_rate: Optional[float] = 1.0
     original_total: Optional[float] = None
     original_currency: Optional[str] = None

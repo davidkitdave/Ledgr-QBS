@@ -1,0 +1,18 @@
+{
+  "client": "Acme Client Pte. Ltd.",
+  "client_uen": "201700001A",
+  "file_label": "Telco-B-Aug-2026.pdf",
+  "expected_direction": "purchase",
+  "from_party": {
+    "name": "Telco Provider B Limited",
+    "uen": "199200004D",
+    "role": "issuer"
+  },
+  "to_party": {
+    "name": "Acme Client Pte. Ltd.",
+    "uen": "201700001A",
+    "role": "recipient"
+  },
+  "expected_direction_for_client": "purchase",
+  "notes": "Second telco utility bill shape. Long issuer name + Pte Ltd suffix stress-tests UEN-based role resolution."
+}

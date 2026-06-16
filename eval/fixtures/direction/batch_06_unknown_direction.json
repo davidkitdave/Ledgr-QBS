@@ -1,0 +1,18 @@
+{
+  "client": "Acme Client Pte. Ltd.",
+  "client_uen": "201700001A",
+  "file_label": "Vendor-Receipt-2026-08.pdf",
+  "expected_direction": "unknown",
+  "from_party": {
+    "name": "Anonymous Vendor",
+    "uen": null,
+    "role": "issuer"
+  },
+  "to_party": {
+    "name": "Anonymous Recipient",
+    "uen": null,
+    "role": "recipient"
+  },
+  "expected_direction_for_client": "unknown",
+  "notes": "Unknown case — neither party matches the client. Understand call returns unknown and the HITL gate engages."
+}

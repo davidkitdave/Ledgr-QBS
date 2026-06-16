@@ -1,12 +1,12 @@
 # Dev environment setup
 
-How to run the local socket-mode bot against your QBS-AI workspace without affecting real customers on the Cloud Run production deployment.
+How to run the local socket-mode bot against your LEDGR-DEV workspace without affecting real customers on the Cloud Run production deployment.
 
 ## Architecture
 
 Two completely separate Slack apps share one codebase but have different tokens, different Firestore namespaces, and different model defaults:
 
-- **Ledgr (dev)** — local socket-mode process, `LEDGR_ENV=dev`, AI Studio key, `gemini-2.5-flash-lite` for invoices. Installed in QBS-AI workspace only for testing.
+- **Ledgr (dev)** — local socket-mode process, `LEDGR_ENV=dev`, AI Studio key, `gemini-2.5-flash-lite` for invoices. Installed in LEDGR-DEV workspace only for testing.
 - **Ledgr (prod)** — Cloud Run HTTP mode, `LEDGR_ENV=prod`, Vertex AI (asia-southeast1), both model tiers default to `gemini-2.5-flash` (until flash-lite reaches that region). Installed in customer workspaces via OAuth.
 
 The two apps share zero state: different bot tokens, different Firestore namespaces (or ideally separate GCP projects), different model env vars.
@@ -16,9 +16,9 @@ The two apps share zero state: different bot tokens, different Firestore namespa
 ### 1. Create the "Ledgr (dev)" Slack app
 
 1. Go to https://api.slack.com/apps → **Create New App** → **From a manifest**
-2. Pick **QBS-AI** as the workspace
+2. Pick **LEDGR-DEV** as the workspace
 3. Paste the contents of `slack/manifest-dev.json`
-4. Install to QBS-AI
+4. Install to LEDGR-DEV
 5. Copy the Bot User OAuth Token (`xoxb-…`) → `SLACK_BOT_TOKEN`
 6. Under **Basic Information** → **App-Level Tokens**, generate a token with `connections:write` scope (`xapp-…`) → `SLACK_APP_TOKEN`
 7. Copy the Signing Secret → `SLACK_SIGNING_SECRET`
@@ -40,7 +40,7 @@ Fill in the three Slack token vars from step 1, your Google AI Studio key, and y
 .venv/bin/python slack_bot.py
 ```
 
-The process connects to QBS-AI via socket mode. Status messages in Slack will be prefixed with `[dev]` so you can tell at a glance that Ledgr-dev replied, not the production bot.
+The process connects to LEDGR-DEV via socket mode. Status messages in Slack will be prefixed with `[dev]` so you can tell at a glance that Ledgr-dev replied, not the production bot.
 
 ### 4. Invite Ledgr-dev to a test channel
 

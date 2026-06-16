@@ -32,6 +32,107 @@ from invoice_processing.extract.invoice_extractor import (
     ExtractedInvoiceBundle,
     ExtractedLine,
 )
+from invoice_processing.extract.document_record import (
+    DocumentRecord,
+    DocumentRecordBundle,
+    LabeledField,
+    LineCapture,
+)
+
+
+def _document_record_from_ex(ex: ExtractedInvoice) -> DocumentRecord:
+    fields: list[LabeledField] = []
+    if ex.invoice_number:
+        fields.append(LabeledField(label="Invoice Number", value=ex.invoice_number))
+    if ex.invoice_date:
+        fields.append(LabeledField(label="Invoice Date", value=ex.invoice_date))
+    if ex.currency:
+        fields.append(LabeledField(label="Currency", value=ex.currency))
+    if ex.fx_rate is not None:
+        fields.append(LabeledField(label="Exchange Rate", value=str(ex.fx_rate)))
+    totals: list[LabeledField] = []
+    if ex.subtotal is not None:
+        totals.append(LabeledField(label="Sub Total", value=str(ex.subtotal)))
+    if ex.gst_total is not None:
+        totals.append(LabeledField(label="GST", value=str(ex.gst_total)))
+    if ex.total is not None:
+        totals.append(LabeledField(label="Total", value=str(ex.total)))
+    return DocumentRecord(
+        labeled_fields=fields,
+        line_items=[
+            LineCapture(
+                description=l.description,
+                net_amount=l.net_amount,
+                tax_label=l.tax_label,
+            )
+            for l in ex.lines
+        ],
+        totals=totals,
+    )
+
+
+def _doc_bundle_from_ex_bundle(bundle: ExtractedInvoiceBundle) -> DocumentRecordBundle:
+    return DocumentRecordBundle(
+        documents=[_document_record_from_ex(ex) for ex in bundle.invoices],
+        skipped_pages=bundle.skipped_pages,
+        notes=bundle.notes,
+    )
+
+
+def _install_legacy_extract_mock(doc_bundle: DocumentRecordBundle) -> None:
+    """Hermetic tests: drive ``extract_invoice_document_node`` via legacy normalize."""
+    from invoice_processing.extract.document_normalizer import (
+        normalize_document_bundle,
+        slim_document_record_for_state,
+    )
+    from invoice_processing.extract.process_invoice_document import InvoiceProcessResult
+
+    def _extract(data, mime, **kw):
+        normalized = normalize_document_bundle(
+            doc_bundle,
+            direction=kw.get("direction") or "purchase",
+            our_gst_registered=kw.get("our_gst_registered", True),
+            base_currency=kw.get("base_currency") or "SGD",
+            client_name=kw.get("client_name"),
+            client_uen=kw.get("client_uen"),
+        )
+        return InvoiceProcessResult(
+            normalized=normalized,
+            extraction_path="legacy",
+            document_records=[
+                slim_document_record_for_state(d) for d in doc_bundle.documents
+            ],
+            skipped_pages=doc_bundle.skipped_pages,
+            document_read_notes=doc_bundle.notes,
+        )
+
+    nodes.EXTRACT_INVOICE_DOCUMENT_FN = _extract
+
+
+def _legacy_result_from_ex_bundle(bundle: ExtractedInvoiceBundle):
+    """Build an ``InvoiceProcessResult`` for review/HITL hermetic tests."""
+    from invoice_processing.extract.document_normalizer import (
+        normalize_document_bundle,
+        slim_document_record_for_state,
+    )
+    from invoice_processing.extract.process_invoice_document import InvoiceProcessResult
+
+    doc_bundle = _doc_bundle_from_ex_bundle(bundle)
+    normalized = normalize_document_bundle(
+        doc_bundle,
+        direction="purchase",
+        our_gst_registered=True,
+        base_currency="SGD",
+    )
+    return InvoiceProcessResult(
+        normalized=normalized,
+        extraction_path="legacy",
+        document_records=[
+            slim_document_record_for_state(d) for d in doc_bundle.documents
+        ],
+        skipped_pages=doc_bundle.skipped_pages,
+        document_read_notes=doc_bundle.notes,
+    )
 
 
 # =========================================================================== #
@@ -116,6 +217,9 @@ def _restore_seams():
             "CLASSIFY_FN",
             "DIRECTION_FN",
             "EXTRACT_BUNDLE_FN",
+            "EXTRACT_DOCUMENT_FN",
+            "EXTRACT_INVOICE_DOCUMENT_FN",
+            "NORMALIZE_DOCUMENT_FN",
             "EXTRACT_BANK_FN",
             "CATEGORIZE_FN",
         )
@@ -140,14 +244,29 @@ def test_classify_routes_invoice():
         confidence=0.99,
         reason="stub",
     )
-    nodes.DIRECTION_FN = lambda cls, client_name=None, **kw: "purchase"
+    # Track whether resolve_direction is called from the invoice lane. After
+    # the Batch Direction slice, classify_node should NOT call it for invoices
+    # — the Understand call owns ``direction_for_client`` instead.
+    resolve_called = {"n": 0}
+    def _spy_resolve(cls, **kw):
+        resolve_called["n"] += 1
+        return "purchase"
+    nodes.DIRECTION_FN = _spy_resolve
 
     ctx = FakeContext(_base_state())
     event = asyncio.run(nodes.classify_node(ctx))
 
     assert event.actions.route == nodes.ROUTE_INVOICE
     assert ctx.state[nodes.DOC_TYPE_KEY] == "invoice"
-    assert ctx.state[nodes.DIRECTION_KEY] == "purchase"
+    # Direction defaults to "auto"; the Understand call later fills it in via
+    # ``direction_for_client``. ``"auto"`` is the sentinel that the
+    # ledger_extract_to_normalized adapter interprets as "use the Understand
+    # call's direction_for_client verdict".
+    assert ctx.state[nodes.DIRECTION_KEY] == "auto"
+    assert resolve_called["n"] == 0, (
+        "classify_node must not call resolve_direction in the invoice lane; "
+        "the Understand call owns direction_for_client instead."
+    )
 
 
 def test_classify_routes_bank_statement():
@@ -180,7 +299,7 @@ def test_invoice_bundle_fanout_three():
     bundle = ExtractedInvoiceBundle(
         invoices=[_ex_invoice("INV-1"), _ex_invoice("INV-2"), _ex_invoice("INV-3")]
     )
-    nodes.EXTRACT_BUNDLE_FN = lambda data, mime, **kw: bundle
+    _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(bundle))
 
     ctx = FakeContext(_base_state(**{nodes.DIRECTION_KEY: "purchase"}))
     event = asyncio.run(nodes.extract_invoice_node(ctx))
@@ -197,7 +316,7 @@ def test_multi_receipt_page_fanout_four():
         invoices=[_ex_receipt(f"R-{i}") for i in range(1, 5)],
         notes="4 receipts on one scanned page",
     )
-    nodes.EXTRACT_BUNDLE_FN = lambda data, mime, **kw: bundle
+    _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(bundle))
 
     ctx = FakeContext(_base_state(**{nodes.DIRECTION_KEY: "purchase"}))
     event = asyncio.run(nodes.extract_invoice_node(ctx))
@@ -214,7 +333,7 @@ def test_soa_skip_extracts_only_embedded_invoice():
         skipped_pages=[1],
         notes="skipped SOA summary cover page",
     )
-    nodes.EXTRACT_BUNDLE_FN = lambda data, mime, **kw: bundle
+    _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(bundle))
 
     ctx = FakeContext(_base_state(**{nodes.DIRECTION_KEY: "purchase"}))
     event = asyncio.run(nodes.extract_invoice_node(ctx))
@@ -229,7 +348,7 @@ def test_soa_phantom_invoices_dropped_by_normalize_bundle():
     """Regression: _normalize_bundle (nodes.py path) must apply the SOA hard-gate.
 
     This captures the live failure where the bot reported "18 sub-documents /
-    30 total lines" for COOL POWER DEC 2025 (expected 10/22).  The extractor
+    30 total lines" for Sample Vendor Inc DEC 2025 (expected 10/22).  The extractor
     returns a bundle with 8 phantom invoices whose lines all have a bare
     'INVOICE' description and gst_amount==0 — the exact shape hallucinated from
     the SOA cover table.  They must be dropped before NORMALIZED_KEY is written.
@@ -240,8 +359,8 @@ def test_soa_phantom_invoices_dropped_by_normalize_bundle():
         invoice_number="IA-07316",
         invoice_date="2025-12-01",
         currency="MYR",
-        issuer_name="COOL POWER SDN BHD",
-        bill_to_name="JBI PLUS AUTO ENTERPRISE",
+        issuer_name="Sample Vendor Inc",
+        bill_to_name="Sample Auto Enterprise",
         lines=[phantom_line],
         subtotal=100.0,
         gst_total=0.0,
@@ -252,8 +371,8 @@ def test_soa_phantom_invoices_dropped_by_normalize_bundle():
         invoice_number="IA-07330",
         invoice_date="2025-12-01",
         currency="MYR",
-        issuer_name="COOL POWER SDN BHD",
-        bill_to_name="JBI PLUS AUTO ENTERPRISE",
+        issuer_name="Sample Vendor Inc",
+        bill_to_name="Sample Auto Enterprise",
         lines=[phantom_line],
         subtotal=200.0,
         gst_total=0.0,
@@ -264,8 +383,8 @@ def test_soa_phantom_invoices_dropped_by_normalize_bundle():
         invoice_number="IA-07465",
         invoice_date="2025-12-05",
         currency="MYR",
-        issuer_name="COOL POWER SDN BHD",
-        bill_to_name="JBI PLUS AUTO ENTERPRISE",
+        issuer_name="Sample Vendor Inc",
+        bill_to_name="Sample Auto Enterprise",
         lines=[ExtractedLine(description="Electricity supply Dec 2025", net_amount=100.0, gst_amount=9.0, tax_label="SR")],
         subtotal=100.0,
         gst_total=9.0,
@@ -275,7 +394,7 @@ def test_soa_phantom_invoices_dropped_by_normalize_bundle():
         invoices=[phantom_inv_a, phantom_inv_b, real_inv],
         skipped_pages=[1],
     )
-    nodes.EXTRACT_BUNDLE_FN = lambda data, mime, **kw: bundle
+    _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(bundle))
 
     ctx = FakeContext(_base_state(**{nodes.DIRECTION_KEY: "purchase"}))
     event = asyncio.run(nodes.extract_invoice_node(ctx))
@@ -293,9 +412,9 @@ def test_soa_phantom_invoices_dropped_by_normalize_bundle():
 
 
 def test_invoice_node_defaults_direction_to_purchase():
-    nodes.EXTRACT_BUNDLE_FN = lambda data, mime, **kw: ExtractedInvoiceBundle(
-        invoices=[_ex_invoice("INV-X")]
-    )
+    _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(
+        ExtractedInvoiceBundle(invoices=[_ex_invoice("INV-X")])
+    ))
     ctx = FakeContext(_base_state())  # no direction in state
     asyncio.run(nodes.extract_invoice_node(ctx))
     assert ctx.state[nodes.NORMALIZED_KEY][0]["doc_type"] == "purchase"
@@ -307,9 +426,9 @@ def test_invoice_node_defaults_direction_to_purchase():
 
 
 def test_categorize_and_tax_chain():
-    nodes.EXTRACT_BUNDLE_FN = lambda data, mime, **kw: ExtractedInvoiceBundle(
-        invoices=[_ex_invoice("INV-1")]
-    )
+    _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(
+        ExtractedInvoiceBundle(invoices=[_ex_invoice("INV-1")])
+    ))
     # Fake categorizer stamps a fixed account code on every line.
     def _fake_categorize(inv, *, coa, category_mapping, entity_memory, **kw):
         for line in inv.lines:
@@ -394,9 +513,9 @@ def test_bank_node_accepts_bare_statement():
 
 
 def test_route_node_invoice_fy_and_sheet():
-    nodes.EXTRACT_BUNDLE_FN = lambda data, mime, **kw: ExtractedInvoiceBundle(
-        invoices=[_ex_invoice("INV-1"), _ex_invoice("INV-2")]
-    )
+    _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(
+        ExtractedInvoiceBundle(invoices=[_ex_invoice("INV-1"), _ex_invoice("INV-2")])
+    ))
     ctx = FakeContext(_base_state(**{nodes.DIRECTION_KEY: "purchase"}))
     asyncio.run(nodes.extract_invoice_node(ctx))
     event = asyncio.run(nodes.route_node(ctx))
@@ -549,13 +668,13 @@ def test_deliver_invoice_names_client_scoped_ledger():
     ctx = FakeContext({
         nodes.LEDGER_ROWS_KEY: {
             "fy": "2026", "kind": "invoice", "software": "Xero",
-            "client_name": "Auditair International Pte. Ltd.",
+            "client_name": "Acme Client Pte. Ltd.",
             "batches": [{"sheet": "Purchase", "rows": [{"Total Amount": 10}]}],
         }
     })
     asyncio.run(nodes.deliver_node(ctx))
     summary = ctx.state[nodes.DELIVER_SUMMARY_KEY]
-    assert "Auditair International Pte. Ltd." in summary
+    assert "Acme Client Pte. Ltd." in summary
     assert "Ledger FY2026" in summary
     # An invoice is a ledger, never a bank statement.
     assert "Bank Statement" not in summary
@@ -566,7 +685,7 @@ def test_deliver_bank_names_bank_statement_not_ledger():
     ctx = FakeContext({
         nodes.LEDGER_ROWS_KEY: {
             "fy": "2025", "kind": "bank", "software": "QBS Ledger",
-            "client_name": "Akar Enterprises Pte. Ltd.",
+            "client_name": "Sample Bank Client Pte Ltd",
             "batches": [{
                 "sheet": "OCBC - 0001",
                 "rows": [
@@ -579,7 +698,7 @@ def test_deliver_bank_names_bank_statement_not_ledger():
     })
     asyncio.run(nodes.deliver_node(ctx))
     summary = ctx.state[nodes.DELIVER_SUMMARY_KEY]
-    assert "Akar Enterprises Pte. Ltd." in summary
+    assert "Sample Bank Client Pte Ltd" in summary
     assert "Bank Statement FY2025" in summary
     # Must NOT mislabel a bank statement as a ledger.
     assert "ledger" not in summary.lower()
@@ -618,7 +737,7 @@ def _self_ref_bundle() -> "ExtractedInvoiceBundle":
 def test_extract_node_self_referential_flagged_for_review():
     """extract_invoice_node must mark self-referential docs reconciled=False
     with a 'needs review' note — never silently book as a clean purchase."""
-    nodes.EXTRACT_BUNDLE_FN = lambda data, mime, **kw: _self_ref_bundle()
+    _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(_self_ref_bundle()))
 
     state = _base_state(**{nodes.DIRECTION_KEY: "self_referential"})
     ctx = FakeContext(state)
@@ -643,7 +762,7 @@ def test_extract_node_self_referential_flagged_for_review():
 
 def test_extract_node_unknown_direction_flagged_for_review():
     """extract_invoice_node must flag 'unknown' direction for review too."""
-    nodes.EXTRACT_BUNDLE_FN = lambda data, mime, **kw: _self_ref_bundle()
+    _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(_self_ref_bundle()))
 
     state = _base_state(**{nodes.DIRECTION_KEY: "unknown"})
     ctx = FakeContext(state)
@@ -662,9 +781,9 @@ def test_extract_node_unknown_direction_flagged_for_review():
 def test_extract_node_clean_purchase_unaffected():
     """A normal purchase (direction='purchase') must NOT be flagged for review
     by the guard — the guard must only fire on self_referential / unknown."""
-    nodes.EXTRACT_BUNDLE_FN = lambda data, mime, **kw: ExtractedInvoiceBundle(
-        invoices=[_ex_invoice("INV-NORMAL")]
-    )
+    _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(
+        ExtractedInvoiceBundle(invoices=[_ex_invoice("INV-NORMAL")])
+    ))
 
     state = _base_state(**{nodes.DIRECTION_KEY: "purchase"})
     ctx = FakeContext(state)
@@ -715,27 +834,23 @@ def _ex_myr_invoice(number: str, net: float = 200.0) -> ExtractedInvoice:
     )
 
 
-def test_extract_node_usd_doc_sgd_client_flagged_needs_fx_review():
-    """USD doc for an SGD-ledger client with no fx_rate on the doc must be
-    flagged needs_fx_review=True and reconciled=False."""
+def test_extract_node_usd_doc_sgd_client_books_in_usd():
+    """USD doc for an SGD-ledger client with no fx_rate is booked in USD."""
     bundle = ExtractedInvoiceBundle(invoices=[_ex_usd_invoice("USD-INV-001")])
-    nodes.EXTRACT_BUNDLE_FN = lambda data, mime, **kw: bundle
+    _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(bundle))
 
     state = _base_state(**{nodes.DIRECTION_KEY: "purchase", "base_currency": "SGD"})
     ctx = FakeContext(state)
     asyncio.run(nodes.extract_invoice_node(ctx))
 
     inv = ctx.state[nodes.NORMALIZED_KEY][0]
-    assert inv.get("needs_fx_review") is True, (
-        f"Expected needs_fx_review=True for USD doc on SGD client, got {inv.get('needs_fx_review')!r}"
+    assert inv.get("needs_fx_review") is False, (
+        f"Expected needs_fx_review=False for single-currency USD doc, got {inv.get('needs_fx_review')!r}"
     )
-    assert inv.get("reconciled") is False, (
-        f"Expected reconciled=False for USD doc on SGD client, got {inv.get('reconciled')!r}"
+    assert inv.get("reconciled") is True, (
+        f"Expected reconciled=True for single-currency USD doc, got {inv.get('reconciled')!r}"
     )
-    note = inv.get("reconcile_note") or ""
-    assert "fx" in note.lower() or "exchange" in note.lower(), (
-        f"Expected FX note in reconcile_note, got: {note!r}"
-    )
+    assert inv.get("currency") == "USD"
 
 
 def test_extract_node_usd_doc_with_fx_rate_converts_amounts():
@@ -755,7 +870,7 @@ def test_extract_node_usd_doc_with_fx_rate_converts_amounts():
         fx_rate=1.35,  # document states its own exchange rate
     )
     bundle = ExtractedInvoiceBundle(invoices=[usd_inv])
-    nodes.EXTRACT_BUNDLE_FN = lambda data, mime, **kw: bundle
+    _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(bundle))
 
     state = _base_state(**{nodes.DIRECTION_KEY: "purchase", "base_currency": "SGD"})
     ctx = FakeContext(state)
@@ -778,7 +893,7 @@ def test_extract_node_myr_client_myr_doc_not_flagged():
     """An MYR doc for an MYR-ledger client is the base currency — must NOT be
     flagged as foreign (needs_fx_review must be False, reconciled per normal)."""
     bundle = ExtractedInvoiceBundle(invoices=[_ex_myr_invoice("MYR-INV-001")])
-    nodes.EXTRACT_BUNDLE_FN = lambda data, mime, **kw: bundle
+    _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(bundle))
 
     state = _base_state(**{nodes.DIRECTION_KEY: "purchase", "base_currency": "MYR"})
     ctx = FakeContext(state)
@@ -949,9 +1064,9 @@ def test_guard_no_warning_below_thresholds(caplog):
     list must be stored unchanged through extract_invoice_node."""
     import logging
 
-    nodes.EXTRACT_BUNDLE_FN = lambda data, mime, **kw: ExtractedInvoiceBundle(
-        invoices=[_ex_invoice("INV-GUARD")]
-    )
+    _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(
+        ExtractedInvoiceBundle(invoices=[_ex_invoice("INV-GUARD")])
+    ))
     ctx = FakeContext(_base_state(**{nodes.DIRECTION_KEY: "purchase"}))
     with caplog.at_level(logging.WARNING, logger="accounting_agents.nodes"):
         asyncio.run(nodes.extract_invoice_node(ctx))
@@ -1009,36 +1124,42 @@ def test_guard_warns_on_payload_size_exceeding_threshold(caplog):
 # =========================================================================== #
 
 
-def test_extract_invoice_node_passes_review_hint_to_extractor():
-    """A seeded ``review_hint`` steers the FIRST read — EXTRACT_BUNDLE_FN gets it."""
+def test_extract_invoice_document_node_passes_review_hint_to_extractor():
+    """A seeded ``review_hint`` steers the FIRST read — orchestrator gets it."""
     captured: dict = {}
 
     def _recorder(data, mime, **kw):
         captured["hint"] = kw.get("hint")
-        return ExtractedInvoiceBundle(invoices=[_ex_invoice("INV-1")])
+        from invoice_processing.extract.process_invoice_document import InvoiceProcessResult
+        return InvoiceProcessResult(normalized=[], extraction_path="understand")
 
-    nodes.EXTRACT_BUNDLE_FN = _recorder
+    nodes.EXTRACT_INVOICE_DOCUMENT_FN = _recorder
 
     ctx = FakeContext(_base_state(**{
         nodes.DIRECTION_KEY: "purchase",
+        nodes.DOC_TYPE_KEY: "invoice",
         "review_hint": "read as a credit note",
     }))
-    asyncio.run(nodes.extract_invoice_node(ctx))
+    asyncio.run(nodes.extract_invoice_document_node(ctx))
 
     assert captured["hint"] == "read as a credit note"
 
 
-def test_extract_invoice_node_omits_hint_when_no_review_hint():
-    """The normal drop path (no review_hint) calls the extractor WITHOUT a hint."""
+def test_extract_invoice_document_node_omits_hint_when_no_review_hint():
+    """The normal drop path (no review_hint) calls the orchestrator WITHOUT a hint."""
     captured: dict = {"saw_key": True}
 
     def _recorder(data, mime, **kw):
-        captured["saw_key"] = "hint" in kw
-        return ExtractedInvoiceBundle(invoices=[_ex_invoice("INV-1")])
+        captured["saw_key"] = "hint" in kw and kw["hint"] is not None
+        from invoice_processing.extract.process_invoice_document import InvoiceProcessResult
+        return InvoiceProcessResult(normalized=[], extraction_path="understand")
 
-    nodes.EXTRACT_BUNDLE_FN = _recorder
+    nodes.EXTRACT_INVOICE_DOCUMENT_FN = _recorder
 
-    ctx = FakeContext(_base_state(**{nodes.DIRECTION_KEY: "purchase"}))
-    asyncio.run(nodes.extract_invoice_node(ctx))
+    ctx = FakeContext(_base_state(**{
+        nodes.DIRECTION_KEY: "purchase",
+        nodes.DOC_TYPE_KEY: "invoice",
+    }))
+    asyncio.run(nodes.extract_invoice_document_node(ctx))
 
     assert captured["saw_key"] is False

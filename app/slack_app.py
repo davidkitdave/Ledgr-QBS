@@ -24,7 +24,7 @@ from app.blocks import (
     welcome_blocks,
 )
 from app.commands import parse_ledgr_command, settings_prefill
-from app.coa_ingest import coa_rows_from_file, ingest_coa, standard_coa_rows
+from app.coa_ingest import coa_rows_from_file, ingest_coa
 from app.onboarding import parse_modal_state, profile_doc
 
 logger = logging.getLogger(__name__)
@@ -307,27 +307,6 @@ def handle_onboarding_submit(
 
     client.chat_postMessage(channel=channel_id, blocks=profile_summary_blocks(doc))
     client.chat_postMessage(channel=channel_id, blocks=coa_prompt_blocks())
-
-
-def handle_use_standard_coa(body: dict, ack: Callable, client, store) -> None:
-    """Ack the button, ingest the standard SG SME COA for this channel's client."""
-    ack()
-    channel_id = (
-        body.get("container", {}).get("channel_id")
-        or body.get("channel", {}).get("id")
-        or body.get("channel_id")
-        or ""
-    )
-
-    def _say(**kwargs) -> None:
-        client.chat_postMessage(channel=channel_id, **kwargs)
-
-    ingest_coa(
-        channel_id=channel_id,
-        store=store,
-        rows=standard_coa_rows(),
-        say_fn=_say,
-    )
 
 
 def handle_ledgr_command(ack: Callable, body: dict, client, store, archive=None) -> None:

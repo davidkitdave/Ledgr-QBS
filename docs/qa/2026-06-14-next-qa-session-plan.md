@@ -8,10 +8,10 @@ Carries over from the 2026-06-14 live QA. Branch: **`fix/ledgr-hitl-learning-and
 pkill -f slack_runner; sleep 2
 nohup .venv/bin/python -u -c "from dotenv import load_dotenv; load_dotenv('.env'); import os,logging; os.environ.setdefault('GOOGLE_GENAI_USE_VERTEXAI','FALSE'); logging.basicConfig(level=logging.INFO,force=True); from accounting_agents.slack_runner import main; main()" > /tmp/ledgr_bot.log 2>&1 &
 ```
-Workspace `qbs-ai.slack.com`; channels: #akar-enterprises-pte-ltd (QBS, FYE Dec, bank),
-#auditair-international-pte-ltd (Xero, FYE Oct, non-GST, invoices). Test docs in
-`~/Desktop/LocalTest/TestDoc/Cast Unity`. Reference (correct) bank formula:
-`~/Downloads/Rosebery Partner Pte. Ltd. - BankStatement_FY2024.xlsx`.
+Workspace `example-workspace.slack.com`; channels: #sample-channel-client-pte-ltd (QBS, FYE Dec, bank),
+#acme-client-test (Xero, FYE Oct, non-GST, invoices). Test docs in
+`~/Desktop/LocalTest/TestDoc/Sample Test Group`. Reference (correct) bank formula:
+`~/Downloads/Sample Partner Pte Ltd - BankStatement_FY2024.xlsx`.
 
 ---
 
@@ -31,13 +31,13 @@ Workspace `qbs-ai.slack.com`; channels: #akar-enterprises-pte-ltd (QBS, FYE Dec,
 ### A. Quick wins (do first)
 
 **A1. Live-verify the bank fixes** (no code; restart bot first)
-- Re-drop an Akar month (e.g. jul-2025) → confirm the rebuilt `BankStatement_FY2025.xlsx`:
+- Re-drop an Sample Bank Client month (e.g. jul-2025) → confirm the rebuilt `BankStatement_FY2025.xlsx`:
   - Math_Check column shows ✅ / GAP / `❌ Exp: <n>` — **never `#VALUE!`**.
   - Running balance chains continuously across months.
 - Open the workbook and check whether any rows have a **genuinely missing extracted balance**
   (vs. the old pre-fix May rows). If balances are missing at extraction time, that's a separate
   **extractor** check: `invoice_processing/extract/bank_statement_extractor.py` (does it reliably
-  capture per-row balance? digital vs scanned path). The May rows in the current Akar sheet are
+  capture per-row balance? digital vs scanned path). The May rows in the current Sample Bank Client sheet are
   stale (old code) — a full re-process or fresh channel gives a clean read.
 
 **A2. Rejection-tally UX** (small)
@@ -59,7 +59,7 @@ document — 0 posted", no explanation)**
   double-post, but the only signal is the misleading "0 posted".
 - ROOT INSIGHT: **dedup state lives in Firestore (`seen_doc_keys`), decoupled from the Excel.**
   So a user who deletes/edits rows in the workbook and re-drops the file gets silently skipped —
-  there is **no way to force a re-process/replace** today. (This is what David hit live.)
+  there is **no way to force a re-process/replace** today. (This is what the developer hit live.)
 - Want:
   1. **Explain, don't emit "0 posted"** — agent says e.g. "I already recorded this June statement on
      <date> in your FY2025 ledger (39 transactions), so there's nothing new to add."
@@ -70,10 +70,10 @@ document — 0 posted", no explanation)**
 - Approach: store date/FY/file label alongside each `seen_doc_keys` entry (in the pointer) so the
   agent can cite when+where; add the confirm/replace action; keep internal idempotency as the net.
 
-**B3b. Agentic status/result messaging (NEW — cross-cutting UX theme David raised)**
+**B3b. Agentic status/result messaging (NEW — cross-cutting UX theme the developer raised)**
 - Today: results are RIGID TEMPLATES — "📥 Processed 1 document — 0 posted to your ledger",
   "✅ Processed", "❌". They don't explain *what happened or why* (deduped? rejected? partially
-  posted? needs review?). David: "it needs to be the agent really replying about what he's doing …
+  posted? needs review?). Developer: "it needs to be the agent really replying about what he's doing …
   rather than a random rigid formula."
 - Want: replace the templated status/summary strings with **agent-authored, situation-aware
   narration** — for dedup, rejection, partial post, FX-hold, needs-review, and normal success.
@@ -97,7 +97,7 @@ document — 0 posted", no explanation)**
 ### C. Larger / design-first
 
 **C5. Channel folder structure (Sales / Purchase / Bank-Statement + per-FY)** — RESEARCH FIRST
-- Old model (Rosebery `Sys_Config`): Google-Drive folder IDs SALES/PURCHASE/BANK/BANK_ARCHIVE.
+- Old model (Sample Partner `Sys_Config`): Google-Drive folder IDs SALES/PURCHASE/BANK/BANK_ARCHIVE.
 - Want Slack-native: per-channel folders, auto-filed by doc type + FY, created on channel setup,
   and outputs routed into the right folder/FY even when dropped in the message.
 - UNKNOWN: what Slack actually supports — the UI shows a "Folder" item in the "+" menu and an "FS"
@@ -140,5 +140,5 @@ Commit each via TDD; restart bot + live-verify after each batch.
 
 NOTE: the bot currently running (PID 79489) predates BOTH the bank N()-formula fix (`209d543`) and
 this plan — so to even see the corrected bank formula / behaviour, restart from HEAD first. To let
-David re-process the jun-2025 statement he edited, the jun-2025 `doc_key` must be cleared from the
-Akar FY2025 pointer's `seen_doc_keys` (B3's replace path) — otherwise it stays deduped.
+the developer re-process the jun-2025 statement he edited, the jun-2025 `doc_key` must be cleared from the
+Sample Bank Client FY2025 pointer's `seen_doc_keys` (B3's replace path) — otherwise it stays deduped.

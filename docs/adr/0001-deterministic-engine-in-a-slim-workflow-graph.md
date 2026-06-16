@@ -2,7 +2,7 @@
 
 - **Status:** Accepted — **consolidation implemented 2026-06-14** (see "Implementation" below)
 - **Date:** 2026-06-13
-- **Deciders:** David (developer)
+- **Deciders:** Ledgr team
 
 > **Implementation (2026-06-14).** The corrected keep/retire list is done:
 > deleted the orphaned agents (`invoice_agent`, `bank_feed_agent`,

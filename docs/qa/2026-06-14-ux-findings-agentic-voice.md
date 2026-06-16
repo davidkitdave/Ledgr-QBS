@@ -1,7 +1,7 @@
 # Ledgr-QBS — UX findings: agentic voice, bank-vs-ledger, Q&A tools, naming, dup-data
 
-Branch **`fix/ledgr-hitl-learning-and-qa`**. Captured during the 2026-06-14 live QA from David's
-feedback after testing real Cast Unity docs in #akar-enterprises-pte-ltd (QBS, FYE Dec, bank).
+Branch **`fix/ledgr-hitl-learning-and-qa`**. Captured during the 2026-06-14 live QA from the developer's
+feedback after testing real Sample Test Group docs in #sample-channel-client-pte-ltd (QBS, FYE Dec, bank).
 ADK-grounded via the `adk-docs` MCP (Events doc) — see notes per item.
 
 These are the things that made the bot feel "robotic" or wrong, plus two confirmed data/Q&A bugs.
@@ -20,13 +20,13 @@ These are the things that made the bot feel "robotic" or wrong, plus two confirm
 - So "total withdrawal for October 2025" has **no matching tool**. The `qa_agent` LlmAgent
   (`MODEL_LITE`, single-turn) is genuinely replying (it is NOT a canned string), but with no bank
   tool it punts ("I can only access ledger data… upload the FY ledger" / "specify the FY").
-- **Answer to David's question:** it's the agent replying, and yes — it lacked the right tools.
+- **Answer to the developer's question:** it's the agent replying, and yes — it lacked the right tools.
 - **Fix:** add bank-aware Q&A tools (e.g. `bank_totals` → withdrawals/deposits/closing balance,
   optionally month-filtered) and teach the `qa_agent` instruction to detect bank vs invoice data and
   pick the right tool. Keep tools pure (operate on `state["ledger_data"]`).
 
 ### F2. September is physically duplicated in the bank workbook (data bug)
-- Akar FY2025 bank sheet: **9 `BALANCE B/F` rows** + per-day counts that are multiples
+- Sample Bank Client FY2025 bank sheet: **9 `BALANCE B/F` rows** + per-day counts that are multiples
   (`18/09: 12`, `20/09: 12`, `12/09: 8`, `30/09: 8`). Clear sign the same statements were appended
   multiple times during the **doc_key format transition** (old `F<fileid>:OCBC:acct` keys vs new
   content key `OCBC - 0001:acct:period`).
@@ -34,7 +34,7 @@ These are the things that made the bot feel "robotic" or wrong, plus two confirm
   rows on every append. Firestore `seen_doc_keys` only blocks *new* uploads; already-duplicated rows
   persist and re-sort each time.
 - **Fix:** (a) row/transaction-level dedup inside `_merge_bank_statement` (key on
-  date+description+amount+balance) as a safety net; (b) one-time clean of the Akar workbook;
+  date+description+amount+balance) as a safety net; (b) one-time clean of the Sample Bank Client workbook;
   (c) collapse the 9 `BALANCE B/F` rows into one continuous running balance per
   `bank-ledger-continuous-sorted` memory.
 
@@ -49,7 +49,7 @@ These are the things that made the bot feel "robotic" or wrong, plus two confirm
 - `ledger_store.py` L480/483: `BankStatement_FY{fy}.xlsx` / `Ledger_FY{fy}.xlsx`.
 - **Requested:** `<Client Name> - BankStatement FYXXXX.xlsx` /
   `<Client Name> - Ledger FYXXXX.xlsx` (matches the reference
-  `Rosebery Partner Pte. Ltd. - BankStatement_FY2024.xlsx`). Thread `client_name` from the profile
+  `Sample Partner Pte Ltd - BankStatement_FY2024.xlsx`). Thread `client_name` from the profile
   into the filename. Confirm download/relabel on every append.
 
 ### F5. Status messages are fixed/robotic — don't say WHAT the doc is
@@ -85,19 +85,19 @@ Commit each via TDD; restart bot + live-verify after each batch (stale bot = old
 ## STATUS — shipped 2026-06-15 (branch `fix/ledgr-hitl-learning-and-qa`)
 
 All of F1–F6 implemented, unit-tested (860 pass), and live-verified in
-#akar-enterprises-pte-ltd. Commits: `f5d295a` (F3/F4), `32669c0` (F1),
+#sample-channel-client-pte-ltd. Commits: `f5d295a` (F3/F4), `32669c0` (F1),
 `01e1ce0` (F2), `11cd576` (F5/F6), `+` opening-balance + tally-noun follow-ups.
 
 - ✅ **F1 bank Q&A tool** — LIVE: "What is the total withdrawal for October 2025?"
   → "The total withdrawal for October 2025 was SGD 4,221.14." (verified vs workbook).
   Added `bank_totals` (withdrawals/deposits/net/opening/closing, month+year filter);
   opening balance is per-period (Oct opens at Sep close), not the sheet's first B/F.
-- ✅ **F2 Sept duplication** — LIVE: live Akar FY2025 workbook cleaned 9→4 blocks
+- ✅ **F2 Sept duplication** — LIVE: live Sample Bank Client FY2025 workbook cleaned 9→4 blocks
   (one B/F per month Jul–Oct, 159→66 rows). `dedupe_blocks` guard added to the merge.
 - ✅ **F3 bank ≠ ledger wording** — LIVE: delivery now "Added Nov 2025 (10 transactions)
-  to your **Akar Enterprises Pte. Ltd. – Bank Statement FY2025**"; batch tally now
+  to your **Sample Bank Client Pte Ltd – Bank Statement FY2025**"; batch tally now
   "posted to your FY2025 bank statement" (was "…QBS Ledger FY2025 ledger").
-- ✅ **F4 client-scoped filenames** — LIVE: "Akar Enterprises Pte. Ltd. - BankStatement_FY2025.xlsx".
+- ✅ **F4 client-scoped filenames** — LIVE: "Sample Bank Client Pte Ltd - BankStatement_FY2025.xlsx".
 - ✅ **F5 specific status lines** — LIVE: "🔍 Taking a look at this document…",
   "🏦 Looks like a bank statement — reading each transaction…", etc.
 - ✅ **F6 warm dedup voice** — names the month/doc + replace prompt (unit-tested;

@@ -63,6 +63,13 @@ from invoice_processing.extract.bank_statement_extractor import (
     extract_bank_statement,
     to_bank_statements,
 )
+from invoice_processing.extract.document_extractor import extract_document_bundle
+from invoice_processing.extract.document_normalizer import normalize_document_bundle
+from invoice_processing.extract.document_record import DocumentRecord, DocumentRecordBundle
+from invoice_processing.extract.process_invoice_document import (
+    InvoiceProcessResult,
+    process_invoice_document,
+)
 from invoice_processing.extract.invoice_extractor import (
     ExtractedInvoiceBundle,
     _is_soa_summary_invoice,
@@ -71,7 +78,7 @@ from invoice_processing.extract.invoice_extractor import (
     to_normalized,
 )
 
-from .config import MODEL_LITE, MODEL_STD
+from .config import MODEL_LITE, MODEL_READ, MODEL_STD
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +133,9 @@ ARTIFACT_NAME_FMT = "inbox/{file_id}.pdf"
 DOC_TYPE_KEY = "doc_type"
 DIRECTION_KEY = "direction"
 NORMALIZED_KEY = "normalized_invoices"
+DOCUMENT_RECORDS_KEY = "document_records"
+LEDGER_SUMMARY_TABLE_KEY = "ledger_summary_table"
+EXTRACTION_PATH_KEY = "extraction_path"
 BANK_STATEMENTS_KEY = "bank_statements"
 ROUTES_KEY = "doc_routes"
 
@@ -231,6 +241,9 @@ class ReviewClarifyDecision(BaseModel):
 CLASSIFY_FN: Callable[..., ClassificationResult] = classify_document
 DIRECTION_FN: Callable[..., str] = resolve_direction
 EXTRACT_BUNDLE_FN: Callable[..., ExtractedInvoiceBundle] = extract_invoice_bundle
+EXTRACT_DOCUMENT_FN: Callable[..., DocumentRecordBundle] = extract_document_bundle
+NORMALIZE_DOCUMENT_FN = normalize_document_bundle
+EXTRACT_INVOICE_DOCUMENT_FN: Callable[..., InvoiceProcessResult] = process_invoice_document
 EXTRACT_BANK_FN: Callable[..., Any] = extract_bank_statement
 CATEGORIZE_FN: Callable[..., NormalizedInvoice] = categorize_invoice
 #: The mid-flow extract critic. Defaults to a small Gemini reader on MODEL_LITE;
@@ -294,7 +307,16 @@ async def classify_node(ctx) -> Event:
     """Classify the uploaded PDF and route to the invoice or bank-statement lane.
 
     Emits ``Event(route="invoice"|"bank_statement")`` and records the resolved
-    ``doc_type`` + ``direction`` in state for downstream nodes.
+    ``doc_type`` in state for downstream nodes.
+
+    Direction is intentionally NOT resolved here for the invoice lane — the
+    Understand (Drive-parity) call now owns parties + ``direction_for_client``
+    in one structured shot, replacing the legacy ``classify_document`` +
+    ``resolve_direction`` two-step that drove the Contractor Beta misclassification.
+    The Understand-extract caller (``_resolve_direction_from_extract``) fills
+    ``DIRECTION_KEY`` after the extract runs; if the Understand call returns
+    ``"unknown"`` the document is parked at the HITL gate (not silently
+    rewritten by a fuzzy Python pass).
     """
     data, mime_type = await _load_pdf_bytes(ctx)
     cls: ClassificationResult = CLASSIFY_FN(data, mime_type, model=MODEL_LITE)
@@ -308,44 +330,159 @@ async def classify_node(ctx) -> Event:
         ctx.state[DIRECTION_KEY] = None
         return Event(route=ROUTE_BANK, output={"doc_type": "bank_statement"})
 
-    direction = DIRECTION_FN(
-        cls,
+    ctx.state[DOC_TYPE_KEY] = doc_type
+    # Invoice lane: leave direction unset; the Understand caller fills it in
+    # based on ``direction_for_client``. Until then, the extract step passes
+    # ``direction="auto"`` so the Understand verdict is honored. If the
+    # extract ever reports ``"unknown"``, the HITL gate (review_extraction_node
+    # or approval_gate) escalates — no fuzzy Python fallback in the graph.
+    ctx.state[DIRECTION_KEY] = "auto"
+    return Event(
+        route=ROUTE_INVOICE,
+        output={"doc_type": doc_type, "direction": "auto"},
+    )
+
+
+def _resolve_direction_from_extract(
+    extract: Optional[dict],
+    fallback: str = "purchase",
+) -> str:
+    """Read ``direction_for_client`` from the Understand extract.
+
+    Per the Batch Direction plan, the Understand call owns the direction
+    decision. Returns the resolved direction string (``"purchase"`` /
+    ``"sales"`` / ``"self_referential"``) or the provided ``fallback`` if the
+    extract is missing or the model returned ``"unknown"``. The
+    ``"unknown"`` case is also returned as-is so the caller can escalate to
+    HITL rather than silently picking a direction.
+    """
+    if not extract:
+        return fallback
+    direction = extract.get("direction_for_client")
+    if direction in ("purchase", "sales", "self_referential"):
+        return direction
+    # Either the field is missing (older extract) or it is "unknown". Pass
+    # "unknown" through so the HITL gate can surface it; otherwise fall back.
+    if direction == "unknown":
+        return "unknown"
+    return fallback
+
+
+def _apply_invoice_process_result(ctx, result: InvoiceProcessResult) -> None:
+    """Write shared orchestrator output into session state."""
+    ctx.state[EXTRACTION_PATH_KEY] = result.extraction_path
+    ctx.state[LEDGER_SUMMARY_TABLE_KEY] = result.summary_table
+    if result.ledger_extract is not None:
+        ctx.state["ledger_extract"] = result.ledger_extract
+    if result.document_records is not None:
+        ctx.state[DOCUMENT_RECORDS_KEY] = _guard_state_payload(
+            DOCUMENT_RECORDS_KEY, result.document_records
+        )
+    elif result.extraction_path == "understand":
+        ctx.state[DOCUMENT_RECORDS_KEY] = _guard_state_payload(DOCUMENT_RECORDS_KEY, [])
+    if result.skipped_pages is not None:
+        ctx.state["skipped_pages"] = result.skipped_pages
+    if result.document_read_notes:
+        ctx.state["document_read_notes"] = result.document_read_notes
+    ctx.state[NORMALIZED_KEY] = _guard_state_payload(
+        NORMALIZED_KEY, [_inv_to_dict(i) for i in result.normalized]
+    )
+
+
+async def extract_invoice_document_node(ctx) -> Event:
+    """Understand or legacy extraction — single orchestrated invoice lane step."""
+    data, mime_type = await _load_pdf_bytes(ctx)
+    review_hint = (ctx.state.get("review_hint") or "").strip()
+    result = EXTRACT_INVOICE_DOCUMENT_FN(
+        data,
+        mime_type,
+        doc_type=ctx.state.get(DOC_TYPE_KEY) or "invoice",
+        direction=ctx.state.get(DIRECTION_KEY) or "purchase",
+        our_gst_registered=bool(ctx.state.get("tax_registered", True)),
+        base_currency=ctx.state.get("base_currency") or "SGD",
+        client_name=ctx.state.get("client_name"),
+        client_uen=ctx.state.get("client_uen"),
+        hint=review_hint or None,
+        model=MODEL_READ,
+    )
+    _apply_invoice_process_result(ctx, result)
+    # Drive-parity direction: the Understand call owns the sales/purchase
+    # decision via ``direction_for_client``. Read it from the extract and
+    # write it back into DIRECTION_KEY so downstream nodes (consolidate,
+    # tax classifier, exporters) see a single, consistent direction. If the
+    # model returned ``"unknown"`` we leave the literal string in place so
+    # the HITL gate (review_extraction_node / approval_gate) can surface the
+    # ambiguity — never silently rewrite via fuzzy Python matching.
+    if result.extraction_path == "understand" and result.ledger_extract:
+        resolved = _resolve_direction_from_extract(
+            result.ledger_extract,
+            fallback=ctx.state.get(DIRECTION_KEY) or "purchase",
+        )
+        ctx.state[DIRECTION_KEY] = resolved
+    return Event(output={"count": len(result.normalized)})
+
+
+async def extract_document_node(ctx) -> Event:
+    """Phase 1 — faithful DocumentRecord capture (legacy path only)."""
+    data, mime_type = await _load_pdf_bytes(ctx)
+    review_hint = (ctx.state.get("review_hint") or "").strip()
+    kwargs: dict = {"model": MODEL_READ}
+    if review_hint:
+        kwargs["hint"] = review_hint
+    from invoice_processing.extract.document_normalizer import slim_document_record_for_state
+
+    bundle: DocumentRecordBundle = EXTRACT_DOCUMENT_FN(data, mime_type, **kwargs)
+    slimmed = [slim_document_record_for_state(doc) for doc in bundle.documents]
+    ctx.state[DOCUMENT_RECORDS_KEY] = _guard_state_payload(
+        DOCUMENT_RECORDS_KEY,
+        slimmed,
+    )
+    if bundle.skipped_pages is not None:
+        ctx.state["skipped_pages"] = bundle.skipped_pages
+    if bundle.notes:
+        ctx.state["document_read_notes"] = bundle.notes
+    return Event(output={"count": len(bundle.documents)})
+
+
+async def normalize_document_node(ctx) -> Event:
+    """Phase 2 — map DocumentRecord(s) to NormalizedInvoice(s)."""
+    from invoice_processing.extract.document_record import DocumentRecord
+
+    raw = ctx.state.get(DOCUMENT_RECORDS_KEY) or []
+    if not raw:
+        ctx.state[NORMALIZED_KEY] = _guard_state_payload(NORMALIZED_KEY, [])
+        return Event(output={"count": 0})
+
+    records = [DocumentRecord.model_validate(d) if isinstance(d, dict) else d for d in raw]
+    bundle = DocumentRecordBundle(documents=records)
+    if len(bundle.documents) > 1:
+        from invoice_processing.extract.record_merge import merge_document_records
+
+        bundle = merge_document_records(bundle)
+        ctx.state[DOCUMENT_RECORDS_KEY] = _guard_state_payload(
+            DOCUMENT_RECORDS_KEY,
+            [doc.model_dump() for doc in bundle.documents],
+        )
+    direction = ctx.state.get(DIRECTION_KEY) or "purchase"
+    our_gst = bool(ctx.state.get("tax_registered", True))
+    base_currency: str = ctx.state.get("base_currency") or "SGD"
+    normalized = NORMALIZE_DOCUMENT_FN(
+        bundle,
+        direction=direction,
+        our_gst_registered=our_gst,
+        base_currency=base_currency,
         client_name=ctx.state.get("client_name"),
         client_uen=ctx.state.get("client_uen"),
     )
-    ctx.state[DOC_TYPE_KEY] = doc_type
-    ctx.state[DIRECTION_KEY] = direction
-    return Event(
-        route=ROUTE_INVOICE,
-        output={"doc_type": doc_type, "direction": direction},
-    )
-
-
-async def extract_invoice_node(ctx) -> Event:
-    """Extract + reconcile + normalize a bundle of invoices/receipts (fan-out).
-
-    Calls ``extract_invoice_bundle`` with MODEL_LITE, then for EACH invoice in the
-    bundle runs ``reconcile`` + ``to_normalized``, producing a LIST of normalized
-    invoices written to ``state[NORMALIZED_KEY]``.
-    """
-    data, mime_type = await _load_pdf_bytes(ctx)
-    # A re_extract request (chat tool / ADR-0010) seeds ``review_hint`` into run
-    # state so the FIRST read is steered too — not just the reviewer's retry. Only
-    # pass the kwarg when a hint is actually present so the normal file-drop path
-    # (no hint) calls ``EXTRACT_BUNDLE_FN`` exactly as before.
-    review_hint = (ctx.state.get("review_hint") or "").strip()
-    if review_hint:
-        bundle: ExtractedInvoiceBundle = EXTRACT_BUNDLE_FN(
-            data, mime_type, model=MODEL_LITE, hint=review_hint
-        )
-    else:
-        bundle = EXTRACT_BUNDLE_FN(data, mime_type, model=MODEL_LITE)
-
-    normalized = _normalize_bundle(ctx, bundle)
     ctx.state[NORMALIZED_KEY] = _guard_state_payload(
         NORMALIZED_KEY, [_inv_to_dict(i) for i in normalized]
     )
     return Event(output={"count": len(normalized)})
+
+
+async def extract_invoice_node(ctx) -> Event:
+    """Invoice lane: understand or legacy extraction in one step."""
+    return await extract_invoice_document_node(ctx)
 
 
 def _normalize_bundle(ctx, bundle: ExtractedInvoiceBundle) -> list[NormalizedInvoice]:
@@ -494,11 +631,45 @@ def detect_struggle(state: dict) -> tuple[bool, list[str]]:
     is NORMAL for a non-registered client, not a struggle) — so a non-registered
     client's "missing tax" never trips the reviewer.
     """
+    from invoice_processing.extract.document_record import DocumentRecord
+
     invoices = _normalized_from_state(state)
+
+    from invoice_processing.extract.document_normalizer import _is_telco_bill
 
     reasons: list[str] = []
 
-    # Signal #1: bundle_empty — extraction produced zero invoices.
+    # Phase 1 read fidelity (DocumentRecord capture) — legacy path only.
+    extraction_path = (state.get(EXTRACTION_PATH_KEY) or "").strip().lower()
+    records_raw = state.get(DOCUMENT_RECORDS_KEY)
+    doc_records: list = []
+    if extraction_path != "understand" and records_raw is not None:
+        if not records_raw:
+            reasons.append("read_empty")
+        for idx, raw in enumerate(records_raw):
+            doc = DocumentRecord.model_validate(raw) if isinstance(raw, dict) else raw
+            doc_records.append(doc)
+            if not doc.labeled_fields and not doc.line_items and not doc.tables:
+                reasons.append(f"read_no_capture: doc #{idx + 1}")
+            elif (
+                (doc.totals or doc.labeled_fields)
+                and not doc.line_items
+                and not doc.tables
+                and not _is_telco_bill(doc)
+            ):
+                reasons.append(f"read_no_lines: doc #{idx + 1}")
+        if len(doc_records) > 1:
+            reasons.append(f"read_false_split: {len(doc_records)} documents")
+
+    # Phase 1 rich but Phase 2 incomplete.
+    if doc_records and invoices:
+        primary = doc_records[0]
+        inv0 = invoices[0]
+        rich_read = bool(primary.labeled_fields or primary.line_items)
+        if rich_read and not inv0.invoice_number and not inv0.doc_total and inv0.lines:
+            reasons.append("normalize_incomplete: read captured lines but missing headers")
+
+    # Signal #1: bundle_empty — normalization produced zero invoices.
     if not invoices:
         reasons.append("bundle_empty")
 
@@ -523,7 +694,13 @@ def detect_struggle(state: dict) -> tuple[bool, list[str]]:
         # (already computed upstream; carry the note for the critic).
         if not inv.reconciled:
             note = inv.reconcile_note or "totals do not reconcile"
-            reasons.append(f"unreconciled: {label} ({note})")
+            totals_ok = note.strip().lower().startswith("reconciled")
+            if not totals_ok:
+                reasons.append(f"unreconciled: {label} ({note})")
+            elif "direction unknown" in note or "self-referential" in note:
+                primary = doc_records[idx] if idx < len(doc_records) else None
+                if not (primary and _is_telco_bill(primary)):
+                    reasons.append(f"direction_uncertain: {label}")
 
         # Signal #6: missing_required — a core identifier/total is absent.
         # §0.5-C: doc_total is a tax/GST-shaped total only insofar as a
@@ -565,11 +742,25 @@ def _reviewer_llm(state: dict, reasons: list[str], *, model: str) -> dict:
 
     from invoice_processing.shared_libraries.genai_client import make_client
 
+    from invoice_processing.extract.document_record import DocumentRecord
+
+    record_summary: list[str] = []
+    for raw in state.get(DOCUMENT_RECORDS_KEY) or []:
+        doc = DocumentRecord.model_validate(raw) if isinstance(raw, dict) else raw
+        record_summary.append(
+            f"labels={len(doc.labeled_fields)} lines={len(doc.line_items)} "
+            f"tables={len(doc.tables)} parties={len(doc.parties)}"
+        )
+
     instruction = (
         "You are a meticulous bookkeeping QA reviewer. An automated reader "
         "extracted an invoice/receipt and a deterministic checker flagged these "
         "concerns:\n"
         + "\n".join(f"- {r}" for r in reasons)
+        + "\n\nPhase 1 capture summary:\n"
+        + "\n".join(f"- {s}" for s in record_summary)
+        + "\n\nNormalized extraction JSON:\n"
+        + json.dumps(state.get(NORMALIZED_KEY) or [], default=str)
         + "\n\nDecide ONE verdict and ALWAYS return it explicitly — never end "
         "with only a tool call and never reply with empty text:\n"
         f"- '{REVIEW_VERDICT_OK}': the extraction is acceptable as-is.\n"
@@ -589,7 +780,7 @@ def _reviewer_llm(state: dict, reasons: list[str], *, model: str) -> dict:
         client = make_client()
         resp = client.models.generate_content(
             model=model,
-            contents=[instruction, json.dumps(state.get(NORMALIZED_KEY) or [], default=str)],
+            contents=[instruction],
             config=_genai_types.GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=_ReviewVerdict,
@@ -613,12 +804,12 @@ def _reviewer_llm(state: dict, reasons: list[str], *, model: str) -> dict:
 REVIEWER_FN = _reviewer_llm
 
 
-def _run_reviewer_loop(ctx, reasons: list[str], pdf_bytes: bytes) -> str:
+def _run_reviewer_loop(ctx, reasons: list[str], pdf_bytes: bytes, mime_type: str = "application/pdf") -> str:
     """Bounded IN-NODE reviewer loop (NOT a graph cycle). Returns a verdict.
 
     §9.3 ceiling: at most ``REVIEW_MAX_REVIEWS`` critic calls +
     ``REVIEW_MAX_REEXTRACTS`` re-extract. ``hints_needed`` (within the re-extract
-    cap) re-runs ``EXTRACT_BUNDLE_FN`` with the hint appended + ``_normalize_bundle``,
+    cap) re-runs Phase 1+2 with the hint appended,
     re-detects, and continues. Ceiling hit / hints exhausted / two reviews still
     bad → ``user_clarify`` (circuit-break to a human, §9.5). On ``ok`` the loop
     returns immediately. Tracks ``review_attempts`` (≤2) and
@@ -639,7 +830,7 @@ def _run_reviewer_loop(ctx, reasons: list[str], pdf_bytes: bytes) -> str:
 
         if verdict == REVIEW_VERDICT_HINTS and reextracts < REVIEW_MAX_REEXTRACTS:
             hint = result.get("hint") or ""
-            _reextract_with_hint(ctx, hint, pdf_bytes)
+            _reextract_with_hint(ctx, hint, pdf_bytes, mime_type)
             reextracts += 1
             ctx.state["review_reextract_count"] = reextracts
             # Re-detect on the fresh extraction; if it's now clean we still loop
@@ -659,21 +850,22 @@ def _run_reviewer_loop(ctx, reasons: list[str], pdf_bytes: bytes) -> str:
     return REVIEW_VERDICT_CLARIFY
 
 
-def _reextract_with_hint(ctx, hint: str, pdf_bytes: bytes) -> None:
-    """Re-run extraction with ``hint`` appended, re-normalize, rewrite state.
-
-    Reuses ``_normalize_bundle`` (shared with ``extract_invoice_node``) so the
-    re-extract path never duplicates normalization logic. ``review_hint`` is
-    stored for audit; the real extractor receives ``hint`` as a kwarg.
-    """
+def _reextract_with_hint(ctx, hint: str, pdf_bytes: bytes, mime_type: str = "application/pdf") -> None:
+    """Re-run extraction with ``hint`` appended, rewrite state."""
     ctx.state["review_hint"] = hint
-    bundle: ExtractedInvoiceBundle = EXTRACT_BUNDLE_FN(
-        pdf_bytes, "application/pdf", model=MODEL_LITE, hint=hint,
+    result = EXTRACT_INVOICE_DOCUMENT_FN(
+        pdf_bytes,
+        mime_type,
+        doc_type=ctx.state.get(DOC_TYPE_KEY) or "invoice",
+        direction=ctx.state.get(DIRECTION_KEY) or "purchase",
+        our_gst_registered=bool(ctx.state.get("tax_registered", True)),
+        base_currency=ctx.state.get("base_currency") or "SGD",
+        client_name=ctx.state.get("client_name"),
+        client_uen=ctx.state.get("client_uen"),
+        hint=hint,
+        model=MODEL_READ,
     )
-    normalized = _normalize_bundle(ctx, bundle)
-    ctx.state[NORMALIZED_KEY] = _guard_state_payload(
-        NORMALIZED_KEY, [_inv_to_dict(i) for i in normalized]
-    )
+    _apply_invoice_process_result(ctx, result)
 
 
 def _review_clarify_question(reasons: list[str]) -> str:
@@ -734,8 +926,8 @@ async def review_extraction_node(ctx):
         return
 
     # Tripped: the bounded loop may re-extract, so load the source PDF now.
-    pdf_bytes, _mime = await _load_pdf_bytes(ctx)
-    verdict = _run_reviewer_loop(ctx, reasons, pdf_bytes)
+    pdf_bytes, mime_type = await _load_pdf_bytes(ctx)
+    verdict = _run_reviewer_loop(ctx, reasons, pdf_bytes, mime_type)
     ctx.state[REVIEW_VERDICT_KEY] = verdict
 
     if verdict != REVIEW_VERDICT_CLARIFY:
@@ -750,21 +942,20 @@ async def review_extraction_node(ctx):
     )
 
 
-async def _maybe_load_pdf(ctx, decision) -> bytes:
-    """Load the source PDF bytes only when the resume action is a re-extract.
-
-    ``reject`` / ``confirm_as_is`` never re-read the artifact, so resuming those
-    must not require an artifact service to be present.
-    """
+async def _maybe_load_pdf(ctx, decision) -> tuple[bytes, str]:
+    """Load source bytes + mime when resume action is re-extract."""
     data = decision if isinstance(decision, dict) else {}
     if data.get("action") == "reextract_as":
-        pdf_bytes, _mime = await _load_pdf_bytes(ctx)
-        return pdf_bytes
-    return b""
+        return await _load_pdf_bytes(ctx)
+    return b"", "application/pdf"
 
 
-def _apply_review_clarify(ctx, decision, pdf_bytes: bytes) -> None:
+def _apply_review_clarify(ctx, decision, pdf_payload: bytes | tuple[bytes, str]) -> None:
     """Apply the human's ReviewClarifyDecision resume payload to the run state."""
+    if isinstance(pdf_payload, tuple):
+        pdf_bytes, mime_type = pdf_payload
+    else:
+        pdf_bytes, mime_type = pdf_payload, "application/pdf"
     data = decision if isinstance(decision, dict) else {}
     action = data.get("action")
     ctx.state["review_clarify_action"] = action
@@ -773,7 +964,7 @@ def _apply_review_clarify(ctx, decision, pdf_bytes: bytes) -> None:
         ctx.state[NORMALIZED_KEY] = []
         return
     if action == "reextract_as":
-        _reextract_with_hint(ctx, data.get("hint") or "", pdf_bytes)
+        _reextract_with_hint(ctx, data.get("hint") or "", pdf_bytes, mime_type)
         return
     # confirm_as_is (or missing/unknown action): wave the current extraction
     # through unchanged.
@@ -978,6 +1169,30 @@ def _approval_summary(reasons: list[str]) -> str:
     return f"{header}\n{bullets}"
 
 
+def _read_preview_from_state(state: dict, *, max_fields: int = 8) -> str:
+    """Compact Phase 1 labeled_fields preview for the approval card."""
+    from invoice_processing.extract.document_record import DocumentRecord
+
+    raw = state.get(DOCUMENT_RECORDS_KEY) or []
+    if not raw:
+        return ""
+    lines: list[str] = ["*What was read from the document:*"]
+    for idx, item in enumerate(raw[:3]):
+        doc = DocumentRecord.model_validate(item) if isinstance(item, dict) else item
+        prefix = f"Doc {idx + 1}: " if len(raw) > 1 else ""
+        shown = 0
+        for field in doc.labeled_fields:
+            if shown >= max_fields:
+                lines.append(f"{prefix}… ({len(doc.labeled_fields) - shown} more fields)")
+                break
+            lines.append(f"{prefix}{field.label}: {field.value}")
+            shown += 1
+        if doc.annotations and shown < max_fields:
+            for ann in doc.annotations[:2]:
+                lines.append(f"{prefix}📝 {ann.text}")
+    return "\n".join(lines)
+
+
 async def approval_gate(ctx):
     """HITL gate: pause for human approval when any entry is uncertain.
 
@@ -1010,6 +1225,9 @@ async def approval_gate(ctx):
         ]
 
     summary = _approval_summary(reasons)
+    read_preview = _read_preview_from_state(ctx.state)
+    if read_preview:
+        summary = f"{read_preview}\n\n{summary}"
     # Stash the summary in state so the (Slack-owning) runner can render the
     # approval card text without re-deriving it; the node stays Slack-agnostic.
     ctx.state["approval_message"] = summary
@@ -1149,6 +1367,15 @@ def _closing_balance_from_rows(rows: list[dict]) -> Optional[float]:
     return last_stated
 
 
+def _software_label_for_summary(software: str) -> str:
+    key = (software or "").strip().lower()
+    if "xero" in key:
+        return "Xero"
+    if key:
+        return "QBS Ledger"
+    return ""
+
+
 def compose_delivery_summary(payload: dict) -> str:
     """Compose the user-facing delivery summary from a LEDGER_ROWS_KEY payload.
 
@@ -1164,7 +1391,9 @@ def compose_delivery_summary(payload: dict) -> str:
 
     doc_label = "Bank Statement" if kind == "bank" else "Ledger"
     prefix = f"{client_name} – " if client_name else ""
-    destination = f"**{prefix}{doc_label} FY{fy}**"
+    sw = _software_label_for_summary(str(payload.get("software") or ""))
+    sw_suffix = f" ({sw})" if sw and kind != "bank" else ""
+    destination = f"**{prefix}{doc_label} FY{fy}{sw_suffix}**"
 
     if not batches:
         return "No entries were produced for this document."

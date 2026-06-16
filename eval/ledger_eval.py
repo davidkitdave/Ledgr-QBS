@@ -353,6 +353,7 @@ def discover_samples(
 
     # Priority dirs: invoice / receipt areas
     priority_patterns = [
+        root / "**" / "Purchase" / "**" / "*.pdf",
         root / "**" / "GST SR*" / "*.pdf",
         root / "**" / "GST ZR*" / "*.pdf",
         root / "**" / "MYDoc" / "**" / "*.pdf",
@@ -498,7 +499,7 @@ def _match_key(needle_key: tuple[str, str], gt_keys: set[tuple[str, str]]) -> bo
 
 
 def load_ground_truth_ledger(path: Path) -> dict[tuple[str, str], list[str]]:
-    """Parse a Cast Unity ground-truth ledger and return a placement lookup.
+    """Parse a Sample Test Group ground-truth ledger and return a placement lookup.
 
     Reads the ``Sales`` and ``Purchase`` sheets of ``<Client> - Ledger_FY*.xlsx``,
     normalises vendor/customer + description to a tuple key, and maps it to
@@ -517,7 +518,7 @@ def load_ground_truth_ledger(path: Path) -> dict[tuple[str, str], list[str]]:
         if not sheets:
             return {}
 
-        # Per-sheet header layout (from real Cast Unity files, observed 2026-06):
+        # Per-sheet header layout (from real Sample Test Group files, observed 2026-06):
         #   Sales:   (date, number, customer, description, ..., total, account, ...)
         #   Purchase:(number, date, vendor, [tax id], description, ..., total, account, ...)
         # We find the columns by header name so we don't break if the order shifts.
@@ -723,6 +724,12 @@ if __name__ == "__main__":
         default="~/Desktop/LocalTest/TestDoc",
         help="Root directory to discover sample PDFs",
     )
+    parser.add_argument(
+        "--paths",
+        nargs="+",
+        default=None,
+        help="Explicit PDF paths (skips discovery)",
+    )
     args = parser.parse_args()
 
     # Load .env before any AI-client imports (mirrors bank_eval.py)
@@ -733,13 +740,17 @@ if __name__ == "__main__":
     os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "FALSE"
 
     client = default_client()
-    paths = discover_samples(root=args.root, limit=args.limit)
+    if args.paths:
+        paths = [Path(p).expanduser() for p in args.paths]
+    else:
+        paths = discover_samples(root=args.root, limit=args.limit)
 
     if not paths:
         print(f"[WARN] No sample PDFs found under: {args.root}")
-        print("       Pass --root to specify a directory containing invoice/receipt PDFs.")
+        print("       Pass --root or --paths to specify PDFs.")
     else:
-        print(f"Evaluating {len(paths)} document(s) from: {args.root}")
+        src = "explicit --paths" if args.paths else args.root
+        print(f"Evaluating {len(paths)} document(s) from: {src}")
         for p in paths:
             print(f"  {p}")
 

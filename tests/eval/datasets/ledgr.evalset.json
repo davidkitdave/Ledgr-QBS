@@ -293,7 +293,7 @@
       "final_session_state": {
         "_eval_assertions": {
           "all_lines_tax_treatment": "NT",
-          "xero_code": "No GST"
+          "xero_code": "No Tax"
         }
       }
     },
@@ -343,7 +343,7 @@
       "final_session_state": {
         "_eval_assertions": {
           "all_lines_tax_treatment": "SR",
-          "xero_code": "Standard-Rated Purchases"
+          "xero_code": "SR"
         }
       }
     },
@@ -393,7 +393,7 @@
       "final_session_state": {
         "_eval_assertions": {
           "line_tax_treatment": "ZR",
-          "xero_code": "Zero-Rated Purchases"
+          "xero_code": "ZR"
         }
       }
     },

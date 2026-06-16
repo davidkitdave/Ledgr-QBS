@@ -415,10 +415,12 @@ class TestExistingRulesUnchanged:
         assert result.tax_treatment == "SR"
         assert not result.tax_flagged
 
-    def test_xero_code_map_for_NT_is_no_gst(self):
-        """Confirm Xero target maps NT → "No GST" for both purchase and sales."""
-        assert CLF.tax_code("NT", "purchase", "xero") == "No GST"
-        assert CLF.tax_code("NT", "sales", "xero") == "No GST"
+    def test_xero_code_map_short_sg_codes(self):
+        """Xero SG org uses SR / ZR / No Tax (not long BillTemplate strings)."""
+        assert CLF.tax_code("SR", "purchase", "xero") == "SR"
+        assert CLF.tax_code("ZR", "purchase", "xero") == "ZR"
+        assert CLF.tax_code("NT", "purchase", "xero") == "No Tax"
+        assert CLF.tax_code("NT", "sales", "xero") == "No Tax"
 
     def test_rate_mismatch_flags(self):
         """Correct SR path but GST amount doesn't reconcile to 9% → flag."""

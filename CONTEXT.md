@@ -26,11 +26,38 @@ being a silent file-processor and start answering and acting on messages. The
 Teammate *talks and routes*; it does **not** itself extract data.
 
 ## Engine (processing pipeline)
-The deterministic document-processing path: classify → extract → categorise →
-tax → workbook. It is plain Python (LLM is called only for the multimodal
-classify/extract steps), trusted and well-tested. The Engine runs as a **single
-node** — it is never re-implemented as a chain of LLM agents. (An earlier agentic
-rewrite of the Engine burned tokens and was retired — see docs/adr.)
+The document-processing path: classify → **understand** → categorise → tax →
+workbook. It is **intelligent at the document boundary, deterministic after**.
+
+- **Understand** — one multimodal Gemini call per standard invoice/receipt/telco
+  bill, returning a Drive-style [[Document Summary]] plus [[Ledger lines]] in a
+  single structured schema (`DocumentLedgerExtract`). This replaces the old
+  faithful-capture + regex-normalize bridge for those doc types.
+- **Policy** — reconcile, tax rules, COA categorisation, and export projection
+  stay plain Python (auditable, testable).
+- The Engine runs inside a **slim ADK Workflow graph** — never as a chain of
+  per-step LLM agents (an earlier rewrite burned tokens and was retired; see
+  docs/adr/0001). See [[Understand layer]] and ADR-0011.
+
+## Understand layer
+The **intelligence** step at the document boundary: one Gemini multimodal call
+with a structured JSON schema that returns both human-readable facts and
+accounting-meaningful lines. Matches Google Drive side-panel behaviour (Category /
+Details summary + collapsed ledger lines for telco). **Not** faithful OCR of every
+row followed by Python regex to re-summarize. SOA packages and complex multi-doc
+splits still use the legacy capture path (ADR-0011).
+
+## Document Summary
+The Drive-style **Category / Details** table the Understand layer returns
+alongside ledger lines (`DocumentLedgerExtract.summary_table`). Used internally
+for eval, debug, and Drive-parity checks — **not** shown in Slack (ADR-0011).
+Slack shows the ledger preview data_table and FY workbook instead.
+
+## Ledger lines
+The small set of charge rows the Understand layer returns for posting — e.g. one
+line for a simple invoice, two SR/ZR summary lines for a telco bill. Mapped into
+[[Canonical Schema]] `InvoiceLine` entries; tax treatment and account codes are
+applied in later **Policy** steps, not in Understand.
 
 ## Batch (Job)
 The unit of work a human creates by dropping one or more documents at once. Even
@@ -85,11 +112,13 @@ The Canvas is the tidy "folder view"; the raw chat may stay noisy. A human may
 optionally drag the Canvas + files into a real Slack folder by hand.
 
 ## Canonical Schema
-The single, **software-agnostic** model the Engine extracts into
-(`NormalizedInvoice` / `BankStatement`) — a **superset** of what any accounting
-target needs. Per-software **exporters** project it into each target's import
-template (QBS Ledger, Xero) at write time: *one extraction → many exports*. The
-canonical schema is never shaped to one software's headers.
+The single, **software-agnostic** model the Engine maps **understood** documents
+into (`NormalizedInvoice` / `BankStatement`) — a **superset** of what any accounting
+target needs. The Understand layer produces ledger-ready lines; Policy steps fill
+tax treatment and COA codes before per-software **exporters** project into each
+target's import template (QBS Ledger, Xero) at write time: *one understanding →
+many exports*. The canonical schema is never shaped to one software's headers.
+See ADR-0005 and ADR-0011.
 
 ## Completeness Contract
 The set of fields extraction **must** fill = the **union of every target template's

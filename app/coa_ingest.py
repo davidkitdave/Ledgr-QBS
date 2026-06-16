@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 class CoaIngestOutcome:
     client_id: Optional[str]
     n_accounts: int
-    status: str   # "active" | "no_profile" | "empty" | "error"
+    status: str   # "active" | "no_profile" | "empty" | "validation_failed" | "error"
     note: str
 
 
@@ -165,7 +165,10 @@ def coa_rows_from_file(path: str) -> list[dict]:
 
 
 def standard_coa_rows() -> list[dict]:
-    """Return the built-in standard SG SME COA as a list of row dicts."""
+    """Return the built-in standard SG SME COA as a list of row dicts.
+
+    Eval/dev only — not exposed in production onboarding.
+    """
     data_path = Path(__file__).parent / "data" / "standard_sg_sme_coa.json"
     with open(data_path, encoding="utf-8") as fh:
         return json.load(fh)
@@ -193,7 +196,8 @@ def ingest_coa(
     Returns:
         CoaIngestOutcome describing what happened.
     """
-    from app.blocks import coa_saved_blocks, needs_setup_blocks
+    from app.blocks import coa_saved_blocks, coa_validation_failed_blocks, needs_setup_blocks
+    from app.coa_validate import validate_coa
 
     ctx = store.get_by_channel(channel_id)
 
@@ -213,6 +217,16 @@ def ingest_coa(
             n_accounts=0,
             status="empty",
             note="No accounts parsed from the provided rows.",
+        )
+
+    validation = validate_coa(rows)
+    if not validation.ok:
+        say_fn(blocks=coa_validation_failed_blocks(validation.errors))
+        return CoaIngestOutcome(
+            client_id=ctx.client_id,
+            n_accounts=0,
+            status="validation_failed",
+            note="; ".join(validation.errors),
         )
 
     store.save_coa(ctx.client_id, rows)

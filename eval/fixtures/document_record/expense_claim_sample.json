@@ -1,0 +1,13 @@
+{
+  "fixture_id": "expense_claim_sample",
+  "description": "Employee expense claim — table row fidelity",
+  "expected_fields": [
+    {"label": "Employee", "value_contains": ""},
+    {"label": "Purpose", "value_contains": ""}
+  ],
+  "min_line_items": 3,
+  "min_tables": 0,
+  "parties": [
+    {"role_hint": "employee", "name_contains": ""}
+  ]
+}

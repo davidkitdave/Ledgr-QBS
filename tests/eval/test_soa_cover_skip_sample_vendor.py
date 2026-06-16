@@ -1,4 +1,4 @@
-"""Regression gate: SOA cover-page skip for COOL POWER DEC 2025 package.
+"""Regression gate: SOA cover-page skip for Sample Vendor Inc DEC 2025 package.
 
 Ground truth (11-page PDF):
   - Page 1 = SOA cover ("DEBTOR STATEMENT") listing 19 line items — MUST be skipped.
@@ -17,7 +17,7 @@ GOOGLE_CLOUD_PROJECT).
 
 Run deliberately:
     LEDGR_TEST_DOC_DIR=~/Desktop/LocalTest/TestDoc \
-    pytest tests/eval/test_soa_cover_skip_cool_power.py -v
+    pytest tests/eval/test_soa_cover_skip_sample_vendor.py -v
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ import pytest
 # ──────────────────────────────────────────────────────────────────────────────
 
 _REL_PATH = pathlib.Path(
-    "MYDoc/JBI PLUS AUTO ENTERPRISE/Purchase/COOL POWER - DEC 2025_.pdf"
+    "MYDoc/Sample Auto Enterprise/Purchase/SOA-SAMPLE-DEC-2025_.pdf"
 )
 
 _TEST_DOC_DIR: Optional[str] = os.environ.get("LEDGR_TEST_DOC_DIR")

@@ -22,7 +22,7 @@ Slack (Bolt); Firestore + GCS; Cloud Run; `agents-cli` for scaffold/eval/deploy;
 
 ## HOW TO RESUME IN A NEW SESSION (read these first)
 1. This plan.
-2. Memory index: `/Users/davidkitdave/.claude/projects/-Users-davidkitdave-Projects-Ledgr-QBS/memory/MEMORY.md`
+2. Memory index: `~/.claude/projects/-Projects-Ledgr-QBS/memory/MEMORY.md`
    and the files it lists (project overview, data model, build-forward-not-legacy, delegate-then-verify,
    adk-use-official-mcp-and-cli).
 3. Design/reference docs in this repo:
@@ -40,7 +40,7 @@ re-implement. Don't replicate the Google Sheets/Drive workflow. All Python via `
 ---
 
 ## ENVIRONMENT (already set up)
-- Project dir: `/Users/davidkitdave/Projects/Ledgr-QBS` (the `invoice-processing` sample is vendored here).
+- Project dir: `~/Projects/Ledgr-QBS` (the `invoice-processing` sample is vendored here).
 - GCP project `ledgr-qbs`, ADC authed (admin@qbsaiautomation.com); APIs on: Vertex AI, Firestore, Cloud Run, GCS.
 - `.env`: `PROJECT_ID=ledgr-qbs`, `LOCATION=asia-southeast1`, `GEMINI_FLASH_MODEL=gemini-2.5-flash`,
   `GEMINI_PRO_MODEL=gemini-2.5-flash` (Pro→Flash on purpose), `GOOGLE_GENAI_USE_VERTEXAI=TRUE`.
@@ -174,7 +174,7 @@ docs/forward-design-slack.md · docs/build-map-categorization.md · docs/researc
 
 ## VERIFY (re-run the end-to-end pipeline — Task #14 confirmation)
 ```bash
-cd /Users/davidkitdave/Projects/Ledgr-QBS
+cd ~/Projects/Ledgr-QBS
 uv run python -c "
 from dotenv import load_dotenv; load_dotenv('.env')
 from invoice_processing.classify.document_classifier import classify_file, resolve_direction
@@ -293,7 +293,7 @@ Grounded in Bolt docs: `App(signing_secret, installation_store, oauth_settings=O
       `roles/storage.objectAdmin` (bucket). **`/slack/install` → HTTP 200** (Bolt install page + OAuth link) —
       service fully functional. ✅ `/slack/events`→401 (sig check). 
       ✅ OAUTH INSTALL VERIFIED (2026-06-12): user added the redirect URL + completed install → per-workspace token
-      PERSISTED to Firestore `workspaces/none-T0B59UG473K` (team QBS-AI, has_bot_token=True, scopes present).
+      PERSISTED to Firestore `workspaces/none-T0B59UG473K` (team LEDGR-DEV, has_bot_token=True, scopes present).
       **Model B multi-workspace install flow works end-to-end on the live service.** (Redirect-URI mismatch was the
       one gotcha — add `…/slack/oauth_redirect` to OAuth&Permissions Redirect URLs; now in `docs/slack-setup.md`.)
       ⏳ REMAINING (final E2E): config Event Subscriptions + Interactivity Request URLs = `…/slack/events` (separate

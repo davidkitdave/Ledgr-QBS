@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-06-13
-- **Deciders:** David (developer)
+- **Deciders:** Ledgr team
 
 ## Context
 

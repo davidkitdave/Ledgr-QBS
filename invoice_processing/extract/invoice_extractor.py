@@ -8,6 +8,7 @@ line is kept separate so a mixed SR/ZR bill stays two lines for the tax classifi
 from __future__ import annotations
 
 import logging
+import re
 from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
@@ -189,6 +190,14 @@ def mime_for(path: str | Path) -> str:
     return _MIME_BY_EXT.get(Path(path).suffix.lower(), "application/octet-stream")
 
 
+def _append_hint(prompt: str, hint: Optional[str]) -> str:
+    """Append a human steering hint to an extraction prompt when provided."""
+    hint = (hint or "").strip()
+    if not hint:
+        return prompt
+    return f"{prompt}\n\nAdditional instruction from the accountant:\n{hint}"
+
+
 def extract_invoice(
     data: bytes,
     mime_type: str,
@@ -196,13 +205,14 @@ def extract_invoice(
     project: Optional[str] = None,
     location: Optional[str] = None,
     model: Optional[str] = None,
+    hint: Optional[str] = None,
 ) -> ExtractedInvoice:
     client = make_client(project, location)
     model = model or default_model()
     part = types.Part.from_bytes(data=data, mime_type=mime_type)
     resp = client.models.generate_content(
         model=model,
-        contents=[part, _PROMPT],
+        contents=[part, _append_hint(_PROMPT, hint)],
         config=types.GenerateContentConfig(
             temperature=0,
             response_mime_type="application/json",
@@ -224,6 +234,7 @@ def extract_invoice_bundle(
     project: Optional[str] = None,
     location: Optional[str] = None,
     model: Optional[str] = None,
+    hint: Optional[str] = None,
 ) -> ExtractedInvoiceBundle:
     """Extract one-or-more invoices/receipts from a single document into a bundle.
 
@@ -236,7 +247,7 @@ def extract_invoice_bundle(
     part = types.Part.from_bytes(data=data, mime_type=mime_type)
     resp = client.models.generate_content(
         model=model,
-        contents=[part, _BUNDLE_PROMPT],
+        contents=[part, _append_hint(_BUNDLE_PROMPT, hint)],
         config=types.GenerateContentConfig(
             temperature=0,
             response_mime_type="application/json",
@@ -251,15 +262,72 @@ def extract_file_bundle(path: str | Path, **kwargs) -> ExtractedInvoiceBundle:
     return extract_invoice_bundle(path.read_bytes(), mime_for(path), **kwargs)
 
 
-def _parse_date(s: Optional[str]) -> Optional[date]:
-    if not s:
-        return None
-    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%Y/%m/%d", "%m/%d/%Y"):
+_DATE_FORMATS = (
+    "%Y-%m-%d",
+    "%d/%m/%Y",
+    "%d/%m/%y",
+    "%d-%m-%Y",
+    "%d.%m.%Y",
+    "%Y/%m/%d",
+    "%m/%d/%Y",
+    "%d %b %Y",
+    "%d %B %Y",
+    "%B %d, %Y",
+    "%d %b %y",
+)
+
+
+def _strip_ordinals(text: str) -> str:
+    return re.sub(r"\b(\d{1,2})(st|nd|rd|th)\b", r"\1", text, flags=re.I)
+
+
+def _parse_date_part(part: str) -> Optional[date]:
+    cleaned = _strip_ordinals(part.strip())
+    for fmt in _DATE_FORMATS:
         try:
-            return datetime.strptime(s.strip(), fmt).date()
+            return datetime.strptime(cleaned, fmt).date()
         except ValueError:
             continue
     return None
+
+
+def _parse_date(s: Optional[str]) -> Optional[date]:
+    """Parse a single invoice date from common formats and date ranges."""
+    if not s:
+        return None
+    raw = s.strip()
+    direct = _parse_date_part(raw)
+    if direct:
+        return direct
+    for sep in (" – ", " - ", " to "):
+        if sep == " to ":
+            if not re.search(r"\s+to\s+", raw, flags=re.I):
+                continue
+            segments = re.split(r"\s+to\s+", raw, flags=re.I)
+        elif sep in raw:
+            segments = raw.split(sep)
+        else:
+            continue
+        parsed = [_parse_date_part(seg) for seg in segments]
+        parsed = [d for d in parsed if d is not None]
+        if parsed:
+            return parsed[-1]
+    return None
+
+
+def _has_currency_conflict(
+    ex: ExtractedInvoice,
+    *,
+    line_currencies: Optional[list[str]] = None,
+) -> bool:
+    """True when the same document mixes more than one currency."""
+    seen: set[str] = set()
+    if ex.currency:
+        seen.add(ex.currency.upper())
+    for code in line_currencies or []:
+        if code:
+            seen.add(code.upper())
+    return len(seen) > 1
 
 
 def reconcile(ex: ExtractedInvoice, *, tol_abs: float = 0.05, tol_rel: float = 0.01) -> tuple[bool, str]:
@@ -299,16 +367,17 @@ def to_normalized(
     client_country: str = "SG",
     base_currency: str = "SGD",
     fx_rate: Optional[float] = None,
+    currency_conflict: bool = False,
+    line_currencies: Optional[list[str]] = None,
 ) -> NormalizedInvoice:
     """Map an ExtractedInvoice to a NormalizedInvoice for the tax classifier + exporter.
 
     direction: 'purchase' (we are the buyer; counterparty = supplier=issuer) or
     'sales' (we are the seller; counterparty = customer=bill_to).
 
-    base_currency: the client's ledger currency (e.g. 'SGD').  When the document
-    currency differs, fx_rate must be supplied to convert amounts.  If not supplied
-    for a non-base currency document, the doc is flagged for human review
-    (needs_fx_review=True, reconciled=False) rather than silently booked at rate=1.
+    Foreign-currency invoices are booked in their document currency (standard AP in
+    QBS/Xero).  needs_fx_review is set only when the same document mixes currencies
+    or when fx_rate conversion was requested but is missing on a conflicting doc.
     """
     doc_type = "sales" if direction == "sales" else "purchase"
     supplier = PartyInfo(name=ex.issuer_name, gst_regno=ex.issuer_gst_regno)
@@ -329,6 +398,9 @@ def to_normalized(
         for l in ex.lines
     ]
     ok, detail = reconcile(ex)
+    mixed_currencies = currency_conflict or _has_currency_conflict(
+        ex, line_currencies=line_currencies
+    )
 
     # ------------------------------------------------------------------ #
     # FX conversion
@@ -377,18 +449,17 @@ def to_normalized(
             ))
         lines = scaled_lines
     else:
-        # Non-base currency but no rate available — flag for review.
-        needs_fx_review = True
+        # Foreign invoice in a single currency — book in document currency.
         resolved_fx_rate = None
-        ledger_currency = doc_currency  # keep original currency; do not convert
-        original_currency = doc_currency
-        original_total = ex.total
-        ok = False
-        fx_note = (
-            f"needs fx review: document currency {doc_currency} differs from "
-            f"base currency {base_currency}; no exchange rate available"
-        )
-        detail = f"{detail}; {fx_note}" if detail else fx_note
+        ledger_currency = doc_currency
+        if mixed_currencies:
+            needs_fx_review = True
+            ok = False
+            fx_note = (
+                "needs fx review: multiple currencies on the same document; "
+                "confirm which currency and amounts to book"
+            )
+            detail = f"{detail}; {fx_note}" if detail else fx_note
 
     return NormalizedInvoice(
         doc_type=doc_type,
@@ -467,8 +538,9 @@ def to_normalized_bundle(
     needed hardening.
 
     fx_rates: optional dict mapping ISO currency code -> exchange rate to base_currency,
-    e.g. {'USD': 1.35, 'IDR': 0.000085}.  When not provided and a document is in a
-    non-base currency, it is flagged for review (needs_fx_review=True).
+    e.g. {'USD': 1.35, 'IDR': 0.000085}.  When provided, amounts are converted to
+    base_currency.  Single-currency foreign invoices without a rate are booked in
+    their document currency; needs_fx_review is set only for mixed-currency docs.
     """
     if fx_rates is None:
         fx_rates = {}

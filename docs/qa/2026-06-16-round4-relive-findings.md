@@ -2,7 +2,7 @@
 
 **Branch:** `feat/ledgr-intelligent-agent` (HEAD `fef4e1c` at end of Round 4 live)
 **Bot:** `Ledgr-dev` socket-mode (PID 66648 at end of round; killed once before that)
-**Slack workspace:** QBS-AI (dev)
+**Slack workspace:** LEDGR-DEV (dev)
 **Reauth event:** user ran `gcloud auth application-default login` mid-round after the bot started 503-timing-out
 
 Source of truth for the four ultraqa fixes that were supposed to land in commits
@@ -17,12 +17,12 @@ SOA ground-truth comparison the developer requested.
 | Test | Channel | Bot at run | Verdict |
 |---|---|---|---|
 | Restart bot from HEAD | n/a | new PID, then killed once mid-round and re-restarted with Track A live | ✅ DONE TWICE |
-| Fix-1: drop `COA & List.xlsx` | `#jbi-plus-auto` | first bot (pre-reauth) | 🟡 NOT VERIFIABLE — channel past `pending_coa` from yesterday; first bot also left a phantom "Processing 1 document..." after the kill |
-| Fix-2: `@Ledgr-dev list recent documents` | `#rosebery-partner` | reauth'd bot | ❌ STILL BROKEN |
+| Fix-1: drop `COA & List.xlsx` | `#sample-auto-enterprise` | first bot (pre-reauth) | 🟡 NOT VERIFIABLE — channel past `pending_coa` from yesterday; first bot also left a phantom "Processing 1 document..." after the kill |
+| Fix-2: `@Ledgr-dev list recent documents` | `#sample-partner` | reauth'd bot | ❌ STILL BROKEN |
 | Fix-2b: `@Ledgr-dev summarize recent activity` | same | reauth'd bot | 🟡 PARTIAL |
-| Fix-3: drop `25-D15-Podaima Paid.pdf` | `#auditair-international` | reauth'd bot | ❌ STILL BROKEN |
-| Fix-4: drop `COOL POWER - DEC 2025_.pdf` | `#jbi-plus-auto` | reauth'd bot + Track A | ✅ WORKING (approval card surfaced w/ explicit counts) |
-| Track A: SOA hard-gate live | `#jbi-plus-auto` | reauth'd bot + Track A | ⚠️ **LIVE FAILURE** — pytest green, but bot still showed 18 sub-docs / 30 lines (expected 10 / 22) |
+| Fix-3: drop `INV-2025-015-sample.pdf` | `#acme-client-test` | reauth'd bot | ❌ STILL BROKEN |
+| Fix-4: drop `SOA-SAMPLE-DEC-2025_.pdf` | `#sample-auto-enterprise` | reauth'd bot + Track A | ✅ WORKING (approval card surfaced w/ explicit counts) |
+| Track A: SOA hard-gate live | `#sample-auto-enterprise` | reauth'd bot + Track A | ⚠️ **LIVE FAILURE** — pytest green, but bot still showed 18 sub-docs / 30 lines (expected 10 / 22) |
 
 ---
 
@@ -45,7 +45,7 @@ SOA ground-truth comparison the developer requested.
 
 ### P0-B. `list_recent_documents` STILL can't see fresh ledger rows
 
-**Repro:** In `#rosebery-partner`, a bank statement was processed yesterday at 22:54 UTC+8 (delivery card visible). At 09:45 today, `@Ledgr-dev list recent documents` replies:
+**Repro:** In `#sample-partner`, a bank statement was processed yesterday at 22:54 UTC+8 (delivery card visible). At 09:45 today, `@Ledgr-dev list recent documents` replies:
 > "I'm sorry, but I could not find any recent documents. Please ensure the relevant workbook is uploaded."
 
 **Why this matters:** Commit `8784823 fix(ultraqa): chat session sees freshly-written ledger rows` was supposed to fix exactly this. The bug is unchanged. Either commit fixed a different axis, or its test didn't exercise the real pipeline-write → chat-tool-read path.
@@ -56,11 +56,11 @@ SOA ground-truth comparison the developer requested.
 
 ### P0-C. HITL-approve path STILL doesn't emit the rich delivery card
 
-**Repro:** In `#auditair-international`, dropped `25-D15-Podaima Paid.pdf`. Pipeline → extract reviewer fires (Step 2 working, with a USD/SGD direction clarification) → click "Looks right, keep it" → approval card → click Approve. Bot reply ends with:
+**Repro:** In `#acme-client-test`, dropped `INV-2025-015-sample.pdf`. Pipeline → extract reviewer fires (Step 2 working, with a USD/SGD direction clarification) → click "Looks right, keep it" → approval card → click Approve. Bot reply ends with:
 
 > ❌ Bare `"Document processed."`
 
-Compare to clean path (Akar / Rosebery bank): rich delivery with "Processed 1 document — 1 posted to your FY2025 bank statement" + "Added Dec 2025 (4 transactions) to your..." + Block Kit data-table + xlsx attachment.
+Compare to clean path (Sample Bank Client / Sample Partner bank): rich delivery with "Processed 1 document — 1 posted to your FY2025 bank statement" + "Added Dec 2025 (4 transactions) to your..." + Block Kit data-table + xlsx attachment.
 
 **Why this matters:** Commit `43ea1ac fix(ultraqa): thread HITL delivery card under the original upload` was supposed to fix exactly this. The bug is unchanged.
 
@@ -70,9 +70,9 @@ Compare to clean path (Akar / Rosebery bank): rich delivery with "Processed 1 do
 
 ### P0-D. SOA hard-gate fires green locally, doesn't fire live
 
-**Repro:** Bot restarted at 09:39 with HEAD `fef4e1c` (commits `b7c4a3b` + `fef4e1c` from Track A loaded). Dropped `COOL POWER - DEC 2025_.pdf` (1 SOA cover + 10 real sub-docs = 22 ground-truth lines). Bot's multi-entity approval card said:
+**Repro:** Bot restarted at 09:39 with HEAD `fef4e1c` (commits `b7c4a3b` + `fef4e1c` from Track A loaded). Dropped `SOA-SAMPLE-DEC-2025_.pdf` (1 SOA cover + 10 real sub-docs = 22 ground-truth lines). Bot's multi-entity approval card said:
 
-> 📄 COOL POWER - DEC 2025_.pdf
+> 📄 SOA-SAMPLE-DEC-2025_.pdf
 > • 18 sub-documents extracted, 30 total lines — review before posting.
 
 Identical to yesterday. The new `_is_soa_summary_invoice` predicate did NOT drop the 8 phantom SOA-cover rows.
@@ -110,14 +110,14 @@ The new message names the window ("last 30 days") and offers two suggested actio
 |---|---|---|
 | Multi-entity approval card (Fix-4) | 2D rerun | Card shows file name, explicit counts ("18 sub-documents extracted, 30 total lines"), and the three action buttons. Reject cleanly aborts ("Document rejected — nothing was added to the ledger"). |
 | Step 2 extract reviewer | 2B rerun | Fired on D15 with the same USD/SGD + issuer/bill-to ambiguity the D12 case surfaced — confirming the reviewer is doing real work, not a no-op |
-| Onboarding socket-mode → Firestore | 1B | Auditair / Rosebery / JBI channels all carried profile state across the bot restart cycle |
+| Onboarding socket-mode → Firestore | 1B | Acme Client / Sample Partner / Sample Auto Enterprise channels all carried profile state across the bot restart cycle |
 | ADC reauth | n/a | After user re-ran `gcloud auth application-default login`, bot resumed all Firestore reads in <10s; no further 503s |
 
 ---
 
-## 5. COOL POWER SOA — ground truth vs yesterday's extraction
+## 5. Sample Vendor Inc SOA — ground truth vs yesterday's extraction
 
-Source: `/Users/davidkitdave/Desktop/LocalTest/TestDoc/MYDoc/JBI PLUS AUTO ENTERPRISE/Purchase/COOL POWER - DEC 2025_.pdf` (11 pages, 1.1 MB).
+Source: `~/Desktop/LocalTest/TestDoc/MYDoc/Sample Auto Enterprise/Purchase/SOA-SAMPLE-DEC-2025_.pdf` (11 pages, 1.1 MB).
 
 | Page | Content | Expected behavior |
 |---|---|---|
@@ -135,7 +135,7 @@ Source: `/Users/davidkitdave/Desktop/LocalTest/TestDoc/MYDoc/JBI PLUS AUTO ENTER
 
 Ground truth = 10 sub-documents (1 credit note + 9 invoices), 22 ledger lines.
 
-Yesterday's extraction (`/Users/davidkitdave/Downloads/JBI Plus Auto Enterprise - Ledger_FY2025.xlsx`):
+Yesterday's extraction (`~/Downloads/Sample Auto Enterprise - Ledger_FY2025.xlsx`):
 - 30 rows
 - 8 **phantom** rows hallucinated from the SOA cover summary table:
   `IA-07316`, `IA-07330`, `IA-07332`, `IA-07365`, `IA-07368`, `IA-07383`, `IA-07392`, `IA-07428` — all with `description="INVOICE"`, tax=0, sub_total==total, no item code
@@ -154,7 +154,7 @@ Explore sub-agent confirmed (read-only investigation):
 - Resolution order: entity_memory → category_mapping → COA keyword match → LLM with client COA
 - LLM prompt explicitly says "COA (choose key from these only):" ([categorizer.py:184-185](invoice_processing/export/categorizer.py:184))
 
-**Verdict:** WIRED. The reason yesterday's JBI ledger had no account codes is that the COA xlsx was rejected at the extension gate before `run_coa_ingest` could run. Once Fix-1 is verified on a fresh `pending_coa` channel, the categorizer will populate the column.
+**Verdict:** WIRED. The reason yesterday's Sample Auto Enterprise ledger had no account codes is that the COA xlsx was rejected at the extension gate before `run_coa_ingest` could run. Once Fix-1 is verified on a fresh `pending_coa` channel, the categorizer will populate the column.
 
 ---
 
@@ -178,7 +178,7 @@ To pick up later. Not built this round.
 2. **Fix-2 TDD + impl** (`oh-my-claudecode:executor`) — failing test + real fix for `list_recent_documents` + most-recent-date hint for `summarize_recent_activity`.
 3. **Fix-3 TDD + impl** (`oh-my-claudecode:executor`) — failing test + real fix for HITL-approve delivery card parity vs clean path.
 
-After all three return, restart the bot and re-run the 5-test surgical sweep in Slack from a CLEAN state (Akar / Auditair / Rosebery / fresh JBI channel for Fix-1).
+After all three return, restart the bot and re-run the 5-test surgical sweep in Slack from a CLEAN state (Sample Bank Client / Acme Client / Sample Partner / fresh Sample Auto Enterprise channel for Fix-1).
 
 ---
 

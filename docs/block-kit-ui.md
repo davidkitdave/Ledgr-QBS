@@ -19,13 +19,13 @@ Native Slack primitives that replace the old plain-text + section-button UX acro
 
 ## Plan block — pipeline step-tracker
 
-**What it is:** a collapsible Slack "thinking" panel showing 5 pipeline stages (Classifying → Extracting → Categorizing → Applying tax → Awaiting approval) with status icons for each (✓ complete, ✨ in-progress, ⏳ pending).
+**What it is:** a collapsible Slack "thinking" panel showing 3 pipeline layers (Understanding document → Applying your rules → Ready to file) with status icons for each (✓ complete, ✨ in-progress, ⏳ pending).
 
 **Replaces:** a single line of text that was being chat_update-edited as the pipeline advanced — the user couldn't tell which stage was running or how far along it was.
 
-**When it fires:** immediately after a document is uploaded to a channel where Ledgr is invited. Updated live as each stage completes.
+**When it fires:** immediately after a document is uploaded to a channel where Ledgr is invited. Updated live as each graph node completes.
 
-**User benefit:** at a glance, the user sees which pipeline stage is running right now. If the bot stalls, the sparkle (in-progress marker) shows which step stopped. Each stage can optionally show output (e.g. "Vendor: Acme · Total: SGD 1,234.50") when it finishes, giving real-time transparency into what the bot found.
+**User benefit:** at a glance, the user sees which layer is running right now. Each stage shows a short output line from real extraction state (e.g. "Telco Provider A · #8004483920 · SGD 1,328.15 · 2 lines", "No Tax · reconciled") so progress feels like thinking, not a static checklist.
 
 **Action:** none — read-only; the plan block auto-advances as the run proceeds.
 
@@ -76,19 +76,23 @@ Native Slack primitives that replace the old plain-text + section-button UX acro
 
 ## Data table — ledger preview after delivery
 
-**What it is:** a native Slack table (Date · Description · Account · Tax · Net · Total) showing the rows just appended to the FY ledger. Built-in filtering, sorting, and pagination (10 rows/page, up to 100 rows per table).
+**What it is:** a native Slack table mirroring the accounting-software export columns (Xero: Contact, Invoice #, …, Currency; QBS: Invoice Date, Vendor, …, Currency). Shown in the **same message** as the delivery summary line — not a separate preface post.
 
-**Replaces:** a fixed-width mrkdwn code block that was hard to read and read-only.
+**When it fires:** after each single-document delivery, or once per FY/sheet group after a multi-file batch completes.
 
-**When it fires:** immediately after successful delivery, right below the per-doc cards. Shows the last ~10 rows posted (or fewer if the batch was small).
+**User benefit:** one headline card — "Added N lines to **Ledger FY2026 (Xero)**" plus the rows that landed. No duplicate "Recent Purchase rows…" section.
 
-**User benefit:** verify the filing at a glance without downloading the workbook. Filter by account or vendor, sort by date, scroll through the appended rows. If the batch had >100 rows, a context line notes "+N more in the workbook above" and the .xlsx file is still the full record.
+**Wiring:** `app/blocks.py:ledger_preview_data_table()` + `delivery_card_blocks()` → `accounting_agents/slack_runner.py:_post_delivery_card()` / `_post_batch_aggregate_delivery()`.
 
-**Actions:** sort, filter, and paginate within the table itself — no buttons needed.
+---
 
-**Wiring:** `app/blocks.py:ledger_preview_data_table()` → called from `accounting_agents/slack_runner.py:persist_and_deliver()` after ledger rows are persisted.
+## Job summary — batch drop tally
 
-**Fallback:** if the workspace doesn't support native `data_table` blocks, shows the classic fixed-width mrkdwn preview instead.
+**What it is:** one top-level message per multi-file upload. Starts as `Received N documents — starting…`, updates live as `Processing N documents — 3/10 done (2 posted, 1 needs review)…`, then final tally via `job_summary_text()`.
+
+**When it fires:** Slack `file_share` with 2+ files. Per-doc status/approval cards thread underneath; aggregate delivery posts at the top level when the batch finishes.
+
+**Wiring:** `app/blocks.py:job_progress_text()` + `job_summary_text()` → `accounting_agents/slack_runner.py` batch handler (`file_share` with 2+ files).
 
 ---
 
@@ -186,12 +190,10 @@ export LEDGR_NATIVE_BLOCKS=0     # force fallback
 
 ## Known follow-ups (not in this PR)
 
-- **Plan block stays in-progress after Approve / Reject** — After a human approves or rejects a document at the approval gate, the plan block's "Awaiting approval" stage doesn't mark as complete. The next batch will move past it cleanly, but a single document approval leaves the stage stuck on ✨. See task #10.
-
-- **Plan block per-stage `output` rich_text not populated in live runs** — The plan block's per-task `output` field (e.g. extract output showing vendor + total) is built correctly but isn't filled in during live pipeline runs. Works in unit tests. See task #11.
-
 - **Bot says "Approved" but doesn't upload the FY workbook for unreconciled docs** — Pre-existing pipeline bug, unrelated to this PR. After approval of a flagged document, the ledger rows are persisted but the .xlsx workbook isn't re-uploaded to the channel. See task #12.
+
+- **Slack Thinking Steps streaming (Timeline mode)** — Phase 2: replace `chat.update` plan accordion with `chat.startStream` / `chat.appendStream` for sub-step visibility. Requires Bolt streaming helper; slack-sdk 3.40+ already in lockfile.
 
 ---
 
-See the [planning doc](file:///Users/davidkitdave/.claude/plans/i-just-notice-that-mellow-lollipop.md) for the design history and architectural decisions.
+See the [planning doc](file://~/.claude/plans/i-just-notice-that-mellow-lollipop.md) for the design history and architectural decisions.

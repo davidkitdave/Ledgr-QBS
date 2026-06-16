@@ -1,0 +1,738 @@
+{
+  "client": "Acme Client Pte. Ltd.",
+  "hermetic": false,
+  "fixtures": [
+    "vendor_invoice_sample",
+    "vendor_invoice_d12",
+    "management_fees",
+    "expense_claim"
+  ],
+  "variants": [
+    "V0",
+    "V1",
+    "V2",
+    "V3"
+  ],
+  "results": [
+    {
+      "variant": "V0",
+      "path": "~/Desktop/LocalTest/TestDoc/Sample Test Group/Acme Client Pte. Ltd./Purchase/FY2026/INV-2026-003-sample.pdf",
+      "error": null,
+      "document_count": 1,
+      "invoice_count": 1,
+      "completeness": 0.5,
+      "reconcile_rate": 0.0,
+      "score": 0.4,
+      "metrics": {
+        "has_invoice_number": true,
+        "has_invoice_date": false,
+        "has_doc_total": false,
+        "has_lines": true,
+        "fx_review_count": 1,
+        "details": [
+          "missing doc_total",
+          "fx_review=1"
+        ]
+      },
+      "phase2": [
+        {
+          "invoice_number": "INV-2026-003",
+          "invoice_date": null,
+          "supplier": "Vendor Alpha Pte Ltd",
+          "currency": "$",
+          "doc_total": null,
+          "needs_fx_review": true,
+          "reconciled": false,
+          "reconcile_note": "reconciled; needs fx review: document currency $ differs from base currency SGD; no exchange rate available",
+          "line_count": 2
+        }
+      ],
+      "fixture_id": "vendor_invoice_sample",
+      "file": "INV-2026-003-sample.pdf"
+    },
+    {
+      "variant": "V1",
+      "path": "~/Desktop/LocalTest/TestDoc/Sample Test Group/Acme Client Pte. Ltd./Purchase/FY2026/INV-2026-003-sample.pdf",
+      "error": null,
+      "document_count": 1,
+      "invoice_count": 1,
+      "completeness": 0.5,
+      "reconcile_rate": 0.0,
+      "score": 0.4,
+      "metrics": {
+        "has_invoice_number": true,
+        "has_invoice_date": false,
+        "has_doc_total": false,
+        "has_lines": true,
+        "fx_review_count": 1,
+        "details": [
+          "missing doc_total",
+          "fx_review=1"
+        ]
+      },
+      "phase2": [
+        {
+          "invoice_number": "INV-2026-003",
+          "invoice_date": null,
+          "supplier": "Vendor Alpha Pte Ltd",
+          "currency": "USD",
+          "doc_total": null,
+          "needs_fx_review": true,
+          "reconciled": false,
+          "reconcile_note": "reconciled; needs fx review: document currency USD differs from base currency SGD; no exchange rate available",
+          "line_count": 2
+        }
+      ],
+      "fixture_id": "vendor_invoice_sample",
+      "file": "INV-2026-003-sample.pdf"
+    },
+    {
+      "variant": "V2",
+      "path": "~/Desktop/LocalTest/TestDoc/Sample Test Group/Acme Client Pte. Ltd./Purchase/FY2026/INV-2026-003-sample.pdf",
+      "error": null,
+      "document_count": 1,
+      "invoice_count": 1,
+      "completeness": 0.5,
+      "reconcile_rate": 0.0,
+      "score": 0.4,
+      "metrics": {
+        "has_invoice_number": true,
+        "has_invoice_date": false,
+        "has_doc_total": false,
+        "has_lines": true,
+        "fx_review_count": 1,
+        "details": [
+          "missing doc_total",
+          "fx_review=1"
+        ]
+      },
+      "phase2": [
+        {
+          "invoice_number": "INV-2026-003",
+          "invoice_date": null,
+          "supplier": "Vendor Alpha Pte Ltd",
+          "currency": "USD",
+          "doc_total": null,
+          "needs_fx_review": true,
+          "reconciled": false,
+          "reconcile_note": "reconciled; needs fx review: document currency USD differs from base currency SGD; no exchange rate available",
+          "line_count": 2
+        }
+      ],
+      "fixture_id": "vendor_invoice_sample",
+      "file": "INV-2026-003-sample.pdf"
+    },
+    {
+      "variant": "V3",
+      "path": "~/Desktop/LocalTest/TestDoc/Sample Test Group/Acme Client Pte. Ltd./Purchase/FY2026/INV-2026-003-sample.pdf",
+      "error": null,
+      "document_count": 1,
+      "invoice_count": 1,
+      "completeness": 0.5,
+      "reconcile_rate": 0.0,
+      "score": 0.4,
+      "metrics": {
+        "has_invoice_number": true,
+        "has_invoice_date": false,
+        "has_doc_total": false,
+        "has_lines": true,
+        "fx_review_count": 1,
+        "details": [
+          "missing doc_total",
+          "fx_review=1"
+        ]
+      },
+      "phase2": [
+        {
+          "invoice_number": "INV-2026-003",
+          "invoice_date": null,
+          "supplier": "Vendor Alpha Pte Ltd",
+          "currency": "USD",
+          "doc_total": null,
+          "needs_fx_review": true,
+          "reconciled": false,
+          "reconcile_note": "reconciled; needs fx review: document currency USD differs from base currency SGD; no exchange rate available",
+          "line_count": 2
+        }
+      ],
+      "fixture_id": "vendor_invoice_sample",
+      "file": "INV-2026-003-sample.pdf"
+    },
+    {
+      "variant": "V0",
+      "path": "~/Desktop/LocalTest/TestDoc/Sample Test Group/Acme Client Pte. Ltd./Purchase/FY2025/INV-2025-012-sample.pdf",
+      "error": null,
+      "document_count": 1,
+      "invoice_count": 1,
+      "completeness": 0.5,
+      "reconcile_rate": 0.0,
+      "score": 0.4,
+      "metrics": {
+        "has_invoice_number": true,
+        "has_invoice_date": false,
+        "has_doc_total": false,
+        "has_lines": true,
+        "fx_review_count": 1,
+        "details": [
+          "missing doc_total",
+          "fx_review=1"
+        ]
+      },
+      "phase2": [
+        {
+          "invoice_number": "INV-2025-012",
+          "invoice_date": null,
+          "supplier": "Vendor Alpha Pte Ltd",
+          "currency": "$",
+          "doc_total": null,
+          "needs_fx_review": true,
+          "reconciled": false,
+          "reconcile_note": "reconciled; needs fx review: document currency $ differs from base currency SGD; no exchange rate available",
+          "line_count": 2
+        }
+      ],
+      "fixture_id": "vendor_invoice_d12",
+      "file": "INV-2025-012-sample.pdf"
+    },
+    {
+      "variant": "V1",
+      "path": "~/Desktop/LocalTest/TestDoc/Sample Test Group/Acme Client Pte. Ltd./Purchase/FY2025/INV-2025-012-sample.pdf",
+      "error": null,
+      "document_count": 1,
+      "invoice_count": 1,
+      "completeness": 0.5,
+      "reconcile_rate": 0.0,
+      "score": 0.4,
+      "metrics": {
+        "has_invoice_number": true,
+        "has_invoice_date": false,
+        "has_doc_total": false,
+        "has_lines": true,
+        "fx_review_count": 1,
+        "details": [
+          "missing doc_total",
+          "fx_review=1"
+        ]
+      },
+      "phase2": [
+        {
+          "invoice_number": "INV-2025-012",
+          "invoice_date": null,
+          "supplier": "Vendor Alpha Pte Ltd",
+          "currency": "USD",
+          "doc_total": null,
+          "needs_fx_review": true,
+          "reconciled": false,
+          "reconcile_note": "reconciled; needs fx review: document currency USD differs from base currency SGD; no exchange rate available",
+          "line_count": 2
+        }
+      ],
+      "fixture_id": "vendor_invoice_d12",
+      "file": "INV-2025-012-sample.pdf"
+    },
+    {
+      "variant": "V2",
+      "path": "~/Desktop/LocalTest/TestDoc/Sample Test Group/Acme Client Pte. Ltd./Purchase/FY2025/INV-2025-012-sample.pdf",
+      "error": null,
+      "document_count": 1,
+      "invoice_count": 1,
+      "completeness": 0.5,
+      "reconcile_rate": 0.0,
+      "score": 0.4,
+      "metrics": {
+        "has_invoice_number": true,
+        "has_invoice_date": false,
+        "has_doc_total": false,
+        "has_lines": true,
+        "fx_review_count": 1,
+        "details": [
+          "missing doc_total",
+          "fx_review=1"
+        ]
+      },
+      "phase2": [
+        {
+          "invoice_number": "INV-2025-012",
+          "invoice_date": null,
+          "supplier": "Vendor Alpha Pte Ltd",
+          "currency": "USD",
+          "doc_total": null,
+          "needs_fx_review": true,
+          "reconciled": false,
+          "reconcile_note": "reconciled; needs fx review: document currency USD differs from base currency SGD; no exchange rate available",
+          "line_count": 2
+        }
+      ],
+      "fixture_id": "vendor_invoice_d12",
+      "file": "INV-2025-012-sample.pdf"
+    },
+    {
+      "variant": "V3",
+      "path": "~/Desktop/LocalTest/TestDoc/Sample Test Group/Acme Client Pte. Ltd./Purchase/FY2025/INV-2025-012-sample.pdf",
+      "error": null,
+      "document_count": 1,
+      "invoice_count": 1,
+      "completeness": 0.5,
+      "reconcile_rate": 0.0,
+      "score": 0.4,
+      "metrics": {
+        "has_invoice_number": true,
+        "has_invoice_date": false,
+        "has_doc_total": false,
+        "has_lines": true,
+        "fx_review_count": 1,
+        "details": [
+          "missing doc_total",
+          "fx_review=1"
+        ]
+      },
+      "phase2": [
+        {
+          "invoice_number": "#INV-2025-012",
+          "invoice_date": null,
+          "supplier": "Vendor Alpha Pte Ltd",
+          "currency": "USD",
+          "doc_total": null,
+          "needs_fx_review": true,
+          "reconciled": false,
+          "reconcile_note": "reconciled; needs fx review: document currency USD differs from base currency SGD; no exchange rate available",
+          "line_count": 2
+        }
+      ],
+      "fixture_id": "vendor_invoice_d12",
+      "file": "INV-2025-012-sample.pdf"
+    },
+    {
+      "variant": "V0",
+      "path": "~/Desktop/LocalTest/TestDoc/Sample Test Group/Acme Client Pte. Ltd./Purchase/FY2025/MGT-2025-011-sample.pdf",
+      "error": null,
+      "document_count": 1,
+      "invoice_count": 1,
+      "completeness": 0.5,
+      "reconcile_rate": 0.0,
+      "score": 0.4,
+      "metrics": {
+        "has_invoice_number": true,
+        "has_invoice_date": false,
+        "has_doc_total": false,
+        "has_lines": true,
+        "fx_review_count": 1,
+        "details": [
+          "missing doc_total",
+          "fx_review=1"
+        ]
+      },
+      "phase2": [
+        {
+          "invoice_number": "MGT-2025-011-INV",
+          "invoice_date": null,
+          "supplier": "ACME REGIONAL LTD",
+          "currency": "$",
+          "doc_total": null,
+          "needs_fx_review": true,
+          "reconciled": false,
+          "reconcile_note": "reconciled; needs fx review: document currency $ differs from base currency SGD; no exchange rate available",
+          "line_count": 1
+        }
+      ],
+      "fixture_id": "management_fees",
+      "file": "MGT-2025-011-sample.pdf"
+    },
+    {
+      "variant": "V1",
+      "path": "~/Desktop/LocalTest/TestDoc/Sample Test Group/Acme Client Pte. Ltd./Purchase/FY2025/MGT-2025-011-sample.pdf",
+      "error": null,
+      "document_count": 1,
+      "invoice_count": 1,
+      "completeness": 0.5,
+      "reconcile_rate": 0.0,
+      "score": 0.4,
+      "metrics": {
+        "has_invoice_number": true,
+        "has_invoice_date": false,
+        "has_doc_total": false,
+        "has_lines": true,
+        "fx_review_count": 1,
+        "details": [
+          "missing doc_total",
+          "fx_review=1"
+        ]
+      },
+      "phase2": [
+        {
+          "invoice_number": "MGT-2025-011-INV",
+          "invoice_date": null,
+          "supplier": "ACME REGIONAL LTD",
+          "currency": "USD",
+          "doc_total": null,
+          "needs_fx_review": true,
+          "reconciled": false,
+          "reconcile_note": "reconciled; needs fx review: document currency USD differs from base currency SGD; no exchange rate available",
+          "line_count": 1
+        }
+      ],
+      "fixture_id": "management_fees",
+      "file": "MGT-2025-011-sample.pdf"
+    },
+    {
+      "variant": "V2",
+      "path": "~/Desktop/LocalTest/TestDoc/Sample Test Group/Acme Client Pte. Ltd./Purchase/FY2025/MGT-2025-011-sample.pdf",
+      "error": null,
+      "document_count": 1,
+      "invoice_count": 1,
+      "completeness": 0.5,
+      "reconcile_rate": 0.0,
+      "score": 0.4,
+      "metrics": {
+        "has_invoice_number": true,
+        "has_invoice_date": false,
+        "has_doc_total": false,
+        "has_lines": true,
+        "fx_review_count": 1,
+        "details": [
+          "missing doc_total",
+          "fx_review=1"
+        ]
+      },
+      "phase2": [
+        {
+          "invoice_number": "MGT-2025-011-INV",
+          "invoice_date": null,
+          "supplier": "ACME REGIONAL LTD",
+          "currency": "USD",
+          "doc_total": null,
+          "needs_fx_review": true,
+          "reconciled": false,
+          "reconcile_note": "reconciled; needs fx review: document currency USD differs from base currency SGD; no exchange rate available",
+          "line_count": 1
+        }
+      ],
+      "fixture_id": "management_fees",
+      "file": "MGT-2025-011-sample.pdf"
+    },
+    {
+      "variant": "V3",
+      "path": "~/Desktop/LocalTest/TestDoc/Sample Test Group/Acme Client Pte. Ltd./Purchase/FY2025/MGT-2025-011-sample.pdf",
+      "error": null,
+      "document_count": 1,
+      "invoice_count": 1,
+      "completeness": 0.5,
+      "reconcile_rate": 0.0,
+      "score": 0.4,
+      "metrics": {
+        "has_invoice_number": true,
+        "has_invoice_date": false,
+        "has_doc_total": false,
+        "has_lines": true,
+        "fx_review_count": 1,
+        "details": [
+          "missing doc_total",
+          "fx_review=1"
+        ]
+      },
+      "phase2": [
+        {
+          "invoice_number": "MGT-2025-011-INV",
+          "invoice_date": null,
+          "supplier": "ACME REGIONAL LTD",
+          "currency": "USD",
+          "doc_total": null,
+          "needs_fx_review": true,
+          "reconciled": false,
+          "reconcile_note": "reconciled; needs fx review: document currency USD differs from base currency SGD; no exchange rate available",
+          "line_count": 1
+        }
+      ],
+      "fixture_id": "management_fees",
+      "file": "MGT-2025-011-sample.pdf"
+    },
+    {
+      "variant": "V0",
+      "path": "~/Desktop/LocalTest/TestDoc/Sample Test Group/Acme Client Pte. Ltd./Purchase/FY2026/EXP-2026-040-sample.pdf",
+      "error": null,
+      "document_count": 6,
+      "invoice_count": 6,
+      "completeness": 0.167,
+      "reconcile_rate": 0.0,
+      "score": -0.567,
+      "metrics": {
+        "has_invoice_number": false,
+        "has_invoice_date": false,
+        "has_doc_total": true,
+        "has_lines": true,
+        "fx_review_count": 2,
+        "details": [
+          "false_split: 6 documents",
+          "missing invoice_number",
+          "fx_review=2"
+        ]
+      },
+      "phase2": [
+        {
+          "invoice_number": null,
+          "invoice_date": null,
+          "supplier": "Acme Client",
+          "currency": "IDR",
+          "doc_total": 311.79,
+          "needs_fx_review": true,
+          "reconciled": false,
+          "reconcile_note": "total: lines=5235670.00 vs doc=311.79 (diff=+5235358.21, tol=3.12); needs fx review: document currency IDR differs from base currency SGD; no exchange rate available",
+          "line_count": 2
+        },
+        {
+          "invoice_number": null,
+          "invoice_date": null,
+          "supplier": null,
+          "currency": "SGD",
+          "doc_total": null,
+          "needs_fx_review": false,
+          "reconciled": false,
+          "reconcile_note": "reconciled; needs review: insufficient capture \u2014 no invoice reference and no line items",
+          "line_count": 0
+        },
+        {
+          "invoice_number": null,
+          "invoice_date": null,
+          "supplier": "Bluebird",
+          "currency": "SGD",
+          "doc_total": null,
+          "needs_fx_review": false,
+          "reconciled": false,
+          "reconcile_note": "reconciled; needs review: insufficient capture \u2014 no invoice reference and no line items",
+          "line_count": 0
+        },
+        {
+          "invoice_number": null,
+          "invoice_date": null,
+          "supplier": "Bluebird",
+          "currency": "SGD",
+          "doc_total": null,
+          "needs_fx_review": false,
+          "reconciled": false,
+          "reconcile_note": "reconciled; needs review: insufficient capture \u2014 no invoice reference and no line items",
+          "line_count": 0
+        },
+        {
+          "invoice_number": null,
+          "invoice_date": null,
+          "supplier": "PT LAUTAN TENANG JAYA",
+          "currency": "IDR",
+          "doc_total": null,
+          "needs_fx_review": true,
+          "reconciled": false,
+          "reconcile_note": "reconciled; needs fx review: document currency IDR differs from base currency SGD; no exchange rate available",
+          "line_count": 1
+        },
+        {
+          "invoice_number": null,
+          "invoice_date": null,
+          "supplier": "CIMB NIAGA",
+          "currency": "SGD",
+          "doc_total": 608400.0,
+          "needs_fx_review": false,
+          "reconciled": false,
+          "reconcile_note": "total: lines=0.00 vs doc=608400.00 (diff=-608400.00, tol=6084.00); needs review: insufficient capture \u2014 no invoice reference and no line items",
+          "line_count": 0
+        }
+      ],
+      "fixture_id": "expense_claim",
+      "file": "EXP-2026-040-sample.pdf"
+    },
+    {
+      "variant": "V1",
+      "path": "~/Desktop/LocalTest/TestDoc/Sample Test Group/Acme Client Pte. Ltd./Purchase/FY2026/EXP-2026-040-sample.pdf",
+      "error": null,
+      "document_count": 6,
+      "invoice_count": 6,
+      "completeness": 0.167,
+      "reconcile_rate": 0.0,
+      "score": -0.767,
+      "metrics": {
+        "has_invoice_number": false,
+        "has_invoice_date": false,
+        "has_doc_total": true,
+        "has_lines": true,
+        "fx_review_count": 6,
+        "details": [
+          "false_split: 6 documents",
+          "missing invoice_number",
+          "fx_review=6"
+        ]
+      },
+      "phase2": [
+        {
+          "invoice_number": null,
+          "invoice_date": null,
+          "supplier": "Acme Client",
+          "currency": "IDR",
+          "doc_total": 311.79,
+          "needs_fx_review": true,
+          "reconciled": false,
+          "reconcile_note": "total: lines=5235670.00 vs doc=311.79 (diff=+5235358.21, tol=3.12); needs fx review: document currency IDR differs from base currency SGD; no exchange rate available",
+          "line_count": 2
+        },
+        {
+          "invoice_number": null,
+          "invoice_date": null,
+          "supplier": null,
+          "currency": "IDR",
+          "doc_total": null,
+          "needs_fx_review": true,
+          "reconciled": false,
+          "reconcile_note": "reconciled; needs fx review: document currency IDR differs from base currency SGD; no exchange rate available; needs review: insufficient capture \u2014 no invoice reference and no line items",
+          "line_count": 0
+        },
+        {
+          "invoice_number": null,
+          "invoice_date": null,
+          "supplier": "Bluebird",
+          "currency": "WIB",
+          "doc_total": null,
+          "needs_fx_review": true,
+          "reconciled": false,
+          "reconcile_note": "reconciled; needs fx review: document currency WIB differs from base currency SGD; no exchange rate available; needs review: insufficient capture \u2014 no invoice reference and no line items",
+          "line_count": 0
+        },
+        {
+          "invoice_number": null,
+          "invoice_date": null,
+          "supplier": "Bluebird",
+          "currency": "WIB",
+          "doc_total": null,
+          "needs_fx_review": true,
+          "reconciled": false,
+          "reconcile_note": "reconciled; needs fx review: document currency WIB differs from base currency SGD; no exchange rate available; needs review: insufficient capture \u2014 no invoice reference and no line items",
+          "line_count": 0
+        },
+        {
+          "invoice_number": null,
+          "invoice_date": null,
+          "supplier": "PT LAUTAN TENANG JAYA",
+          "currency": "IDR",
+          "doc_total": null,
+          "needs_fx_review": true,
+          "reconciled": false,
+          "reconcile_note": "reconciled; needs fx review: document currency IDR differs from base currency SGD; no exchange rate available",
+          "line_count": 1
+        },
+        {
+          "invoice_number": null,
+          "invoice_date": null,
+          "supplier": "CIMB NIAGA",
+          "currency": "DEC",
+          "doc_total": 608400.0,
+          "needs_fx_review": true,
+          "reconciled": false,
+          "reconcile_note": "total: lines=0.00 vs doc=608400.00 (diff=-608400.00, tol=6084.00); needs fx review: document currency DEC differs from base currency SGD; no exchange rate available; needs review: insufficient capture \u2014 no invoice reference and no line items",
+          "line_count": 0
+        }
+      ],
+      "fixture_id": "expense_claim",
+      "file": "EXP-2026-040-sample.pdf"
+    },
+    {
+      "variant": "V2",
+      "path": "~/Desktop/LocalTest/TestDoc/Sample Test Group/Acme Client Pte. Ltd./Purchase/FY2026/EXP-2026-040-sample.pdf",
+      "error": null,
+      "document_count": 6,
+      "invoice_count": 1,
+      "completeness": 0.5,
+      "reconcile_rate": 0.0,
+      "score": -0.35,
+      "metrics": {
+        "has_invoice_number": false,
+        "has_invoice_date": false,
+        "has_doc_total": true,
+        "has_lines": true,
+        "fx_review_count": 1,
+        "details": [
+          "false_split: 6 documents",
+          "missing invoice_number",
+          "fx_review=1"
+        ]
+      },
+      "phase2": [
+        {
+          "invoice_number": null,
+          "invoice_date": null,
+          "supplier": "Acme Client",
+          "currency": "IDR",
+          "doc_total": 311.79,
+          "needs_fx_review": true,
+          "reconciled": false,
+          "reconcile_note": "total: lines=9035670.00 vs doc=311.79 (diff=+9035358.21, tol=3.12); needs fx review: document currency IDR differs from base currency SGD; no exchange rate available",
+          "line_count": 3
+        }
+      ],
+      "fixture_id": "expense_claim",
+      "file": "EXP-2026-040-sample.pdf"
+    },
+    {
+      "variant": "V3",
+      "path": "~/Desktop/LocalTest/TestDoc/Sample Test Group/Acme Client Pte. Ltd./Purchase/FY2026/EXP-2026-040-sample.pdf",
+      "error": null,
+      "document_count": 1,
+      "invoice_count": 1,
+      "completeness": 0.5,
+      "reconcile_rate": 0.0,
+      "score": 0.4,
+      "metrics": {
+        "has_invoice_number": false,
+        "has_invoice_date": false,
+        "has_doc_total": true,
+        "has_lines": true,
+        "fx_review_count": 1,
+        "details": [
+          "missing invoice_number",
+          "fx_review=1"
+        ]
+      },
+      "phase2": [
+        {
+          "invoice_number": null,
+          "invoice_date": null,
+          "supplier": "AAG ACME CLIENT GROUP",
+          "currency": "IDR",
+          "doc_total": 311.79,
+          "needs_fx_review": true,
+          "reconciled": false,
+          "reconcile_note": "total: lines=9862940.00 vs doc=311.79 (diff=+9862628.21, tol=3.12); needs fx review: document currency IDR differs from base currency SGD; no exchange rate available",
+          "line_count": 5
+        }
+      ],
+      "fixture_id": "expense_claim",
+      "file": "EXP-2026-040-sample.pdf"
+    }
+  ],
+  "ranking": [
+    {
+      "variant": "V3",
+      "avg_score": 0.4,
+      "avg_completeness": 0.5,
+      "avg_reconcile": 0.0,
+      "false_splits": 0
+    },
+    {
+      "variant": "V2",
+      "avg_score": 0.213,
+      "avg_completeness": 0.5,
+      "avg_reconcile": 0.0,
+      "false_splits": 1
+    },
+    {
+      "variant": "V0",
+      "avg_score": 0.158,
+      "avg_completeness": 0.417,
+      "avg_reconcile": 0.0,
+      "false_splits": 1
+    },
+    {
+      "variant": "V1",
+      "avg_score": 0.108,
+      "avg_completeness": 0.417,
+      "avg_reconcile": 0.0,
+      "false_splits": 1
+    }
+  ],
+  "winner": "V3"
+}

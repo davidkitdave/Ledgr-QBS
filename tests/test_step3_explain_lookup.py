@@ -165,7 +165,7 @@ def test_explain_tax_uses_canonical_field_names():
     inv = NormalizedInvoice(
         doc_type="purchase",
         invoice_date=date(2025, 6, 1),
-        supplier=PartyInfo(name="Singtel", country="SG"),
+        supplier=PartyInfo(name="Telco Provider B", country="SG"),
         our_gst_registered=True,
     )
     clf.classify_line(line, inv)
@@ -328,9 +328,9 @@ def test_list_recent_documents_respects_limit():
 # bank-statement rows regardless of transaction date
 # --------------------------------------------------------------------------- #
 
-# Bank rows from a Rosebery-style workbook (Dec 2025, uploaded 2026-06-16).
+# Bank rows from a Sample Partner-style workbook (Dec 2025, uploaded 2026-06-16).
 # They have Withdrawal/Deposit/Balance columns — _is_bank_row returns True.
-_ROSEBERY_BANK_ROWS = [
+_SAMPLE_PARTNER_BANK_ROWS = [
     {
         "Date": "01/12/2025",
         "Description": "Opening balance",
@@ -377,13 +377,13 @@ _ROSEBERY_BANK_ROWS = [
 def test_list_recent_documents_includes_bank_statement_rows():
     """list_recent_documents must surface bank-statement source docs.
 
-    Reproduces P0-2: the Rosebery Dec 2025 bank statement was uploaded
+    Reproduces P0-2: the Sample Partner Dec 2025 bank statement was uploaded
     2026-06-16 but list_recent_documents returned empty because every row
     has Withdrawal/Deposit/Balance columns and _is_bank_row skipped them all.
     The tool must group bank rows by (Date, Source Filename) and include them
     so the user can see 'what documents have been processed in this channel?'
     """
-    ctx = _ctx(**{LEDGER_DATA_KEY: _ROSEBERY_BANK_ROWS})
+    ctx = _ctx(**{LEDGER_DATA_KEY: _SAMPLE_PARTNER_BANK_ROWS})
     raw = list_recent_documents(ctx, limit="10")
     data = _parse_json(raw)
     assert len(data["documents"]) >= 1, (
@@ -406,7 +406,7 @@ def test_summarize_recent_activity_names_fy_when_only_old_bank_rows():
     The response must name either the most-recent bank date OR the FY so the
     user knows the data IS there and can ask for a wider view.
     """
-    ctx = _ctx(**{LEDGER_DATA_KEY: _ROSEBERY_BANK_ROWS})
+    ctx = _ctx(**{LEDGER_DATA_KEY: _SAMPLE_PARTNER_BANK_ROWS})
     raw = summarize_recent_activity(ctx, days="30")
     # Must NOT just say "no transactions" with zero guidance
     assert "2025" in raw or "Dec" in raw.lower() or "december" in raw.lower(), (

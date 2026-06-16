@@ -17,6 +17,7 @@ from invoice_processing.extract.invoice_extractor import (
     ExtractedInvoice,
     ExtractedInvoiceBundle,
     ExtractedLine,
+    _parse_date,
     reconcile,
     to_normalized,
     to_normalized_bundle,
@@ -254,34 +255,44 @@ class TestFxConversion:
 # =========================================================================== #
 
 class TestFxNoRate:
-    """Non-base-currency doc with NO derivable rate is flagged, not rate=1."""
+    """Single-currency foreign docs book in document currency; mixed-currency docs flag."""
 
-    def test_usd_doc_no_rate_is_flagged(self):
-        """USD doc with no fx_rate → needs_fx_review=True; reconciled=False."""
+    def test_usd_doc_no_rate_books_in_usd(self):
+        """USD doc with no fx_rate → booked in USD, not flagged."""
         r = _make_receipt(invoice_number="R-USD-NORATE", currency="USD", total=500.0, subtotal=500.0)
         inv = to_normalized(r, direction="purchase", base_currency="SGD")
-        assert inv.needs_fx_review is True
-        assert inv.reconciled is False
+        assert inv.needs_fx_review is False
+        assert inv.reconciled is True
+        assert inv.currency == "USD"
+        assert inv.fx_rate is None
 
-    def test_usd_doc_no_rate_fx_rate_is_not_1(self):
-        """USD doc with no fx_rate → fx_rate is NOT 1.0 (would be wrong SGD total)."""
+    def test_usd_doc_no_rate_not_converted_to_sgd(self):
+        """USD doc with no fx_rate → amounts stay in USD (not silently converted)."""
         r = _make_receipt(invoice_number="R-USD-NORATE", currency="USD", total=500.0, subtotal=500.0)
         inv = to_normalized(r, direction="purchase", base_currency="SGD")
-        # Must NOT silently default to 1.0 — that would produce wrong SGD amounts
-        assert inv.fx_rate != 1.0 or inv.needs_fx_review is True
+        assert inv.doc_total == 500.0
+        assert inv.currency == "USD"
 
-    def test_usd_doc_no_rate_review_note_set(self):
-        """USD doc with no fx_rate → reconcile_note mentions FX review."""
-        r = _make_receipt(invoice_number="R-USD-NORATE", currency="USD", total=500.0, subtotal=500.0)
-        inv = to_normalized(r, direction="purchase", base_currency="SGD")
-        assert inv.reconcile_note is not None
-        assert "fx" in inv.reconcile_note.lower() or "rate" in inv.reconcile_note.lower()
-
-    def test_idr_doc_no_rate_is_flagged(self):
-        """IDR doc with no fx_rate → needs_fx_review=True."""
+    def test_idr_doc_no_rate_books_in_idr(self):
+        """IDR doc with no fx_rate → booked in IDR, not flagged."""
         r = _make_receipt(invoice_number="R-IDR-NORATE", currency="IDR", total=974470.0, subtotal=974470.0)
         inv = to_normalized(r, direction="purchase", base_currency="SGD")
+        assert inv.needs_fx_review is False
+        assert inv.currency == "IDR"
+
+    def test_mixed_currency_doc_is_flagged(self):
+        """Same document with IDR lines and USD header → needs_fx_review."""
+        r = _make_receipt(invoice_number="R-MIX", currency="USD", total=311.79, subtotal=311.79)
+        inv = to_normalized(
+            r,
+            direction="purchase",
+            base_currency="SGD",
+            currency_conflict=True,
+            line_currencies=["IDR", "IDR", "USD"],
+        )
         assert inv.needs_fx_review is True
+        assert inv.reconciled is False
+        assert "multiple currencies" in (inv.reconcile_note or "").lower()
 
     def test_sgd_doc_no_rate_not_flagged(self):
         """SGD (= base currency) doc with no fx_rate → NOT flagged (no FX needed)."""
@@ -289,14 +300,8 @@ class TestFxNoRate:
         inv = to_normalized(r, direction="purchase", base_currency="SGD")
         assert inv.needs_fx_review is False
 
-    def test_fx_rate_none_not_stored_as_1(self):
-        """When FX review needed, fx_rate should be None (not 1.0) to prevent silent errors."""
-        r = _make_receipt(invoice_number="R-USD-NORATE", currency="USD", total=500.0, subtotal=500.0)
-        inv = to_normalized(r, direction="purchase", base_currency="SGD")
-        assert inv.fx_rate is None
-
-    def test_bundle_with_mixed_currencies_no_rate_flags_non_base(self):
-        """Bundle with IDR+USD receipts, no rates → IDR and USD flagged, SGD is not."""
+    def test_bundle_with_mixed_currencies_no_rate_not_flagged(self):
+        """Separate single-currency docs in a bundle are not flagged."""
         r_sgd = _make_receipt(invoice_number="R-SGD", currency="SGD", total=100.0, subtotal=100.0)
         r_usd = _make_receipt(invoice_number="R-USD", currency="USD", total=50.0, subtotal=50.0)
         r_idr = _make_receipt(invoice_number="R-IDR", currency="IDR", total=50000.0, subtotal=50000.0)
@@ -305,8 +310,8 @@ class TestFxNoRate:
         assert len(results) == 3
         by_num = {r.invoice_number: r for r in results}
         assert by_num["R-SGD"].needs_fx_review is False
-        assert by_num["R-USD"].needs_fx_review is True
-        assert by_num["R-IDR"].needs_fx_review is True
+        assert by_num["R-USD"].needs_fx_review is False
+        assert by_num["R-IDR"].needs_fx_review is False
 
 
 # =========================================================================== #
@@ -347,6 +352,32 @@ class TestReconcilePerDoc:
         ok2, _ = reconcile(r2)
         assert ok1 is True
         assert ok2 is True
+
+
+# =========================================================================== #
+# G — Date parsing for ledger export
+# =========================================================================== #
+
+class TestParseDate:
+    def test_text_month_year(self):
+        assert str(_parse_date("15 Jan 2025")) == "2025-01-15"
+
+    def test_ordinal_date_range_uses_end(self):
+        assert str(_parse_date("17th November 2025 - 19th November 2025")) == "2025-11-19"
+
+    def test_iso_date(self):
+        assert str(_parse_date("2025-12-01")) == "2025-12-01"
+
+    def test_text_month_via_to_normalized(self):
+        r = _make_receipt(
+            invoice_number="R-DATE",
+            currency="USD",
+            total=100.0,
+            subtotal=100.0,
+        )
+        r.invoice_date = "15 Jan 2025"
+        inv = to_normalized(r, direction="purchase", base_currency="SGD")
+        assert str(inv.invoice_date) == "2025-01-15"
 
 
 # =========================================================================== #

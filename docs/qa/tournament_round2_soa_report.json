@@ -1,0 +1,21 @@
+{
+  "round": 2,
+  "topic": "soa_segmentation",
+  "hermetic": true,
+  "results": [
+    {
+      "variant": "V0",
+      "hermetic": true,
+      "document_count": 2,
+      "invoice_count": 1,
+      "score": 0.725
+    },
+    {
+      "variant": "V3",
+      "hermetic": true,
+      "document_count": 2,
+      "invoice_count": 1,
+      "score": 0.37499999999999994
+    }
+  ]
+}

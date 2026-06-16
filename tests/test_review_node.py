@@ -25,6 +25,7 @@ from invoice_processing.extract.invoice_extractor import (
     ExtractedInvoiceBundle,
     ExtractedLine,
 )
+from tests.test_nodes import _doc_bundle_from_ex_bundle
 
 
 class FakeContext:
@@ -76,7 +77,7 @@ async def _drive(node_coro_gen):
 
 @pytest.fixture(autouse=True)
 def _restore_seams():
-    saved = {n: getattr(nodes, n) for n in ("REVIEWER_FN", "EXTRACT_BUNDLE_FN")}
+    saved = {n: getattr(nodes, n) for n in ("REVIEWER_FN", "EXTRACT_INVOICE_DOCUMENT_FN")}
     yield
     for n, fn in saved.items():
         setattr(nodes, n, fn)
@@ -145,11 +146,12 @@ def test_hints_needed_reextracts_exactly_once_then_rereviews():
             return {"verdict": nodes.REVIEW_VERDICT_HINTS, "hint": "read the summary page"}
         return {"verdict": nodes.REVIEW_VERDICT_OK}
 
-    def fake_extract(data, mime, *, model, hint=None):
+    def fake_extract(data, mime, **kw):
         extract_calls["n"] += 1
-        extract_calls["hints"].append(hint)
-        # The re-extraction now yields a CLEAN invoice.
-        return ExtractedInvoiceBundle(
+        extract_calls["hints"].append(kw.get("hint"))
+        from tests.test_nodes import _legacy_result_from_ex_bundle
+        return _legacy_result_from_ex_bundle(
+            ExtractedInvoiceBundle(
             invoices=[
                 ExtractedInvoice(
                     doc_type="invoice",
@@ -164,10 +166,10 @@ def test_hints_needed_reextracts_exactly_once_then_rereviews():
                     total=109.0,
                 )
             ]
-        )
+        ))
 
     nodes.REVIEWER_FN = fake_reviewer
-    nodes.EXTRACT_BUNDLE_FN = fake_extract
+    nodes.EXTRACT_INVOICE_DOCUMENT_FN = fake_extract
 
     # Start tripped via an empty line invoice.
     inv = _clean_invoice(lines=[])
@@ -196,10 +198,11 @@ def test_ceiling_enforced_two_reviews_one_reextract():
         reviewer_calls["n"] += 1
         return {"verdict": nodes.REVIEW_VERDICT_HINTS, "hint": "try again"}
 
-    def fake_extract(data, mime, *, model, hint=None):
+    def fake_extract(data, mime, **kw):
         extract_calls["n"] += 1
-        # Re-extraction stays bad (still empty lines) so signals keep tripping.
-        return ExtractedInvoiceBundle(
+        from tests.test_nodes import _legacy_result_from_ex_bundle
+        return _legacy_result_from_ex_bundle(
+            ExtractedInvoiceBundle(
             invoices=[
                 ExtractedInvoice(
                     doc_type="invoice",
@@ -210,10 +213,10 @@ def test_ceiling_enforced_two_reviews_one_reextract():
                     total=109.0,
                 )
             ]
-        )
+        ))
 
     nodes.REVIEWER_FN = always_hints
-    nodes.EXTRACT_BUNDLE_FN = fake_extract
+    nodes.EXTRACT_INVOICE_DOCUMENT_FN = fake_extract
 
     inv = _clean_invoice(lines=[])
     ctx = FakeContext(_state([inv]))

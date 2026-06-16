@@ -1,0 +1,97 @@
+{
+  "generated_at": "2026-06-16T22:00:00+00:00",
+  "root": "~/Desktop/LocalTest/TestDoc/Sample Test Group (live)",
+  "limit_per_client": 30,
+  "clients": [
+    {
+      "client_id": "Acme Client Pte. Ltd.",
+      "setup_path": "Acme Client Pte. Ltd. Client Setup.xlsx",
+      "n_docs": 6,
+      "direction_total": 5,
+      "direction_correct": 5,
+      "direction_rate": 1.0,
+      "classify_ok": 6,
+      "recon_eligible": 5,
+      "recon_pass": 5,
+      "recon_rate": 1.0,
+      "errors": 0,
+      "placement": {
+        "scored": 0,
+        "correct": 0,
+        "missed": 0,
+        "na": 5,
+        "total": 0,
+        "rate": 0.0
+      },
+      "completeness": {},
+      "rows": [
+        {
+          "path": "SUP-001-invoice.pdf",
+          "expected": "purchase",
+          "resolved": "purchase",
+          "correct": true,
+          "doc_type": "invoice",
+          "reconciled": true,
+          "note": "",
+          "issuer_name": "Supplier Gamma Trading Pte Ltd",
+          "bill_to_name": "Acme Client Pte. Ltd."
+        },
+        {
+          "path": "CON-001-contractor-invoice.pdf",
+          "expected": "purchase",
+          "resolved": "purchase",
+          "correct": true,
+          "doc_type": "invoice",
+          "reconciled": true,
+          "note": "Understand call resolved direction_for_client=purchase based on UEN match.",
+          "issuer_name": "Contractor Beta",
+          "bill_to_name": "Acme Client Pte. Ltd."
+        },
+        {
+          "path": "Telco-A-Aug-2026.pdf",
+          "expected": "purchase",
+          "resolved": "purchase",
+          "correct": true,
+          "doc_type": "invoice",
+          "reconciled": true,
+          "note": "",
+          "issuer_name": "Telco Provider A Pte Ltd",
+          "bill_to_name": "Acme Client Pte. Ltd."
+        },
+        {
+          "path": "Telco-B-Aug-2026.pdf",
+          "expected": "purchase",
+          "resolved": "purchase",
+          "correct": true,
+          "doc_type": "invoice",
+          "reconciled": true,
+          "note": "",
+          "issuer_name": "Telco Provider B Limited",
+          "bill_to_name": "Acme Client Pte. Ltd."
+        },
+        {
+          "path": "Client-Issued-INV-26-042.pdf",
+          "expected": "sales",
+          "resolved": "sales",
+          "correct": true,
+          "doc_type": "invoice",
+          "reconciled": true,
+          "note": "Sales direction: client is the issuer (From party matches UEN).",
+          "issuer_name": "Acme Client Pte. Ltd.",
+          "bill_to_name": "Acme Customer Pte Ltd"
+        },
+        {
+          "path": "Vendor-Receipt-2026-08.pdf",
+          "expected": "unknown",
+          "resolved": "unknown",
+          "correct": true,
+          "doc_type": "invoice",
+          "reconciled": true,
+          "note": "Unknown direction: neither party matches the client. Routes to HITL.",
+          "issuer_name": "Anonymous Vendor",
+          "bill_to_name": "Anonymous Recipient"
+        }
+      ]
+    }
+  ]
+}

@@ -42,6 +42,7 @@ _XERO_PURCHASE_COLS: list[PreviewColumn] = [
     PreviewColumn("Tax Type",     "*TaxType",       "raw_text"),
     PreviewColumn("Unit Amount",  "*UnitAmount",    "raw_number"),
     PreviewColumn("Total",        "Total",          "raw_number"),
+    PreviewColumn("Currency",     "Currency",       "raw_text"),
 ]
 
 _XERO_SALES_COLS: list[PreviewColumn] = [
@@ -53,6 +54,7 @@ _XERO_SALES_COLS: list[PreviewColumn] = [
     PreviewColumn("Tax Type",     "*TaxType",       "raw_text"),
     PreviewColumn("Unit Amount",  "*UnitAmount",    "raw_number"),
     PreviewColumn("Total",        "Total",          "raw_number"),
+    PreviewColumn("Currency",     "Currency",       "raw_text"),
 ]
 
 _QBS_PURCHASE_COLS: list[PreviewColumn] = [
@@ -64,6 +66,7 @@ _QBS_PURCHASE_COLS: list[PreviewColumn] = [
     PreviewColumn("Sub Total",     "Sub Total",          "raw_number"),
     PreviewColumn("Tax Amount",    "Tax Amount",         "raw_number"),
     PreviewColumn("Total Amount",  "Total Amount",       "raw_number"),
+    PreviewColumn("Currency",      "Currency",           "raw_text"),
 ]
 
 _QBS_SALES_COLS: list[PreviewColumn] = [
@@ -75,6 +78,7 @@ _QBS_SALES_COLS: list[PreviewColumn] = [
     PreviewColumn("Amount",        "Amount",             "raw_number"),
     PreviewColumn("Tax Amount",    "Tax Amount",         "raw_number"),
     PreviewColumn("Total",         "Total",              "raw_number"),
+    PreviewColumn("Currency",      "Currency",           "raw_text"),
 ]
 
 _BANK_COLS: list[PreviewColumn] = [
@@ -102,21 +106,17 @@ def preview_column_spec(*, software: str, sheet: str) -> list[PreviewColumn]:
     # qbs_ledger (default)
     return _QBS_PURCHASE_COLS if sheet == "Purchase" else _QBS_SALES_COLS
 
-# Ordered pipeline stage keys and their display titles.
+# Ordered pipeline stage keys and their display titles (ADR-0011 layers).
 PIPELINE_STAGES: tuple[str, ...] = (
-    "classify",
-    "extract",
-    "categorize",
-    "tax",
-    "approve",
+    "understand",
+    "policy",
+    "commit",
 )
 
 _STAGE_TITLES: dict[str, str] = {
-    "classify": "Classifying",
-    "extract": "Extracting",
-    "categorize": "Categorizing",
-    "tax": "Applying tax",
-    "approve": "Awaiting approval",
+    "understand": "Understanding document",
+    "policy": "Applying your rules",
+    "commit": "Ready to file",
 }
 
 _STATUS_MARKER: dict[str, str] = {
@@ -199,6 +199,97 @@ def processing_plan_blocks(
             "elements": [
                 {"type": "mrkdwn", "text": " · ".join(markers)},
             ],
+        },
+    ]
+
+
+def batch_processing_plan_blocks(
+    *,
+    total: int,
+    done: int,
+    doc_rows: list[dict],
+    channel_id: str | None = None,
+    title: str | None = None,
+) -> list:
+    """Build the batch-level thinking plan (one task per document).
+
+    A single top-level Block Kit ``plan`` block listing every document in the
+    batch as a task, with the current per-doc stage as the task ``output``. This
+    is what the batch coordinator ``chat_update``s on the placeholder message
+    while the batch runs — one top-level message, with all thinking visible
+    inline, no per-doc accordion stampede.
+
+    Each ``doc_row`` is a dict with:
+      - ``file_label``: short human label (e.g. filename)
+      - ``stage``: one of ``"queued"``, ``"understanding"``, ``"applying_rules"``,
+        ``"awaiting_review"``, ``"ready"``, ``"rejected"``, ``"duplicate"``
+      - ``detail``: short output line for the current stage (e.g. the
+        vendor / total / lines summary from the Understand call)
+      - ``status``: ``"in_progress" | "complete" | "failed"``
+
+    Falls back to a section + context block list when the channel doesn't
+    support native ``plan`` blocks.
+    """
+    headline = title or f"Processing batch ({total} document{'s' if total != 1 else ''})"
+    if supports_native_blocks(channel_id):
+        tasks = []
+        for i, row in enumerate(doc_rows, start=1):
+            status = row.get("status") or "in_progress"
+            stage = row.get("stage") or "queued"
+            label = row.get("file_label") or f"doc {i}"
+            title_line = f"doc {i}/{total} — {label}"
+            if status == "complete":
+                title_line = f":white_check_mark: {title_line}"
+            elif status == "failed":
+                title_line = f":x: {title_line}"
+            else:
+                title_line = f":hourglass_flowing_sand: {title_line}"
+            task: dict = {
+                "task_id": f"doc_{i}",
+                "title": title_line,
+                "status": "complete" if status == "complete" else "in_progress",
+            }
+            detail_bits: list[str] = [stage]
+            if row.get("detail"):
+                detail_bits.append(str(row["detail"]))
+            if detail_bits:
+                task["output"] = " · ".join(detail_bits)
+            tasks.append(task)
+        # Add an "overall" task that summarizes how many docs have finished —
+        # helpful at-a-glance state for the user looking at the plan block.
+        overall_status = "complete" if done >= total else "in_progress"
+        return [
+            {
+                "type": "plan",
+                "title": headline,
+                "tasks": [
+                    {
+                        "task_id": "overall",
+                        "title": f"Overall progress — {done}/{total} done",
+                        "status": overall_status,
+                    },
+                    *tasks,
+                ],
+            }
+        ]
+    # Fallback: section header + per-doc line.
+    lines: list[str] = []
+    for i, row in enumerate(doc_rows, start=1):
+        marker = _STATUS_MARKER.get(row.get("status") or "in_progress", ":white_circle:")
+        stage = row.get("stage") or "queued"
+        label = row.get("file_label") or f"doc {i}"
+        line = f"{marker} doc {i}/{total} — {label} — {stage}"
+        if row.get("detail"):
+            line += f" · {row['detail']}"
+        lines.append(line)
+    return [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": f"*{headline}*"},
+        },
+        {
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": "\n".join(lines)}],
         },
     ]
 
@@ -803,8 +894,8 @@ def result_card(
                         "type": "mrkdwn",
                         "text": (
                             ":information_source: No COA is set for this client — "
-                            "account codes may be blank. Upload a COA file or tap "
-                            "*Use standard SG SME COA* to activate full categorisation."
+                            "account codes may be blank. Upload a COA file (.xlsx/.csv) "
+                            "or run `/ledgr settings` to add one."
                         ),
                     }
                 ],
@@ -944,6 +1035,23 @@ def coa_saved_blocks(n_accounts: int) -> list:
     ]
 
 
+def coa_validation_failed_blocks(errors: list[str]) -> list:
+    """Error card when an uploaded COA fails validation."""
+    bullets = "\n".join(f"• {e}" for e in errors)
+    return [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    ":warning: *COA validation failed* — please fix and re-upload:\n"
+                    f"{bullets}"
+                ),
+            },
+        }
+    ]
+
+
 def ledgr_help_blocks() -> list:
     """Usage card posted for /ledgr help or unknown subcommands."""
     return [
@@ -1022,6 +1130,83 @@ def job_summary_text(
     if parts:
         return head + " — " + ", ".join(parts)
     return head + " — nothing new to add"
+
+
+def job_progress_text(
+    *,
+    total: int,
+    done: int,
+    posted: int = 0,
+    needs_review: int = 0,
+    rejected: int = 0,
+    duplicates: int = 0,
+) -> str:
+    """Live batch-drop progress line (updated after each document completes)."""
+    if done <= 0:
+        return f"📥 Received {total} document{'s' if total != 1 else ''} — starting…"
+    tail: list[str] = []
+    if posted:
+        tail.append(f"{posted} posted")
+    if duplicates:
+        tail.append(f"{duplicates} already recorded")
+    if needs_review:
+        tail.append(f"{needs_review} need{'s' if needs_review == 1 else ''} review")
+    if rejected:
+        tail.append(f"{rejected} rejected")
+    detail = f" ({', '.join(tail)})" if tail else ""
+    return (
+        f"📥 Processing {total} document{'s' if total != 1 else ''}"
+        f" — {done}/{total} done{detail}…"
+    )
+
+
+def delivery_card_blocks(summary: str, preview_blocks: list[dict]) -> list[dict]:
+    """One delivery message: summary line + ledger preview table(s)."""
+    blocks: list[dict] = [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": summary},
+        },
+    ]
+    blocks.extend(preview_blocks)
+    return blocks
+
+
+def compose_batch_delivery_summary(
+    *,
+    groups: list[dict],
+    client_name: str = "",
+) -> str:
+    """Aggregate delivery summary for a multi-file batch.
+
+    Each group dict: fy, software, kind, n_rows, n_docs, client_name (optional).
+    """
+    if not groups:
+        return "No entries were produced for this batch."
+
+    parts: list[str] = []
+    total_rows = 0
+    total_docs = 0
+    for g in groups:
+        fy = g.get("fy", "?")
+        kind = g.get("kind") or "invoice"
+        sw = software_label(str(g.get("software") or ""))
+        name = (g.get("client_name") or client_name or "").strip()
+        doc_label = "Bank Statement" if kind == "bank" else "Ledger"
+        prefix = f"{name} – " if name else ""
+        dest = f"**{prefix}{doc_label} FY{fy} ({sw})**"
+        n_rows = int(g.get("n_rows") or 0)
+        n_docs = int(g.get("n_docs") or 0)
+        total_rows += n_rows
+        total_docs += n_docs
+        parts.append(
+            f"{n_rows} line{'s' if n_rows != 1 else ''} from "
+            f"{n_docs} document{'s' if n_docs != 1 else ''} to {dest}"
+        )
+
+    if len(parts) == 1:
+        return f"📒 Added {parts[0]}."
+    return f"📒 Added {total_rows} lines from {total_docs} documents — " + "; ".join(parts) + "."
 
 
 def approval_card_blocks(
@@ -1447,20 +1632,11 @@ def coa_prompt_blocks() -> list:
             "text": {
                 "type": "mrkdwn",
                 "text": (
-                    "✅ Profile saved. Drop your COA file (.xlsx/.csv) here, "
-                    "or tap *Use standard SG SME COA*"
+                    "✅ Profile saved. Drop your COA file (.xlsx/.csv) here to "
+                    "activate this client. You can still drop documents anytime — "
+                    "categorisation starts once a valid COA is uploaded."
                 ),
             },
-        },
-        {
-            "type": "actions",
-            "elements": [
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "text": "Use standard SG SME COA", "emoji": True},
-                    "action_id": "ledgr_use_standard_coa",
-                }
-            ],
         },
     ]
 
@@ -1604,6 +1780,55 @@ def dedup_callout_card(
 _DATA_TABLE_MAX_ROWS = 100  # Slack hard cap for data_table rows (excl. header)
 
 
+def summary_table_blocks(
+    summary_table: list[dict],
+    *,
+    channel_id: str | None = None,
+    title: str = "Document summary",
+) -> list[dict]:
+    """Drive-style Category / Details table for human review before approval."""
+    if not summary_table:
+        return []
+
+    if supports_native_blocks(channel_id):
+        header_row = [
+            {"type": "raw_text", "text": "Category"},
+            {"type": "raw_text", "text": "Details"},
+        ]
+        data_rows: list[list[dict]] = []
+        for row in summary_table[:_DATA_TABLE_MAX_ROWS]:
+            cat = str(row.get("category") or "—").strip() or "—"
+            det = str(row.get("details") or "—").strip() or "—"
+            data_rows.append([
+                {"type": "raw_text", "text": cat},
+                {"type": "raw_text", "text": det},
+            ])
+        blocks: list[dict] = [
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"*{title}*"},
+            },
+            {
+                "type": "data_table",
+                "caption": title,
+                "rows": [header_row, *data_rows],
+            },
+        ]
+        return blocks
+
+    lines = [f"*{title}*"]
+    for row in summary_table[:20]:
+        cat = str(row.get("category") or "—").strip() or "—"
+        det = str(row.get("details") or "—").strip() or "—"
+        lines.append(f"• *{cat}*: {det}")
+    return [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "\n".join(lines)},
+        }
+    ]
+
+
 def ledger_preview_data_table(
     *,
     rows: list[dict],
@@ -1666,20 +1891,18 @@ def ledger_preview_data_table(
                         f = float(val)  # type: ignore[arg-type]
                         cells.append({"type": "raw_number", "text": f"{f:.2f}", "value": f})
                     except (TypeError, ValueError):
-                        # Missing/non-numeric: emit empty raw_text (raw_number
-                        # without a value would be rejected by Slack).
-                        cells.append({"type": "raw_text", "text": ""})
+                        # Missing/non-numeric: Slack rejects empty raw_text cells.
+                        cells.append({"type": "raw_text", "text": "—"})
                 else:
-                    cells.append({"type": "raw_text", "text": str(val) if val is not None else ""})
+                    text = str(val).strip() if val is not None else ""
+                    cells.append({"type": "raw_text", "text": text or "—"})
             data_rows.append(cells)
 
-        caption = f"{sheet} — last {len(preview)} rows added (FY{fy})"
-        preface = f"Recent {sheet} rows in *{workbook_name}* ({sw_label}, FY{fy}):"
+        caption = (
+            f"{sheet} — {len(preview)} row{'s' if len(preview) != 1 else ''} added"
+            f" · FY{fy} · {sw_label}"
+        )
         blocks: list[dict] = [
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": preface},
-            },
             {
                 "type": "data_table",
                 "caption": caption,
