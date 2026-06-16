@@ -324,6 +324,97 @@ def test_list_recent_documents_respects_limit():
 
 
 # --------------------------------------------------------------------------- #
+# P0-2 regression: list_recent_documents + summarize_recent_activity must see
+# bank-statement rows regardless of transaction date
+# --------------------------------------------------------------------------- #
+
+# Bank rows from a Rosebery-style workbook (Dec 2025, uploaded 2026-06-16).
+# They have Withdrawal/Deposit/Balance columns — _is_bank_row returns True.
+_ROSEBERY_BANK_ROWS = [
+    {
+        "Date": "01/12/2025",
+        "Description": "Opening balance",
+        "Withdrawal": None,
+        "Deposit": None,
+        "Balance": 5000.0,
+        "Currency": "SGD",
+        "Source Filename": "2025 12.pdf",
+        "_sheet": "OCBC - 0001",
+    },
+    {
+        "Date": "15/12/2025",
+        "Description": "Vendor payment",
+        "Withdrawal": 1200.0,
+        "Deposit": None,
+        "Balance": 3800.0,
+        "Currency": "SGD",
+        "Source Filename": "2025 12.pdf",
+        "_sheet": "OCBC - 0001",
+    },
+    {
+        "Date": "28/12/2025",
+        "Description": "Interest credit",
+        "Withdrawal": None,
+        "Deposit": 12.50,
+        "Balance": 3812.50,
+        "Currency": "SGD",
+        "Source Filename": "2025 12.pdf",
+        "_sheet": "OCBC - 0001",
+    },
+    {
+        "Date": "31/12/2025",
+        "Description": "Closing balance",
+        "Withdrawal": None,
+        "Deposit": None,
+        "Balance": 3812.50,
+        "Currency": "SGD",
+        "Source Filename": "2025 12.pdf",
+        "_sheet": "OCBC - 0001",
+    },
+]
+
+
+def test_list_recent_documents_includes_bank_statement_rows():
+    """list_recent_documents must surface bank-statement source docs.
+
+    Reproduces P0-2: the Rosebery Dec 2025 bank statement was uploaded
+    2026-06-16 but list_recent_documents returned empty because every row
+    has Withdrawal/Deposit/Balance columns and _is_bank_row skipped them all.
+    The tool must group bank rows by (Date, Source Filename) and include them
+    so the user can see 'what documents have been processed in this channel?'
+    """
+    ctx = _ctx(**{LEDGER_DATA_KEY: _ROSEBERY_BANK_ROWS})
+    raw = list_recent_documents(ctx, limit="10")
+    data = _parse_json(raw)
+    assert len(data["documents"]) >= 1, (
+        "list_recent_documents returned no documents even though 4 bank rows "
+        "from '2025 12.pdf' are loaded — bank-statement docs must appear"
+    )
+    filenames = {d["filename"] for d in data["documents"]}
+    assert "2025 12.pdf" in filenames, (
+        f"Expected '2025 12.pdf' in documents, got {filenames!r}"
+    )
+
+
+def test_summarize_recent_activity_names_fy_when_only_old_bank_rows():
+    """summarize_recent_activity must name the available data when result is empty.
+
+    Reproduces P0-2: Dec 2025 bank rows are > 30 days old (today is 2026-06-16).
+    The 30-day window returns nothing, and the existing 'newest_hint' path only
+    inspects INVOICE rows — bank rows are silently skipped in that pass too,
+    so the user gets 'No transactions found in the last 30 days.' with no hint.
+    The response must name either the most-recent bank date OR the FY so the
+    user knows the data IS there and can ask for a wider view.
+    """
+    ctx = _ctx(**{LEDGER_DATA_KEY: _ROSEBERY_BANK_ROWS})
+    raw = summarize_recent_activity(ctx, days="30")
+    # Must NOT just say "no transactions" with zero guidance
+    assert "2025" in raw or "Dec" in raw.lower() or "december" in raw.lower(), (
+        f"Expected the response to name the available bank data period, got: {raw!r}"
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Agent registration + prompt
 # --------------------------------------------------------------------------- #
 
