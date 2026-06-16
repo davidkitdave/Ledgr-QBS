@@ -766,16 +766,14 @@ def summarize_recent_activity(tool_context: ToolContext, days: str = "30") -> st
             flagged_count += 1
 
     if txn_count == 0:
-        # Find the most recent non-bank invoice date in the full dataset so the
+        # Find the most recent date across ALL rows (invoice AND bank) so the
         # user knows what period IS available and can ask a smarter follow-up.
         newest: date | None = None
         for row in rows:
-            if _is_bank_row(row):
-                continue
             rd = _parse_row_date(row.get("Date"))
             if rd is not None and (newest is None or rd > newest):
                 newest = rd
-        newest_hint = f" The newest document I see is from {newest.isoformat()}." if newest else ""
+        newest_hint = f" The newest entry I see is from {newest.isoformat()}." if newest else ""
         return (
             f"No transactions found in the last {window} days.{newest_hint}"
             f" Ask me for that month or the full FY if you'd like a wider view."
@@ -849,8 +847,13 @@ def lookup_row(tool_context: ToolContext, query: str, limit: str = "5") -> str:
 def list_recent_documents(tool_context: ToolContext, limit: str = "10") -> str:
     """List source documents grouped from the loaded FY ledger rows.
 
-    Groups by ``(Date, Source Filename, Doc Type)``. Only covers documents
-    present in the currently loaded workbook — not a cross-FY job log.
+    Groups by ``(Source Filename, Doc Type / sheet)``. Covers both invoice rows
+    (Purchase / Sales) and bank-statement rows (Withdrawal / Deposit / Balance)
+    so a channel that only has a bank statement doesn't return an empty list.
+
+    For invoice rows the representative date is the ``Date`` column value.
+    For bank rows the representative date is the earliest transaction date in the
+    group (the statement opening date), and ``doc_type`` is ``"Bank"``.
 
     Args:
         tool_context: Injected by ADK; provides session state.
@@ -867,18 +870,26 @@ def list_recent_documents(tool_context: ToolContext, limit: str = "10") -> str:
     groups: dict[tuple, dict] = {}
 
     for row in rows:
-        if _is_bank_row(row):
-            continue
-        key = (
-            str(row.get("Date") or ""),
-            str(row.get("Source Filename") or row.get("source_filename") or "unknown"),
-            str(row.get("Doc Type") or ""),
-        )
+        is_bank = _is_bank_row(row)
+        filename = str(row.get("Source Filename") or row.get("source_filename") or "unknown")
+        if is_bank:
+            # Group bank rows by filename + sheet (one entry per uploaded statement).
+            doc_type = "Bank"
+            sheet = str(row.get("_sheet") or "Bank")
+            key = (filename, doc_type, sheet)
+        else:
+            doc_type = str(row.get("Doc Type") or "")
+            key = (
+                filename,
+                doc_type,
+                str(row.get("Date") or ""),
+            )
+
         if key not in groups:
             groups[key] = {
-                "date": key[0],
-                "filename": key[1],
-                "doc_type": key[2],
+                "date": str(row.get("Date") or ""),
+                "filename": filename,
+                "doc_type": doc_type,
                 "row_count": 0,
                 "total": 0.0,
                 "currency": row.get("Currency") or row.get("currency") or "SGD",
@@ -886,7 +897,22 @@ def list_recent_documents(tool_context: ToolContext, limit: str = "10") -> str:
             }
         entry = groups[key]
         entry["row_count"] += 1
-        entry["total"] += _to_float(row.get("Source Amount") or row.get("amount"))
+
+        if is_bank:
+            # Use the earliest date in the group as the representative date so
+            # the document sorts near its statement month, not the last row.
+            row_date_str = str(row.get("Date") or "")
+            if row_date_str and (
+                not entry["date"]
+                or (_parse_row_date(row_date_str) or date.max)
+                < (_parse_row_date(entry["date"]) or date.max)
+            ):
+                entry["date"] = row_date_str
+            # Net figure: deposits − withdrawals (positive = net inflow).
+            entry["total"] += _to_float(row.get("Deposit")) - _to_float(row.get("Withdrawal"))
+        else:
+            entry["total"] += _to_float(row.get("Source Amount") or row.get("amount"))
+
         if row.get("Review") or row.get("Flagged"):
             entry["flagged_count"] += 1
 
