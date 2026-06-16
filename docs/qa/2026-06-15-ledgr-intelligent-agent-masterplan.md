@@ -99,6 +99,58 @@ Live Slack QA prompts for Step 3: (1) "why did the Acme invoice go to 6100?", (2
 should a non-registered client get on this SR line?", (3) "show me last month's activity",
 (4) "find the AWS line", (5) "what documents have I processed this month?"
 
+**H. QA-scope decisions and MY/COA gaps surfaced 2026-06-15 in pre-/ultraqa planning.**
+While planning the live /ultraqa sweep against the dev Slack app (`Ledgr (dev)`, memory
+`two-slack-apps-dev-prod`), the developer scoped four real test clients (one per documented
+capability) and surfaced two gaps the original plan does not cover:
+
+- **Test-channel scope (one per documented capability):**
+  - **Akar** — SG, clean digital invoices → happy-path + cost gate (reviewer must NOT fire,
+    categorizer must NOT fall to LLM on known vendors).
+  - **Auditair International Pte. Ltd.** — SG, second SG client → tax/categorizer diversity.
+  - **Rosebery** — SG, scanned bank statement → multi-account → multi-tab split per memory
+    `bank-statement-requirements` + FY bank ledger continuity per memory
+    `bank-ledger-continuous-sorted`.
+  - **JBI Plus Auto Enterprise** — **MY** (Malaysian, not SG) → COOL POWER SOA: multi-page
+    split, skip cover, novel-vendor LLM fallback. **JBI client onboarding is DEFERRED to a later
+    phase** (gated by Gaps 1 + 2 below). Immediate QA goal for the JBI doc is **extraction-only**:
+    drop the SOA into an existing SG test channel and verify the extractor splits unique invoice
+    pages and skips the SOA cover, regardless of whether categorize/tax are correct downstream.
+
+- **Gap 1 — MY / non-SG onboarding (§7 Step 9).** The onboarding wizard asks "GST-registered?",
+  a Singapore concept; §0.5-C master gate is hardcoded around `our_gst_registered`. For an MY
+  client, the right answer is to suppress the SG-GST branch entirely (and eventually model SST).
+  **Must add a `region`/`country` field to the Firestore profile schema and branch the master gate
+  on it.** P0 for JBI live testing; not blocking for the SG-only sweep on Akar/Auditair/Rosebery.
+
+- **Gap 2 — COA from user upload, not seeded default (§7 Step 10).** Onboarding must NOT ship a
+  default COA. Instead, the user uploads their COA file (PDF/Excel) and the bot extracts it into
+  the Firestore profile. JBI has its own COA in `${LEDGR_TEST_DOC_DIR}/MYDoc/JBI PLUS AUTO ENTERPRISE/`
+  — first real test of this path.
+
+- **Latent-bug recheck** (memory `socket-mode-store-split-followup`): socket-mode onboarding
+  historically wrote to `InMemoryClientStore` while the pipeline reads Firestore — the dev Slack
+  app runs socket mode, so this could mask itself as "profile not found" during QA. **Must verify
+  the wiring is fixed on `feat/ledgr-intelligent-agent` BEFORE live QA**, else every channel
+  appears empty to the pipeline and the entire sweep is invalid.
+
+- **Slack Canvas / files-folder per channel (§7 Step 11):** raised here for first time —
+  per-channel canvas/files folder for tidy file management. Status unknown; investigate before
+  promising it works.
+
+**I. Delivery surface duplication — surfaced live 2026-06-15 (drives §7 Step 12).**
+The first live JBI delivery showed all three notice variants stacked for one upload:
+(a) the per-step processing accordion ("Processing [dev] FILE — ✓ Classifying / ✓ Extracting /
+✓ Categorizing / ✓ Applying tax / ✓ Awaiting approval"), (b) the summary line
+("Processed 1 document — 1 posted to your FY2025 ledger" + "Added 30 lines from 18 documents
+to your JBI Plus Auto Enterprise – Ledger FY2025"), (c) the Block Kit data-table preview
+(the Purchase / Bank ledger row tables shipped this branch and visible in `#qa-blockkit`).
+**User direction (live QA):** drop (a) — it duplicates capability the chat agent already
+provides on demand (Steps 1+3+4: ask "what's happening with this doc?" and the assistant
+explains). Keep (b), enrich with row counts and ledger pointer. **Always emit (c) as the
+headline artifact** — operators want the result, not the plumbing. One tight delivery card per
+upload, not three stacked notices. Tracked as §7 Step 12.
+
 ---
 
 ## 1. The simple mental model (so we never lose the thread)
@@ -258,9 +310,15 @@ E = engine surface — but they share code, so they interleave on purpose.
 | 6 | Migrate document-lane orchestration to **Dynamic Workflows** (`@node` + `ctx.run_node`), now that the smart-edge shape is proven | E-3 | Clean, resumable, easy to add the next inspector per node | ✅ **DONE 2026-06-15** (Option (c): thin `@node(rerun_on_resume=True)` driver wrapping the existing node fns unchanged; terminal decision threaded via `ctx.run_node(approval_gate)` return; both HITL interrupts resume with side-effecting nodes run exactly-once — verified end-to-end) |
 | 7 | `re_extract_document(file_id, hints)` + `replace_recorded_month` + `learn_mapping` from chat — both lanes now share the exact same engine tools | C-3 | Talk-to-it-and-it-acts; the engine and chat are one mind | ✅ **DONE 2026-06-15** (learn_mapping=direct Correction write per ADR-0004; replace_recorded_month=Date-filtered row clear + seen_doc_keys purge; re_extract=re-run pipeline w/ hint + identity-exact append replace, ADR-0010, no schema change; all gated, leak-safe) |
 | 8 | Proactive auto-hints: a low-confidence reviewer verdict prompts the agent to *offer* a redo ("this one looks off — want me to re-extract as a credit note?") | C-4/E | The "smart, knows what to do" end state, built on everything above | ✅ **DONE 2026-06-15** (after a FLAGGED delivery — reviewer fired (review_reason non-empty) and verdict != CLARIFY — post a rare proactive re-read offer; button → hint modal → Step-7 re_extract w/ replace; clean docs offer nothing; built entirely on Steps 2 + 7, no new engine logic) |
+| 9 | **Region / country split in onboarding + non-SG tax behaviour.** Add `region` (or `country`) to the Firestore profile schema; branch §0.5-C master gate so MY (and any non-SG) clients suppress SG-GST entirely. Eventually model SST. Surfaced §0.5-H Gap 1. **Gates JBI live QA.** | E | MY/foreign clients onboard correctly; §0.5-C stops mis-firing as SG-only | ⬜ **NOT STARTED** |
+| 10 | **COA from user upload, not seeded default.** Onboarding accepts a COA file (PDF or Excel); the engine extracts the COA into the Firestore profile and the categorizer uses it. Remove any default-COA seeding from the wizard. Surfaced §0.5-H Gap 2. JBI's own COA in `${LEDGR_TEST_DOC_DIR}/MYDoc/JBI PLUS AUTO ENTERPRISE/` is the first real test case. | E/C | Client onboarding uses the firm's actual COA, not a stock list | ⬜ **NOT STARTED** |
+| 11 | **Per-channel Slack Canvas as auto-maintained index** (re-scoped after Phase 0 audit, 2026-06-15). On onboarding, bot calls `canvases.create` to attach a canvas to the new channel, then maintains it as a Doc Index — links to processed docs grouped by month, current FY ledger pointer, COA status. **Slack file-folders proper remain impossible** (ADR-0002 still correct: no `files.upload`-into-folder API); a per-channel canvas is the closest Slack-native primitive for "tidy file mgmt." Phase 0 audit confirmed the canvas API IS exposed (`slack_create_canvas` works). **Will need a follow-up ADR amending §0002** — that ADR's "manual canvas only" decision predates the matured canvas API. | C | Operators land in a channel and see a live, bot-maintained index of all processed docs + current ledger pointer + COA status — no hunting through channel history | ⬜ **NOT STARTED** (Phase 0 re-scope 2026-06-15) |
+| 12 | **Delivery surface simplification — drop the redundant processing-status accordion.** Current delivery surfaces THREE artifacts per upload: (a) the "Processing [dev] FILE: ✓ Classifying / ✓ Extracting / ✓ Categorizing / ✓ Applying tax / ✓ Awaiting approval" accordion, (b) the "Processed N document — N posted" / "Added X lines from Y documents..." summary line, (c) the Block Kit data-table preview (purchase / bank ledger row tables) we already shipped this branch. User direction during live QA 2026-06-15: **(a) is redundant** — the agentic chat (`assistant_agent`, Steps 1+3+4) already answers "what's happening / where are we in the pipeline" on demand. Keep (b) — but **enrich it with row counts + ledger pointer** — and **always emit the Block Kit data table (c) as the headline artifact**. Net effect: one tight final card per delivery (counts + table), not three stacked notices. | C/E | One delivery message per doc, not three: "Added N rows to {ledger}: [data table]" — operator sees the result, not the plumbing | ⬜ **NOT STARTED** (surfaced §0.5-I) |
 
 Recommended starting pair: **Step 1 then Step 2.** Step 1 is the smallest unblock; Step 2 is the
-biggest single intelligence win on the engine.
+biggest single intelligence win on the engine. Steps 9–11 (added §0.5-H) gate JBI live QA and the
+"folder feature" file-management ask but are NOT blockers for the SG-only sweep on Akar /
+Auditair / Rosebery.
 
 ## 8. ADK citations (queried 2026-06-15 via `adk-docs` MCP)
 
