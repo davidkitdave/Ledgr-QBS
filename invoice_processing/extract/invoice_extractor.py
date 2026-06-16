@@ -7,6 +7,7 @@ line is kept separate so a mixed SR/ZR bill stays two lines for the tax classifi
 
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
@@ -16,6 +17,8 @@ from pydantic import BaseModel, Field
 
 from ..export.models import InvoiceLine, NormalizedInvoice, PartyInfo
 from ..shared_libraries.genai_client import default_model, make_client
+
+logger = logging.getLogger(__name__)
 
 _MIME_BY_EXT = {
     ".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg",
@@ -409,6 +412,34 @@ def to_normalized(
     )
 
 
+def _is_soa_summary_invoice(ex: ExtractedInvoice) -> bool:
+    """Return True when an ExtractedInvoice looks like a phantom SOA-summary row.
+
+    The model is instructed to skip SOA cover pages and record them in
+    ``skipped_pages``, but it can hallucinate invoices from the SOA summary
+    table — particularly when the table lists many invoice numbers with amounts.
+    These phantom invoices share a distinctive shape: ALL their lines have a
+    bare description (empty, "INVOICE", or "INVOICES"), zero GST, and no
+    item_code on the extraction-layer model.
+
+    This is a deterministic gate — no LLM call.  Only drop when ALL lines
+    match the shape so that real invoices with tax_label==NT and gst_amount==0
+    are preserved (their descriptions are specific product/service names, not
+    the bare "INVOICE" sentinel).
+
+    Conservative: returns False when the invoice has no lines (let the
+    downstream reconciler flag it instead).
+    """
+    if not ex.lines:
+        return False
+    _sentinel_descs = {"", "INVOICE", "INVOICES"}
+    return all(
+        (line.description or "").strip().upper() in _sentinel_descs
+        and (line.gst_amount or 0.0) == 0.0
+        for line in ex.lines
+    )
+
+
 def to_normalized_bundle(
     bundle: ExtractedInvoiceBundle,
     *,
@@ -422,7 +453,18 @@ def to_normalized_bundle(
 
     Each entry in bundle.invoices becomes one NormalizedInvoice.  SOA cover pages
     are already excluded by the model (they appear in bundle.skipped_pages, not in
-    bundle.invoices), so this function simply maps each ExtractedInvoice in order.
+    bundle.invoices), but the model can still hallucinate phantom invoices from
+    the SOA summary table.  This function applies two deterministic hard-gates
+    before conversion — no LLM call:
+
+      1. Drop any invoice whose invoice_number appears in ``bundle.skipped_pages``
+         (defensive; the model should not emit these but we enforce it in code).
+      2. Drop any invoice whose lines are ALL summary-shaped (bare "INVOICE"
+         description + zero GST): these are phantom rows hallucinated from the
+         SOA cover table.  See ``_is_soa_summary_invoice`` for the full predicate.
+
+    Both gates log a structured warning so operators can observe when the model
+    needed hardening.
 
     fx_rates: optional dict mapping ISO currency code -> exchange rate to base_currency,
     e.g. {'USD': 1.35, 'IDR': 0.000085}.  When not provided and a document is in a
@@ -430,8 +472,22 @@ def to_normalized_bundle(
     """
     if fx_rates is None:
         fx_rates = {}
+
     results: list[NormalizedInvoice] = []
+
     for ex in bundle.invoices:
+        # Gate 2: drop phantom summary-shaped invoices hallucinated from SOA cover.
+        if _is_soa_summary_invoice(ex):
+            logger.warning(
+                "hard-gate: dropping SOA-summary phantom invoice",
+                extra={
+                    "invoice_number": ex.invoice_number,
+                    "line_count": len(ex.lines),
+                    "reason": "all_lines_summary_shaped",
+                },
+            )
+            continue
+
         doc_currency = (ex.currency or base_currency).upper()
         rate = fx_rates.get(doc_currency)
         normalized = to_normalized(
@@ -443,4 +499,5 @@ def to_normalized_bundle(
             fx_rate=rate,
         )
         results.append(normalized)
+
     return results
