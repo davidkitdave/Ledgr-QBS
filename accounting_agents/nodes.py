@@ -1149,6 +1149,58 @@ def _closing_balance_from_rows(rows: list[dict]) -> Optional[float]:
     return last_stated
 
 
+def compose_delivery_summary(payload: dict) -> str:
+    """Compose the user-facing delivery summary from a LEDGER_ROWS_KEY payload.
+
+    Pure function used by both ``deliver_node`` (clean path) and
+    ``persist_and_deliver`` (HITL-approve path) so the two paths stay in
+    delivery-card lockstep. If we ever drift again, it's because someone
+    bypassed this helper.
+    """
+    batches = payload.get("batches") or []
+    fy = payload.get("fy", "?")
+    kind = payload.get("kind", "document")
+    client_name = (payload.get("client_name") or "").strip()
+
+    doc_label = "Bank Statement" if kind == "bank" else "Ledger"
+    prefix = f"{client_name} – " if client_name else ""
+    destination = f"**{prefix}{doc_label} FY{fy}**"
+
+    if not batches:
+        return "No entries were produced for this document."
+
+    if kind == "bank":
+        parts: list[str] = []
+        for batch in batches:
+            rows = batch.get("rows") or []
+            txn_rows = [
+                r for r in rows
+                if (r.get("Description") or "") not in ("BALANCE B/F", "TOTALS")
+            ]
+            txn_count = len(txn_rows)
+            month_label = _month_label(txn_rows)
+            closing = _closing_balance_from_rows(rows)
+            currency = next(
+                (r.get("Currency") for r in rows if r.get("Currency")), "SGD"
+            )
+            label = f"**{month_label}**" if month_label else "statement"
+            count_str = f"{txn_count} transaction{'s' if txn_count != 1 else ''}"
+            bal_str = (
+                f" — closing balance {currency} {closing:,.2f}"
+                if closing is not None
+                else ""
+            )
+            parts.append(f"{label} ({count_str}){bal_str}")
+        return f"📒 Added {'; '.join(parts)} to your {destination}."
+
+    n_rows = sum(len(b.get("rows") or []) for b in batches)
+    return (
+        f"📒 Added {n_rows} line{'s' if n_rows != 1 else ''} from "
+        f"{len(batches)} document{'s' if len(batches) != 1 else ''} "
+        f"to your {destination}."
+    )
+
+
 async def deliver_node(ctx) -> Event:
     """Emit the final user-facing summary text (NO Slack I/O).
 
@@ -1165,60 +1217,7 @@ async def deliver_node(ctx) -> Event:
     """
     state = ctx.state
     payload = state.get(LEDGER_ROWS_KEY) or {}
-    batches = payload.get("batches") or []
-    fy = payload.get("fy", "?")
-    kind = payload.get("kind", "document")
-    client_name = (payload.get("client_name") or "").strip()
-
-    # Destination workbook name — bank statements are NOT ledgers, so name them
-    # accordingly and never call a bank doc a "ledger". Mirrors the file naming in
-    # ledger_store.append_rows (``<Client> - BankStatement_FY<fy>`` / ``Ledger_FY<fy>``).
-    doc_label = "Bank Statement" if kind == "bank" else "Ledger"
-    prefix = f"{client_name} – " if client_name else ""
-    destination = f"**{prefix}{doc_label} FY{fy}**"
-
-    if not batches:
-        state[DELIVER_SUMMARY_KEY] = "No entries were produced for this document."
-        state["delivered"] = True
-        return Event(output={"delivered": True, "summary": state[DELIVER_SUMMARY_KEY]})
-
-    if kind == "bank":
-        # Build a named summary per account batch.
-        parts: list[str] = []
-        for batch in batches:
-            rows = batch.get("rows") or []
-            # Count only real transaction rows (exclude BALANCE B/F + TOTALS markers).
-            txn_rows = [
-                r for r in rows
-                if (r.get("Description") or "") not in ("BALANCE B/F", "TOTALS")
-            ]
-            txn_count = len(txn_rows)
-            month_label = _month_label(txn_rows)
-            closing = _closing_balance_from_rows(rows)
-
-            # Derive currency from the first row that has it.
-            currency = next(
-                (r.get("Currency") for r in rows if r.get("Currency")), "SGD"
-            )
-
-            label = f"**{month_label}**" if month_label else "statement"
-            count_str = f"{txn_count} transaction{'s' if txn_count != 1 else ''}"
-            bal_str = (
-                f" — closing balance {currency} {closing:,.2f}"
-                if closing is not None
-                else ""
-            )
-            parts.append(f"{label} ({count_str}){bal_str}")
-
-        summary = f"📒 Added {'; '.join(parts)} to your {destination}."
-    else:
-        n_rows = sum(len(b.get("rows") or []) for b in batches)
-        summary = (
-            f"📒 Added {n_rows} line{'s' if n_rows != 1 else ''} from "
-            f"{len(batches)} document{'s' if len(batches) != 1 else ''} "
-            f"to your {destination}."
-        )
-
+    summary = compose_delivery_summary(payload)
     state[DELIVER_SUMMARY_KEY] = summary
     state["delivered"] = True
     return Event(output={"delivered": True, "summary": summary})

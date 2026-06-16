@@ -5005,3 +5005,222 @@ def test_reject_path_posts_rejection_in_thread():
     assert all(
         p.get("thread_ts") == "T_UPLOAD" for p in rejection_posts
     ), f"Rejection post(s) missing thread_ts='T_UPLOAD': {rejection_posts}"
+
+
+# =========================================================================== #
+# P1-1 Fix-3: HITL-review → approve path must emit the full delivery card,
+# not the bare "Document processed." fallback.
+# Bug: the session state that persist_and_deliver reads after the approval
+# resume may lack DELIVER_SUMMARY_KEY (deliver_node writes it to ctx.state
+# but ADK may not flush it before get_session() is called).  The fix derives
+# the summary from LEDGER_ROWS_KEY — which IS reliably present — when
+# DELIVER_SUMMARY_KEY is absent.
+# =========================================================================== #
+
+def _ledger_rows_state_no_summary(
+    sheet="Purchase",
+    doc_key="F1:Purchase:INV-1",
+    client_name="Auditair International",
+):
+    """State with LEDGER_ROWS_KEY but no DELIVER_SUMMARY_KEY.
+
+    Simulates the production HITL-review → approve path where consolidate_node
+    has run (rows are in state) but deliver_node's DELIVER_SUMMARY_KEY write
+    is not yet visible to persist_and_deliver via get_session().
+    """
+    return {
+        nodes.LEDGER_ROWS_KEY: {
+            "client_id": "c1",
+            "fy": "2026",
+            "kind": "invoice",
+            "software": "qbs",
+            "client_name": client_name,
+            "batches": [
+                {
+                    "sheet": sheet,
+                    "doc_key": doc_key,
+                    "rows": [
+                        {"Invoice Number": "INV-99", "Description": "consulting", "Source Amount": 250.0},
+                        {"Invoice Number": "INV-99", "Description": "expenses", "Source Amount": 50.0},
+                    ],
+                }
+            ],
+        }
+        # Deliberately NO DELIVER_SUMMARY_KEY — this is the failing production case.
+    }
+
+
+def test_approve_path_emits_full_delivery_card_not_bare_string():
+    """HITL-review → approve path must emit the rich delivery card, not 'Document processed.'
+
+    Regression test for P1-1 (2026-06-15 ultraqa findings §3).
+    Sequence:
+      1. Write a :review interrupt.
+      2. Call handle_review_action("confirm_as_is") — fake resume yields an
+         approval-gate re-pause event, so _finalize_run_outcome posts the
+         approval card and writes a new approval-gate interrupt doc.
+      3. Read the written approval-gate op_id from db.
+      4. Call handle_approval_action("approve") with that op_id.
+      5. Assert the final delivery Slack message:
+         - contains "FY" (ledger pointer) OR starts with "Added"
+         - matches r"\\b\\d+\\s+(transactions?|lines?)\\b" (row count, singular or plural)
+         - does NOT match the bare fallback r"^Document processed\\.?\\s*$"
+         - xlsx was uploaded (slack.uploads non-empty)
+    """
+    import re
+    from accounting_agents.slack_runner import handle_approval_action, handle_review_action
+
+    db = FakeFirestore()
+    slack = FakeSlackClient()
+    # Runner whose session state has LEDGER_ROWS_KEY but no DELIVER_SUMMARY_KEY —
+    # this is the exact production failure shape.
+    state = _ledger_rows_state_no_summary()
+    runner = _FakeRunner([], state)
+    runner.session_service.created = True  # session exists after the initial run
+    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+
+    # Step 1: write the :review interrupt (as process_file_event would after a
+    # mid-flow pause at review_extraction_node).
+    review_op_id = "CHITL:FHITL:review"
+    approval_op_id = "CHITL:FHITL"  # the base id (without :review suffix)
+    write_interrupt(
+        db, review_op_id, session_id=approval_op_id, channel_id="CHITL",
+        slack_file_id="FHITL", message_ts="1.0", user_id="CHITL",
+        extra={"kind": "review", "question": "Verify line items?", "reasons": [],
+               "thread_ts": "T_UPLOAD"},
+    )
+
+    # The re-pause event that handle_review_action's resume will yield — this is
+    # the approval_gate pausing with the BASE op_id (no :review suffix).
+    repause_event = SimpleNamespace(
+        content=SimpleNamespace(parts=[]),
+        get_function_calls=lambda: [
+            SimpleNamespace(name="adk_request_input", id=approval_op_id)
+        ],
+    )
+
+    async def fake_resume_review(_runner, _db, op, decision):
+        # Simulate the resumed run reaching approval_gate and re-pausing.
+        return [repause_event]
+
+    # Patch resume_session at module level so both handlers use our fakes.
+    import accounting_agents.slack_runner as sr_mod
+    orig_resume = sr_mod.resume_session
+
+    async def _fake_resume_review(runner_, db_, op, decision):
+        return [repause_event]
+
+    async def _fake_resume_approve(runner_, db_, op, decision):
+        # Approval resume: the graph runs to completion; no new interrupt.
+        return []
+
+    # Step 2: run the review accept action — sees the re-pause event →
+    # _finalize_run_outcome writes the approval-gate interrupt doc.
+    sr_mod.resume_session = _fake_resume_review
+    try:
+        asyncio.run(
+            handle_review_action(
+                runner=runner, ledger_store=store, db=db, slack_client=slack,
+                op_id=review_op_id, action="confirm_as_is", app_name="acc",
+            )
+        )
+    finally:
+        sr_mod.resume_session = orig_resume
+
+    # Step 3: verify the approval-gate interrupt was written by _finalize_run_outcome.
+    approval_interrupt = read_interrupt(db, approval_op_id)
+    assert approval_interrupt is not None, (
+        "_finalize_run_outcome should have written an approval-gate interrupt doc"
+    )
+
+    # Step 4: approve action.
+    sr_mod.resume_session = _fake_resume_approve
+    try:
+        asyncio.run(
+            handle_approval_action(
+                runner=runner, ledger_store=store, db=db, slack_client=slack,
+                op_id=approval_op_id, decision="approve", app_name="acc",
+            )
+        )
+    finally:
+        sr_mod.resume_session = orig_resume
+
+    # Step 5: assertions on the final delivery shape.
+    posts = _post_calls(slack)
+    texts = [p.get("text", "") for p in posts]
+
+    # Must NOT be the bare fallback.
+    bare_pattern = re.compile(r"^Document processed\.?\s*$")
+    assert not any(bare_pattern.match(t) for t in texts), (
+        f"Delivery message must not be the bare fallback. Got posts: {texts}"
+    )
+
+    # Must contain a ledger/FY pointer OR "Added ".
+    has_fy_pointer = any("FY" in t or "Added " in t for t in texts)
+    assert has_fy_pointer, (
+        f"Delivery message must contain a ledger/FY pointer. Got: {texts}"
+    )
+
+    # Must contain a row count (e.g. "2 lines").
+    row_count_pattern = re.compile(r"\b\d+\s+(transactions|lines)\b")
+    has_row_count = any(row_count_pattern.search(t) for t in texts)
+    assert has_row_count, (
+        f"Delivery message must contain a row count (N lines/transactions). Got: {texts}"
+    )
+
+    # xlsx must have been uploaded.
+    assert slack.uploads, (
+        "Delivery must include an xlsx upload — none found"
+    )
+
+
+async def _noop_coro():
+    """Placeholder async no-op for test flow control."""
+    pass
+
+
+def test_clean_path_emits_full_delivery_card():
+    """Clean path (no review, no approval gate pause) emits the same delivery shape.
+
+    Lockstep counterpart to test_approve_path_emits_full_delivery_card_not_bare_string:
+    both paths must produce the same shape so regressions on either are caught.
+    """
+    import re
+
+    slack = FakeSlackClient()
+    db = FakeFirestore()
+    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+    final_event = SimpleNamespace(
+        content=SimpleNamespace(parts=[SimpleNamespace(text="done")]),
+        get_function_calls=lambda: [],
+    )
+    # Clean path: LEDGER_ROWS_KEY present, DELIVER_SUMMARY_KEY present (deliver_node ran).
+    runner = _FakeRunner([final_event], _ledger_payload())
+
+    result = asyncio.run(
+        process_file_event(
+            runner=runner, ledger_store=store, db=db, slack_client=slack,
+            channel_id="C1", file_id="F_CLEAN", app_name="acc",
+            download_fn=lambda c, f: b"%PDF-1.4 fake",
+            source_filename="invoice.pdf",
+            client_store=_seeded_client_store(db),
+        )
+    )
+
+    assert result["status"] == "delivered"
+    posts = _post_calls(slack)
+    texts = [p.get("text", "") for p in posts]
+
+    bare_pattern = re.compile(r"^Document processed\.?\s*$")
+    assert not any(bare_pattern.match(t) for t in texts), (
+        f"Clean-path delivery must not be the bare fallback. Got: {texts}"
+    )
+
+    has_fy_pointer = any("FY" in t or "Added " in t for t in texts)
+    assert has_fy_pointer, f"Clean-path delivery must contain FY pointer. Got: {texts}"
+
+    row_count_pattern = re.compile(r"\b\d+\s+(transactions?|lines?)\b")
+    has_row_count = any(row_count_pattern.search(t) for t in texts)
+    assert has_row_count, f"Clean-path delivery must contain row count. Got: {texts}"
+
+    assert slack.uploads, "Clean-path delivery must include an xlsx upload"

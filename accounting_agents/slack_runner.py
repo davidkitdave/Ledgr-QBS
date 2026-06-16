@@ -702,7 +702,10 @@ async def persist_and_deliver(
         append_result["all_deduped"] = True
         return append_result
 
-    summary = state.get(nodes.DELIVER_SUMMARY_KEY) or "Document processed."
+    # HITL-approve path skips deliver_node, so DELIVER_SUMMARY_KEY is absent.
+    # Derive the summary from the LEDGER_ROWS_KEY payload so the HITL path emits
+    # the SAME rich delivery card as the clean path — never the bare fallback.
+    summary = state.get(nodes.DELIVER_SUMMARY_KEY) or nodes.compose_delivery_summary(payload)
     _post_message(slack_client, channel_id, summary, thread_ts=thread_ts)
 
     # Post one data_table preview per batch (best-effort; never breaks delivery).
