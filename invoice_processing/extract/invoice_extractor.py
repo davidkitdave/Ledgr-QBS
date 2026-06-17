@@ -17,7 +17,7 @@ from google.genai import types
 from pydantic import BaseModel, Field
 
 from ..export.models import InvoiceLine, NormalizedInvoice, PartyInfo
-from ..shared_libraries.genai_client import default_model, make_client
+from ..shared_libraries.genai_client import lite_model, make_client
 
 logger = logging.getLogger(__name__)
 
@@ -208,7 +208,7 @@ def extract_invoice(
     hint: Optional[str] = None,
 ) -> ExtractedInvoice:
     client = make_client(project, location)
-    model = model or default_model()
+    model = model or lite_model()
     part = types.Part.from_bytes(data=data, mime_type=mime_type)
     resp = client.models.generate_content(
         model=model,
@@ -243,7 +243,7 @@ def extract_invoice_bundle(
     rather than raising on a model that returns no entries.
     """
     client = make_client(project, location)
-    model = model or default_model()
+    model = model or lite_model()
     part = types.Part.from_bytes(data=data, mime_type=mime_type)
     resp = client.models.generate_content(
         model=model,

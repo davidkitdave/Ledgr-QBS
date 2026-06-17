@@ -87,9 +87,9 @@ class TestResolveModel:
     def test_dev_std_default(self):
         assert _model("std") == "gemini-2.5-flash"
 
-    def test_prod_lite_defaults_to_flash(self, monkeypatch):
+    def test_prod_lite_defaults_to_flash_lite(self, monkeypatch):
         monkeypatch.setenv("LEDGR_ENV", "prod")
-        assert _model("lite") == "gemini-2.5-flash"
+        assert _model("lite") == "gemini-2.5-flash-lite"
 
     def test_prod_std_defaults_to_flash(self, monkeypatch):
         monkeypatch.setenv("LEDGR_ENV", "prod")

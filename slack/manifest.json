@@ -22,6 +22,7 @@
     "scopes": {
       "bot": [
         "chat:write",
+        "reactions:write",
         "files:read",
         "files:write",
         "channels:history",

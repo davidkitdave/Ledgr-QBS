@@ -49,6 +49,7 @@ dev = [
     "ruff>=0.15.9",
     "agent-starter-pack>=0.14.1",
     "pytest>=9.0.3",
+    "google-adk[eval]>=2.0.0,<3.0.0",
 ]
 
 [tool.pytest.ini_options]

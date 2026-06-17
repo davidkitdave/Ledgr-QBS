@@ -62,6 +62,67 @@ layer; intent (upload help, extraction questions, ledger lookups) is handled by 
 ``LlmAgent`` + tools. Real policy guardrails (e.g. un-onboarded channel asking ledger questions)
 belong in ADK ``before_model_callback``, not Bolt ``if any(w in text)`` checks.
 
+## Diagnostic state injection (2026-06-16 addendum)
+
+The chat runner (``answer_question``) writes the following diagnostic state keys into every turn's
+``state_delta`` so the assistant's tools can introspect without doing their own I/O:
+
+- ``ledger_data`` (existing), ``fy_loaded``, ``ledger_row_count``, ``fy_pointers`` — chosen by
+  ``best_fy_for_chat`` (picks the FY whose workbook has the most data, not the highest FY label;
+  see ``accounting_agents/ledger_store.py``).
+- ``processing_log`` (existing) — recent deliveries from ``client_store.list_processing_log``;
+  the runner lazily backfills from ADK doc sessions when empty
+  (see ``scripts/backfill_processing_log.py`` for the one-shot equivalent).
+- ``processing_log_count``, ``pending_review_count`` — flat counts for ADK instruction
+  templating (``{+processing_log_count?+}`` / ``{+pending_review_count?+}`` in
+  ``_BASE_INSTRUCTION``); derived from the list keys above.
+- ``pending_reviews`` — ``hitl.list_pending_interrupts`` filtered to the current channel.
+- ``document_sessions`` — read-only snapshots of per-document ADK session state, keyed by
+  ``file_id``; the chat can cite the extraction path / review reasons / source filename without
+  doing its own session I/O.
+
+The four new introspection tools (``diagnose_assistant_context``,
+``get_document_processing_detail``, ``list_processing_history``, ``list_pending_reviews``) read
+these state keys only. They are pure function tools; the runner owns the data.
+
+## Instruction templating + model tier (2026-06-17 addendum)
+
+- ``assistant_agent.instruction`` is a plain string (``_BASE_INSTRUCTION``) with ADK
+  ``{+state_key+}`` / ``{+key?+}`` placeholders; the runner's ``state_delta`` fills the
+  preamble at LLM call time (no Python ``InstructionProvider`` at runtime).
+- Chat lane uses ``config.MODEL_CHAT`` (defaults to ``MODEL_STD`` / gemini-2.5-flash) because
+  the 22-tool surface needs reliable multi-step orchestration; override via ``LEDGR_MODEL_CHAT``.
+- P1 diagnostic tools live in ``accounting_agents/assistant_tools/introspect.py``; the
+  ``LlmAgent`` definition remains ~30 lines at the bottom of ``assistant.py``.
+
+## Addendum (2026-06-17): Thread delivery context + chat UX
+
+When a user replies **in the thread under a batch delivery card** (ADR-0007 job
+summary), the Slack runner resolves thread-scoped delivery metadata and injects
+it into the chat ``state_delta`` before each ADK turn:
+
+- ``thread_delivery_message_ts`` — parent delivery message ts (= ``raw_thread_ts``)
+- ``thread_delivery_filenames`` / ``thread_delivery_invoice_ids`` / ``thread_delivery_fy``
+- ``thread_scoped_processing_log`` — processing-log entries whose
+  ``delivery_message_ts`` matches the thread parent
+
+Processing-log entries are written per document (including batch mode via
+``defer_slack_delivery``) with ``delivery_message_ts`` and ``channel_id`` so the
+filter is stable across restarts. Older deliveries without the field fall back to
+``conversations.replies`` block parsing.
+
+**Chat UX (Phase 4):** the chat lane mirrors document-upload responsiveness:
+
+- ``reactions.add`` 👀 on the user's message at turn start
+- ``assistant.threads.setStatus`` with rotating ``loading_messages`` during ADK
+  ``run_async`` (tool-aware labels on function-call events)
+- Optional ✅ on the user message after a successful reply
+- Error path clears thinking status and removes 👀
+
+Optional **Thinking Steps streaming** (``chat.startStream`` / ``LEDGR_CHAT_STREAM=1``)
+is deferred; tool-step streaming requires slack-sdk ≥ 3.40 and is not enabled by
+default.
+
 ## Alternatives rejected
 
 - **In-graph `mode='chat'`** — impossible; crashes graph validation (see Context).

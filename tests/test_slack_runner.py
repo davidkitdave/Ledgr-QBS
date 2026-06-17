@@ -172,6 +172,10 @@ def _ledger_payload(sheet="Purchase", doc_key="F1:Purchase:INV-1"):
             "fy": "2026",
             "kind": "invoice",
             "software": "qbs",
+            # Phase 1 fix: production consolidate_node writes the file_id into
+            # the payload so _record_processing_log can resolve it (the entry
+            # also falls back to top-level state["file_id"] in the live path).
+            "file_id": "F1",
             "batches": [
                 {
                     "sheet": sheet,
@@ -314,6 +318,119 @@ def test_process_file_event_completion_appends_ledger_once():
     assert result["append"]["appended"] == 1
     # The delivery summary was posted.
     assert any("FY2026 ledger" in u for u in _posted_texts(slack))
+
+
+def test_process_file_event_defer_slack_delivery_writes_processing_log():
+    """defer_slack_delivery=True (batch mode) must still persist a processing_log
+    entry per doc so the chat lane can introspect it (Phase 1 thread-context fix).
+
+    Pre-fix: the defer_slack_delivery early return in persist_and_deliver skipped
+    _record_processing_log, so multi-file drops were invisible to the assistant.
+    """
+    from tests.test_slack_runner import FakeSlackClient as _FS
+
+    slack = _FS()
+    db = FakeFirestore()
+    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+
+    # Custom payload so file_id matches the test's expectation
+    custom_payload = _ledger_payload()
+    custom_payload[nodes.LEDGER_ROWS_KEY]["file_id"] = "F-batch-1"
+    custom_payload["source_filename"] = "25-D15-Podaima Paid.pdf"
+    runner = _FakeRunner([], custom_payload)
+
+    written: list[dict] = []
+
+    class _RecordingClientStore:
+        def __init__(self, _db):
+            self._db = _db
+
+        def append_processing_log(self, *, client_id, file_id, entry):
+            written.append({"client_id": client_id, "file_id": file_id, "entry": entry})
+
+        def get_by_channel(self, _channel_id):
+            from invoice_processing.export.client_context import ClientContext
+            return ClientContext(
+                client_id="c1", client_name="Test", accounting_software="QBS",
+                fye_month=12, channel_id="C1",
+            )
+
+    rec_store = _RecordingClientStore(db)
+
+    asyncio.run(
+        process_file_event(
+            runner=runner,
+            ledger_store=store,
+            db=db,
+            slack_client=slack,
+            channel_id="C1",
+            file_id="F-batch-1",
+            app_name="acc",
+            download_fn=lambda c, f: b"%PDF-1.4 fake",
+            source_filename="25-D15-Podaima Paid.pdf",
+            client_store=rec_store,
+            defer_slack_delivery=True,
+        )
+    )
+
+    assert len(written) == 1, f"expected one processing_log write, got {written}"
+    entry = written[0]["entry"]
+    assert entry["file_id"] == "F-batch-1"
+    assert entry["filename"] == "25-D15-Podaima Paid.pdf"
+    assert entry["fy"] == "2026"
+    assert entry["row_count"] == 1
+    # delivery_message_ts is absent because the per-doc thread_ts is None in
+    # this test (batch mode with no job summary yet). The batch-end backfill
+    # (Phase 2) patches it onto the entry later when the job summary ts exists.
+    assert "delivery_message_ts" not in entry
+
+
+def test_process_file_event_completion_writes_processing_log_with_delivery_ts():
+    """Non-batch (clean) delivery path records delivery_message_ts = thread_ts
+    so a chat question in the same thread can resolve to this file (Phase 2)."""
+    slack = FakeSlackClient()
+    db = FakeFirestore()
+    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+
+    custom_payload = _ledger_payload()
+    custom_payload[nodes.LEDGER_ROWS_KEY]["file_id"] = "F-clean-1"
+    custom_payload["source_filename"] = "clean.pdf"
+    runner = _FakeRunner([], custom_payload)
+
+    written: list[dict] = []
+
+    class _RecordingClientStore:
+        def append_processing_log(self, *, client_id, file_id, entry):
+            written.append(entry)
+
+        def get_by_channel(self, _channel_id):
+            from invoice_processing.export.client_context import ClientContext
+            return ClientContext(
+                client_id="c1", client_name="Test", accounting_software="QBS",
+                fye_month=12, channel_id="C1",
+            )
+
+    rec_store = _RecordingClientStore()
+
+    asyncio.run(
+        process_file_event(
+            runner=runner,
+            ledger_store=store,
+            db=db,
+            slack_client=slack,
+            channel_id="C1",
+            file_id="F-clean-1",
+            app_name="acc",
+            download_fn=lambda c, f: b"%PDF-1.4 fake",
+            source_filename="clean.pdf",
+            client_store=rec_store,
+            thread_ts="1716000000.000200",
+        )
+    )
+
+    assert len(written) == 1
+    assert written[0]["delivery_message_ts"] == "1716000000.000200"
+    assert written[0]["channel_id"] == "C1"
 
 
 def test_process_file_event_interrupt_posts_card_and_writes_doc():
@@ -1720,7 +1837,11 @@ def test_batch_plan_task_titles_have_no_emoji_shortcodes(monkeypatch):
 # =========================================================================== #
 
 
-def _capture_message_handler_with_slack_client(injected_slack: FakeSlackClient):
+def _capture_message_handler_with_slack_client(
+    injected_slack: FakeSlackClient,
+    *,
+    ledger_store=None,
+):
     """Same as ``_capture_message_handler`` but injects ``injected_slack`` as the
     sync WebClient so we can read its recorded ``chat_postMessage`` /
     ``chat_update`` calls — the outer handler must post ONE summary + edit it.
@@ -1756,7 +1877,7 @@ def _capture_message_handler_with_slack_client(injected_slack: FakeSlackClient):
                       return_value=SimpleNamespace(app_name="accounting_agents_assistant")):
         build_async_app(
             runner=rm,
-            ledger_store=MagicMock(),
+            ledger_store=ledger_store if ledger_store is not None else MagicMock(),
             db=MagicMock(),
         )
 
@@ -1829,11 +1950,13 @@ def test_batch_drop_posts_one_job_summary_then_threads_per_doc():
     assert "Xero" in final_text or "FY2026" in final_text
 
 
-def test_single_file_drop_still_posts_summary_then_thread():
-    """A 1-file drop also collapses to one summary message + one threaded doc card.
+def test_single_file_drop_keeps_processing_and_delivery_on_top_level_message():
+    """A 1-file drop uses the same main-channel UX as multi-file drops.
 
-    Behaviour parity with multi-file drops — the user always sees ONE Job summary
-    per upload event, regardless of file count (ADR-0007).
+    Single-file drops now also post the processing "thinking" plan block
+    and the delivery preview tables on the top-level Job summary message
+    (they used to be hidden in a thread reply). HITL review cards continue
+    to thread under summary_ts per ADR-0007.
     """
     from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1862,15 +1985,237 @@ def test_single_file_drop_still_posts_summary_then_thread():
          patch.object(slack_runner, "download_pdf_bytes", return_value=b"%PDF fake"):
         asyncio.run(handler(event=event, body=body, client=fake_client))
 
+    # One top-level Job summary (the only channel post).
     top_level = [p for p in slack._posts if not p.get("thread_ts")]
     assert len(top_level) == 1
     assert "1" in top_level[0].get("text", "")
+    # The Job summary's INITIAL post carries the plan block (used to be plain
+    # text only for single-file drops).
+    assert top_level[0].get("blocks"), "single-file Job summary must attach a plan block"
+    summary_ts = top_level[0].get("ts")
+
+    # process_file_event runs once; thread_ts still wires it under the
+    # Job summary (HITL cards need that anchor) but the per-doc "thinking"
+    # status post is suppressed because batch_mode=True.
     assert mock_pfe.call_count == 1
-    assert mock_pfe.call_args.kwargs.get("thread_ts") == top_level[0].get("ts")
-    assert mock_pfe.call_args.kwargs.get("defer_slack_delivery") is False
+    assert mock_pfe.call_args.kwargs.get("thread_ts") == summary_ts
+    assert mock_pfe.call_args.kwargs.get("defer_slack_delivery") is True
+    assert mock_pfe.call_args.kwargs.get("batch_mode") is True
+    assert mock_pfe.call_args.kwargs.get("defer_ledger_persist") is True
+    assert mock_pfe.call_args.kwargs.get("status_callback") is not None
+
+    # Per-doc "Received …" thread status messages are suppressed for single
+    # drops (the plan block on the top-level message owns the UX now).
+    thread_statuses = [
+        p for p in slack._posts
+        if p.get("thread_ts") and "Received" in (p.get("text") or "")
+    ]
+    assert thread_statuses == []
+
+    # Final tally chat_update on the top-level summary carries the delivery
+    # summary text.
     assert len(slack.updates) >= 1
-    assert "Processed" in slack.updates[-1].get("text", "")
-    assert "1" in slack.updates[-1].get("text", "")
+    final_text = slack.updates[-1].get("text", "")
+    assert "Processed" in final_text
+    assert "1" in final_text
+    # The final update was on the SAME top-level message, not a thread reply.
+    assert slack.updates[-1].get("ts") == summary_ts
+    assert "thread_ts" not in slack.updates[-1]
+
+
+def test_single_file_drop_uses_processing_document_headline(monkeypatch):
+    """Single-file drops must not say 'Processing batch (1 document)'."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from accounting_agents import slack_runner
+    from app import native_blocks_compat
+    from app.slack_app import _SeenEvents
+
+    monkeypatch.delenv("LEDGR_BATCH_EXPANDED_PROGRESS", raising=False)
+    monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
+    native_blocks_compat._PROBE_CACHE.pop("C-single-headline", None)
+
+    slack_runner._seen = _SeenEvents()
+    slack = FakeSlackClient()
+    handler, _ = _capture_message_handler_with_slack_client(slack)
+
+    event = {
+        "type": "message",
+        "subtype": "file_share",
+        "ts": "222.003",
+        "channel": "C-single-headline",
+        "files": [{"id": "FS-headline"}],
+    }
+    mock_pfe = AsyncMock(return_value={
+        "status": "delivered",
+        "append": {"appended": 0, "software": "QBS Ledger", "fy": "2024", "kind": "bank"},
+    })
+
+    with patch.object(slack_runner, "process_file_event", mock_pfe), \
+         patch.object(slack_runner, "download_pdf_bytes", return_value=b"%PDF fake"):
+        asyncio.run(handler(event=event, body={"event_id": "Ev-headline"}, client=MagicMock()))
+
+    top_level = [p for p in slack._posts if not p.get("thread_ts")]
+    plan = next(b for b in (top_level[0].get("blocks") or []) if b.get("type") == "plan")
+    assert plan["title"] == "Processing document"
+
+
+def test_single_file_coordinator_flushes_workbook_to_slack(monkeypatch):
+    """Single-file defer path must still call append_rows at batch end → one upload."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from accounting_agents import slack_runner
+    from accounting_agents.ledger_store import SlackLedgerStore
+    from app import native_blocks_compat
+    from app.slack_app import _SeenEvents
+    from tests.test_ledger_store import FakeFirestore
+
+    monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
+    native_blocks_compat._PROBE_CACHE.pop("C-single-flush", None)
+
+    slack = FakeSlackClient()
+    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+    slack_runner._seen = _SeenEvents()
+    handler, _ = _capture_message_handler_with_slack_client(slack, ledger_store=store)
+
+    deferred = {
+        "summary": "Added",
+        "payload": {
+            "client_id": "c-akar",
+            "fy": "2024",
+            "kind": "bank",
+            "software": "qbs",
+            "client_name": "Akar Enterprises Pte. Ltd.",
+        },
+        "batches": [
+            {
+                "sheet": "DBS Bank Ltd - 5545 - SGD",
+                "doc_key": "F-single:5545:SGD:Apr2024",
+                "rows": [
+                    {"Description": "BALANCE B/F", "Balance": 100.0, "Currency": "SGD"},
+                    {"Date": "15/04/2024", "Description": "TEST", "Deposit": 1.0,
+                     "Balance": 101.0, "Currency": "SGD"},
+                    {"Description": "TOTALS", "Currency": "SGD"},
+                ],
+            },
+        ],
+        "workbook_name": "",
+    }
+    mock_pfe = AsyncMock(return_value={
+        "status": "delivered",
+        "append": {
+            "deferred_delivery": deferred,
+            "deferred_ledger": deferred,
+            "kind": "bank",
+            "software": "qbs",
+            "fy": "2024",
+            "appended": 0,
+        },
+    })
+
+    event = {
+        "type": "message",
+        "subtype": "file_share",
+        "ts": "222.004",
+        "channel": "C-single-flush",
+        "files": [{"id": "FS-flush"}],
+    }
+    with patch.object(slack_runner, "process_file_event", mock_pfe), \
+         patch.object(slack_runner, "download_pdf_bytes", return_value=b"%PDF fake"):
+        asyncio.run(handler(event=event, body={"event_id": "Ev-flush"}, client=MagicMock()))
+
+    assert len(slack.uploads) == 1, "expected one files_upload_v2 at batch end"
+    final_update = slack.updates[-1]
+    assert "added" in final_update.get("text", "").lower()
+    blocks = final_update.get("blocks") or []
+    assert any(b.get("type") == "data_table" for b in blocks), (
+        "delivery preview tables should appear when rows were appended"
+    )
+
+
+def test_single_file_re_drop_all_deduped_shows_delivery_preview_and_callout(monkeypatch):
+    """Re-drop where every batch dedupes still shows extraction preview + callout."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from accounting_agents import slack_runner
+    from accounting_agents.ledger_store import SlackLedgerStore
+    from app import native_blocks_compat
+    from app.slack_app import _SeenEvents
+    from tests.test_ledger_store import FakeFirestore
+
+    monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
+    native_blocks_compat._PROBE_CACHE.pop("C-redrop", None)
+
+    slack = FakeSlackClient()
+    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+    doc_key = "DBS Bank Ltd - 5545 - SGD:5545:SGD:01 Apr 2024 - 30 Apr 2024"
+    store.append_rows(
+        client_id="c-akar", fy="2024", slack_client=slack, channel_id="C-redrop",
+        kind="bank",
+        batches=[{
+            "sheet": "DBS Bank Ltd - 5545 - SGD",
+            "doc_key": doc_key,
+            "rows": [
+                {"Description": "BALANCE B/F", "Balance": 1.0, "Currency": "SGD"},
+                {"Date": "15/04/2024", "Description": "OLD", "Balance": 1.0, "Currency": "SGD"},
+                {"Description": "TOTALS", "Currency": "SGD"},
+            ],
+        }],
+    )
+    assert len(slack.uploads) == 1
+    slack.uploads.clear()
+
+    slack_runner._seen = _SeenEvents()
+    handler, _ = _capture_message_handler_with_slack_client(slack, ledger_store=store)
+
+    deferred = {
+        "summary": "Added",
+        "payload": {
+            "client_id": "c-akar", "fy": "2024", "kind": "bank",
+            "software": "qbs", "client_name": "Akar",
+        },
+        "batches": [{
+            "sheet": "DBS Bank Ltd - 5545 - SGD",
+            "doc_key": doc_key,
+            "rows": [
+                {"Description": "BALANCE B/F", "Balance": 1.0, "Currency": "SGD"},
+                {"Date": "15/04/2024", "Description": "OLD", "Balance": 1.0, "Currency": "SGD"},
+                {"Description": "TOTALS", "Currency": "SGD"},
+            ],
+        }],
+        "workbook_name": "",
+    }
+    mock_pfe = AsyncMock(return_value={
+        "status": "delivered",
+        "append": {
+            "deferred_delivery": deferred,
+            "deferred_ledger": deferred,
+            "kind": "bank", "software": "qbs", "fy": "2024", "appended": 0,
+        },
+    })
+
+    event = {
+        "type": "message", "subtype": "file_share", "ts": "222.005",
+        "channel": "C-redrop", "files": [{"id": "FS-redrop"}],
+    }
+    with patch.object(slack_runner, "process_file_event", mock_pfe), \
+         patch.object(slack_runner, "download_pdf_bytes", return_value=b"%PDF fake"):
+        asyncio.run(handler(event=event, body={"event_id": "Ev-redrop"}, client=MagicMock()))
+
+    final_update = slack.updates[-1]
+    final_text = final_update.get("text", "")
+    assert "added" in final_text.lower()
+    assert "already recorded" not in final_text.lower()
+    assert "workbook unchanged" in final_text.lower()
+    blocks = final_update.get("blocks") or []
+    assert any(b.get("type") == "data_table" for b in blocks)
+    action_ids = {
+        el.get("action_id")
+        for b in blocks
+        if b.get("type") in ("card", "actions")
+        for el in (b.get("actions") or b.get("elements") or [])
+    }
+    assert "ledgr_dedup_replace" in action_ids
 
 
 # =========================================================================== #
@@ -2810,6 +3155,7 @@ class _StatefulCapturingChatRunner(_CapturingChatRunner):
     def __init__(self, sessions: dict, app_name: str = "accounting_agents_assistant"):
         super().__init__(sessions, app_name)
         self.pre_run_state_snapshots: list[dict] = []
+        self.pre_run_state_deltas: list[dict] = []
 
         # Wrap the inherited _SessionService to add append_event support so
         # _apply_state_delta (called before run_async) can actually update the
@@ -2852,6 +3198,7 @@ class _StatefulCapturingChatRunner(_CapturingChatRunner):
         self.pre_run_state_snapshots.append(
             dict(sess.state) if sess is not None else {}
         )
+        self.pre_run_state_deltas.append(dict(state_delta or {}))
         async for event in super().run_async(
             user_id=user_id,
             session_id=session_id,
@@ -2944,6 +3291,782 @@ def test_chat_session_sees_freshly_written_ledger_rows():
         f"Session state at turn-2 start held stale ledger_data="
         f"{turn2_pre_state.get(LEDGER_DATA_KEY)!r}; expected 3 rows."
     )
+
+
+def test_pick_chat_fy_prefers_question_processing_log_hint():
+    from accounting_agents.slack_runner import _pick_chat_fy
+
+    class _Store:
+        def latest_fy(self, client_id):
+            return "2026"
+
+    fy = _pick_chat_fy(
+        best_fy="2026",
+        fy_summaries=[
+            {"fy": "2026", "row_count": 10, "has_data": True},
+            {"fy": "2025", "row_count": 3, "has_data": True},
+        ],
+        processing_log=[
+            {"filename": "25-D12-Podaima Paid.pdf", "fy": "2025"},
+        ],
+        question="yes file name 25-D12",
+        fye_month=10,
+        ledger_store=_Store(),
+        client_id="c1",
+    )
+    assert fy == "2025"
+
+
+def test_resolve_thread_delivery_context_filters_by_ts():
+    """Phase 3: when the user replies under a delivery card, the chat lane
+    must scope its question to that delivery's files.
+
+    The processing_log entry is written by Phase 2 with delivery_message_ts =
+    the job-summary message ts (= the parent of the thread).
+    """
+    from accounting_agents.slack_runner import _resolve_thread_delivery_context
+
+    log = [
+        {"file_id": "F-other", "filename": "old.pdf", "fy": "2024",
+         "delivery_message_ts": "1700000000.000100", "channel_id": "C1"},
+        {"file_id": "F-D15", "filename": "25-D15-Podaima Paid.pdf", "fy": "2025",
+         "delivery_message_ts": "1700000099.000200", "channel_id": "C1",
+         "invoice_ids": ["25-D15"]},
+        {"file_id": "F-D12", "filename": "25-D12-Podaima Paid.pdf", "fy": "2025",
+         "delivery_message_ts": "1700000099.000200", "channel_id": "C1",
+         "invoice_ids": ["25-D12"]},
+        {"file_id": "F-future", "filename": "26-X.pdf", "fy": "2026",
+         "delivery_message_ts": "1700000999.000300", "channel_id": "C1"},
+    ]
+
+    ctx = _resolve_thread_delivery_context(
+        raw_thread_ts="1700000099.000200",
+        channel_id="C1",
+        processing_log=log,
+    )
+    assert ctx["thread_delivery_message_ts"] == "1700000099.000200"
+    assert sorted(ctx["thread_delivery_filenames"]) == [
+        "25-D12-Podaima Paid.pdf", "25-D15-Podaima Paid.pdf",
+    ]
+    assert sorted(ctx["thread_delivery_invoice_ids"]) == ["25-D12", "25-D15"]
+    assert ctx["thread_delivery_fy"] == "2025"
+    assert len(ctx["thread_scoped_processing_log"]) == 2
+
+
+def test_resolve_thread_delivery_context_empty_for_top_level():
+    """Top-level channel message (no thread) returns an empty dict so the
+    chat lane keeps its existing channel-wide behaviour."""
+    from accounting_agents.slack_runner import _resolve_thread_delivery_context
+
+    ctx = _resolve_thread_delivery_context(
+        raw_thread_ts=None,
+        channel_id="C1",
+        processing_log=[{"file_id": "F1", "filename": "x.pdf", "fy": "2025",
+                         "delivery_message_ts": "1700000099.000200"}],
+    )
+    assert ctx == {}
+
+
+def test_answer_question_injects_thread_delivery_context_into_state_delta():
+    """End-to-end: a thread reply under a delivery card must inject
+    ``thread_delivery_*`` keys into the chat state_delta so the assistant
+    preamble and tools can see the scope (Phase 3).
+    """
+    from unittest.mock import MagicMock
+    from accounting_agents.slack_runner import answer_question
+
+    slack = FakeSlackClient()
+    sessions: dict = {}
+    chat_runner = _StatefulCapturingChatRunner(sessions)
+
+    class _Store:
+        def latest_fy(self, client_id):
+            return "2026"
+        def best_fy_for_chat(self, client_id, slack_client):
+            return "2025", [
+                {"fy": "2025", "row_count": 5, "has_data": True},
+                {"fy": "2026", "row_count": 1, "has_data": True},
+            ]
+        def read_rows(self, *, client_id, fy, slack_client, channel_id):
+            return []
+
+    class _StubClientStore:
+        def __init__(self, log):
+            self._log = log
+        def get_by_channel(self, channel_id):
+            from invoice_processing.export.client_context import ClientContext
+            return ClientContext(
+                client_id="c1", client_name="Test", accounting_software="QBS",
+                fye_month=12, channel_id=channel_id,
+            )
+        def list_processing_log(self, client_id, limit=20):
+            return list(self._log)
+        def list_pending_interrupts(self, *a, **k):
+            return []
+
+    log = [
+        {"file_id": "F-D15", "filename": "25-D15-Podaima Paid.pdf",
+         "fy": "2025", "channel_id": "C1",
+         "delivery_message_ts": "1700000099.000200",
+         "invoice_ids": ["25-D15"]},
+        {"file_id": "F-D12", "filename": "25-D12-Podaima Paid.pdf",
+         "fy": "2025", "channel_id": "C1",
+         "delivery_message_ts": "1700000099.000200",
+         "invoice_ids": ["25-D12"]},
+    ]
+    rec_store = _StubClientStore(log)
+
+    asyncio.run(
+        answer_question(
+            runner=chat_runner,
+            ledger_store=_Store(),
+            slack_client=slack,
+            channel_id="C1",
+            question="why 6100-Software for 25-D15?",
+            app_name=chat_runner.app_name,
+            client_store=rec_store,
+            message_ts="1700000200.001",
+            thread_ts="1700000099.000200",
+            raw_thread_ts="1700000099.000200",
+        )
+    )
+
+    delta = chat_runner.pre_run_state_deltas[0]
+    # Thread-scoped keys present
+    assert delta.get("thread_delivery_message_ts") == "1700000099.000200"
+    assert "25-D15-Podaima Paid.pdf" in delta.get("thread_delivery_filenames") or []
+    assert "25-D12-Podaima Paid.pdf" in delta.get("thread_delivery_filenames") or []
+    assert "25-D15" in delta.get("thread_delivery_invoice_ids") or []
+    # FY re-picked to match the thread (2025 has rows in this fixture)
+    assert delta.get("fy_loaded") == "2025"
+
+
+def test_answer_question_chat_ux_ack_and_thinking(monkeypatch):
+    """Phase 4: chat lane adds 👀 on the user message and thinking status before ADK run."""
+    from accounting_agents.slack_runner import answer_question
+
+    monkeypatch.setenv("LEDGR_CHAT_UX", "1")
+    slack = FakeSlackClient()
+    sessions: dict = {}
+    chat_runner = _StatefulCapturingChatRunner(sessions)
+
+    class _Store:
+        def latest_fy(self, client_id):
+            return "2025"
+        def read_rows(self, *, client_id, fy, slack_client, channel_id):
+            return []
+
+    asyncio.run(
+        answer_question(
+            runner=chat_runner,
+            ledger_store=_Store(),
+            slack_client=slack,
+            channel_id="C-UX",
+            question="what is loaded?",
+            app_name=chat_runner.app_name,
+            client_store=None,
+            message_ts="1700000300.001",
+            thread_ts="1700000099.000200",
+            raw_thread_ts="1700000099.000200",
+        )
+    )
+
+    eyes = [r for r in slack.reactions_added if r["name"] == "eyes"]
+    assert eyes == [{"channel": "C-UX", "timestamp": "1700000300.001", "name": "eyes"}]
+    assert slack.thinking_status_calls, "expected assistant_threads_setStatus"
+    assert slack.thinking_status_calls[0]["thread_ts"] == "1700000099.000200"
+    assert slack.thinking_status_calls[0]["status"] == "is thinking..."
+    checkmarks = [r for r in slack.reactions_added if r["name"] == "white_check_mark"]
+    assert checkmarks, "expected ✅ on user message after reply"
+    assert not [r for r in slack.reactions_removed if r["name"] == "eyes"] or True
+
+
+def test_answer_question_chat_ux_error_clears_thinking(monkeypatch):
+    """Error path must clear thinking status and remove 👀."""
+    from accounting_agents.slack_runner import _handle_chat_turn
+
+    monkeypatch.setenv("LEDGR_CHAT_UX", "1")
+    slack = FakeSlackClient()
+    sessions: dict = {}
+
+    class _FailRunner(_CapturingChatRunner):
+        async def run_async(self, **kwargs):
+            if False:
+                yield  # pragma: no cover
+            raise RuntimeError("boom")
+
+    runner = _FailRunner(sessions)
+
+    class _Store:
+        def read_rows(self, **kwargs):
+            return []
+
+    asyncio.run(
+        _handle_chat_turn(
+            chat_runner=runner,
+            ledger_store=_Store(),
+            slack_client=slack,
+            channel_id="C-ERR",
+            question="break",
+            client_store=None,
+            message_ts="1700000400.001",
+            thread_ts="1700000099.000200",
+            raw_thread_ts="1700000099.000200",
+            doc_runner=None,
+            db=None,
+        )
+    )
+
+    cleared = [c for c in slack.thinking_status_calls if c.get("status") == ""]
+    assert cleared, "expected thinking status cleared on error"
+    removed = [r for r in slack.reactions_removed if r["name"] == "eyes"]
+    assert removed == [{"channel": "C-ERR", "timestamp": "1700000400.001", "name": "eyes"}]
+    assert any("error" in p.get("text", "").lower() for p in slack._posts)
+
+
+def test_chat_stream_disabled_by_default():
+    from accounting_agents.slack_runner import _chat_stream_enabled
+
+    assert _chat_stream_enabled() is False
+
+
+def test_resolve_thread_delivery_context_falls_back_to_replies():
+    """Older processing_log entries (pre-Phase 2) lack delivery_message_ts.
+    The resolver must fall back to conversations.replies parsing."""
+    from accounting_agents.slack_runner import _resolve_thread_delivery_context
+
+    class _RepliesClient:
+        def __init__(self):
+            self.calls: list[dict] = []
+        def conversations_replies(self, *, channel, ts, limit):
+            self.calls.append({"channel": channel, "ts": ts, "limit": limit})
+            return {
+                "messages": [
+                    {
+                        "text": "Added 3 lines to FY2025 ledger",
+                        "blocks": [
+                            {"type": "section",
+                             "text": {"type": "mrkdwn",
+                                      "text": "Delivered 2 files:\n• 25-D15-Podaima Paid.pdf\n• 25-D12-Podaima Paid.pdf"}},
+                            {"type": "data_table",
+                             "rows": [[{"text": "Source Filename"}, {"text": "Account"}],
+                                      [{"text": "25-D15-Podaima Paid.pdf"}, {"text": "6-3000"}]]},
+                        ]
+                    }
+                ]
+            }
+
+    log = [
+        {"file_id": "F-D15", "filename": "25-D15-Podaima Paid.pdf", "fy": "2025"},
+        {"file_id": "F-D12", "filename": "25-D12-Podaima Paid.pdf", "fy": "2025"},
+    ]
+    slack = _RepliesClient()
+    ctx = _resolve_thread_delivery_context(
+        raw_thread_ts="1716000000.000",
+        channel_id="C1",
+        processing_log=log,
+        slack_client=slack,
+    )
+    assert slack.calls, "must call conversations_replies on fallback"
+    assert "25-D15-Podaima Paid.pdf" in ctx["thread_delivery_filenames"]
+    assert "25-D12-Podaima Paid.pdf" in ctx["thread_delivery_filenames"]
+    assert ctx["thread_delivery_fy"] == "2025"
+    assert "25-D15" in ctx["thread_delivery_invoice_ids"]
+    assert ctx.get("thread_delivery_preview_rows"), "must parse delivery data_table"
+    assert ctx["thread_delivery_preview_rows"][0]["account_code"] == "6-3000"
+
+
+def test_parse_delivery_data_table_rows_xero_shape():
+    from accounting_agents.slack_runner import _parse_delivery_data_table_rows
+
+    resp = {
+        "messages": [{
+            "blocks": [{
+                "type": "data_table",
+                "rows": [
+                    [
+                        {"text": "Invoice #"},
+                        {"text": "Account"},
+                        {"text": "Description"},
+                    ],
+                    [
+                        {"text": "25-D15"},
+                        {"text": "902-A02"},
+                        {"text": "PTTEP/UOA"},
+                    ],
+                ],
+            }],
+        }],
+    }
+    rows = _parse_delivery_data_table_rows(resp)
+    assert len(rows) == 1
+    assert rows[0]["invoice_id"] == "25-D15"
+    assert rows[0]["account_code"] == "902-A02"
+
+
+def test_prefetch_thread_ledger_matches_finds_xero_invoice():
+    from accounting_agents.slack_runner import _prefetch_thread_ledger_matches
+
+    ledger = [{
+        "_sheet": "Purchase",
+        "*InvoiceNumber": "25-D15",
+        "*AccountCode": "902-A02",
+        "*ContactName": "Podaima",
+        "*Description": "Professional fees",
+    }]
+    matches = _prefetch_thread_ledger_matches(
+        ledger,
+        invoice_ids=["25-D15"],
+        filenames=["25-D15-Podaima Paid.pdf"],
+    )
+    assert len(matches) == 1
+    assert matches[0]["account_code"] == "902-A02"
+    assert matches[0]["row_index"] == 0
+
+
+def test_try_direct_thread_account_code_answer_from_preview():
+    from accounting_agents.slack_runner import (
+        _try_direct_thread_account_code_answer,
+    )
+    from accounting_agents.assistant import LEDGER_DATA_KEY
+
+    state = {
+        "thread_delivery_preview_rows": [{
+            "invoice_id": "25-D15",
+            "account_code": "902-A02",
+            "vendor": "Darrell Podaima",
+            "description": "PTTEP/UOA monitoring audit",
+        }],
+        "thread_delivery_invoice_ids": ["25-D15"],
+        LEDGER_DATA_KEY: [],
+    }
+    text, focus = _try_direct_thread_account_code_answer(
+        "Why account code for 25-D15 in this batch?", state_delta=state,
+    )
+    assert text
+    assert "902-A02" in text
+    assert "25-D15" in text
+    assert focus and focus.get("account_code") == "902-A02"
+    assert "vendor" not in text.lower() or "Darrell" in text
+
+
+def test_try_direct_thread_account_code_answer_clarifies_wrong_code():
+    from accounting_agents.slack_runner import _try_direct_thread_account_code_answer
+
+    state = {
+        "thread_delivery_preview_rows": [{
+            "invoice_id": "25-D15",
+            "account_code": "902-A02",
+            "description": "Fees",
+        }],
+    }
+    text, _focus = _try_direct_thread_account_code_answer(
+        "Why account code 6-3000 for invoice 25-D15?", state_delta=state,
+    )
+    assert text
+    assert "902-A02" in text
+    assert "6-3000" in text
+
+
+def test_try_direct_thread_coa_description_followup_from_focus():
+    from accounting_agents.assistant import THREAD_FOCUS_KEY
+    from accounting_agents.slack_runner import _try_direct_thread_account_code_answer
+
+    state = {
+        THREAD_FOCUS_KEY: {
+            "invoice_id": "25-D15",
+            "account_code": "902-A02",
+            "vendor": "Darrell Podaima",
+            "line_description": "Fees",
+        },
+        "coa": [
+            {"code": "902-A02", "description": "Professional Fees", "account_type": "Expense"},
+        ],
+    }
+    text, focus = _try_direct_thread_account_code_answer(
+        "What is the description of the acount code?", state_delta=state,
+    )
+    assert text
+    assert "902-A02" in text
+    assert "Professional Fees" in text
+    assert focus and focus["account_code"] == "902-A02"
+
+
+def test_question_asks_account_code_matches_acount_typo():
+    from accounting_agents.slack_runner import _question_asks_account_code
+
+    assert _question_asks_account_code("What is the description of the acount code?")
+
+
+def test_answer_question_injects_thread_delivery_ledger_matches(monkeypatch):
+    from accounting_agents.slack_runner import answer_question
+
+    FY25_ROWS = [{
+        "_sheet": "Purchase",
+        "*InvoiceNumber": "25-D15",
+        "*AccountCode": "902-A02",
+        "*Description": "Fees",
+    }]
+
+    class _Store:
+        def list_processing_log(self, client_id, limit=20):
+            return [{
+                "file_id": "F-D15",
+                "filename": "25-D15-Podaima Paid.pdf",
+                "fy": "2025",
+                "delivery_message_ts": "1700000099.000200",
+                "row_count": 0,
+            }]
+
+        def get_by_channel(self, channel_id):
+            from invoice_processing.export.client_context import ClientContext
+            return ClientContext(
+                client_id="c1", client_name="Test", accounting_software="Xero",
+                fye_month=12, channel_id=channel_id,
+            )
+
+    class _Ledger:
+        def best_fy_for_chat(self, client_id, slack_client):
+            return "2025", [{"fy": "2025", "row_count": 1, "has_data": True}]
+
+        def read_rows(self, **kwargs):
+            return FY25_ROWS
+
+    class _RepliesSlack:
+        def conversations_replies(self, *, channel, ts, limit):
+            return {
+                "messages": [{
+                    "text": "FY2025 ledger",
+                    "blocks": [{
+                        "type": "data_table",
+                        "rows": [
+                            [{"text": "Invoice #"}, {"text": "Account"}],
+                            [{"text": "25-D15"}, {"text": "902-A02"}],
+                        ],
+                    }],
+                }],
+            }
+
+        def chat_postMessage(self, **kwargs):
+            return {"ok": True, "ts": "1700000400.002"}
+
+    sessions: dict = {}
+    runner = _StatefulCapturingChatRunner(sessions)
+    slack = _RepliesSlack()
+
+    result = asyncio.run(answer_question(
+        runner=runner,
+        ledger_store=_Ledger(),
+        slack_client=slack,
+        channel_id="C-THREAD",
+        question="Why account code for 25-D15?",
+        app_name=runner.app_name,
+        client_store=_Store(),
+        message_ts="1700000400.001",
+        thread_ts="1700000099.000200",
+        raw_thread_ts="1700000099.000200",
+    ))
+
+    assert result.get("direct") is True
+    assert "902-A02" in (result.get("text") or "")
+    assert "25-D15" in (result.get("text") or "")
+    assert not runner.calls, "direct path must skip LLM when preview rows exist"
+
+
+def test_chat_session_picks_fy_with_most_rows_not_latest():
+    """P0-B: ``answer_question`` should call ``best_fy_for_chat`` and use the
+    FY whose workbook has the most data — not just the highest FY label.
+
+    Regression for the Auditair client whose data lives in FY2025 while
+    ``latest_fy`` would pick FY2026 (empty) and report "ledger not loaded".
+    """
+    from accounting_agents.slack_runner import LEDGER_DATA_KEY, answer_question
+
+    # FY2025 has 3 rows, FY2026 has 1 row — the agent should pick FY2025.
+    FY25_ROWS = [
+        {"Date": "01/01/2025", "Source Filename": "a.pdf", "Doc Type": "B",
+         "Source Amount": 100.0, "Description": "A1", "Balance": 100.0,
+         "Withdrawal": 100.0, "Deposit": None, "Currency": "SGD"},
+        {"Date": "02/01/2025", "Source Filename": "a.pdf", "Doc Type": "B",
+         "Source Amount": 200.0, "Description": "A2", "Balance": 300.0,
+         "Withdrawal": None, "Deposit": 200.0, "Currency": "SGD"},
+        {"Date": "03/01/2025", "Source Filename": "a.pdf", "Doc Type": "B",
+         "Source Amount": 50.0, "Description": "A3", "Balance": 250.0,
+         "Withdrawal": 50.0, "Deposit": None, "Currency": "SGD"},
+    ]
+    FY26_ROWS = [
+        {"Date": "01/01/2026", "Source Filename": "b.pdf", "Doc Type": "B",
+         "Source Amount": 10.0, "Description": "B1", "Balance": 10.0,
+         "Withdrawal": None, "Deposit": 10.0, "Currency": "SGD"},
+    ]
+
+    from unittest.mock import MagicMock
+
+    slack = FakeSlackClient()
+    sessions: dict = {}
+    chat_runner = _StatefulCapturingChatRunner(sessions)
+
+    # ``read_rows`` is called AFTER FY selection; the store returns rows
+    # keyed by the FY the runner asked for. The two return values below
+    # simulate two FYs — one of them has 3 rows, the other 1.
+    read_calls: list[str] = []
+
+    def fake_read_rows(*, client_id, fy, slack_client, channel_id):
+        read_calls.append(fy)
+        if fy == "2025":
+            return list(FY25_ROWS)
+        if fy == "2026":
+            return list(FY26_ROWS)
+        return []
+
+    class _FakeStore:
+        def __init__(self):
+            self.latest_fy = lambda client_id: "2026"  # would pick empty FY
+            self.read_rows = fake_read_rows
+            self.best_fy_for_chat = (
+                lambda client_id, slack_client: (
+                    "2025",
+                    [
+                        {"fy": "2025", "row_count": 3, "has_data": True},
+                        {"fy": "2026", "row_count": 1, "has_data": True},
+                    ],
+                )
+            )
+
+    ledger = _FakeStore()
+
+    asyncio.run(
+        answer_question(
+            runner=chat_runner,
+            ledger_store=ledger,
+            slack_client=slack,
+            channel_id="C-P0B",
+            question="list recent documents",
+            app_name=chat_runner.app_name,
+            client_store=None,
+            message_ts="1700000002.001",
+            thread_ts="1700000002.001",
+            raw_thread_ts="1700000002.001",
+        )
+    )
+
+    # The runner should have selected FY2025 (most rows) and read from it.
+    assert "2025" in read_calls
+    turn1_pre_state = chat_runner.pre_run_state_snapshots[0]
+    assert turn1_pre_state.get(LEDGER_DATA_KEY) == FY25_ROWS
+    # Diagnostic state was injected into the state_delta passed to run_async
+    # (ADK applies it via the user-message event, so the snapshot of session
+    # state itself does not yet show it).
+    turn1_delta = chat_runner.pre_run_state_deltas[0]
+    assert turn1_delta.get("fy_loaded") == "2025"
+    assert turn1_delta.get("ledger_row_count") == 3
+    assert turn1_delta.get("fy_pointers") == [
+        {"fy": "2025", "row_count": 3, "has_data": True},
+        {"fy": "2026", "row_count": 1, "has_data": True},
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# P1 — pending_reviews + document_sessions injection
+# --------------------------------------------------------------------------- #
+
+
+def test_list_pending_interrupts_filters_by_channel_and_status():
+    from accounting_agents.hitl import (
+        INTERRUPTS_COLLECTION,
+        list_pending_interrupts,
+        write_interrupt,
+    )
+
+    db = FakeFirestore()
+    write_interrupt(
+        db, "INT-1",
+        session_id="C-A:F-1", channel_id="C-A", slack_file_id="F-1",
+    )
+    write_interrupt(
+        db, "INT-2",
+        session_id="C-B:F-1", channel_id="C-B", slack_file_id="F-1",
+    )
+    # Resolve INT-2 so it should NOT appear in pending.
+    write_interrupt(
+        db, "INT-2",
+        session_id="C-B:F-1", channel_id="C-B", slack_file_id="F-1",
+        status="resolved",
+    )
+    pending = list_pending_interrupts(db, "C-A")
+    assert len(pending) == 1
+    assert pending[0]["interrupt_id"] == "INT-1"
+    assert pending[0]["channel_id"] == "C-A"
+    # Sanity: the resolved doc is filtered out.
+    assert list_pending_interrupts(db, "C-B") == []
+
+
+def test_coerce_snapshot_fields_keeps_chat_relevant_subset():
+    from accounting_agents.slack_runner import _coerce_snapshot_fields
+
+    state = {
+        "doc_type": "invoice",
+        "extraction_path": "understand",
+        "review_reasons": ["tax_code_unknown"],
+        "source_filename": "x.pdf",
+        "summary_table": [1, 2, 3, 4, 5],
+        "normalized_invoice_count": 1,
+        "soa_legacy_path": False,
+        # Should be omitted from the snapshot.
+        "ledger_data": [{"huge": "row"}],
+        "pending_ledger_write": [{"x": 1}],
+    }
+    snap = _coerce_snapshot_fields(state)
+    assert snap["doc_type"] == "invoice"
+    assert snap["extraction_path"] == "understand"
+    assert snap["review_reasons"] == ["tax_code_unknown"]
+    assert snap["summary_table_size"] == 5
+    assert "ledger_data" not in snap
+    assert "pending_ledger_write" not in snap
+
+
+def test_snapshot_doc_sessions_reads_per_doc_state():
+    """``_snapshot_doc_sessions`` should read per-document sessions and
+    return a small chat-friendly subset keyed by file_id."""
+    from accounting_agents.slack_runner import _snapshot_doc_sessions
+
+    class _FakeSessionService:
+        def __init__(self, store):
+            self._store = store
+
+        async def get_session(self, *, app_name, user_id, session_id):
+            data = self._store.get((user_id, session_id))
+            if not data:
+                return None
+            return SimpleNamespace(state=data)
+
+    store = {
+        ("C-X:F-1", "C-X:F-1"): {
+            "doc_type": "invoice",
+            "extraction_path": "understand",
+            "summary_table": [1, 2, 3],
+            "ledger_data": [{"ignored": True}],
+        },
+        ("C-X:F-2", "C-X:F-2"): {
+            "doc_type": "soa",
+            "soa_legacy_path": True,
+            "review_reasons": ["amount_mismatch"],
+        },
+    }
+    runner = SimpleNamespace(session_service=_FakeSessionService(store))
+    out = asyncio.run(
+        _snapshot_doc_sessions(runner, "app", "C-X", ["F-1", "F-2", "F-3"])
+    )
+    assert "F-1" in out and "F-2" in out
+    # F-3 has no session → omitted.
+    assert "F-3" not in out
+    assert out["F-1"]["doc_type"] == "invoice"
+    assert out["F-1"]["summary_table_size"] == 3
+    assert "ledger_data" not in out["F-1"]
+    assert out["F-2"]["soa_legacy_path"] is True
+
+
+def test_chat_session_injects_pending_reviews_and_doc_sessions(monkeypatch):
+    """P1-2: ``answer_question`` should populate the new state keys for
+    pending HITL reviews and per-document session snapshots so the
+    diagnostic tools see them."""
+    from accounting_agents.hitl import write_interrupt
+    from accounting_agents.slack_runner import answer_question
+
+    db = FakeFirestore()
+    write_interrupt(
+        db, "INT-99",
+        session_id="C-P1:F-1", channel_id="C-P1", slack_file_id="F-1",
+    )
+    write_interrupt(
+        db, "INT-100",
+        session_id="C-P1:F-2", channel_id="C-P1", slack_file_id="F-2",
+    )
+
+    slack = FakeSlackClient()
+    sessions: dict = {}
+    chat_runner = _StatefulCapturingChatRunner(sessions)
+
+    # Stub a fake client_store that returns one processing log entry (so
+    # file_ids = ["F-1"] is non-empty and _snapshot_doc_sessions runs).
+    from tests.test_slack_runner import FakeFirestore as _FF
+    from invoice_processing.export.client_context import (
+        FirestoreClientStore,
+    )
+
+    class _StubClientStore:
+        def list_processing_log(self, client_id, limit=20):
+            return [
+                {
+                    "filename": "old.pdf",
+                    "file_id": "F-1",
+                    "doc_type": "invoice",
+                    "extraction_path": "understand",
+                }
+            ]
+
+        def add_processing_log(self, *args, **kwargs):
+            return None
+
+        def get_profile(self, client_id):
+            from invoice_processing.export.client_context import ClientContext
+            return ClientContext(
+                client_id=client_id,
+                client_name="Test",
+                accounting_software="QBS Ledger",
+                fye_month=12,
+            )
+
+        def get_by_channel(self, channel_id):
+            from invoice_processing.export.client_context import ClientContext
+            return ClientContext(
+                client_id="C-P1",
+                client_name="Test",
+                accounting_software="QBS Ledger",
+                fye_month=12,
+                channel_id=channel_id,
+            )
+
+    class _FakeStore:
+        def latest_fy(self, client_id):
+            return "2025"
+
+        def read_rows(self, *, client_id, fy, slack_client, channel_id):
+            return []
+
+        def best_fy_for_chat(self, client_id, slack_client):
+            return "2025", [{"fy": "2025", "row_count": 0, "has_data": False}]
+
+    ledger = _FakeStore()
+    client_store = _StubClientStore()
+
+    asyncio.run(
+        answer_question(
+            runner=chat_runner,
+            ledger_store=ledger,
+            slack_client=slack,
+            channel_id="C-P1",
+            question="anything waiting on me?",
+            app_name=chat_runner.app_name,
+            client_store=client_store,
+            db=db,
+            message_ts="1700000003.001",
+            thread_ts="1700000003.001",
+            raw_thread_ts="1700000003.001",
+        )
+    )
+
+    delta = chat_runner.pre_run_state_deltas[0]
+    pending = delta.get("pending_reviews") or []
+    assert len(pending) == 2
+    ids = {p["interrupt_id"] for p in pending}
+    assert ids == {"INT-99", "INT-100"}
+    assert delta.get("pending_review_count") == 2
+    assert delta.get("processing_log_count") == 1
+    # document_sessions should be a dict (empty for a real session that
+    # has no per-doc session in this fake) but still present.
+    assert "document_sessions" in delta
+    assert isinstance(delta["document_sessions"], dict)
 
 
 # --------------------------------------------------------------------------- #

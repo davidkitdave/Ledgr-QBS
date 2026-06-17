@@ -419,24 +419,30 @@ def test_summarize_recent_activity_names_fy_when_only_old_bank_rows():
 # --------------------------------------------------------------------------- #
 
 
-def test_assistant_agent_has_eighteen_tools():
+def test_assistant_agent_has_twenty_two_tools():
     # Step 3 added the 12 read tools; Step 4 (ADR-0009) adds the two gated
     # write tools (amend_ledger_row / remove_ledger_row) → 14; Step 7 adds the
     # direct learn_mapping tool → 15; Step 7/C-3 adds the gated
     # replace_recorded_month tool → 16; Step 7/ADR-0010 adds the gated
     # re_extract_document tool → 17; chat introspection adds
-    # explain_document_processing → 18.
+    # explain_document_processing → 18. P1 (2026-06-16) adds the four
+    # diagnostic / introspection tools
+    # (diagnose_assistant_context, list_processing_history,
+    # get_document_processing_detail, list_pending_reviews) → 22.
     assert assistant_agent.mode is None
-    assert len(assistant_agent.tools) == 18
+    assert len(assistant_agent.tools) == 22
 
 
 def test_assistant_instruction_mentions_new_tools():
+    """P5-slim: instruction carries routing bullets, not a full tool catalog."""
     for name in (
-        "explain_categorization",
-        "explain_tax_treatment",
-        "summarize_recent_activity",
-        "lookup_row",
+        "diagnose_assistant_context",
+        "get_document_processing_detail",
+        "list_processing_history",
+        "list_pending_reviews",
         "list_recent_documents",
-        "explain_document_processing",
+        "lookup_row",
     ):
         assert name in _BASE_INSTRUCTION
+    assert "explain_categorization" in _BASE_INSTRUCTION
+    assert "lookup_row" in _BASE_INSTRUCTION

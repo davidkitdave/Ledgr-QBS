@@ -20,7 +20,7 @@ from google.genai import types
 from pydantic import BaseModel, Field
 
 from ..export.models import NormalizedInvoice
-from ..shared_libraries.genai_client import default_model, make_client
+from ..shared_libraries.genai_client import lite_model, make_client
 from .invoice_extractor import (
     ExtractedInvoice,
     ExtractedLine,
@@ -200,7 +200,7 @@ def extract_document_ledger(
     in one shot, not via a downstream fuzzy-match pass.
     """
     client = make_client(project, location)
-    model = model or default_model()
+    model = model or lite_model()
     part = types.Part.from_bytes(data=data, mime_type=mime_type)
     prompt = _build_understand_prompt(client_name, client_uen)
     resp = client.models.generate_content(

@@ -244,6 +244,19 @@ def _batch_progress_expanded_blocks(
     ]
 
 
+def processing_plan_headline(*, total: int, title: str | None = None) -> str:
+    """Human headline for the live processing plan block.
+
+    Single-file drops say "Processing document" — "batch" implies multiple
+    uploads and reads oddly when ``total == 1``.
+    """
+    if title:
+        return title
+    if total == 1:
+        return "Processing document"
+    return f"Processing batch ({total} documents)"
+
+
 def batch_processing_plan_blocks(
     *,
     total: int,
@@ -278,7 +291,7 @@ def batch_processing_plan_blocks(
     """
     import os
 
-    headline = title or f"Processing batch ({total} document{'s' if total != 1 else ''})"
+    headline = processing_plan_headline(total=total, title=title)
     use_expanded = os.environ.get("LEDGR_BATCH_EXPANDED_PROGRESS", "").strip().lower() in (
         "1",
         "true",
@@ -1943,7 +1956,7 @@ def _dedup_value(vendor: str, fy: int, month: str, op_id: str | None) -> str:
         urllib.parse.quote(vendor, safe="") or "-",
         str(fy) or "0",
         urllib.parse.quote(month, safe="") or "-",
-        op_id or "-",
+        urllib.parse.quote(op_id or "-", safe=""),
     ])
 
 

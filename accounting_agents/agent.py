@@ -88,6 +88,7 @@ from invoice_processing.export.client_context import (
 from . import config  # ensures AI Studio env is set before any ADK model init
 from . import nodes
 from .assistant import assistant_agent  # noqa: F401 — re-exported via __all__
+from .plugins.ledgr_reflect_retry import LedgrReflectRetryPlugin
 
 # --------------------------------------------------------------------------- #
 # Route labels (top-level coordinator router)
@@ -305,6 +306,10 @@ coordinator_graph = Workflow(
 # Apps — document coordinator + standalone chat assistant
 # --------------------------------------------------------------------------- #
 
+# ADK AgentEvaluator / ``adk eval`` convention — document-lane golden cases load
+# this module and read ``root_agent`` directly (not ``app.root_agent``).
+root_agent = coordinator_graph
+
 app = App(
     name="accounting_agents",
     root_agent=coordinator_graph,
@@ -321,10 +326,12 @@ document_app = App(
 #: Standalone chat-lane App: a root ``LlmAgent`` with no ``mode`` so it sees
 #: full per-thread session history (multi-turn). Has its own Runner built by
 #: ``slack_runner.build_chat_runner``. No ``resumability_config`` — chat has no
-#: HITL gates. See ADR-0008.
+#: HITL gates. P7: ``LedgrReflectRetryPlugin`` retries tools that return
+#: ``status=error|not_found``. See ADR-0008 / ADR-0013.
 assistant_app = App(
     name="accounting_agents_assistant",
     root_agent=assistant_agent,
+    plugins=[LedgrReflectRetryPlugin(max_retries=2)],
 )
 
 __all__ = [

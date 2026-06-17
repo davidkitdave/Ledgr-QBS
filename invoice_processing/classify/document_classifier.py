@@ -19,7 +19,7 @@ from typing import Optional
 from google.genai import types
 from pydantic import BaseModel, Field
 
-from ..shared_libraries.genai_client import default_model, make_client
+from ..shared_libraries.genai_client import lite_model, make_client
 
 ALLOWED_DOC_TYPES = [
     "invoice",              # tax invoice / bill / proforma / telco bill (goods or services)
@@ -84,7 +84,7 @@ def classify_document(
 ) -> ClassificationResult:
     """Classify a single document (PDF or image bytes)."""
     client = make_client(project, location)
-    model = model or default_model()
+    model = model or lite_model()
     part = types.Part.from_bytes(data=data, mime_type=mime_type)
     resp = client.models.generate_content(
         model=model,

@@ -1,4 +1,16 @@
-import io
+"""DEPRECATED — early ADK prototype (2025). Do not use in production.
+
+This module predates the live Ledgr paths:
+
+- **Profile** — runner injects ``ClientContext.to_state()``; do not call
+  ``fetch_client_profile`` from a tool.
+- **Excel export** — ``ledger_store`` + ``invoice_processing/export`` exporters.
+- **HITL** — document graph + Slack Block Kit interrupts, not
+  ``LongRunningFunctionTool``.
+
+See ADR-0013 (native ADK adoption matrix). No production import references
+this module; kept for reference until moved to ``legacy/``.
+"""
 import json
 import openpyxl
 from google.adk.tools import LongRunningFunctionTool, ToolContext

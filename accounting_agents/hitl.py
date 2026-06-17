@@ -106,6 +106,54 @@ def update_interrupt_status(db: Any, op_id: str, status: str) -> None:
     )
 
 
+def list_pending_interrupts(
+    db: Any,
+    channel_id: str,
+    *,
+    limit: int = 25,
+) -> list[dict[str, Any]]:
+    """Return pending interrupt correlation docs for ``channel_id``.
+
+    Iterates the ``interrupts`` collection (Firestore has no native compound
+    index for ``channel_id`` + ``status`` in this schema) and filters in
+    Python. Read-only — used by the chat lane to render "anything waiting
+    on me?" without exposing a Firestore client to the LLM.
+
+    Args:
+        db: Firestore client (or compatible fake).
+        channel_id: Slack channel id to scope to.
+        limit: Hard cap on returned entries (defensive default 25).
+
+    Returns:
+        List of pending interrupt dicts. Each entry is the raw correlation
+        doc plus a normalized ``interrupt_id`` key (== ``op_id``) so the
+        chat tools can render a stable handle.
+    """
+    out: list[dict[str, Any]] = []
+    if not channel_id:
+        return out
+    coll = db.collection(INTERRUPTS_COLLECTION)
+    try:
+        snaps = list(coll.stream())
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "list_pending_interrupts: stream failed for channel %s", channel_id
+        )
+        return out
+    for snap in snaps:
+        data = snap.to_dict() or {}
+        if str(data.get("channel_id") or "") != str(channel_id):
+            continue
+        if str(data.get("status") or "pending") != "pending":
+            continue
+        data = dict(data)
+        data.setdefault("interrupt_id", data.get("op_id") or snap.id)
+        out.append(data)
+        if len(out) >= limit:
+            break
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Idempotency marker
 # --------------------------------------------------------------------------- #

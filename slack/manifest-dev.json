@@ -1,7 +1,7 @@
 {
   "display_information": {
     "name": "Ledgr (dev)",
-    "description": "Accounting document processor — drop a PDF or invoice and get a QBS Ledger import file back.",
+    "description": "Drop PDFs or invoices, get a ledger import back. Dev-only — slash command is /ledgr-dev.",
     "background_color": "#1a1a2e"
   },
   "features": {
@@ -11,8 +11,8 @@
     },
     "slash_commands": [
       {
-        "command": "/ledgr",
-        "description": "Ledgr settings & export",
+        "command": "/ledgr-dev",
+        "description": "Ledgr dev settings & export",
         "usage_hint": "settings | export",
         "should_escape": false
       }
@@ -21,16 +21,17 @@
   "oauth_config": {
     "scopes": {
       "bot": [
+        "app_mentions:read",
+        "channels:history",
+        "channels:read",
         "chat:write",
+        "commands",
         "files:read",
         "files:write",
-        "channels:history",
         "groups:history",
-        "im:history",
-        "channels:read",
         "groups:read",
-        "commands",
-        "app_mentions:read",
+        "im:history",
+        "reactions:write",
         "users:read"
       ]
     }

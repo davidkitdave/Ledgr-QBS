@@ -26,22 +26,47 @@ suite is unaffected. The `@pytest.mark.eval` marker is belt-and-suspenders.
 
 ## Running via agents-cli
 
+Ledgr has **two eval lanes** with different root agents:
+
+| Lane | Agent module | Session state | Generate command |
+|------|--------------|---------------|------------------|
+| **Chat (B3–B6)** | `accounting_agents/chat_eval` | Required (ledger, FY, processing log) | `eval/ledgr_eval_generate.py` → `agents-cli eval grade` |
+| **Doc (A, C–E)** | `accounting_agents` | Per-case in ADK evalset | `pytest tests/eval/ -m eval` or ADK `AgentEvaluator` |
+
+Stock `agents-cli eval generate` does **not** seed ADK session state, so chat cases
+(especially B6 Auditair invoice account-code) must use the local bridge script below.
+
+### Chat lane (recommended for tool-trajectory iteration)
+
 ```bash
-# Generate traces (runs the agent against each case):
-agents-cli eval generate \
-  --dataset tests/eval/datasets/ledgr.evalset.json \
-  --output tests/eval/.traces/
+# Full chat loop: generate traces + grade
+./scripts/ledgr_eval_chat.sh
 
-# Grade the traces:
+# Single case (e.g. Auditair B6)
+./scripts/ledgr_eval_chat.sh B6_chat_invoice_account_code_trajectory
+
+# Manual steps:
+uv run python eval/ledgr_eval_generate.py --lane chat --case-id B6_chat_invoice_account_code_trajectory
 agents-cli eval grade \
-  --metrics tool_trajectory_avg_score,response_match_score \
-  --traces tests/eval/.traces/
+  --traces artifacts/traces/chat_traces.json \
+  --config tests/eval/eval_config_chat.yaml
 
-# Compare two grade-result files (regression check):
-agents-cli eval compare baseline.json candidate.json
+# Regression compare after a fix:
+agents-cli eval compare artifacts/grade_results/baseline.json artifacts/grade_results/results_<ts>.json
+```
 
-# Discover all available built-in metrics:
-agents-cli eval metric list
+### Doc lane (pytest golden gate)
+
+```bash
+pytest tests/eval/ -m eval -v
+pytest "tests/eval/test_eval_golden.py::test_golden_eval_case[B6_chat_invoice_account_code_trajectory]" -m eval -v
+```
+
+### Doc lane agents-cli (prompt-only smoke — no session state)
+
+```bash
+agents-cli eval generate --dataset tests/eval/datasets/basic-dataset.json
+agents-cli eval grade --config tests/eval/eval_config.yaml
 ```
 
 ## Where Source Documents Live

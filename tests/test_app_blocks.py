@@ -23,6 +23,7 @@ from app.blocks import (
     per_doc_card,
     proactive_redo_blocks,
     proactive_redo_modal,
+    processing_plan_headline,
     profile_summary_blocks,
     result_card,
     review_card_blocks,
@@ -1990,4 +1991,10 @@ class TestSummaryTableBlocks:
         from app.blocks import summary_table_blocks
 
         assert summary_table_blocks([]) == []
+
+
+def test_processing_plan_headline_single_vs_multi():
+    assert processing_plan_headline(total=1) == "Processing document"
+    assert processing_plan_headline(total=2) == "Processing batch (2 documents)"
+    assert processing_plan_headline(total=1, title="Custom") == "Custom"
 

@@ -4,10 +4,10 @@ How to run the local socket-mode bot against your LEDGR-DEV workspace without af
 
 ## Architecture
 
-Two completely separate Slack apps share one codebase but have different tokens, different Firestore namespaces, and different model defaults:
+Two completely separate Slack apps share one codebase but have different tokens, different Firestore namespaces, and the same model env vars (`LEDGR_MODEL_*` in `.env` — resolved by `invoice_processing/shared_libraries/model_config.py`):
 
 - **Ledgr (dev)** — local socket-mode process, `LEDGR_ENV=dev`, AI Studio key, `gemini-2.5-flash-lite` for invoices. Installed in LEDGR-DEV workspace only for testing.
-- **Ledgr (prod)** — Cloud Run HTTP mode, `LEDGR_ENV=prod`, Vertex AI (asia-southeast1), both model tiers default to `gemini-2.5-flash` (until flash-lite reaches that region). Installed in customer workspaces via OAuth.
+- **Ledgr (prod)** — Cloud Run HTTP mode, `LEDGR_ENV=prod`, Vertex AI (asia-southeast1), `gemini-2.5-flash-lite` for invoices/digital bank PDFs and `gemini-2.5-flash` for scanned bank statements. Installed in customer workspaces via OAuth.
 
 The two apps share zero state: different bot tokens, different Firestore namespaces (or ideally separate GCP projects), different model env vars.
 
@@ -48,11 +48,13 @@ The process connects to LEDGR-DEV via socket mode. Status messages in Slack will
 /invite @Ledgr-dev
 ```
 
+Use **`/ledgr-dev settings`** (not `/ledgr`) — the dev app registers a separate slash command so it does not clash with production **Ledgr-QBS** in the same workspace.
+
 Only invite Ledgr-dev to channels like `#qa-blockkit` or personal DMs. Never invite it to a channel where the production bot is already present or where real client data lives.
 
 ## Production
 
-Cloud Run runs the **other** Slack app (`Ledgr`, `slack/manifest.json`) with production tokens from Secret Manager and `LEDGR_ENV=prod`. See `.env.prod.example` for the full variable reference — that file is documentation only; Cloud Run never reads it directly.
+Cloud Run runs the **Ledgr-QBS** Slack app (`slack/manifest-qbs.json`) with production tokens from Secret Manager and `LEDGR_ENV=prod`. See `.env.prod.example` for the full variable reference — that file is documentation only; Cloud Run never reads it directly.
 
 ## Switching back
 

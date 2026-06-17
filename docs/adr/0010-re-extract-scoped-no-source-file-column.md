@@ -76,3 +76,15 @@ adding provenance to the schema.
 - **Content-signature removal as the primary mechanism** — kept as the identity-match path,
   but it is fuzzy when identity changes, so it is paired with the explicit fallback rather
   than trusted blindly.
+
+## Chat lane cross-reference (2026-06-16 addendum)
+
+Because workbook rows are anonymous, the chat lane needs a stable surrogate for
+"which document did this row come from?" The QBS column set has ``Source Filename``; the
+Xero column set does not. The chat tools apply ``_normalize_row_for_tools``
+(``accounting_agents/assistant.py``) which aliases the Xero ``*InvoiceNumber`` /
+``*Reference`` into ``Source Filename`` (prefixed ``Xero:``) so ``list_recent_documents``
+groups the rows under a stable key for the user. The underlying file id is still only
+visible via ``processing_log`` / ``document_sessions`` (ADR-0008 addendum), not on the
+row itself — the workbook remains a clean export.
+

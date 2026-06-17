@@ -324,8 +324,12 @@ See [`.env.example`](.env.example) for the full list. Key variables:
 |----------|---------|-------------|
 | `PROJECT_ID` | (required) | GCP project ID |
 | `LOCATION` | `us-central1` | GCP region |
-| `GEMINI_FLASH_MODEL` | `gemini-2.5-flash` | Model for the ADK agent |
-| `GEMINI_PRO_MODEL` | `gemini-2.5-pro` | Model for ALF pipeline continuation and investigation |
+| `LEDGR_MODEL_LITE` | `gemini-2.5-flash-lite` | Invoices, classification, digital bank PDFs |
+| `LEDGR_MODEL_STD` | `gemini-2.5-flash` | Scanned bank statements, chat lane (default) |
+| `LEDGR_MODEL_CHAT` | (same as STD) | Chat-lane root agent override |
+| `LEDGR_MODEL_READ` | (same as LITE) | Understand / Phase-1 invoice read override |
+| `GEMINI_FLASH_MODEL` | (legacy) | Fallback for STD only if `LEDGR_MODEL_STD` unset |
+| `GEMINI_PRO_MODEL` | `gemini-2.5-pro` | Legacy ALF pipeline only |
 | `API_CALL_DELAY_SECONDS` | `1.0` | Rate limiting between API calls |
 
 ### Running the Agent

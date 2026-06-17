@@ -200,6 +200,41 @@ def test_image_mime_type_always_uses_vision(monkeypatch):
     assert len(vision_called) == 1
 
 
+def test_bank_model_routing_digital_lite_vision_std(monkeypatch):
+    """Digital path receives digital_model; vision path receives vision_model."""
+    models_seen: dict[str, str] = {}
+
+    def _digital(text, **kw):
+        models_seen["digital"] = kw.get("model")
+        return _FAKE_DIGITAL_RESULT
+
+    def _vision(data, mime, **kw):
+        models_seen["vision"] = kw.get("model")
+        return _FAKE_VISION_RESULT
+
+    monkeypatch.setattr(bse, "_extract_digital", _digital)
+    monkeypatch.setattr(bse, "_extract_vision", _vision)
+
+    pdf_bytes = _make_digital_pdf_bytes()
+    extract_bank_statement(
+        pdf_bytes,
+        "application/pdf",
+        digital_model="gemini-2.5-flash-lite",
+        vision_model="gemini-2.5-flash",
+    )
+    assert models_seen["digital"] == "gemini-2.5-flash-lite"
+
+    models_seen.clear()
+    pdf_bytes = _make_scanned_pdf_bytes()
+    extract_bank_statement(
+        pdf_bytes,
+        "application/pdf",
+        digital_model="gemini-2.5-flash-lite",
+        vision_model="gemini-2.5-flash",
+    )
+    assert models_seen["vision"] == "gemini-2.5-flash"
+
+
 # --------------------------------------------------------------------------- #
 # Test 4 — extract_bank_node end-to-end: digital bytes → pdfplumber path
 # --------------------------------------------------------------------------- #

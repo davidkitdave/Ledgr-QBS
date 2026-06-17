@@ -62,6 +62,7 @@ class FakeSlackClient:
         # Reaction tracking: list of {"channel", "timestamp", "name"} dicts.
         self.reactions_added: list[dict] = []
         self.reactions_removed: list[dict] = []
+        self.thinking_status_calls: list[dict] = []
         # Optional per-file share ts injected by tests to simulate files_info shares.
         # Maps file_id → {"channel_id": ts_string}.
         self._file_share_ts: dict[str, dict[str, str]] = {}
@@ -116,6 +117,15 @@ class FakeSlackClient:
 
     def reactions_remove(self, *, channel, timestamp, name):
         self.reactions_removed.append({"channel": channel, "timestamp": timestamp, "name": name})
+        return {"ok": True}
+
+    def assistant_threads_setStatus(self, *, channel_id, thread_ts, status, loading_messages=None):
+        self.thinking_status_calls.append({
+            "channel_id": channel_id,
+            "thread_ts": thread_ts,
+            "status": status,
+            "loading_messages": loading_messages,
+        })
         return {"ok": True}
 
     def opener(self) -> _FakeOpener:
@@ -251,6 +261,139 @@ def test_reprocessing_same_doc_is_deduped():
     assert len(rows) == 1  # still exactly one row
 
 
+def test_dedupe_only_reshares_workbook_to_slack():
+    """When every batch dedupes but the workbook still has data, re-upload it.
+
+    Covers the case where the user deleted the Excel message from the channel
+    while Firestore seen_doc_keys still block re-append.
+    """
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+
+    result1 = store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        software="qbs", kind="invoice",
+        batches=[{"sheet": "Purchase", "doc_key": "F1:Purchase:INV-1", "rows": [_row("first")]}],
+    )
+    assert len(slack.uploads) == 1
+    first_file_id = result1["slack_file_id"]
+    slack.uploads.clear()
+
+    result2 = store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        software="qbs", kind="invoice",
+        batches=[{"sheet": "Purchase", "doc_key": "F1:Purchase:INV-1", "rows": [_row("first")]}],
+    )
+
+    assert result2["appended"] == 0
+    assert result2["deduped"] == 1
+    assert result2.get("reshared") is True
+    assert len(slack.uploads) == 1, "deduped-only path must still post the workbook"
+    assert result2["slack_file_id"] != first_file_id
+    data = slack.files[result2["slack_file_id"]]
+    rows = _read_sheet_rows(data, "Purchase")
+    assert len(rows) == 1
+
+
+def test_dedupe_only_reshare_skips_shell_workbook():
+    """Shell tabs (B/F + TOTALS only) must not be re-shared on dedupe-only path."""
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+
+    shell_rows = [
+        {"Description": "BALANCE B/F", "Balance": 0.0, "Currency": "SGD"},
+        {"Description": "TOTALS", "Currency": "SGD"},
+    ]
+    result1 = store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        kind="bank",
+        batches=[{
+            "sheet": "DBS - 5545 - SGD",
+            "doc_key": "DBS Bank Ltd - 5545 - SGD:5545:SGD:Apr2024",
+            "rows": shell_rows,
+        }],
+    )
+    first_file_id = result1["slack_file_id"]
+    slack.uploads.clear()
+
+    result2 = store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        kind="bank",
+        batches=[{
+            "sheet": "DBS - 5545 - SGD",
+            "doc_key": "DBS Bank Ltd - 5545 - SGD:5545:SGD:Apr2024",
+            "rows": shell_rows,
+        }],
+    )
+
+    assert result2["appended"] == 0
+    assert result2.get("reshared") is not True
+    assert len(slack.uploads) == 0
+    assert result2["slack_file_id"] == first_file_id
+
+
+def test_purge_seen_doc_keys_allows_reappend():
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+    doc_key = "DBS Bank Ltd - 5545 - SGD:5545:SGD:Apr2024"
+    rows = [
+        {"Description": "BALANCE B/F", "Balance": 100.0, "Currency": "SGD"},
+        {"Date": "15/04/2024", "Description": "SALARY", "Deposit": 50.0,
+         "Balance": 150.0, "Currency": "SGD"},
+        {"Description": "TOTALS", "Currency": "SGD"},
+    ]
+    store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        kind="bank",
+        batches=[{"sheet": "DBS - 5545 - SGD", "doc_key": doc_key, "rows": rows}],
+    )
+    result2 = store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        kind="bank",
+        batches=[{"sheet": "DBS - 5545 - SGD", "doc_key": doc_key, "rows": rows}],
+    )
+    assert result2["deduped"] == 1
+
+    purged = store.purge_seen_doc_keys("c1", "2026", [doc_key])
+    assert purged == 1
+
+    result3 = store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        kind="bank",
+        batches=[{
+            "sheet": "DBS - 5545 - SGD",
+            "doc_key": doc_key,
+            "rows": [
+                {"Description": "BALANCE B/F", "Balance": 100.0, "Currency": "SGD"},
+                {"Date": "15/04/2024", "Description": "SALARY-UPDATED", "Deposit": 75.0,
+                 "Balance": 175.0, "Currency": "SGD"},
+                {"Description": "TOTALS", "Currency": "SGD"},
+            ],
+        }],
+    )
+    assert result3["appended"] > 0
+
+
+def test_stash_and_consume_bank_dedup_replace():
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+    batches = [{"sheet": "DBS - 5545 - SGD", "doc_key": "k1", "rows": []}]
+    stash_key = "c1|C1|2026|April 2024"
+    store.stash_bank_dedup_replace(
+        stash_key=stash_key,
+        client_id="c1",
+        fy="2026",
+        kind="bank",
+        software="qbs",
+        client_name="Test",
+        batches=batches,
+    )
+    loaded = store.consume_bank_dedup_replace(stash_key)
+    assert loaded is not None
+    assert loaded["batches"] == batches
+    assert store.consume_bank_dedup_replace(stash_key) is None
+
+
 def test_bank_workbook_one_sheet_per_account():
     slack = FakeSlackClient()
     store = _make_store(slack)
@@ -271,6 +414,188 @@ def test_bank_workbook_one_sheet_per_account():
     # No hidden dedupe column in the workbook — dedupe is Firestore-side.
     header = [c.value for c in wb["OCBC - 5001"][1]]
     assert "_ledgr_doc_key" not in header
+
+
+def test_bank_sheet_title_multi_currency_same_account():
+    """Multi-currency account 072-955554-5 → 3 distinct 'Bank - 5545 - CCY' titles."""
+    from invoice_processing.export.exporters import bank_sheet_title
+
+    titles = {
+        bank_sheet_title(
+            bank_name="DBS Bank Ltd",
+            account_number="072-955554-5",
+            currency=ccy,
+        )
+        for ccy in ("SGD", "USD", "CNH")
+    }
+    assert titles == {
+        "DBS Bank Ltd - 5545 - SGD",
+        "DBS Bank Ltd - 5545 - USD",
+        "DBS Bank Ltd - 5545 - CNH",
+    }
+
+
+def test_bank_sheet_title_strips_llm_packed_digits():
+    """bank_name 'OCBC - 5001' + account_number '5001' collapses to 'OCBC - 5001 - SGD'."""
+    from invoice_processing.export.exporters import bank_sheet_title
+
+    assert bank_sheet_title(
+        bank_name="OCBC - 5001", account_number="5001", currency="SGD",
+    ) == "OCBC - 5001 - SGD"
+
+
+def test_bank_sheet_title_falls_back_to_bank_name_digits():
+    """If account_number is missing, last4 are pulled from bank_name digits."""
+    from invoice_processing.export.exporters import bank_sheet_title
+
+    # No " - " separator in bank_name → whole string is the label; last4 come
+    # from the trailing digits embedded in the label. (DBS itself is short
+    # enough to fit under the 31-char Excel sheet limit.)
+    assert bank_sheet_title(
+        bank_name="DBS 955554", account_number=None, currency="USD",
+    ) == "DBS 955554 - 5554 - USD"
+
+
+def test_bank_sheet_title_pads_short_digits():
+    from invoice_processing.export.exporters import bank_sheet_title
+
+    assert bank_sheet_title(
+        bank_name="DBS", account_number="12", currency="SGD",
+    ) == "DBS - 0012 - SGD"
+
+
+def test_bank_sheet_title_sanitizes_excel_invalid_chars():
+    from invoice_processing.export.exporters import bank_sheet_title
+
+    # Excel forbids []:*?/\\ — must be stripped from the label, not crash openpyxl.
+    title = bank_sheet_title(
+        bank_name="Bank/Co [Asia] - 7777", account_number="X-9999", currency="SGD",
+    )
+    for ch in "[]:*?/\\":
+        assert ch not in title
+    assert title.endswith("SGD")
+
+
+def test_bank_workbook_multi_currency_one_account():
+    """Three currency sections of the same account → three Excel tabs with headers."""
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+    from invoice_processing.export.exporters import BankStatementExporter
+    from invoice_processing.export.models import BankStatement, BankTransaction
+    from datetime import date as _date
+
+    exporter = BankStatementExporter()
+
+    def _stmt(ccy: str, desc: str, *, wd=None, dep=None, bal: float, opening: float):
+        return BankStatement(
+            bank_name="DBS Bank Ltd",
+            account_number="072-955554-5",
+            currency=ccy,
+            opening_balance=opening,
+            closing_balance=bal,
+            transactions=[
+                BankTransaction(
+                    date=_date(2024, 4, 15), description=desc,
+                    withdrawal=wd, deposit=dep, balance=bal,
+                )
+            ],
+        )
+
+    batches = []
+    for ccy, desc, wd, dep, bal, opening, key in [
+        ("SGD", "REMITTANCE", 100000.0, None, 0.0, 100000.0, "F1:DBS:5545:SGD"),
+        ("USD", "WIRE FEE", 50.0, None, 0.0, 50.0, "F1:DBS:5545:USD"),
+        ("CNH", "CREDIT", None, 200.0, 200.0, 0.0, "F1:DBS:5545:CNH"),
+    ]:
+        stmt = _stmt(ccy, desc, wd=wd, dep=dep, bal=bal, opening=opening)
+        batches.append({
+            "sheet": f"DBS Bank Ltd - 5545 - {ccy}",
+            "doc_key": key,
+            "rows": exporter.bank_rows(stmt),
+        })
+
+    result = store.append_rows(
+        client_id="c1", fy="2024", slack_client=slack, channel_id="C1",
+        kind="bank",
+        batches=batches,
+    )
+
+    wb = load_workbook(io.BytesIO(slack.files[result["slack_file_id"]]), data_only=False)
+    expected_tabs = [
+        "DBS Bank Ltd - 5545 - SGD",
+        "DBS Bank Ltd - 5545 - USD",
+        "DBS Bank Ltd - 5545 - CNH",
+    ]
+    for tab in expected_tabs:
+        assert tab in wb.sheetnames
+        ws = wb[tab]
+        header = [c.value for c in ws[1]]
+        assert header == exporter.BANK_COLS, f"{tab} missing canonical header: {header}"
+        check_col = header.index("Math_Check") + 1
+        # Row 2 = BALANCE B/F — static ✅ on first block.
+        assert ws.cell(row=2, column=check_col).value == "✅"
+        # Row 3 = first txn — formula-based check.
+        chk = ws.cell(row=3, column=check_col).value
+        assert isinstance(chk, str) and chk.startswith("=IF(ROUND(")
+
+
+def test_bank_april_then_may_same_fy_workbook():
+    """April then May on the same account append to one FY workbook tab."""
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+    from invoice_processing.export.exporters import BankStatementExporter
+    from invoice_processing.export.models import BankStatement, BankTransaction
+    from datetime import date as _date
+
+    exporter = BankStatementExporter()
+    sheet = "DBS Bank Ltd - 5545 - SGD"
+
+    def _rows(month: int, desc: str):
+        stmt = BankStatement(
+            bank_name="DBS Bank Ltd",
+            account_number="072-955554-5",
+            currency="SGD",
+            opening_balance=100.0,
+            closing_balance=150.0,
+            transactions=[
+                BankTransaction(
+                    date=_date(2024, month, 10), description=desc,
+                    deposit=50.0, balance=150.0,
+                ),
+            ],
+        )
+        return exporter.bank_rows(stmt)
+
+    store.append_rows(
+        client_id="c1", fy="2024", slack_client=slack, channel_id="C1",
+        kind="bank",
+        batches=[{
+            "sheet": sheet,
+            "doc_key": f"{sheet}:5545:SGD:Apr2024",
+            "rows": _rows(4, "APR-TXN"),
+        }],
+    )
+    result2 = store.append_rows(
+        client_id="c1", fy="2024", slack_client=slack, channel_id="C1",
+        kind="bank",
+        batches=[{
+            "sheet": sheet,
+            "doc_key": f"{sheet}:5545:SGD:May2024",
+            "rows": _rows(5, "MAY-TXN"),
+        }],
+    )
+    assert result2["appended"] > 0
+    assert result2["deduped"] == 0
+
+    wb = load_workbook(io.BytesIO(slack.files[result2["slack_file_id"]]))
+    ws = wb[sheet]
+    descriptions = [
+        str(ws.cell(row=r, column=2).value or "")
+        for r in range(2, ws.max_row + 1)
+    ]
+    assert "APR-TXN" in descriptions
+    assert "MAY-TXN" in descriptions
+    assert descriptions.count("BALANCE B/F") >= 2
 
 
 def test_bank_sheet_has_no_dedupe_column():
@@ -2001,3 +2326,79 @@ def test_replace_true_doc_key_in_seen_after_replace():
     ptr = store.get_pointer("c1", "2026")
     seen = set(ptr.get("seen_doc_keys") or [])
     assert "Purchase:INV-10" in seen
+
+
+def test_best_fy_for_chat_picks_fy_with_most_rows():
+    """``best_fy_for_chat`` should return the FY whose workbook has the most
+    data, not the highest FY label. P0-1 fix for chat lane."""
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+
+    # FY2025 — populated with 3 rows
+    slack_file_old = store.append_rows(
+        client_id="c1", fy="2025", slack_client=slack, channel_id="C1",
+        software="qbs", kind="invoice",
+        batches=[{
+            "sheet": "Purchase",
+            "doc_key": "old:Purchase:1",
+            "rows": [
+                _row("a"), _row("b"), _row("c"),
+            ],
+        }],
+    )["slack_file_id"]
+
+    # FY2026 — populated with 1 row (would be picked by latest_fy)
+    store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        software="qbs", kind="invoice",
+        batches=[{
+            "sheet": "Purchase",
+            "doc_key": "new:Purchase:1",
+            "rows": [_row("only")],
+        }],
+    )
+
+    best, summaries = store.best_fy_for_chat("c1", slack)
+    assert best == "2025", f"expected FY2025 (more rows), got {best!r}"
+    by_fy = {s["fy"]: s for s in summaries}
+    assert by_fy["2025"]["row_count"] == 3
+    assert by_fy["2025"]["has_data"] is True
+    assert by_fy["2026"]["row_count"] == 1
+    # Sanity: pointer file_id for FY2025 matches.
+    assert by_fy["2025"]["fy"] == "2025"
+    # Suppress unused-var lint for the captured file id.
+    assert slack_file_old
+
+
+def test_best_fy_for_chat_falls_back_to_latest_when_empty():
+    """If every FY is empty, fall back to the highest FY label (matches
+    the old ``latest_fy`` behaviour so the agent can still report a stable
+    label to the user)."""
+    slack = FakeSlackClient()
+    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+    # Manually create an empty workbook so the FY pointer resolves to a real
+    # file (with zero rows) — append_rows rejects empty batches.
+    from openpyxl import Workbook
+    wb = Workbook()
+    wb.active.append(["Date", "Description", "Source Amount"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    slack.files["F_EMPTY"] = buf.getvalue()
+    slack.urls["F_EMPTY"] = buf.getvalue()
+    store._set_pointer(
+        client_id="c1", fy="2025", slack_file_id="F_EMPTY",
+    )
+    best, summaries = store.best_fy_for_chat("c1", slack)
+    assert best == "2025"
+    assert all(s["row_count"] == 0 for s in summaries)
+    # All FYs are empty → has_data is False for each.
+    assert all(s["has_data"] is False for s in summaries)
+
+
+def test_best_fy_for_chat_no_pointers_returns_none():
+    """No ledger pointers → ``(None, [])``."""
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+    best, summaries = store.best_fy_for_chat("ghost", slack)
+    assert best is None
+    assert summaries == []

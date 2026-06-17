@@ -43,6 +43,7 @@ from .export.client_context import (
 from .export.exporters import (
     BankStatementExporter,
     _sheet_title,
+    bank_sheet_title,
     get_bank_exporter,
     get_exporter,
     validate_required_fields,
@@ -155,12 +156,20 @@ def _build_bank_workbook(
 
     Statements sharing an account sheet are merged into one continuous, date-sorted
     chain (see :class:`BankStatementExporter`), so a year of monthly statements for
-    an account lands as a single cross-month-reconciling sheet.
+    an account lands as a single cross-month-reconciling sheet. Multi-currency
+    statements of the same account split into distinct sheets (one per currency).
     """
     wb = Workbook()
     grouped: dict[str, list[BankStatement]] = {}
     for stmt in statements:
-        grouped.setdefault(_sheet_title(stmt.bank_name), []).append(stmt)
+        grouped.setdefault(
+            bank_sheet_title(
+                bank_name=stmt.bank_name,
+                account_number=stmt.account_number,
+                currency=stmt.currency or "SGD",
+            ),
+            [],
+        ).append(stmt)
 
     for i, (title, stmts) in enumerate(grouped.items()):
         sheet = wb.active if i == 0 else wb.create_sheet()

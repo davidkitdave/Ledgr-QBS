@@ -8,7 +8,12 @@ from __future__ import annotations
 
 import pytest
 
-from app.commands import LedgrCommand, parse_ledgr_command, settings_prefill
+from app.commands import (
+    LedgrCommand,
+    ledgr_slash_command_name,
+    parse_ledgr_command,
+    settings_prefill,
+)
 from app.slack_app import handle_ledgr_command, handle_onboarding_submit
 from invoice_processing.export.client_context import ClientContext, InMemoryClientStore
 
@@ -126,6 +131,22 @@ class TestParseLedgrCommand:
     def test_parse_profile_subcommand(self):
         from app.commands import parse_ledgr_command
         assert parse_ledgr_command("profile").subcommand == "profile"
+
+
+class TestLedgrSlashCommandName:
+    def test_dev_default(self, monkeypatch):
+        monkeypatch.delenv("LEDGR_SLASH_COMMAND", raising=False)
+        monkeypatch.setenv("LEDGR_ENV", "dev")
+        assert ledgr_slash_command_name() == "/ledgr-dev"
+
+    def test_prod(self, monkeypatch):
+        monkeypatch.delenv("LEDGR_SLASH_COMMAND", raising=False)
+        monkeypatch.setenv("LEDGR_ENV", "prod")
+        assert ledgr_slash_command_name() == "/ledgr"
+
+    def test_override(self, monkeypatch):
+        monkeypatch.setenv("LEDGR_SLASH_COMMAND", "/ledgr-test")
+        assert ledgr_slash_command_name() == "/ledgr-test"
 
     def test_bogus_returns_help(self):
         cmd = parse_ledgr_command("bogus")

@@ -249,6 +249,322 @@
     },
 
     {
+      "eval_id": "B6_chat_invoice_account_code_trajectory",
+      "session_input": {
+        "app_name": "accounting_agents_assistant",
+        "user_id": "eval_user",
+        "state": {
+          "client_name": "Auditair International Pte Ltd",
+          "client_uen": "201234567A",
+          "region": "SINGAPORE",
+          "base_currency": "SGD",
+          "tax_registered": false,
+          "fye_month": 10,
+          "software": "Xero Ledger",
+          "fy_loaded": "2025",
+          "ledger_row_count": 2,
+          "processing_log_count": 2,
+          "coa": [
+            {"code": "6-3000", "name": "Professional Fees"},
+            {"code": "5-1000", "name": "Cost of Sales"}
+          ],
+          "entity_memory": [],
+          "category_mapping": {},
+          "ledger_data": [
+            {
+              "_sheet": "Purchase",
+              "*InvoiceNumber": "25-D15",
+              "*ContactName": "Darrell Podaima",
+              "*Description": "Consulting fees",
+              "*AccountCode": "6-3000",
+              "*UnitAmount": "1200.00"
+            },
+            {
+              "_sheet": "Purchase",
+              "*InvoiceNumber": "25-D12",
+              "*ContactName": "Darrell Podaima",
+              "*Description": "Advisory",
+              "*AccountCode": "6-3000",
+              "*UnitAmount": "800.00"
+            }
+          ],
+          "processing_log": [
+            {
+              "filename": "25-D15-Podaima Paid.pdf",
+              "file_id": "F-D15",
+              "doc_type": "invoice",
+              "extraction_path": "understand",
+              "fy": "2025",
+              "row_count": 1
+            },
+            {
+              "filename": "25-D12-Podaima Paid.pdf",
+              "file_id": "F-D12",
+              "doc_type": "invoice",
+              "extraction_path": "understand",
+              "fy": "2025",
+              "row_count": 1
+            }
+          ]
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "B6-inv-01",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Tell me why you used this account code for invoice 25-D15 and 25-D12"
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "6-3000 Professional Fees"
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [
+              {"name": "lookup_row", "args": {"query": "25-D15"}},
+              {"name": "explain_categorization", "args": {"vendor_name": "Darrell Podaima", "line_description": "Consulting fees"}},
+              {"name": "lookup_row", "args": {"query": "25-D12"}},
+              {"name": "explain_categorization", "args": {"vendor_name": "Darrell Podaima", "line_description": "Advisory"}}
+            ],
+            "intermediate_responses": []
+          }
+        }
+      ]
+    },
+
+    {
+      "eval_id": "B7_chat_thread_delivery_context_trajectory",
+      "session_input": {
+        "app_name": "accounting_agents_assistant",
+        "user_id": "eval_user",
+        "state": {
+          "client_name": "Auditair International Pte Ltd",
+          "client_uen": "201234567A",
+          "region": "SINGAPORE",
+          "base_currency": "SGD",
+          "tax_registered": false,
+          "fye_month": 10,
+          "software": "Xero Ledger",
+          "fy_loaded": "2025",
+          "ledger_row_count": 2,
+          "processing_log_count": 2,
+          "thread_delivery_message_ts": "1700000099.000200",
+          "thread_delivery_filenames": [
+            "25-D15-Podaima Paid.pdf",
+            "25-D12-Podaima Paid.pdf"
+          ],
+          "thread_delivery_invoice_ids": ["25-D15", "25-D12"],
+          "thread_delivery_fy": "2025",
+          "coa": [
+            {"code": "6-3000", "name": "Professional Fees"},
+            {"code": "5-1000", "name": "Cost of Sales"}
+          ],
+          "entity_memory": [],
+          "category_mapping": {},
+          "ledger_data": [
+            {
+              "_sheet": "Purchase",
+              "*InvoiceNumber": "25-D15",
+              "*ContactName": "Darrell Podaima",
+              "*Description": "Consulting fees",
+              "*AccountCode": "6-3000",
+              "*UnitAmount": "1200.00"
+            },
+            {
+              "_sheet": "Purchase",
+              "*InvoiceNumber": "25-D12",
+              "*ContactName": "Darrell Podaima",
+              "*Description": "Advisory",
+              "*AccountCode": "6-3000",
+              "*UnitAmount": "800.00"
+            }
+          ],
+          "processing_log": [
+            {
+              "filename": "25-D15-Podaima Paid.pdf",
+              "file_id": "F-D15",
+              "doc_type": "invoice",
+              "extraction_path": "understand",
+              "fy": "2025",
+              "row_count": 1,
+              "delivery_message_ts": "1700000099.000200",
+              "channel_id": "C-auditair",
+              "invoice_ids": ["25-D15"]
+            },
+            {
+              "filename": "25-D12-Podaima Paid.pdf",
+              "file_id": "F-D12",
+              "doc_type": "invoice",
+              "extraction_path": "understand",
+              "fy": "2025",
+              "row_count": 1,
+              "delivery_message_ts": "1700000099.000200",
+              "channel_id": "C-auditair",
+              "invoice_ids": ["25-D12"]
+            }
+          ],
+          "thread_scoped_processing_log": [
+            {
+              "filename": "25-D15-Podaima Paid.pdf",
+              "file_id": "F-D15",
+              "fy": "2025",
+              "delivery_message_ts": "1700000099.000200",
+              "invoice_ids": ["25-D15"]
+            },
+            {
+              "filename": "25-D12-Podaima Paid.pdf",
+              "file_id": "F-D12",
+              "fy": "2025",
+              "delivery_message_ts": "1700000099.000200",
+              "invoice_ids": ["25-D12"]
+            }
+          ]
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "B7-inv-01",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Why account code for 25-D15 in this delivery?"
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "6-3000 Professional Fees"
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [
+              {"name": "lookup_row", "args": {"query": "25-D15"}},
+              {"name": "explain_categorization", "args": {"vendor_name": "Darrell Podaima", "line_description": "Consulting fees"}}
+            ],
+            "intermediate_responses": []
+          }
+        }
+      ]
+    },
+
+    {
+      "eval_id": "B8_thread_followup_coa_description",
+      "session_input": {
+        "app_name": "accounting_agents_assistant",
+        "user_id": "eval_user",
+        "state": {
+          "client_name": "Auditair International Pte Ltd",
+          "client_uen": "201234567A",
+          "region": "SINGAPORE",
+          "base_currency": "SGD",
+          "tax_registered": false,
+          "fye_month": 10,
+          "software": "Xero Ledger",
+          "fy_loaded": "2025",
+          "ledger_row_count": 1,
+          "processing_log_count": 1,
+          "thread_delivery_message_ts": "1700000099.000200",
+          "thread_delivery_filenames": ["25-D15-Podaima Paid.pdf"],
+          "thread_delivery_invoice_ids": ["25-D15"],
+          "thread_delivery_fy": "2025",
+          "thread_focus": {
+            "invoice_id": "25-D15",
+            "account_code": "902-A02",
+            "vendor": "Darrell Podaima",
+            "line_description": "Consulting fees",
+            "row_index": 0
+          },
+          "coa": [
+            {"code": "902-A02", "description": "Professional Fees", "account_type": "Expense"}
+          ],
+          "entity_memory": [],
+          "category_mapping": {},
+          "ledger_data": [
+            {
+              "_sheet": "Purchase",
+              "*InvoiceNumber": "25-D15",
+              "*ContactName": "Darrell Podaima",
+              "*Description": "Consulting fees",
+              "*AccountCode": "902-A02",
+              "*UnitAmount": "1200.00"
+            }
+          ],
+          "processing_log": [
+            {
+              "filename": "25-D15-Podaima Paid.pdf",
+              "file_id": "F-D15",
+              "doc_type": "invoice",
+              "extraction_path": "understand",
+              "fy": "2025",
+              "row_count": 1,
+              "delivery_message_ts": "1700000099.000200",
+              "channel_id": "C-auditair",
+              "invoice_ids": ["25-D15"]
+            }
+          ],
+          "thread_delivery_ledger_matches": [
+            {
+              "invoice_id": "25-D15",
+              "account_code": "902-A02",
+              "vendor": "Darrell Podaima",
+              "description": "Consulting fees",
+              "row_index": 0
+            }
+          ]
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "B8-inv-01",
+          "user_content": {
+            "role": "user",
+            "parts": [{"text": "Why account code for 25-D15?"}]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [{"text": "902-A02 posted for 25-D15"}]
+          },
+          "intermediate_data": {
+            "tool_uses": [
+              {"name": "lookup_row", "args": {"query": "25-D15"}},
+              {"name": "explain_categorization", "args": {"row_index": "0"}}
+            ],
+            "intermediate_responses": []
+          }
+        },
+        {
+          "invocation_id": "B8-inv-02",
+          "user_content": {
+            "role": "user",
+            "parts": [{"text": "What is the description of that account code?"}]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [{"text": "902-A02 Professional Fees"}]
+          },
+          "intermediate_data": {
+            "tool_uses": [
+              {"name": "lookup_coa_account", "args": {"account_code": "902-A02"}}
+            ],
+            "intermediate_responses": []
+          }
+        }
+      ]
+    },
+
+    {
       "eval_id": "C6_gst_non_registered_invoice_all_nt",
       "session_input": {
         "app_name": "accounting_agents",

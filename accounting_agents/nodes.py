@@ -53,6 +53,7 @@ from invoice_processing.export.client_context import (
     entity_memory_from_state,
 )
 from invoice_processing.export.exporters import (
+    bank_sheet_title,
     get_bank_exporter,
     get_exporter,
 )
@@ -971,9 +972,18 @@ def _apply_review_clarify(ctx, decision, pdf_payload: bytes | tuple[bytes, str])
 
 
 async def extract_bank_node(ctx) -> Event:
-    """Extract a bank statement (MODEL_STD) into a list of BankStatements."""
+    """Extract a bank statement into a list of BankStatements.
+
+    Digital PDFs (pdfplumber text) use ``MODEL_LITE``; scanned/image paths use
+    ``MODEL_STD`` for stronger multimodal OCR.
+    """
     data, mime_type = await _load_pdf_bytes(ctx)
-    result = EXTRACT_BANK_FN(data, mime_type, model=MODEL_STD)
+    result = EXTRACT_BANK_FN(
+        data,
+        mime_type,
+        digital_model=MODEL_LITE,
+        vision_model=MODEL_STD,
+    )
     # extract_bank_statement returns (ExtractedBankStatement, mode_used); fakes
     # may return just the statement.
     if isinstance(result, tuple):
@@ -1064,16 +1074,14 @@ async def route_node(ctx) -> Event:
     routes: list[dict] = []
 
     if doc_type == "bank_statement":
-        for s in _bank_from_state(ctx.state):
-            # Bank statements route by representative date; derive it from the
-            # stored BankStatement dict's transactions.
-            rep_date = _bank_dict_representative_date(s)
+        doc_date = _bank_run_representative_date(ctx.state)
+        for _s in _bank_from_state(ctx.state):
             routes.append(
                 _route_to_dict(
                     route_document(
                         doc_type="bank_statement",
                         direction=None,
-                        doc_date=rep_date,
+                        doc_date=doc_date,
                         fye_month=fye_month,
                         client_id=client_id,
                         filename=ctx.state.get("source_filename", "statement.pdf"),
@@ -1277,12 +1285,20 @@ async def consolidate_node(ctx) -> Event:
         exporter = get_bank_exporter()
         statements = _bank_statements_from_state(state)
         for idx, (stmt, route) in enumerate(zip(statements, routes)):
-            sheet = stmt.bank_name or stmt.account_number or f"Account {idx + 1}"
+            sheet = bank_sheet_title(
+                bank_name=stmt.bank_name,
+                account_number=stmt.account_number,
+                currency=stmt.currency or "SGD",
+            )
             rows = exporter.bank_rows(stmt)
+            # Currency is part of the dedupe identity so different currency
+            # sections of the same account don't share a doc_key (and so a
+            # re-drop of just one currency doesn't get silently deduped).
+            ident = f"{stmt.account_number or stmt.bank_name}:{stmt.currency or 'SGD'}"
             batches.append(
                 {
                     "sheet": sheet,
-                    "doc_key": _doc_key(state, sheet, stmt.account_number or stmt.bank_name, idx,
+                    "doc_key": _doc_key(state, sheet, ident, idx,
                                        period=stmt.statement_period or ""),
                     "rows": rows,
                 }
@@ -1532,13 +1548,65 @@ def _bank_statements_from_state(state: dict) -> list[BankStatement]:
     return [_dict_to_bank(d) for d in (state.get(BANK_STATEMENTS_KEY) or [])]
 
 
+def _parse_statement_period_anchor(period: Optional[str]) -> Optional[date]:
+    """Parse the opening date from a printed statement period string."""
+    if not period or not str(period).strip():
+        return None
+    import re
+    from datetime import datetime
+
+    text = str(period).strip()
+    if re.search(r"\s+to\s+", text, flags=re.I):
+        head = re.split(r"\s+to\s+", text, maxsplit=1, flags=re.I)[0].strip()
+    elif " - " in text:
+        head = text.split(" - ", 1)[0].strip()
+    else:
+        head = text
+    for fmt in (
+        "%d %b %Y", "%d %B %Y", "%d-%b-%Y", "%d-%B-%Y",
+        "%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d",
+    ):
+        try:
+            return datetime.strptime(head, fmt).date()
+        except ValueError:
+            continue
+    return _parse_iso(head)
+
+
+def _bank_run_representative_date(state: dict) -> date:
+    """Pick one routing date for the whole bank PDF.
+
+  Scans every currency section for transaction dates, then falls back to
+  ``statement_period`` on any account. Only uses ``date.today()`` when the
+  entire extraction is dateless — never because the first-listed currency
+  (often CNH) happened to have zero transactions.
+    """
+    statements = _bank_from_state(state)
+    best: Optional[date] = None
+    for s in statements:
+        for t in s.get("transactions") or []:
+            d = _parse_iso(t.get("date"))
+            if d is not None and (best is None or d > best):
+                best = d
+    if best is not None:
+        return best
+    for s in statements:
+        anchor = _parse_statement_period_anchor(s.get("statement_period"))
+        if anchor is not None:
+            return anchor
+    return date.today()
+
+
 def _bank_dict_representative_date(s: dict) -> date:
     best: Optional[date] = None
     for t in s.get("transactions") or []:
         d = _parse_iso(t.get("date"))
         if d is not None and (best is None or d > best):
             best = d
-    return best if best is not None else date.today()
+    if best is not None:
+        return best
+    anchor = _parse_statement_period_anchor(s.get("statement_period"))
+    return anchor if anchor is not None else date.today()
 
 
 def _route_to_dict(r: DocRoute) -> dict:

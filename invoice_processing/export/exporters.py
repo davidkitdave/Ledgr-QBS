@@ -344,6 +344,53 @@ def _sheet_title(name: str) -> str:
     return (name or "Bank").translate(_SHEET_INVALID).strip()[:31] or "Bank"
 
 
+def _last4_digits(*sources: str | None) -> str:
+    """Return the last 4 numeric digits found across the given strings (left-padded).
+
+    Used to build a deterministic tab name like ``DBS - 5545 - CNH`` from
+    a free-form ``bank_name`` + structured ``account_number``. We fall back
+    across sources so an LLM that already packed the digits into ``bank_name``
+    still produces a stable title.
+    """
+    digits = "".join(c for c in "".join(s or "" for s in sources) if c.isdigit())
+    return digits[-4:].rjust(4, "0") if digits else "0000"
+
+
+def _bank_label(bank_name: str) -> str:
+    """Extract the bank-only label from a possibly-prefixed ``bank_name``.
+
+    The LLM extraction prompt sometimes returns ``"OCBC - 5001"`` or
+    ``"DBS Bank Ltd - 5545"``. We keep just the bank portion (text before the
+    first ``-``) so the structured ``account_number`` + ``currency`` are the
+    sole source of the last-4 + currency suffix appended by ``bank_sheet_title``.
+    """
+    raw = (bank_name or "").strip()
+    if " - " in raw:
+        return raw.split(" - ", 1)[0].strip()
+    if "-" in raw and not any(c.isdigit() for c in raw.split("-", 1)[0]):
+        return raw.split("-", 1)[0].strip()
+    return raw or "Bank"
+
+
+def bank_sheet_title(
+    *,
+    bank_name: str,
+    account_number: str | None,
+    currency: str,
+) -> str:
+    """Build ``"<Bank> - XXXX - CCY"`` for a bank statement's Excel tab.
+
+    Deterministic (code-owned, not LLM-owned) so multi-currency statements of
+    the same account split into distinct tabs instead of being silently merged
+    by ``SlackLedgerStore._merge_bank_statement``. Result is sanitized via
+    :func:`_sheet_title` (invalid Excel chars stripped, capped at 31 chars).
+    """
+    label = _bank_label(bank_name)
+    last4 = _last4_digits(account_number, bank_name)
+    ccy = (currency or "SGD").upper()
+    return _sheet_title(f"{label} - {last4} - {ccy}")
+
+
 def _parse_ddmmyyyy(value) -> Optional[datetime]:
     """Parse a ``DD/MM/YYYY`` date string into a ``datetime`` (None if unparseable).
 
@@ -682,13 +729,21 @@ class BankStatementExporter:
 
         Statements sharing a bank/account sheet are merged into a single continuous
         ledger (sorted by date, one chain), so a year of monthly statements for an
-        account lands as one sorted, cross-month-reconciling sheet.
+        account lands as one sorted, cross-month-reconciling sheet. Multi-currency
+        statements of the same account split into distinct sheets (one per currency).
         """
         wb = Workbook()
         # Group statements by their sheet title, preserving first-seen order.
         grouped: dict[str, list[BankStatement]] = {}
         for stmt in statements:
-            grouped.setdefault(_sheet_title(stmt.bank_name), []).append(stmt)
+            grouped.setdefault(
+                bank_sheet_title(
+                    bank_name=stmt.bank_name,
+                    account_number=stmt.account_number,
+                    currency=stmt.currency or "SGD",
+                ),
+                [],
+            ).append(stmt)
 
         for i, (title, stmts) in enumerate(grouped.items()):
             sheet = wb.active if i == 0 else wb.create_sheet()

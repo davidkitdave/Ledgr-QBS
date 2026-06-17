@@ -466,9 +466,10 @@ class TestModelInfo:
         from accounting_agents import config
 
         data = json.loads(model_info(_FakeToolContext({})))
-        assert data["chat_model"] == config.MODEL_LITE
+        assert data["chat_model"] == config.MODEL_CHAT
         assert data["model_lite"] == config.MODEL_LITE
         assert data["model_std"] == config.MODEL_STD
+        assert data["model_chat"] == config.MODEL_CHAT
 
 
 # --------------------------------------------------------------------------- #
@@ -477,18 +478,21 @@ class TestModelInfo:
 
 
 def test_assistant_agent_is_root_multi_turn():
-    """A root LlmAgent carries no ``mode`` (multi-turn default) and exposes 17 tools.
+    """A root LlmAgent carries no ``mode`` (multi-turn default) and exposes
+    20 read/explain/inspect + 4 gated write tools.
 
     See ADR-0008: in ADK 2.2.0 a root agent must not set ``mode``, so the
     runtime uses ``include_contents='default'`` and the agent sees full
-    session history. Step 4 (ADR-0009) adds the two gated write tools (14);
-    Step 7 (C-3) adds learn_mapping (15) and replace_recorded_month (16);
-    Step 7 (ADR-0010) adds re_extract_document (17).
+    session history. Step 4 (ADR-0009) adds the two gated write tools;
+    Step 7 (C-3) adds learn_mapping and replace_recorded_month; Step 7
+    (ADR-0010) adds re_extract_document; P1 (2026-06-16) adds the four
+    diagnostic / introspection tools; thread follow-up (2026-06-17) adds
+    ``lookup_coa_account`` and ``explain_posted_line``.
     """
     from accounting_agents.assistant import assistant_agent
 
     assert assistant_agent.mode is None
-    assert len(assistant_agent.tools) == 18
+    assert len(assistant_agent.tools) == 24
 
 
 def test_write_tools_registered_with_confirmation():
@@ -511,8 +515,45 @@ def test_write_tools_registered_with_confirmation():
         assert tool._require_confirmation is True
 
 
+def test_thread_before_model_injects_preamble():
+    from accounting_agents.assistant import THREAD_FOCUS_KEY, _chat_before_model
+    from google.adk.models import LlmRequest
+    from google.genai import types
+
+    class _State:
+        def get(self, key, default=None):
+            data = {
+                THREAD_FOCUS_KEY: {
+                    "invoice_id": "25-D15",
+                    "account_code": "902-A02",
+                },
+                "thread_delivery_message_ts": "1700000099.000200",
+            }
+            return data.get(key, default)
+
+    class _Ctx:
+        state = _State()
+
+    req = LlmRequest(
+        contents=[
+            types.Content(
+                role="user",
+                parts=[types.Part(text="What is the description of the account code?")],
+            )
+        ]
+    )
+    result = _chat_before_model(_Ctx(), req)
+    assert result is None
+    assert req.config.system_instruction
+    assert "902-A02" in req.config.system_instruction
+    assert "lookup_coa_account" in req.config.system_instruction
+
+
 def test_assistant_instruction_seeds_profile():
-    """The profile preamble is prepended whenever ``client_name`` is set."""
+    """P5-slim: profile fields populate the ``{+key+}`` placeholders
+    inside ``_BASE_INSTRUCTION`` instead of being prepended as a separate
+    preamble block. ADK injects state into the base instruction at LLM
+    call time — the rendered prompt is one string, not two concatenated."""
     from accounting_agents.assistant import _BASE_INSTRUCTION, assistant_instruction
 
     ctx = _FakeToolContext({
@@ -526,12 +567,20 @@ def test_assistant_instruction_seeds_profile():
     text = assistant_instruction(ctx)
     assert "Acme Pte Ltd" in text
     assert "201912345A" in text
-    assert text.endswith(_BASE_INSTRUCTION)
-
-    # Empty state → base instruction unchanged.
-    assert assistant_instruction(_FakeToolContext({})) == _BASE_INSTRUCTION
+    # The rendered prompt still contains the base instruction (with
+    # placeholders filled in).
+    assert "You are the read-only accounting assistant" in text
+    # And the placeholders themselves are gone (ADK substitution worked).
+    assert "{+client_name+}" not in text
+    # Empty state → optional placeholders collapse to empty strings; the
+    # surrounding routing tree + rules still flow. Whitespace-only
+    # client_name is treated as absent (no exception, no leftover
+    # placeholder text).
+    base = assistant_instruction(_FakeToolContext({}))
+    assert "You are the read-only accounting assistant" in base
+    assert "Acme Pte Ltd" not in base
     # Whitespace-only client_name is treated as absent.
-    assert assistant_instruction(_FakeToolContext({"client_name": "   "})) == _BASE_INSTRUCTION
+    assert assistant_instruction(_FakeToolContext({"client_name": "   "})) == base
 
 
 # --------------------------------------------------------------------------- #
@@ -1347,3 +1396,512 @@ def test_list_recent_documents_enriched_with_processing_log():
     doc = data["documents"][0]
     assert doc["extraction_path"] == "understand"
     assert doc["file_id"] == "F-INV-1"
+
+
+# --------------------------------------------------------------------------- #
+# P0-2 — Xero → tool column normalization
+# --------------------------------------------------------------------------- #
+
+
+def test_xero_row_normalization_aliases_to_qbs_columns():
+    """Xero rows (``*InvoiceNumber``, ``*InvoiceDate`` etc.) should surface as
+    QBS column names so chat tools that read ``Source Filename`` /
+    ``Description`` / ``Source Amount`` see the right values."""
+    from accounting_agents.assistant import _normalize_row_for_tools
+
+    raw = {
+        "_sheet": "Purchase",
+        "*InvoiceNumber": "INV-9001",
+        "*InvoiceDate": "2025-09-12",
+        "*Description": "Office supplies",
+        "*AccountCode": "6100-Software",
+        "*UnitAmount": 123.45,
+    }
+    out = _normalize_row_for_tools(raw)
+    assert out["Source Filename"] == "Xero:INV-9001"
+    assert out["Doc Type"] == "Purchase"
+    assert out["Source Amount"] == 123.45
+    assert out["Description"] == "Office supplies"
+    assert out["Account Code / COA"] == "6100-Software"
+    assert out["Date"] == "2025-09-12"
+    # Original Xero keys are still there for callers that want them.
+    assert out["*InvoiceNumber"] == "INV-9001"
+
+
+def test_qbs_row_normalization_preserves_existing_fields():
+    """QBS rows already use the canonical column names; normalization must
+    not overwrite them or lose data."""
+    from accounting_agents.assistant import _normalize_row_for_tools
+
+    raw = {
+        "_sheet": "Purchase",
+        "Source Filename": "acme.pdf",
+        "Doc Type": "Purchase",
+        "Source Amount": 200.0,
+        "Description": "Existing QBS row",
+        "Account Code / COA": "6000",
+        "Date": "01/10/2025",
+    }
+    out = _normalize_row_for_tools(raw)
+    assert out["Source Filename"] == "acme.pdf"
+    assert out["Source Amount"] == 200.0
+    assert out["Description"] == "Existing QBS row"
+
+
+def test_get_rows_applies_normalization_to_every_row():
+    """``_get_rows`` should always return normalized rows so downstream tools
+    can rely on QBS column names regardless of the source software."""
+    from accounting_agents.assistant import _get_rows
+
+    raw = [
+        {"_sheet": "Purchase", "*InvoiceNumber": "X-1", "*UnitAmount": 50.0},
+        {"_sheet": "Sales", "*InvoiceNumber": "X-2", "*UnitAmount": 75.0},
+    ]
+    rows = _get_rows(_FakeToolContext({LEDGER_DATA_KEY: raw}))
+    assert all("Source Filename" in r for r in rows)
+    assert rows[0]["Doc Type"] == "Purchase"
+    assert rows[1]["Doc Type"] == "Sales"
+    assert [r["Source Amount"] for r in rows] == [50.0, 75.0]
+
+
+def test_list_recent_documents_empty_returns_diagnostic_message():
+    """Empty-state must include FY/row count/processing-log depth, not the
+    generic "upload the ledger" string."""
+    from accounting_agents.assistant import (
+        PROCESSING_LOG_KEY,
+        list_recent_documents,
+    )
+
+    ctx = _FakeToolContext({
+        LEDGER_DATA_KEY: [],
+        "fy_loaded": "2026",
+        "ledger_row_count": 0,
+        "fy_pointers": [
+            {"fy": "2025", "row_count": 42, "has_data": True},
+            {"fy": "2026", "row_count": 0, "has_data": False},
+        ],
+        PROCESSING_LOG_KEY: [
+            {"filename": "old.pdf", "file_id": "F-1", "extraction_path": "understand"},
+        ],
+    })
+    msg = list_recent_documents(ctx)
+    assert "FY2026" in msg
+    assert "FY2025=42" in msg
+    assert "row_count=0" in msg
+    assert "Processing log has 1 entries" in msg
+    # Also assert the legacy "not loaded" wording is preserved so the older
+    # tests that check for it still match.
+    assert "not loaded" in msg.lower()
+
+
+# --------------------------------------------------------------------------- #
+# P1 — Diagnostic / introspection tools
+# --------------------------------------------------------------------------- #
+
+
+def test_diagnose_assistant_context_empty_ledger():
+    """diagnose_assistant_context returns the FY pointers and counts even
+    when the ledger is empty, so the LLM can answer 'what FYs exist?'."""
+    from accounting_agents.assistant import (
+        PENDING_REVIEWS_KEY,
+        PROCESSING_LOG_KEY,
+        diagnose_assistant_context,
+    )
+
+    ctx = _FakeToolContext({
+        "client_name": "Auditair",
+        "software": "Xero Ledger",
+        "fy_loaded": "2026",
+        "ledger_row_count": 0,
+        "fy_pointers": [
+            {"fy": "2025", "row_count": 42, "has_data": True},
+            {"fy": "2026", "row_count": 0, "has_data": False},
+        ],
+        PROCESSING_LOG_KEY: [{"filename": "a.pdf"}],
+        PENDING_REVIEWS_KEY: [],
+    })
+    data = json.loads(diagnose_assistant_context(ctx))
+    assert data["status"] == "success"
+    assert data["client_name"] == "Auditair"
+    assert data["software"] == "Xero Ledger"
+    assert data["fy_loaded"] == "2026"
+    assert data["ledger_row_count"] == 0
+    assert data["ledger_type"] == "empty"
+    assert data["processing_log_count"] == 1
+    assert data["pending_review_count"] == 0
+    assert data["onboarding_required"] is False
+    assert len(data["fy_pointers"]) == 2
+
+
+def test_diagnose_assistant_context_detects_bank_ledger():
+    """ledger_type='bank' when any sample row is on a non-invoice sheet."""
+    from accounting_agents.assistant import diagnose_assistant_context
+
+    ctx = _FakeToolContext({
+        "client_name": "Acme",
+        "software": "QBS",
+        "fy_loaded": "2025",
+        "ledger_row_count": 1,
+        LEDGER_DATA_KEY: [
+            {"_sheet": "OCBC - 0001", "Date": "01/01/2025", "Balance": 100.0},
+        ],
+    })
+    data = json.loads(diagnose_assistant_context(ctx))
+    assert data["ledger_type"] == "bank"
+
+
+def test_diagnose_assistant_context_detects_invoice_ledger():
+    """ledger_type='invoice' for Purchase/Sales sheets."""
+    from accounting_agents.assistant import diagnose_assistant_context
+
+    ctx = _FakeToolContext({
+        "client_name": "Acme",
+        "software": "QBS",
+        "fy_loaded": "2025",
+        "ledger_row_count": 1,
+        LEDGER_DATA_KEY: [
+            {"_sheet": "Purchase", "Date": "01/01/2025", "Source Amount": 50.0},
+        ],
+    })
+    data = json.loads(diagnose_assistant_context(ctx))
+    assert data["ledger_type"] == "invoice"
+
+
+def test_list_processing_history_returns_recent_entries():
+    from accounting_agents.assistant import (
+        PROCESSING_LOG_KEY,
+        list_processing_history,
+    )
+
+    ctx = _FakeToolContext({
+        PROCESSING_LOG_KEY: [
+            {
+                "filename": "a.pdf",
+                "file_id": "F-1",
+                "doc_type": "invoice",
+                "extraction_path": "understand",
+                "row_count": 3,
+                "fy": "2025",
+            },
+            {
+                "filename": "b.pdf",
+                "file_id": "F-2",
+                "doc_type": "statement_of_account",
+                "extraction_path": "soa_legacy",
+                "soa_legacy_path": True,
+                "row_count": 10,
+            },
+        ],
+    })
+    data = json.loads(list_processing_history(ctx))
+    assert len(data["entries"]) == 2
+    assert data["entries"][0]["filename"] == "a.pdf"
+    assert data["entries"][1]["soa_legacy_path"] is True
+
+
+def test_list_processing_history_empty_log():
+    from accounting_agents.assistant import list_processing_history
+
+    data = json.loads(list_processing_history(_FakeToolContext({})))
+    assert data == {"entries": []}
+
+
+def test_get_document_processing_detail_merges_session_snapshot():
+    """Detail tool layers the read-only ``document_sessions`` snapshot on
+    top of the processing log entry so the LLM can cite both."""
+    from accounting_agents.assistant import (
+        DOCUMENT_SESSIONS_KEY,
+        PROCESSING_LOG_KEY,
+        get_document_processing_detail,
+    )
+
+    ctx = _FakeToolContext({
+        PROCESSING_LOG_KEY: [
+            {
+                "filename": "invoice.pdf",
+                "file_id": "F-INV-1",
+                "doc_type": "invoice",
+                "extraction_path": "understand",
+            }
+        ],
+        DOCUMENT_SESSIONS_KEY: {
+            "F-INV-1": {
+                "doc_type": "invoice",
+                "extraction_path": "understand",
+                "review_reasons": ["tax_code_unknown"],
+                "source_filename": "invoice.pdf",
+                "summary_table_size": 5,
+                "normalized_invoice_count": 1,
+            }
+        },
+    })
+    data = json.loads(
+        get_document_processing_detail(ctx, file_id="F-INV-1")
+    )
+    assert data["file_id"] == "F-INV-1"
+    assert data["review_reasons"] == ["tax_code_unknown"]
+    assert data["summary_table_size"] == 5
+    assert data["normalized_invoice_count"] == 1
+
+
+def test_get_document_processing_detail_partial_filename_match():
+    """Users say ``25-D15``; log stores ``25-D15-Podaima Paid.pdf``."""
+    from accounting_agents.assistant import (
+        PROCESSING_LOG_KEY,
+        get_document_processing_detail,
+    )
+
+    ctx = _FakeToolContext({
+        PROCESSING_LOG_KEY: [
+            {
+                "filename": "25-D15-Podaima Paid.pdf",
+                "file_id": "F-D15",
+                "doc_type": "invoice",
+                "extraction_path": "understand",
+            }
+        ],
+    })
+    data = json.loads(
+        get_document_processing_detail(ctx, filename="25-D15")
+    )
+    assert data["file_id"] == "F-D15"
+    assert "25-D15" in data["filename"]
+
+
+def test_lookup_row_finds_xero_invoice_number():
+    from accounting_agents.assistant import LEDGER_DATA_KEY, lookup_row
+
+    ctx = _FakeToolContext({
+        LEDGER_DATA_KEY: [
+            {
+                "_sheet": "Purchase",
+                "*InvoiceNumber": "25-D12",
+                "*ContactName": "Darrell Podaima",
+                "*Description": "Professional services",
+                "*AccountCode": "6-3000",
+                "*UnitAmount": "500.00",
+            }
+        ],
+    })
+    data = json.loads(lookup_row(ctx, query="25-D12"))
+    assert len(data["matches"]) == 1
+    assert data["matches"][0]["account_code"] == "6-3000"
+    assert "Darrell" in (data["matches"][0].get("vendor") or "")
+
+
+def test_lookup_row_falls_back_to_processing_log_when_ledger_empty():
+    from accounting_agents.assistant import PROCESSING_LOG_KEY, lookup_row
+
+    ctx = _FakeToolContext({
+        "ledger_data": [],
+        "fy_loaded": "2026",
+        PROCESSING_LOG_KEY: [
+            {
+                "filename": "25-D12-Podaima Paid.pdf",
+                "file_id": "F-D12",
+                "fy": "2025",
+                "doc_type": "invoice",
+            }
+        ],
+    })
+    data = json.loads(lookup_row(ctx, query="25-D12"))
+    assert data["matches"] == []
+    assert len(data["processing_log_matches"]) == 1
+    assert data["processing_log_matches"][0]["fy"] == "2025"
+
+
+def test_explain_categorization_accepts_row_index():
+    from accounting_agents.assistant import LEDGER_DATA_KEY, explain_categorization
+
+    ctx = _FakeToolContext({
+        LEDGER_DATA_KEY: [
+            {
+                "Vendor": "Acme Pte Ltd",
+                "Description": "Consulting fees",
+            }
+        ],
+        "coa": [{"code": "6100", "name": "Professional Fees"}],
+    })
+    data = json.loads(explain_categorization(ctx, row_index="0"))
+    assert data["status"] in ("resolved", "unresolved")
+    assert "account_code" in data
+
+
+def test_get_document_processing_detail_not_found_lists_recent():
+    from accounting_agents.assistant import (
+        PROCESSING_LOG_KEY,
+        get_document_processing_detail,
+    )
+
+    ctx = _FakeToolContext({
+        PROCESSING_LOG_KEY: [
+            {"filename": "old.pdf", "file_id": "F-OLD", "extraction_path": "understand"},
+        ],
+    })
+    data = json.loads(
+        get_document_processing_detail(ctx, filename="missing.pdf")
+    )
+    assert data["status"] == "not_found"
+    assert data["recent"][0]["filename"] == "old.pdf"
+
+
+def test_list_pending_reviews_returns_interrupts():
+    from accounting_agents.assistant import (
+        PENDING_REVIEWS_KEY,
+        list_pending_reviews,
+    )
+
+    ctx = _FakeToolContext({
+        PENDING_REVIEWS_KEY: [
+            {
+                "interrupt_id": "INT-1",
+                "file_id": "F-1",
+                "filename": "x.pdf",
+                "doc_type": "invoice",
+                "asked_at": "2026-06-17T01:00:00Z",
+                "reason": "tax_code_unknown",
+                "options": ["approve", "edit", "reject"],
+            }
+        ],
+    })
+    data = json.loads(list_pending_reviews(ctx))
+    assert data["count"] == 1
+    assert data["reviews"][0]["interrupt_id"] == "INT-1"
+    assert data["reviews"][0]["options"] == ["approve", "edit", "reject"]
+
+
+def test_list_pending_reviews_empty():
+    from accounting_agents.assistant import list_pending_reviews
+
+    data = json.loads(list_pending_reviews(_FakeToolContext({})))
+    assert data == {"reviews": [], "count": 0}
+
+
+def test_lookup_coa_account_finds_code():
+    from accounting_agents.assistant import lookup_coa_account
+
+    ctx = _FakeToolContext({
+        "coa": [
+            {"code": "902-A02", "description": "Professional Fees", "account_type": "Expense"},
+        ],
+    })
+    data = json.loads(lookup_coa_account(ctx, account_code="902-A02"))
+    assert data["status"] == "found"
+    assert data["description"] == "Professional Fees"
+    assert data["account_type"] == "Expense"
+
+
+def test_lookup_coa_account_uses_thread_focus():
+    from accounting_agents.assistant import THREAD_FOCUS_KEY, lookup_coa_account
+
+    ctx = _FakeToolContext({
+        THREAD_FOCUS_KEY: {"account_code": "902-A02"},
+        "coa": [{"code": "902-A02", "description": "Professional Fees"}],
+    })
+    data = json.loads(lookup_coa_account(ctx, account_code=""))
+    assert data["status"] == "found"
+    assert data["code"] == "902-A02"
+
+
+def test_explain_posted_line_combines_ledger_and_coa():
+    from accounting_agents.assistant import LEDGER_DATA_KEY, explain_posted_line
+
+    ctx = _FakeToolContext({
+        LEDGER_DATA_KEY: [
+            {
+                "*InvoiceNumber": "25-D15",
+                "*ContactName": "Darrell Podaima",
+                "*Description": "Consulting fees",
+                "*AccountCode": "902-A02",
+            }
+        ],
+        "coa": [{"code": "902-A02", "description": "Professional Fees"}],
+        "processing_log": [
+            {
+                "filename": "25-D15-Podaima Paid.pdf",
+                "file_id": "F-D15",
+                "invoice_ids": ["25-D15"],
+                "extraction_path": "understand",
+            }
+        ],
+    })
+    data = json.loads(explain_posted_line(ctx, invoice_id="25-D15"))
+    assert data["status"] == "found"
+    assert data["posted_account_code"] == "902-A02"
+    assert data["coa_description"] == "Professional Fees"
+    assert data["vendor"] == "Darrell Podaima"
+
+
+def test_diagnostic_tools_registered_on_assistant_agent():
+    """Introspection + COA tools must be wired up to ``assistant_agent``."""
+    from google.adk.tools import FunctionTool
+
+    from accounting_agents.assistant import assistant_agent
+
+    tool_names = {
+        getattr(t, "func", t).__name__
+        for t in assistant_agent.tools
+    }
+    for name in (
+        "diagnose_assistant_context",
+        "get_document_processing_detail",
+        "list_processing_history",
+        "list_pending_reviews",
+        "lookup_coa_account",
+        "explain_posted_line",
+    ):
+        assert name in tool_names, f"{name!r} missing from assistant_agent.tools"
+
+
+def test_assistant_instruction_includes_diagnostic_counts_in_preamble():
+    """P3: preamble must include FY/row count/processing-log/pending-review."""
+    from accounting_agents.assistant import (
+        PENDING_REVIEWS_KEY,
+        PROCESSING_LOG_KEY,
+        assistant_instruction,
+    )
+
+    class _Ctx:
+        state = {
+            "client_name": "Acme",
+            "client_uen": "UEN-1",
+            "region": "SINGAPORE",
+            "base_currency": "SGD",
+            "tax_registered": True,
+            "fye_month": 12,
+            "fy_loaded": "2025",
+            "ledger_row_count": 42,
+            PROCESSING_LOG_KEY: [
+                {"filename": "a.pdf"},
+                {"filename": "b.pdf"},
+            ],
+            PENDING_REVIEWS_KEY: [
+                {"interrupt_id": "INT-1"},
+            ],
+        }
+
+    inst = assistant_instruction(_Ctx())
+    # The preamble should name the loaded FY, the row count, the
+    # processing-log depth, and the pending-review count so the model
+    # knows context BEFORE picking a tool.
+    assert "Acme" in inst
+    assert "FY2025" in inst
+    assert "42 rows" in inst
+    assert "Processing history: 2 deliveries" in inst
+    assert "Pending reviews: 1" in inst
+
+
+def test_base_instruction_has_diagnostic_routing_decision_tree():
+    """P3: the base instruction should include explicit routing bullets
+    so the LLM knows when to call the diagnostic tools."""
+    from accounting_agents.assistant import _BASE_INSTRUCTION
+
+    # The decision tree should name the new tools explicitly.
+    assert "diagnose_assistant_context" in _BASE_INSTRUCTION
+    assert "get_document_processing_detail" in _BASE_INSTRUCTION
+    assert "list_processing_history" in _BASE_INSTRUCTION
+    assert "list_pending_reviews" in _BASE_INSTRUCTION
+    # Routing bullets for the most common chat scenarios.
+    assert "How was X extracted" in _BASE_INSTRUCTION
+    assert "Anything waiting" in _BASE_INSTRUCTION
+    assert "Empty ledger" in _BASE_INSTRUCTION

@@ -95,6 +95,20 @@ PENDING_REEXTRACT_KEY = "pending_reextract"
 #: Recent document-processing deliveries injected by the Slack runner (ADR chat introspection).
 PROCESSING_LOG_KEY = "processing_log"
 
+#: Pending HITL reviews for the current channel. Injected by the runner from
+#: ``hitl.list_pending_interrupts`` so the chat agent can answer "anything
+#: waiting on my approval?" without doing its own Firestore I/O.
+PENDING_REVIEWS_KEY = "pending_reviews"
+
+#: Per-document session snapshot for files referenced in the processing log.
+#: Injected by the runner via ``_snapshot_doc_sessions``; the chat tools
+#: treat this as read-only introspection data only.
+DOCUMENT_SESSIONS_KEY = "document_sessions"
+
+#: Last invoice/account-code focus for thread follow-ups (set by the runner
+#: after a direct account-code answer or ``explain_posted_line``).
+THREAD_FOCUS_KEY = "thread_focus"
+
 #: Substrings that suggest a ledger-data question when onboarding is incomplete.
 _LEDGER_QUESTION_HINTS: frozenset[str] = frozenset(
     {
@@ -114,6 +128,23 @@ _LEDGER_QUESTION_HINTS: frozenset[str] = frozenset(
         "spend",
         "revenue",
         "expense",
+    }
+)
+
+#: Hints for thread-scoped account/COA follow-ups (before_model guard).
+_THREAD_ACCOUNT_HINTS: frozenset[str] = frozenset(
+    {
+        "account code",
+        "acount code",
+        "account_code",
+        "coa",
+        "categoriz",
+        "what does",
+        "description of",
+        "what is the description",
+        "explain the code",
+        "that code",
+        "posted to",
     }
 )
 
@@ -169,12 +200,155 @@ _SIGNATURE_COLS: tuple[str, ...] = (
 GST_THRESHOLD_SGD = 1_000_000.0
 
 
+def _normalize_row_for_tools(row: dict) -> dict:
+    """Return a shallow-copied row with Xero columns aliased to QBS column names.
+
+    QBS export uses ``Source Filename`` / ``Doc Type`` / ``Source Amount`` /
+    ``Description`` / ``Account Code / COA`` / ``Date``. Xero export uses
+    ``*ContactName`` / ``*InvoiceNumber`` / ``*UnitAmount`` / ``*Description``
+    / ``*AccountCode`` / ``*InvoiceDate``. The chat tools all read the QBS
+    column names, so without normalization a Xero ledger would return
+    ``filename="unknown"`` for every row (see ADR-0010: workbook rows are
+    anonymous — there is no source-file column). Aliasing the invoice number
+    into ``Source Filename`` is a pragmatic grouping key (the file is
+    identified in ``processing_log`` instead).
+
+    The original row is left untouched (defensive copy) so any caller holding
+    a reference to the underlying list still sees canonical Xero columns if
+    it needs them.
+    """
+    if not isinstance(row, dict):
+        return row
+    out = dict(row)
+    # Source Filename: Xero rows have no file id; group by invoice number.
+    if not out.get("Source Filename") and not out.get("source_filename"):
+        inv = (
+            out.get("*InvoiceNumber")
+            or out.get("*Reference")
+            or out.get("Reference")
+        )
+        if inv:
+            out["Source Filename"] = f"Xero:{inv}"
+    # Doc Type: infer from sheet when absent.
+    if not out.get("Doc Type"):
+        sheet = str(out.get("_sheet") or "").strip().lower()
+        if sheet == "purchase":
+            out["Doc Type"] = "Purchase"
+        elif sheet == "sales":
+            out["Doc Type"] = "Sales"
+    # Source Amount: QBS field. Xero uses *UnitAmount (per-line) and Amount
+    # (per-invoice total). Prefer the explicit per-line amount; fall back to
+    # Amount so at least the headline value surfaces.
+    if not out.get("Source Amount") and not out.get("amount"):
+        amount = out.get("*UnitAmount") or out.get("Amount")
+        if amount is not None:
+            out["Source Amount"] = amount
+    # Description.
+    if not out.get("Description") and not out.get("description"):
+        desc = out.get("*Description")
+        if desc is not None:
+            out["Description"] = desc
+    # Account Code / COA.
+    if not out.get("Account Code / COA") and not out.get("account_code"):
+        acct = out.get("*AccountCode")
+        if acct is not None:
+            out["Account Code / COA"] = acct
+    # Date.
+    if not out.get("Date") and not out.get("date"):
+        d = out.get("*InvoiceDate")
+        if d is not None:
+            out["Date"] = d
+    # Vendor / contact (Xero *ContactName).
+    if not out.get("Vendor") and not out.get("vendor"):
+        contact = out.get("*ContactName")
+        if contact is not None:
+            out["Vendor"] = contact
+    return out
+
+
 def _get_rows(tool_context: ToolContext) -> list[dict]:
-    """Return the ledger rows from session state (empty list if absent)."""
+    """Return the ledger rows from session state (empty list if absent).
+
+    Rows are passed through :func:`_normalize_row_for_tools` so Xero and QBS
+    layouts look identical to downstream tools.  This is the data-plane fix
+    for ADR-0010's "no source-file column" limitation; chat tools that
+    previously reported ``filename="unknown"`` for Xero clients now see the
+    invoice number as a stable grouping key.
+    """
     rows = tool_context.state.get(LEDGER_DATA_KEY)
     if not isinstance(rows, list):
         return []
-    return rows
+    return [_normalize_row_for_tools(r) for r in rows]
+
+
+def _diagnostic_counts(tool_context: ToolContext) -> dict:
+    """Return the small set of context numbers the runner injects.
+
+    Pulled from ``state`` (filled by the Slack runner) so empty-state messages
+    can name the FY, the row count, the processing-log depth, and the
+    pending-review count instead of saying "upload the ledger first" with
+    no context.
+    """
+    state = tool_context.state
+    fy = state.get("fy_loaded") or "unknown"
+    try:
+        rows = int(state.get("ledger_row_count") or 0)
+    except (TypeError, ValueError):
+        rows = 0
+    try:
+        plog_raw = state.get("processing_log_count")
+        if plog_raw is not None:
+            plog = int(plog_raw)
+        else:
+            plog = len(state.get(PROCESSING_LOG_KEY) or [])
+    except (TypeError, ValueError):
+        plog = 0
+    try:
+        pending_raw = state.get("pending_review_count")
+        if pending_raw is not None:
+            pending = int(pending_raw)
+        else:
+            pending = len(state.get(PENDING_REVIEWS_KEY) or [])
+    except (TypeError, ValueError):
+        pending = 0
+    return {
+        "fy_loaded": fy,
+        "ledger_row_count": rows,
+        "processing_log_count": plog,
+        "pending_review_count": pending,
+        "software": state.get("software") or "",
+        "client_name": state.get("client_name") or "",
+    }
+
+
+def _empty_ledger_message(tool_context: ToolContext) -> str:
+    """Render a diagnostic empty-state message instead of a generic prompt.
+
+    The chat agent would otherwise tell the user "upload the FY ledger"
+    with no idea which FY, how many pointers exist, or how many deliveries
+    are on file.  This message names the actual context so the LLM can
+    suggest a concrete next step (e.g. "we have FY2026 with 0 rows but
+    FY2025 has 42 — ask me about FY2025").
+    """
+    diag = _diagnostic_counts(tool_context)
+    pointers = tool_context.state.get("fy_pointers") or []
+    pointer_summary = ""
+    if isinstance(pointers, list) and pointers:
+        parts = []
+        for s in pointers[:6]:
+            if not isinstance(s, dict):
+                continue
+            fy = s.get("fy", "?")
+            count = s.get("row_count", 0)
+            parts.append(f"FY{fy}={count}")
+        if parts:
+            pointer_summary = " Pointers: " + ", ".join(parts) + "."
+    fy = diag["fy_loaded"]
+    return (
+        f"The ledger data is not loaded for FY{fy} (row_count=0).{pointer_summary} "
+        f"Processing log has {diag['processing_log_count']} entries. "
+        "If a different FY has data, ask me to load it explicitly."
+    )
 
 
 def summarize_by_category(tool_context: ToolContext) -> str:
@@ -193,7 +367,7 @@ def summarize_by_category(tool_context: ToolContext) -> str:
     """
     rows = _get_rows(tool_context)
     if not rows:
-        return "The ledger data is not loaded yet. Please upload the FY ledger first."
+        return _empty_ledger_message(tool_context)
 
     totals: dict[str, float] = {}
     for row in rows:
@@ -225,7 +399,7 @@ def pnl_for_fy(tool_context: ToolContext) -> str:
     """
     rows = _get_rows(tool_context)
     if not rows:
-        return "The ledger data is not loaded yet. Please upload the FY ledger first."
+        return _empty_ledger_message(tool_context)
 
     revenue = 0.0
     expenses = 0.0
@@ -494,7 +668,7 @@ def gst_threshold_check(tool_context: ToolContext) -> str:
     """
     rows = _get_rows(tool_context)
     if not rows:
-        return "The ledger data is not loaded yet. Please upload the FY ledger first."
+        return _empty_ledger_message(tool_context)
 
     taxable = 0.0
     for row in rows:
@@ -614,9 +788,10 @@ def model_info(tool_context: ToolContext) -> str:  # noqa: ARG001 — uniform to
     """
     return json.dumps(
         {
-            "chat_model": config.MODEL_LITE,
+            "chat_model": config.MODEL_CHAT,
             "model_lite": config.MODEL_LITE,
             "model_std": config.MODEL_STD,
+            "model_chat": config.MODEL_CHAT,
         },
         ensure_ascii=False,
     )
@@ -629,9 +804,10 @@ def model_info(tool_context: ToolContext) -> str:  # noqa: ARG001 — uniform to
 
 def explain_categorization(
     tool_context: ToolContext,
-    vendor_name: str,
-    line_description: str,
+    vendor_name: str = "",
+    line_description: str = "",
     category: str = "",
+    row_index: str = "",
 ) -> str:
     """Explain why a line would map to a COA account using the engine's categorizer.
 
@@ -639,11 +815,15 @@ def explain_categorization(
     uses (entity_memory → category_mapping → COA keyword). Does NOT call the LLM
     fallback — this explains the first-pass deterministic path only.
 
+    Prefer ``row_index`` from a prior ``lookup_row`` hit — vendor and description
+    are read from the ledger row automatically.
+
     Args:
         tool_context: Injected by ADK; provides session state.
         vendor_name: Supplier / vendor name on the invoice line.
         line_description: The line item description.
         category: Optional universal category label (for category_mapping lookups).
+        row_index: Optional ledger row index from ``lookup_row`` (overrides vendor/description).
 
     Returns:
         JSON with ``status``, ``account_code``, ``account_name``, ``confidence``,
@@ -654,9 +834,31 @@ def explain_categorization(
     except Exception:  # noqa: BLE001
         state = {}
 
+    vendor = (vendor_name or "").strip()
+    desc = (line_description or "").strip()
+    if row_index:
+        try:
+            idx = int(str(row_index).strip())
+            rows = _get_rows(tool_context)
+            if 0 <= idx < len(rows):
+                row = rows[idx]
+                vendor = vendor or str(row.get("Vendor") or row.get("*ContactName") or "")
+                desc = desc or str(row.get("Description") or row.get("*Description") or "")
+        except (TypeError, ValueError):
+            pass
+
+    if not vendor and not desc:
+        return json.dumps(
+            {
+                "status": "error",
+                "message": "Need row_index from lookup_row or vendor_name + line_description.",
+            },
+            ensure_ascii=False,
+        )
+
     res = resolve_account(
-        line_description,
-        vendor_name,
+        desc,
+        vendor,
         coa=coa_from_state(state),
         category_mapping=category_mapping_from_state(state),
         entity_memory=entity_memory_from_state(state),
@@ -672,6 +874,73 @@ def explain_categorization(
             "source": res.source,
             "flagged": res.flagged,
             "reason": _categorization_reason(res.source, res),
+        },
+        ensure_ascii=False,
+    )
+
+
+def lookup_coa_account(tool_context: ToolContext, account_code: str) -> str:
+    """Return COA description, type, and keywords for a posted account code.
+
+    Reads the client's chart of accounts from session state (``coa`` list
+    injected by the runner from ``ClientContext``). Use when the user asks
+    what a code *means* in their COA — distinct from ``explain_categorization``,
+    which re-runs the engine's pick logic for a vendor/line.
+
+    Args:
+        tool_context: Injected by ADK; provides session state.
+        account_code: The COA code to look up (e.g. ``902-A02``, ``6-3000``).
+
+    Returns:
+        JSON with ``status`` ``found`` or ``not_found`` and COA fields when found.
+    """
+    from accounting_agents.assistant_tools._helpers import find_coa_by_code
+
+    try:
+        state = tool_context.state
+    except Exception:  # noqa: BLE001
+        state = {}
+
+    code = (account_code or "").strip()
+    if not code:
+        focus = state.get(THREAD_FOCUS_KEY) or {}
+        if isinstance(focus, dict):
+            code = str(focus.get("account_code") or "").strip()
+    if not code:
+        return json.dumps(
+            {
+                "status": "error",
+                "message": "Need account_code (or thread_focus from a prior turn).",
+            },
+            ensure_ascii=False,
+        )
+
+    entry = find_coa_by_code(state, code)
+    if not entry:
+        return json.dumps(
+            {
+                "status": "not_found",
+                "account_code": code,
+                "message": f"No COA entry for code {code!r} in the loaded chart.",
+            },
+            ensure_ascii=False,
+        )
+
+    description = (
+        entry.get("description")
+        or entry.get("name")
+        or entry.get("key")
+        or ""
+    )
+    return json.dumps(
+        {
+            "status": "found",
+            "code": entry.get("code") or code,
+            "description": description,
+            "account_type": entry.get("account_type"),
+            "financial_statement": entry.get("financial_statement"),
+            "nature": entry.get("nature"),
+            "keywords": entry.get("keywords"),
         },
         ensure_ascii=False,
     )
@@ -767,7 +1036,7 @@ def summarize_recent_activity(tool_context: ToolContext, days: str = "30") -> st
     """
     rows = _get_rows(tool_context)
     if not rows:
-        return "The ledger data is not loaded yet. Please upload the FY ledger first."
+        return _empty_ledger_message(tool_context)
 
     window = _parse_int_param(days, default=30, minimum=1, maximum=366)
     cutoff = date.today() - timedelta(days=window)
@@ -829,33 +1098,43 @@ def summarize_recent_activity(tool_context: ToolContext, days: str = "30") -> st
 def lookup_row(tool_context: ToolContext, query: str, limit: str = "5") -> str:
     """Search loaded ledger rows by substring (case-insensitive).
 
-    Matches against ``Description``, ``Vendor``, ``Reference``, and
-    ``Account Code / COA`` columns.
+    Matches Description, Vendor, Reference, Source Filename, invoice number
+    (``*InvoiceNumber`` / ``Xero:…``), and contact name. When nothing matches
+    in the loaded ledger, also searches the processing log so partial filenames
+    like ``25-D12`` still resolve to a delivery (and its FY).
 
     Args:
         tool_context: Injected by ADK; provides session state.
-        query: Substring to search for.
+        query: Substring to search for (invoice id, filename fragment, vendor).
         limit: Maximum matches to return (default ``5``, max ``20``).
 
     Returns:
-        JSON ``{"matches": [...]}`` — empty list when nothing matches.
+        JSON with ``matches`` (ledger hits) and optional ``processing_log_matches``.
     """
-    rows = _get_rows(tool_context)
-    if not rows:
-        return "The ledger data is not loaded yet. Please upload the FY ledger first."
+    from accounting_agents.assistant_tools._helpers import filename_matches_query
 
+    rows = _get_rows(tool_context)
     needle = (query or "").strip().lower()
     if not needle:
-        return json.dumps({"matches": []}, ensure_ascii=False)
+        return json.dumps({"matches": [], "processing_log_matches": []}, ensure_ascii=False)
+
+    if not rows:
+        plog_hits = _processing_log_hits(tool_context, needle)
+        payload: dict = {
+            "status": "empty_ledger",
+            "message": _empty_ledger_message(tool_context),
+            "matches": [],
+        }
+        if plog_hits:
+            payload["processing_log_matches"] = plog_hits
+        return json.dumps(payload, ensure_ascii=False)
 
     cap = _parse_int_param(limit, default=5, minimum=1, maximum=20)
     matches: list[dict] = []
+    from accounting_agents.assistant_tools._helpers import row_search_text
+
     for idx, row in enumerate(rows):
-        haystack = " ".join(
-            str(row.get(col) or "")
-            for col in ("Description", "Vendor", "Reference", "Account Code / COA")
-        ).lower()
-        if needle not in haystack:
+        if needle not in row_search_text(row):
             continue
         matches.append(
             {
@@ -873,7 +1152,47 @@ def lookup_row(tool_context: ToolContext, query: str, limit: str = "5") -> str:
         if len(matches) >= cap:
             break
 
-    return json.dumps({"matches": matches}, ensure_ascii=False)
+    payload: dict = {"matches": matches}
+    if not matches:
+        plog_hits = _processing_log_hits(tool_context, needle)
+        if plog_hits:
+            payload["processing_log_matches"] = plog_hits
+            diag = _diagnostic_counts(tool_context)
+            loaded = str(diag.get("fy_loaded") or "")
+            hit_fys = {str(h.get("fy") or "") for h in plog_hits}
+            if loaded and hit_fys - {loaded}:
+                payload["hint"] = (
+                    f"Found {len(plog_hits)} processing-log hit(s) in FY "
+                    f"{', '.join(sorted(hit_fys))} but the loaded ledger is "
+                    f"FY{loaded}. Re-ask after the session loads that FY, or "
+                    "call diagnose_assistant_context."
+                )
+
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _processing_log_hits(tool_context: ToolContext, needle: str) -> list[dict]:
+    from accounting_agents.assistant_tools._helpers import filename_matches_query
+
+    raw_log = tool_context.state.get(PROCESSING_LOG_KEY) or []
+    if not isinstance(raw_log, list):
+        return []
+    hits: list[dict] = []
+    for entry in raw_log:
+        if not isinstance(entry, dict):
+            continue
+        fn = str(entry.get("filename") or "")
+        if filename_matches_query(needle, fn):
+            hits.append(
+                {
+                    "filename": entry.get("filename"),
+                    "file_id": entry.get("file_id"),
+                    "fy": entry.get("fy"),
+                    "doc_type": entry.get("doc_type"),
+                    "row_count": entry.get("row_count"),
+                }
+            )
+    return hits
 
 
 def list_recent_documents(tool_context: ToolContext, limit: str = "10") -> str:
@@ -896,7 +1215,7 @@ def list_recent_documents(tool_context: ToolContext, limit: str = "10") -> str:
     """
     rows = _get_rows(tool_context)
     if not rows:
-        return "The ledger data is not loaded yet. Please upload the FY ledger first."
+        return _empty_ledger_message(tool_context)
 
     cap = _parse_int_param(limit, default=10, minimum=1, maximum=50)
     groups: dict[tuple, dict] = {}
@@ -1078,6 +1397,21 @@ def explain_document_processing(
 
 
 # --------------------------------------------------------------------------- #
+# Diagnostic / introspection tools (P1) — read state only, no I/O
+# Implementation lives in ``assistant_tools.introspect``; re-exported here
+# for the LlmAgent ``tools=[...]`` list and for backward-compatible
+# test imports (``from accounting_agents.assistant import ...``).
+# --------------------------------------------------------------------------- #
+from accounting_agents.assistant_tools.introspect import (  # noqa: E402,F401
+    diagnose_assistant_context,
+    explain_posted_line,
+    get_document_processing_detail,
+    list_pending_reviews,
+    list_processing_history,
+)
+
+
+# --------------------------------------------------------------------------- #
 # Write tools (Step 4 / C-2) — gated behind ADK Tool Confirmation (ADR-0009)
 # --------------------------------------------------------------------------- #
 
@@ -1180,7 +1514,7 @@ def _load_target_row(
     """
     rows = _get_rows(tool_context)
     if not rows:
-        return None, "The ledger data is not loaded yet. Please upload the FY ledger first."
+        return None, _empty_ledger_message(tool_context)
 
     try:
         idx = int(str(row_index).strip())
@@ -1596,7 +1930,7 @@ def replace_recorded_month(tool_context: ToolContext, month: str) -> str:
     # Ledger-loaded gate.
     rows = _get_rows(tool_context)
     if not rows:
-        return "The ledger data is not loaded yet. Please upload the FY ledger first."
+        return _empty_ledger_message(tool_context)
 
     # Parse the month arg.
     fy = str(tool_context.state.get("fy") or "").strip() or None
@@ -1874,127 +2208,137 @@ def learn_mapping(
 # --------------------------------------------------------------------------- #
 
 _BASE_INSTRUCTION = """
-You are a read-only accounting assistant for a Singapore SME's financial ledger.
-You answer questions strictly based on the ledger data that has been loaded into
-your session — you do NOT make up numbers, guess, or call external services.
+You are the read-only accounting assistant for a Singapore SME's FY ledger.
+Answer strictly from the data already loaded into your session — never invent
+figures, never call external services. The data may be an INVOICE ledger or a
+BANK STATEMENT; each tool's docstring tells you which kind it expects.
 
-The loaded data may be an INVOICE ledger (columns like "Source Amount",
-"Account Code / COA", "Doc Type") or a BANK STATEMENT (columns "Withdrawal",
-"Deposit", "Balance"). Pick the tool that matches the question:
+Preamble (filled by ADK from session state — see runner state_delta):
+- client: {+client_name+} (UEN {+client_uen?+}, {+region?+}, base {+base_currency?+},
+  GST-registered: {+tax_registered?+}, FYE month {+fye_month?+})
+- loaded FY: FY{+fy_loaded?+}  ({+ledger_row_count?+} rows)
+- Processing history: {+processing_log_count?+} deliveries
+- Pending reviews: {+pending_review_count?+} awaiting approval
+- Thread-scoped delivery (Phase 3 — only set when the user replies under a
+  delivery card; the runner derives these from processing_log + the parent
+  message ts of the thread):
+  * message_ts: {+thread_delivery_message_ts?+}
+  * filenames:   {+thread_delivery_filenames?+}
+  * invoice_ids: {+thread_delivery_invoice_ids?+}
+  * FY of the delivery: FY{+thread_delivery_fy?+}
+  * rows shown in the delivery card table: {+thread_delivery_preview_rows?+}
+  * pre-resolved ledger matches (runner prefetch): {+thread_delivery_ledger_matches?+}
+  * thread focus from the last account-code answer: {+thread_focus?+}
 
-Bank-statement questions (withdrawals, deposits, money in/out, closing or
-opening balance, a given month's totals):
-- ``bank_totals``: withdrawals, deposits, net, opening/closing balance — with an
-  optional month + year filter (e.g. month="October", year="2025").
-
-Invoice-ledger questions (spend by category, P&L, GST):
-- ``summarize_by_category``: total spend per GL account / COA category.
-- ``pnl_for_fy``: revenue, expenses, and net profit/loss for the FY.
-- ``gst_threshold_check``: whether the business is near the SGD 1 M GST
-  registration threshold.
-
-Inspection tools (when the user asks about setup / context / models):
-- ``show_client_profile``: the loaded client profile and counts.
-- ``show_learned_mappings``: learned category / entity mappings.
-- ``model_info``: which Gemini models back this assistant.
-
-Explain + lookup tools (when the user asks *why* or *where*):
-- ``explain_categorization``: why a vendor/line maps to a COA account (same engine logic).
-- ``explain_tax_treatment``: why a line gets SR/ZR/NT/etc (same tax classifier).
-- ``summarize_recent_activity``: spend and activity in the last N days (default 30).
-- ``lookup_row``: find ledger rows matching a text query (vendor, description, account).
-- ``list_recent_documents``: list source documents grouped from the loaded FY ledger.
-- ``explain_document_processing``: which extraction pipeline ran (understand vs legacy,
-  SOA vs invoice) for a recently delivered file — use for "was extraction correct?"
-  questions.
-
-Upload / process help (when the user asks how to add documents):
-- Explain that they drop PDF invoices or bank statements directly in the Slack channel
-  (multi-select in one message works). Processing starts automatically on file drop;
-  @mention is optional. You CAN answer questions that contain words like "extract",
-  "process", or "upload" — interpret intent from context; do not refuse them.
-
-Write tools (when the user asks you to FIX, DELETE, or CLEAR a ledger line or month):
-- ``amend_ledger_row``: change one field (``account`` / ``amount`` / ``description``
-  / ``tax``) of an invoice ledger row.
-- ``remove_ledger_row``: delete an invoice ledger row.
-- ``replace_recorded_month``: clear ALL invoice rows for a given month (e.g.
-  "clear September so I can re-drop those docs"). This is GATED — the first call
-  shows a count and asks for confirmation; nothing is written until the user
-  replies "yes". After clearing, the user can re-drop the original documents and
-  they will be recorded fresh (the dedupe keys are purged too).
-- ``re_extract_document``: re-read an ALREADY-FILED document with a correction
-  hint (e.g. "re-read the Acme invoice as a credit note", "re-read file F123 and
-  zero-rate the freight line") and REPLACE its ledger rows. The corrected read
-  goes back through the normal Approve / Edit / Reject card. This is GATED — the
-  first call previews and asks for confirmation. Requires the document's
-  ``file_id`` (use ``list_recent_documents`` to find it) AND a non-empty hint.
-BEFORE calling ``amend_ledger_row`` or ``remove_ledger_row`` you MUST call
-``lookup_row`` to get the exact ``row_index`` of the line the user means —
-never guess an index. All write tools are GATED: the first call only PROPOSES
-the change and asks the user to confirm; nothing is written until the user
-replies "yes". Only invoice rows (Purchase / Sales) can be edited — bank rows
-are read-only. The tax treatment is always re-derived by the engine (a
-non-GST-registered client is forced to NT), so do not promise a specific tax
-code the user typed.
-
-Learning tool (when the user says "remember X goes to Y" or "always code X as Y"):
-- ``learn_mapping``: record a vendor→account or vendor→tax rule so the next
-  invoice from that vendor is auto-categorised correctly. This is IMMEDIATE —
-  no confirmation step. Call it as soon as you recognise the user's intent to
-  teach a rule. Confirm back what was learned in plain English.
+Routing decision tree (apply BEFORE picking a tool):
+1. "How was X extracted?" / "was the SOA extracted correctly?" →
+   ``diagnose_assistant_context`` then ``get_document_processing_detail``.
+2. "Show recent documents" / "what came in?" → ``list_recent_documents`` +
+   ``list_processing_history``.
+3. "Anything waiting for me?" / "pending reviews" → ``list_pending_reviews``.
+4. Empty ledger / "upload the workbook" → ``diagnose_assistant_context`` first;
+   report FY pointers and suggest the right FY.
+5. "Why this COA?" / "why this tax?" / "why account code for invoice X?" /
+   "where in the ledger?" → ``lookup_row`` with the invoice id or filename
+   fragment (e.g. ``25-D15``, ``25-D12``). Use ``explain_categorization`` with
+   ``row_index`` from the match — do NOT ask the user for vendor/description.
+   If the user replies with only a filename or invoice id, call ``lookup_row``
+   again immediately. Check ``processing_log_matches`` when ledger ``matches`` is
+   empty. **Thread-scoped default (Phase 3):** if the preamble lists
+   ``thread_delivery_filenames`` (i.e. the user replied under a delivery card),
+   prefer those filenames over the global processing log — the question is
+   about that specific delivery unless the user says otherwise. When
+   ``thread_delivery_ledger_matches`` is populated, use those ``row_index``
+   values directly with ``explain_categorization`` — do NOT claim a document
+   has "0 rows" because ``processing_log`` row_count can be stale for batch
+   deliveries. When ``thread_delivery_preview_rows`` lists account codes from
+   the delivery card, those rows were posted to the ledger — cite them and
+   explain the code via ``explain_categorization``.
+5b. "What does account code X mean?" / "description of the account code" /
+   "what is that code?" → ``lookup_coa_account`` with the code (or use
+   ``thread_focus.account_code`` when the user omits it). For a full audit
+   trail (posted row + COA name + extraction path) use ``explain_posted_line``
+   instead of chaining three tools. Do NOT ask for vendor/description when
+   ``thread_focus`` or ``thread_delivery_ledger_matches`` is set.
+6. "Fix" / "delete" / "clear" → run ``lookup_row`` first to get the exact
+   ``row_index``; never guess. Write tools are GATED — they PROPOSE first and
+   wait for the user to reply "yes" before anything is written. Only invoice
+   rows (Purchase / Sales) are editable; bank rows are read-only. Tax is
+   always re-derived by the engine (non-GST-registered → NT) — don't promise
+   the literal code the user typed.
+7. "Remember X goes to Y" / "always code X as Y" → ``learn_mapping``
+   immediately (no confirmation).
 
 For every question, call the single most relevant tool first, then explain the
-result in plain English. For a bank question naming a month, pass that month
-(and year if given) to ``bank_totals``. If a tool reports that the data is not
-loaded, tell the user to upload the relevant workbook first.
+result in plain English. If a tool reports the data is not loaded, follow the
+diagnostic routing above before claiming nothing is there.
 
 CRITICAL — ALWAYS finish your turn with a short plain-English message to the
-user. After a tool returns, you MUST write one or two sentences summarising the
-answer in your own words, citing the relevant numbers from the tool result.
+user summarising the answer in your own words and citing the relevant numbers.
 NEVER end your turn with only a tool call and no text reply — the user cannot
-see the raw tool output, so silence looks like a broken assistant.
+see raw tool output, so silence looks like a broken assistant.
 
-Be concise and professional. Do not invent figures not returned by the tools.
+Be concise and professional.
 """.strip()
 
 
-def assistant_instruction(ctx) -> str:
-    """Build the assistant's system prompt with a one-line profile preamble.
+def _enrich_instruction_state(state_dict: dict) -> dict:
+    """Ensure flat count keys exist for ADK ``{+key?+}`` instruction placeholders.
 
-    Because the assistant is a standalone root agent (see ADR-0008), it sees
-    the user turn + full session history via ``include_contents='default'``,
-    so we no longer embed the question into the prompt. Instead we prepend a
-    short profile preamble — pulled defensively from the per-channel state
-    keys produced by ``ClientContext.to_state()`` — so the model knows who
-    the client is on every turn. Falls back to the base instruction when no
-    profile is loaded so prompt assembly never crashes the lane.
+    The runner injects ``processing_log_count`` / ``pending_review_count`` in
+    ``state_delta``; tests may only provide the list keys — derive counts here
+    so ``assistant_instruction()`` and ADK runtime injection stay aligned.
+    """
+    enriched = dict(state_dict)
+    if enriched.get("processing_log_count") is None:
+        plog = enriched.get(PROCESSING_LOG_KEY) or enriched.get("processing_log")
+        if isinstance(plog, list):
+            enriched["processing_log_count"] = len(plog)
+    if enriched.get("pending_review_count") is None:
+        pending = enriched.get(PENDING_REVIEWS_KEY) or enriched.get("pending_reviews")
+        if isinstance(pending, list):
+            enriched["pending_review_count"] = len(pending)
+    return enriched
+
+
+def assistant_instruction(ctx) -> str:
+    """Render ``_BASE_INSTRUCTION`` with ADK's session-state injection.
+
+    Kept for tests and for callers that want a hand-rendered prompt. At
+    runtime the agent uses ``_BASE_INSTRUCTION`` directly as a string so
+    ADK auto-injects via ``instructions_utils.inject_session_state``. This
+    callable reproduces the same behaviour synchronously by walking the
+    same template substitution rules (markers: ``{+key+}`` for required,
+    ``{+key?+}`` for optional).
+
+    See ``accounting_agents.assistant`` docstring + ADR-0008 for the
+    chat-lane state contract.
     """
     try:
-        state = ctx.state
-        client_name = (state.get("client_name") or "").strip()
-    except Exception:  # noqa: BLE001 — never let prompt assembly crash the lane
+        state_obj = ctx.state
+        state_dict = _enrich_instruction_state(
+            dict(state_obj) if hasattr(state_obj, "items") else {}
+        )
+    except Exception:  # noqa: BLE001 — never let prompt assembly crash
         return _BASE_INSTRUCTION
 
-    if not client_name:
-        return _BASE_INSTRUCTION
+    def _sub(match: "re.Match[str]") -> str:  # type: ignore[name-defined]
+        raw = match.group(0).lstrip("{").rstrip("}").strip().lstrip("+").rstrip("+").strip()
+        optional = raw.endswith("?")
+        key = raw[:-1] if optional else raw
+        val = state_dict.get(key)
+        # Treat None and blank strings as missing for optional placeholders
+        # (matches ADK's behaviour of collapsing to empty).
+        if val is None or (isinstance(val, str) and not val.strip()):
+            return "" if optional else match.group(0)
+        return str(val)
 
     try:
-        client_uen = state.get("client_uen") or "unknown"
-        region = state.get("region") or "SINGAPORE"
-        base_currency = state.get("base_currency") or "SGD"
-        tax_registered = bool(state.get("tax_registered"))
-        fye_month = state.get("fye_month") or "unknown"
+        import re as _re
+
+        return _re.sub(r"\{\+[a-zA-Z_][a-zA-Z0-9_]*\?\+\}|\{\+[a-zA-Z_][a-zA-Z0-9_]*\+\}", _sub, _BASE_INSTRUCTION)
     except Exception:  # noqa: BLE001
         return _BASE_INSTRUCTION
-
-    gst_label = "yes" if tax_registered else "no"
-    preamble = (
-        f"You are working for {client_name} (UEN {client_uen}, {region}, "
-        f"base currency {base_currency}, GST-registered: {gst_label}, "
-        f"FYE month {fye_month}).\n\n"
-    )
-    return preamble + _BASE_INSTRUCTION
 
 
 def _onboarding_before_model(
@@ -2040,11 +2384,84 @@ def _onboarding_before_model(
     )
 
 
+def _thread_account_before_model(
+    callback_context: CallbackContext, llm_request: LlmRequest
+) -> LlmResponse | None:
+    """Inject thread-focus preamble when the user asks about a posted account code."""
+    try:
+        state = callback_context.state
+    except Exception:  # noqa: BLE001
+        return None
+
+    has_thread = bool(
+        state.get("thread_delivery_message_ts")
+        or state.get("thread_delivery_ledger_matches")
+        or state.get(THREAD_FOCUS_KEY)
+    )
+    if not has_thread:
+        return None
+
+    last_user = ""
+    try:
+        contents = llm_request.contents or []
+        if contents and contents[-1].role == "user":
+            parts = contents[-1].parts or []
+            if parts and parts[0].text:
+                last_user = parts[0].text.lower()
+    except Exception:  # noqa: BLE001
+        return None
+
+    if not any(hint in last_user for hint in _THREAD_ACCOUNT_HINTS):
+        return None
+
+    focus = state.get(THREAD_FOCUS_KEY) or {}
+    matches = state.get("thread_delivery_ledger_matches") or []
+    inv = ""
+    acct = ""
+    if isinstance(focus, dict):
+        inv = str(focus.get("invoice_id") or "")
+        acct = str(focus.get("account_code") or "")
+    if not acct and isinstance(matches, list) and matches:
+        first = matches[0] if isinstance(matches[0], dict) else {}
+        inv = inv or str(first.get("invoice_id") or "")
+        acct = acct or str(first.get("account_code") or "")
+
+    if not inv and not acct:
+        return None
+
+    preamble = (
+        "Thread delivery context is loaded. "
+        f"Invoice {inv or '(see thread)'} was posted to account code {acct or '(see ledger matches)'}. "
+        "Do NOT ask the user for vendor, line description, or account code. "
+        "Call lookup_coa_account or explain_posted_line first, then answer in plain English."
+    )
+    try:
+        llm_request.append_instructions([preamble])
+    except Exception:  # noqa: BLE001
+        logger.debug("thread account preamble injection failed", exc_info=True)
+    return None
+
+
+def _chat_before_model(
+    callback_context: CallbackContext, llm_request: LlmRequest
+) -> LlmResponse | None:
+    """Onboarding gate first, then thread account/COA preamble injection."""
+    blocked = _onboarding_before_model(callback_context, llm_request)
+    if blocked is not None:
+        return blocked
+    return _thread_account_before_model(callback_context, llm_request)
+
+
 assistant_agent = LlmAgent(
     name="assistant",
-    model=config.MODEL_LITE,
-    instruction=assistant_instruction,
-    before_model_callback=_onboarding_before_model,
+    model=config.MODEL_CHAT,
+    # P5-slim-instruction: ADK auto-injects session state into string
+    # instructions via ``instructions_utils.inject_session_state``. The
+    # ``_BASE_INSTRUCTION`` template carries ``{state_key}`` placeholders
+    # (with ``{key?}`` for optional ones), so the runner's state_delta fills
+    # the preamble at LLM call time — no Python callable needed at runtime.
+    instruction=_BASE_INSTRUCTION,
+    before_model_callback=_chat_before_model,
     tools=[
         bank_totals,
         summarize_by_category,
@@ -2054,11 +2471,17 @@ assistant_agent = LlmAgent(
         show_learned_mappings,
         model_info,
         explain_categorization,
+        lookup_coa_account,
         explain_tax_treatment,
         summarize_recent_activity,
         lookup_row,
         list_recent_documents,
+        list_processing_history,
         explain_document_processing,
+        get_document_processing_detail,
+        explain_posted_line,
+        diagnose_assistant_context,
+        list_pending_reviews,
         FunctionTool(amend_ledger_row, require_confirmation=True),
         FunctionTool(remove_ledger_row, require_confirmation=True),
         FunctionTool(replace_recorded_month, require_confirmation=True),
@@ -2089,9 +2512,15 @@ __all__ = [
     "show_learned_mappings",
     "model_info",
     "explain_categorization",
+    "lookup_coa_account",
     "explain_tax_treatment",
     "summarize_recent_activity",
     "lookup_row",
     "list_recent_documents",
+    "list_processing_history",
     "explain_document_processing",
+    "get_document_processing_detail",
+    "explain_posted_line",
+    "diagnose_assistant_context",
+    "list_pending_reviews",
 ]

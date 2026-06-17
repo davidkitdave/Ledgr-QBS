@@ -490,6 +490,74 @@ def test_bank_node_multi_account_list():
     assert {s["currency"] for s in statements} == {"SGD", "USD"}
 
 
+def test_consolidate_node_bank_sheet_titles_multi_currency():
+    """consolidate_node emits distinct 'Bank - XXXX - CCY' sheet names per currency.
+
+    Regression for the Akar DBS FY2024 case: a multi-currency statement of
+    one account used to collapse into a single Excel tab because the sheet
+    name was the LLM-supplied ``bank_name`` (no currency suffix). The merge
+    in ``SlackLedgerStore._merge_bank_statement`` then silently rolled the
+    sections together, so the workbook had one tab but the Slack delivery
+    card showed N preview tables (one per batch).
+    """
+    ex_bank = ExtractedBankStatement(
+        accounts=[
+            ExtractedAccount(
+                bank_name="DBS Bank Ltd",
+                account_number="072-955554-5",
+                currency="SGD",
+                opening_balance=100.0,
+                closing_balance=0.0,
+                transactions=[
+                    ExtractedBankTxn(date="2024-04-15", description="REMITTANCE",
+                                      withdrawal=100.0, balance=0.0)
+                ],
+            ),
+            ExtractedAccount(
+                bank_name="DBS Bank Ltd",
+                account_number="072-955554-5",
+                currency="USD",
+                opening_balance=50.0,
+                closing_balance=50.0,
+                transactions=[
+                    ExtractedBankTxn(date="2024-04-15", description="ADVICE 055...",
+                                      withdrawal=30.0, balance=20.0)
+                ],
+            ),
+            ExtractedAccount(
+                bank_name="DBS Bank Ltd",
+                account_number="072-955554-5",
+                currency="CNH",
+                opening_balance=0.0,
+                closing_balance=200.0,
+                transactions=[
+                    ExtractedBankTxn(date="2024-04-15", description="BUSINESS A...",
+                                      deposit=200.0, balance=200.0)
+                ],
+            ),
+        ]
+    )
+    nodes.EXTRACT_BANK_FN = lambda data, mime, **kw: (ex_bank, "vision")
+    state = _base_state(**{nodes.DOC_TYPE_KEY: "bank_statement"})
+    ctx = FakeContext(state)
+    asyncio.run(nodes.extract_bank_node(ctx))
+    asyncio.run(nodes.route_node(ctx))
+    asyncio.run(nodes.consolidate_node(ctx))
+
+    payload = ctx.state[nodes.LEDGER_ROWS_KEY]
+    assert payload["kind"] == "bank"
+    sheets = [b["sheet"] for b in payload["batches"]]
+    assert sheets == [
+        "DBS Bank Ltd - 5545 - SGD",
+        "DBS Bank Ltd - 5545 - USD",
+        "DBS Bank Ltd - 5545 - CNH",
+    ]
+    # Dedupe identity must include currency so the 3 sections don't collide.
+    keys = [b["doc_key"] for b in payload["batches"]]
+    assert len(set(keys)) == 3
+    assert all("SGD" in k or "USD" in k or "CNH" in k for k in keys)
+
+
 def test_bank_node_accepts_bare_statement():
     ex_bank = ExtractedBankStatement(
         accounts=[
@@ -545,6 +613,146 @@ def test_route_node_bank_workbook():
 
     assert event.output == {"count": 1}
     assert ctx.state[nodes.ROUTES_KEY][0]["workbook"] == "BankStatement_FY2025.xlsx"
+
+
+def test_route_node_bank_fy_when_first_currency_has_no_transactions():
+    """Jun 2024 must route to FY2024 even when CNH (listed first) has no txns.
+
+    Regression: empty first account used date.today() -> FY2026 in 2026.
+    """
+    from invoice_processing.extract.bank_statement_extractor import (
+        ExtractedAccount,
+        ExtractedBankStatement,
+        ExtractedBankTxn,
+    )
+
+    ex_bank = ExtractedBankStatement(
+        accounts=[
+            ExtractedAccount(
+                bank_name="DBS Bank Ltd",
+                account_number="072-955554-5",
+                currency="CNH",
+                statement_period="01 Jun 2024 - 30 Jun 2024",
+                opening_balance=0.0,
+                closing_balance=0.0,
+                transactions=[],
+            ),
+            ExtractedAccount(
+                bank_name="DBS Bank Ltd",
+                account_number="072-955554-5",
+                currency="SGD",
+                statement_period="01 Jun 2024 - 30 Jun 2024",
+                opening_balance=16189.43,
+                closing_balance=26379.7,
+                transactions=[
+                    ExtractedBankTxn(
+                        date="2024-06-14", description="GIRO",
+                        deposit=12000.0, balance=28189.43,
+                    ),
+                ],
+            ),
+            ExtractedAccount(
+                bank_name="DBS Bank Ltd",
+                account_number="072-955554-5",
+                currency="USD",
+                statement_period="01 Jun 2024 - 30 Jun 2024",
+                opening_balance=7668.0,
+                closing_balance=8860.67,
+                transactions=[
+                    ExtractedBankTxn(
+                        date="2024-06-11", description="TT",
+                        withdrawal=4800.0, balance=2868.0,
+                    ),
+                ],
+            ),
+        ]
+    )
+    nodes.EXTRACT_BANK_FN = lambda data, mime, **kw: (ex_bank, "vision")
+    ctx = FakeContext(_base_state(**{
+        nodes.DOC_TYPE_KEY: "bank_statement",
+        "fye_month": 12,
+        "source_filename": "4. DBS - Jun 2024.pdf",
+    }))
+    asyncio.run(nodes.extract_bank_node(ctx))
+    asyncio.run(nodes.route_node(ctx))
+    asyncio.run(nodes.consolidate_node(ctx))
+
+    routes = ctx.state[nodes.ROUTES_KEY]
+    assert all(r["fy"] == 2024 for r in routes)
+    assert all(r["workbook"] == "BankStatement_FY2024.xlsx" for r in routes)
+    assert ctx.state[nodes.LEDGER_ROWS_KEY]["fy"] == "2024"
+
+
+def test_parse_statement_period_dbs_dash_format():
+    """DBS prints periods like '01-Jun-2024 to 30-Jun-2024'."""
+    from datetime import date
+
+    from accounting_agents.nodes import _parse_statement_period_anchor
+
+    assert _parse_statement_period_anchor("01-Jun-2024 to 30-Jun-2024") == date(2024, 6, 1)
+    assert _parse_statement_period_anchor("01 Apr 2024 - 30 Apr 2024") == date(2024, 4, 1)
+
+
+def test_route_node_bank_fy_from_period_when_all_currencies_empty():
+    """When every currency section is txn-empty, derive FY from statement_period."""
+    from invoice_processing.extract.bank_statement_extractor import (
+        ExtractedAccount,
+        ExtractedBankStatement,
+    )
+
+    ex_bank = ExtractedBankStatement(
+        accounts=[
+            ExtractedAccount(
+                bank_name="DBS Bank Ltd",
+                account_number="072-955554-5",
+                currency="CNH",
+                statement_period="01-Jun-2024 to 30-Jun-2024",
+                opening_balance=0.0,
+                closing_balance=0.0,
+                transactions=[],
+            ),
+        ]
+    )
+    nodes.EXTRACT_BANK_FN = lambda data, mime, **kw: (ex_bank, "vision")
+    ctx = FakeContext(_base_state(**{
+        nodes.DOC_TYPE_KEY: "bank_statement",
+        "fye_month": 12,
+    }))
+    asyncio.run(nodes.extract_bank_node(ctx))
+    asyncio.run(nodes.route_node(ctx))
+    assert ctx.state[nodes.ROUTES_KEY][0]["fy"] == 2024
+
+
+def test_route_node_bank_apr_2024_calendar_fye():
+    """Apr 2024 statement routes to FY2024 when client FYE month is December."""
+    ex_bank = ExtractedBankStatement(
+        accounts=[
+            ExtractedAccount(
+                bank_name="DBS Bank Ltd",
+                account_number="072-065554-5",
+                currency="SGD",
+                statement_period="01 Apr 2024 - 30 Apr 2024",
+                opening_balance=0.0,
+                transactions=[
+                    ExtractedBankTxn(
+                        date="2024-04-15", description="SALARY",
+                        deposit=100.0, balance=100.0,
+                    ),
+                ],
+            )
+        ]
+    )
+    nodes.EXTRACT_BANK_FN = lambda data, mime, **kw: (ex_bank, "vision")
+    ctx = FakeContext(_base_state(**{
+        nodes.DOC_TYPE_KEY: "bank_statement",
+        "fye_month": 12,
+    }))
+    asyncio.run(nodes.extract_bank_node(ctx))
+    event = asyncio.run(nodes.route_node(ctx))
+
+    assert event.output == {"count": 1}
+    assert ctx.state[nodes.ROUTES_KEY][0]["fy"] == 2024
+    assert ctx.state[nodes.ROUTES_KEY][0]["workbook"] == "BankStatement_FY2024.xlsx"
 
 
 # =========================================================================== #

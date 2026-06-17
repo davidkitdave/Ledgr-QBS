@@ -87,7 +87,7 @@ def _init_llm() -> Optional["GenerativeModel"]:
 
     project_id = os.getenv("PROJECT_ID")
     location = os.getenv("LOCATION", "us-central1")
-    model_name = os.getenv("GEMINI_FLASH_MODEL", "gemini-2.5-flash")
+    model_name = os.getenv("LEDGR_MODEL_STD") or os.getenv("GEMINI_FLASH_MODEL", "gemini-2.5-flash")
 
     if not project_id:
         return None

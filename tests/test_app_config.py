@@ -227,3 +227,44 @@ class TestManifest:
         assert bot["always_online"] is True
 
 
+class TestManifestDev:
+    @pytest.fixture(scope="class")
+    def manifest(self):
+        path = PROJECT_ROOT / "slack" / "manifest-dev.json"
+        return json.loads(path.read_text())
+
+    def test_slash_command_is_ledgr_dev(self, manifest):
+        names = [c["command"] for c in manifest["features"]["slash_commands"]]
+        assert names == ["/ledgr-dev"]
+        assert "/ledgr" not in names
+
+    def test_reactions_write_scope(self, manifest):
+        assert "reactions:write" in manifest["oauth_config"]["scopes"]["bot"]
+
+    def test_socket_mode_enabled(self, manifest):
+        assert manifest["settings"]["socket_mode_enabled"] is True
+
+
+class TestManifestQbs:
+    @pytest.fixture(scope="class")
+    def manifest(self):
+        path = PROJECT_ROOT / "slack" / "manifest-qbs.json"
+        return json.loads(path.read_text())
+
+    def test_slash_command_is_ledgr(self, manifest):
+        cmds = manifest["features"]["slash_commands"]
+        assert len(cmds) == 1
+        assert cmds[0]["command"] == "/ledgr"
+        assert "run.app" in cmds[0]["url"]
+
+    def test_reactions_write_scope(self, manifest):
+        assert "reactions:write" in manifest["oauth_config"]["scopes"]["bot"]
+
+    def test_socket_mode_disabled(self, manifest):
+        assert manifest["settings"]["socket_mode_enabled"] is False
+
+    def test_display_name(self, manifest):
+        assert manifest["display_information"]["name"] == "Ledgr-QBS"
+        assert manifest["features"]["bot_user"]["display_name"] == "Ledgr-QBS"
+
+

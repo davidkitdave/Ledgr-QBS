@@ -8,7 +8,7 @@ from typing import Optional
 
 from google.genai import types
 
-from ..shared_libraries.genai_client import default_model, make_client
+from ..shared_libraries.genai_client import lite_model, make_client
 from .document_record import DocumentRecordBundle
 from .invoice_extractor import _append_hint, mime_for
 
@@ -67,7 +67,7 @@ def extract_document_bundle(
             data, mime_type = preprocessed
 
     client = make_client(project, location)
-    model = model or default_model()
+    model = model or lite_model()
     prompt = phase1_prompt if phase1_prompt is not None else PHASE1_PROMPT
     part = types.Part.from_bytes(data=data, mime_type=mime_type)
     resp = client.models.generate_content(

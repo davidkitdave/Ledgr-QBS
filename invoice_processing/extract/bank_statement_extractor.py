@@ -23,7 +23,7 @@ from google.genai import types
 from pydantic import BaseModel, Field
 
 from ..export.models import BankStatement, BankTransaction
-from ..shared_libraries.genai_client import default_model, make_client
+from ..shared_libraries.genai_client import lite_model, make_client, std_model
 from .invoice_extractor import _parse_date, mime_for
 
 
@@ -37,7 +37,7 @@ class ExtractedBankTxn(BaseModel):
 
 
 class ExtractedAccount(BaseModel):
-    bank_name: str = Field(description="Short account label, bank + last account digits, e.g. 'OCBC - 5001'")
+    bank_name: str = Field(description="Bank label only (e.g. 'OCBC' or 'DBS Bank Ltd'); do NOT pack account digits into this field")
     account_number: Optional[str] = None
     currency: Optional[str] = Field(None, description="ISO currency code, default SGD")
     statement_period: Optional[str] = Field(None, description="As printed, e.g. '01 DEC 2024 - 31 DEC 2024'")
@@ -69,8 +69,13 @@ Per transaction row:
 - description = the transaction narrative as printed.
 
 Per account:
-- bank_name = short label of bank + last digits of account (e.g. 'OCBC - 5001').
-- currency as ISO (default SGD). statement_period as printed. account_number if shown.
+- bank_name = the bank label ONLY (e.g. 'OCBC' or 'DBS Bank Ltd'). Do NOT pack
+  account digits into the bank_name — the tab title is built in code from
+  ``bank_name`` + ``account_number`` + ``currency`` (format: 'Bank - XXXX - CCY'),
+  so duplicating the digits here causes multi-currency sections to collapse
+  into a single Excel tab.
+- currency as ISO (default SGD). statement_period as printed. account_number
+  as printed on the statement, including any dashes (e.g. '072-955554-5').
 
 Do not invent values; leave a field null if it is not visible."""
 
@@ -123,7 +128,7 @@ def _extract_digital(text: str, *, model: Optional[str] = None,
                      project: Optional[str] = None, location: Optional[str] = None) -> ExtractedBankStatement:
     """Structured-output call with the extracted TEXT as content (text-only, no image Part)."""
     client = make_client(project, location)
-    model = model or default_model()
+    model = model or lite_model()
     resp = client.models.generate_content(
         model=model,
         contents=[text, _PROMPT],
@@ -140,7 +145,7 @@ def _extract_vision(data: bytes, mime_type: str, *, model: Optional[str] = None,
                     project: Optional[str] = None, location: Optional[str] = None) -> ExtractedBankStatement:
     """Multimodal structured-output call on the raw document bytes (for scanned PDFs/images)."""
     client = make_client(project, location)
-    model = model or default_model()
+    model = model or std_model()
     part = types.Part.from_bytes(data=data, mime_type=mime_type)
     resp = client.models.generate_content(
         model=model,
@@ -165,10 +170,18 @@ def extract_bank_statement(
     path: Optional[str | Path] = None,
     mode: str = "auto",
     model: Optional[str] = None,
+    digital_model: Optional[str] = None,
+    vision_model: Optional[str] = None,
     project: Optional[str] = None,
     location: Optional[str] = None,
 ) -> tuple[ExtractedBankStatement, str]:
     """Extract a bank statement; returns (parsed, mode_used).
+
+    Model routing (when callers do not override):
+    - **digital** (pdfplumber text path) → ``lite_model()`` / flash-lite
+    - **vision** (scanned PDF or image) → ``std_model()`` / flash
+
+    ``model`` sets both paths when ``digital_model`` / ``vision_model`` are unset.
 
     mode:
     - 'auto'    -> pick digital vs vision via _is_digital. Works from either a
@@ -180,15 +193,24 @@ def extract_bank_statement(
     - 'digital' -> force the pdfplumber-text path (requires ``path``).
     - 'vision'  -> force the multimodal/bytes path.
     """
-    kw = dict(model=model, project=project, location=location)
+    dig_kw = dict(
+        model=digital_model or model,
+        project=project,
+        location=location,
+    )
+    vis_kw = dict(
+        model=vision_model or model,
+        project=project,
+        location=location,
+    )
 
     if mode == "vision":
-        return _extract_vision(data, mime_type, **kw), "vision"
+        return _extract_vision(data, mime_type, **vis_kw), "vision"
 
     if mode == "digital":
         if path is None:
             raise ValueError("mode='digital' requires a path for pdfplumber text extraction")
-        return _extract_digital(_digital_text(path), **kw), "digital"
+        return _extract_digital(_digital_text(path), **dig_kw), "digital"
 
     # mode == 'auto'
     # Digital detection works from either a path or from the raw bytes directly
@@ -207,13 +229,13 @@ def extract_bank_statement(
     if is_dig:
         text = _digital_text(**text_src_kw).strip()
         if text:
-            ex = _extract_digital(text, **kw)
+            ex = _extract_digital(text, **dig_kw)
             if _has_data(ex):
                 return ex, "digital"
         # empty text or no usable data -> fall back to vision
-        return _extract_vision(data, mime_type, **kw), "vision"
+        return _extract_vision(data, mime_type, **vis_kw), "vision"
 
-    return _extract_vision(data, mime_type, **kw), "vision"
+    return _extract_vision(data, mime_type, **vis_kw), "vision"
 
 
 def extract_bank_file(path: str | Path, *, mode: str = "auto", **kw) -> tuple[ExtractedBankStatement, str]:

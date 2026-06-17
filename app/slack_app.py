@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 # OAuthSettings (multi-workspace install) and slack/manifest-distributed.json.
 BOT_SCOPES = [
     "chat:write",
+    "reactions:write",
     "files:read",
     "files:write",
     "channels:history",

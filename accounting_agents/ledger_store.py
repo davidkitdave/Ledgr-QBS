@@ -49,6 +49,7 @@ logger = logging.getLogger(__name__)
 
 #: Firestore collection holding client profiles (pointer lives in a subcollection).
 _CLIENTS_COLLECTION = "clients"
+_LEDGER_STASH_COLLECTION = "dedup_stash"
 #: Subcollection name for the per-FY ledger pointer docs.
 _LEDGERS_SUBCOLLECTION = "ledgers"
 
@@ -109,6 +110,105 @@ class SlackLedgerStore:
             return None
         fys.sort()
         return fys[-1]
+
+    def fy_pointers(self, client_id: str) -> list[dict]:
+        """Return all FY pointer docs for ``client_id`` as ``{fy, ...}`` dicts.
+
+        Each entry contains at least the ``fy`` label. Used by chat tooling to
+        surface every FY the client has ledgers for, so the agent can name the
+        correct one when the user asks "show me last year's books".
+        """
+        coll = (
+            self._db.collection(_CLIENTS_COLLECTION)
+            .document(client_id)
+            .collection(_LEDGERS_SUBCOLLECTION)
+        )
+        out: list[dict] = []
+        for snap in coll.stream():
+            data = snap.to_dict() or {}
+            data["fy"] = snap.id
+            out.append(data)
+        return out
+
+    def _count_rows_in_workbook(self, slack_client: Any, slack_file_id: str) -> int:
+        """Return the non-blank row count across all sheets in a workbook.
+
+        Downloads the workbook bytes (same SSRF-hardened path as
+        :meth:`read_rows`) and counts rows containing at least one non-None
+        cell. Returns 0 on any failure (network, missing file, malformed
+        workbook) so the caller can fall back gracefully.
+        """
+        try:
+            data = self._download_workbook(slack_client, slack_file_id)
+        except Exception:  # noqa: BLE001
+            return 0
+        try:
+            wb = self._load_workbook(data)
+        except Exception:  # noqa: BLE001
+            return 0
+        total = 0
+        for sheet in wb.worksheets:
+            if sheet.max_row < 2:
+                continue
+            headers = [c.value for c in sheet[1]]
+            if not any(h is not None for h in headers):
+                continue
+            for row in sheet.iter_rows(min_row=2, values_only=True):
+                if any(cell is not None for cell in row):
+                    total += 1
+        return total
+
+    def best_fy_for_chat(
+        self,
+        client_id: str,
+        slack_client: Any,
+    ) -> tuple[Optional[str], list[dict]]:
+        """Pick the FY label that has the most data for chat answers.
+
+        Returns ``(best_fy, summaries)`` where ``summaries`` is a list of
+        ``{fy, row_count, has_data}`` for every FY pointer the client has,
+        ordered by ``row_count`` desc then FY label desc. Ties go to the
+        highest FY label (matches the previous ``latest_fy`` behaviour for
+        empty ledgers, but only after data is checked).
+
+        If no pointers exist, ``best_fy`` is ``None`` and ``summaries`` is
+        empty. Pointers with no ``slack_file_id`` are reported as
+        ``row_count=0`` without a network call.
+        """
+        pointers = self.fy_pointers(client_id)
+        if not pointers:
+            return None, []
+        summaries: list[dict] = []
+        for ptr in pointers:
+            fy = str(ptr.get("fy") or "")
+            slack_file_id = ptr.get("slack_file_id")
+            if not slack_file_id:
+                summaries.append({"fy": fy, "row_count": 0, "has_data": False})
+                continue
+            count = self._count_rows_in_workbook(slack_client, slack_file_id)
+            summaries.append(
+                {"fy": fy, "row_count": count, "has_data": count > 0}
+            )
+        # Best = most rows; tie-break by highest FY label.
+        summaries_sorted = sorted(
+            summaries,
+            key=lambda s: (s.get("row_count", 0), s.get("fy", "")),
+            reverse=True,
+        )
+        best_fy = None
+        for s in summaries_sorted:
+            if s.get("has_data"):
+                best_fy = s.get("fy")
+                break
+        if best_fy is None and summaries_sorted:
+            # No FY has data; fall back to the highest FY label (matches old
+            # ``latest_fy`` behaviour so the agent still gets a stable key
+            # to report to the user).
+            best_fy = max(
+                (s.get("fy", "") for s in summaries_sorted),
+                default=None,
+            )
+        return best_fy, summaries_sorted
 
     def _set_pointer(
         self,
@@ -206,14 +306,178 @@ class SlackLedgerStore:
         return wb
 
     @staticmethod
-    def _load_workbook(data: bytes) -> Workbook:
-        return load_workbook(io.BytesIO(data))
+    def _slack_file_unavailable(exc: BaseException) -> bool:
+        """True when Slack reports the file id is gone (deleted / not found)."""
+        err = str(exc).lower()
+        return any(
+            token in err
+            for token in (
+                "file_deleted",
+                "file_not_found",
+                "not_found",
+                "missing_file",
+                "no_file",
+            )
+        )
+
+    @staticmethod
+    def _workbook_has_transaction_data(wb: Workbook) -> bool:
+        """True when at least one sheet has real transaction rows (not B/F or TOTALS)."""
+        skip = frozenset({"BALANCE B/F", "TOTALS"})
+        for sheet in wb.worksheets:
+            if sheet.max_row < 2:
+                continue
+            headers = [c.value for c in sheet[1]]
+            if not any(h for h in headers if h):
+                continue
+            desc_idx = None
+            for i, h in enumerate(headers):
+                if h == "Description":
+                    desc_idx = i
+                    break
+            for row in sheet.iter_rows(min_row=2, values_only=True):
+                if not row:
+                    continue
+                if desc_idx is not None and desc_idx < len(row):
+                    desc = row[desc_idx]
+                    if desc is not None and str(desc).strip() not in skip:
+                        return True
+                elif any(
+                    cell is not None and str(cell).strip()
+                    for cell in row
+                ):
+                    return True
+        return False
+
+    def _stash_ref(self, client_id: str, stash_key: str):
+        doc_id = urllib.parse.quote(stash_key, safe="")
+        return (
+            self._db.collection(_CLIENTS_COLLECTION)
+            .document(client_id)
+            .collection(_LEDGER_STASH_COLLECTION)
+            .document(doc_id)
+        )
+
+    def stash_bank_dedup_replace(
+        self,
+        *,
+        stash_key: str,
+        client_id: str,
+        fy: str,
+        kind: str,
+        software: str,
+        client_name: str,
+        batches: list[dict],
+    ) -> None:
+        """Store incoming bank batches for a deferred dedup Replace action."""
+        if not client_id or not batches:
+            return
+        self._stash_ref(client_id, stash_key).set({
+            "stash_key": stash_key,
+            "client_id": client_id,
+            "fy": str(fy),
+            "kind": kind,
+            "software": software,
+            "client_name": client_name,
+            "batches": batches,
+        })
+
+    def consume_bank_dedup_replace(self, stash_key: str) -> Optional[dict]:
+        """Load and delete a stashed dedup-replace payload."""
+        parts = stash_key.split("|", 3)
+        client_id = parts[0] if parts else ""
+        if not client_id:
+            return None
+        ref = self._stash_ref(client_id, stash_key)
+        snap = ref.get()
+        if not snap.exists:
+            return None
+        data = snap.to_dict() or {}
+        ref.delete()
+        return data
+
+    def purge_seen_doc_keys(
+        self,
+        client_id: str,
+        fy: str,
+        doc_keys: list[str],
+    ) -> int:
+        """Remove ``doc_keys`` from the FY pointer so batches can re-append."""
+        pointer = self.get_pointer(client_id, fy)
+        if not pointer:
+            return 0
+        seen = self._get_seen_doc_keys(pointer)
+        purged = 0
+        for dk in doc_keys:
+            if dk in seen:
+                seen.discard(dk)
+                purged += 1
+        if purged == 0:
+            return 0
+        slack_file_id = pointer.get("slack_file_id") or ""
+        extra = {k: v for k, v in pointer.items()
+                 if k not in ("slack_file_id", "seen_doc_keys", "fy", "client_id")}
+        self._set_pointer(
+            client_id,
+            fy,
+            slack_file_id,
+            seen_doc_keys=list(seen),
+            **extra,
+        )
+        return purged
+
+    def _upload_workbook_bytes(
+        self,
+        *,
+        wb: Workbook,
+        slack_client: Any,
+        channel_id: str,
+        client_id: str,
+        fy: str,
+        filename: str,
+        seen_doc_keys: set,
+        kind: str,
+        client_name: str,
+        prev_file_id: Optional[str],
+    ) -> tuple[Optional[str], Any]:
+        """Upload workbook bytes to Slack and update the Firestore pointer."""
+        new_bytes = self._to_bytes(wb)
+        upload_result = slack_client.files_upload_v2(
+            channel=channel_id,
+            filename=filename,
+            file=new_bytes,
+            title=filename,
+        )
+        new_file_id = self._extract_uploaded_file_id(upload_result)
+        if new_file_id:
+            self._set_pointer(
+                client_id,
+                fy,
+                new_file_id,
+                seen_doc_keys=list(seen_doc_keys),
+                channel_id=channel_id,
+                kind=kind,
+                client_name=client_name,
+            )
+        if prev_file_id and new_file_id and prev_file_id != new_file_id:
+            try:
+                slack_client.files_delete(file=prev_file_id)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "Could not delete superseded ledger file %s (non-fatal).",
+                    prev_file_id,
+                )
+        return new_file_id, upload_result
 
     @staticmethod
     def _to_bytes(wb: Workbook) -> bytes:
         buf = io.BytesIO()
         wb.save(buf)
         return buf.getvalue()
+
+    @staticmethod
+    def _load_workbook(data: bytes) -> Workbook:
+        return load_workbook(io.BytesIO(data))
 
     @staticmethod
     def _append_rows_to_sheet(sheet, cols: list[str], rows: list[dict]) -> int:
@@ -253,11 +517,13 @@ class SlackLedgerStore:
            of truth on every rebuild.
         """
         raw_header = [c.value for c in sheet[1]] if sheet.max_row >= 1 else []
-        if not raw_header:
+        if not raw_header or not any(h for h in raw_header if h):
             return []
 
         # Remap legacy column names to current canonical names.
         header = [cls._LEGACY_COL_MAP.get(h, h) for h in raw_header]
+        if "Description" not in header:
+            return []
         col_idx = {name: i for i, name in enumerate(header)}
 
         value_rows: list[dict] = []
@@ -361,6 +627,23 @@ class SlackLedgerStore:
             if cell.value in cls._LEGACY_COL_MAP:
                 cell.value = cls._LEGACY_COL_MAP[cell.value]
 
+    @classmethod
+    def _ensure_bank_header(cls, sheet, cols: list[str]) -> None:
+        """Ensure row 1 carries the canonical ``BANK_COLS`` header.
+
+        ``openpyxl``'s ``create_sheet`` leaves row 1 as a blank placeholder
+        (``[None]``), which is truthy in Python — so the old ``if not header``
+        guard never fired and secondary currency tabs were written without
+        column names or ``Math_Check`` formulas.
+        """
+        raw = [c.value for c in sheet[1]] if sheet.max_row >= 1 else []
+        normalized = [cls._LEGACY_COL_MAP.get(h, h) for h in raw if h]
+        if "Description" in normalized and "Balance" in normalized:
+            cls._migrate_legacy_header(sheet, cols)
+            return
+        for i, name in enumerate(cols, start=1):
+            sheet.cell(row=1, column=i, value=name)
+
     def _merge_bank_statement(
         self, sheet, cols: list[str], rows: list[dict]
     ) -> int:
@@ -371,14 +654,7 @@ class SlackLedgerStore:
         Dedupe (doc_key already seen?) is checked in Firestore before this is called.
         Returns the count of newly-added value rows.
         """
-        # Ensure the header exists on a brand-new sheet.
-        header = [c.value for c in sheet[1]] if sheet.max_row >= 1 else []
-        if not header:
-            sheet.append(list(cols))
-
-        # Migrate legacy column names in-place before reading blocks, so that
-        # rebuild_account_sheet always writes the current canonical header.
-        self._migrate_legacy_header(sheet, cols)
+        self._ensure_bank_header(sheet, cols)
 
         existing_blocks = self._read_bank_blocks(sheet, cols)
 
@@ -486,13 +762,29 @@ class SlackLedgerStore:
         # Read the Firestore-side set of already-processed doc keys.
         seen_doc_keys: set = self._get_seen_doc_keys(pointer)
 
+        # When the user deleted the workbook message from Slack the pointer can
+        # still reference a dead file id while seen_doc_keys blocks re-append.
+        if prev_file_id:
+            try:
+                slack_client.files_info(file=prev_file_id)
+            except Exception as exc:  # noqa: BLE001
+                if self._slack_file_unavailable(exc):
+                    logger.warning(
+                        "Workbook %s unavailable in Slack — resetting FY%s pointer "
+                        "and clearing seen_doc_keys so the drop can re-append.",
+                        prev_file_id, fy,
+                    )
+                    prev_file_id = None
+                    seen_doc_keys = set()
+                else:
+                    raise
+
         if prev_file_id:
             try:
                 data = self._download_workbook(slack_client, prev_file_id)
                 wb = self._load_workbook(data)
             except Exception as exc:
-                err_str = str(exc)
-                if "file_deleted" in err_str or "file_not_found" in err_str:
+                if self._slack_file_unavailable(exc):
                     logger.warning(
                         "Previous workbook %s gone from Slack — starting fresh FY%s.",
                         prev_file_id, fy,
@@ -609,8 +901,10 @@ class SlackLedgerStore:
                          "replaced": replaced_count, "appended": n}
                     )
 
-        # Skip the expensive download→re-upload cycle when nothing was appended
-        # (every batch was already in seen_doc_keys).
+        # Skip the upload when nothing new was appended — unless every batch was
+        # deduped and we still hold a populated workbook. That happens when the
+        # user deleted the Slack message but Firestore seen_doc_keys still block
+        # re-append; re-post the existing workbook so the channel regains a file.
         if appended == 0:
             result: dict = {
                 "slack_file_id": prev_file_id or "",
@@ -620,40 +914,36 @@ class SlackLedgerStore:
             }
             if replace:
                 result["batch_replace_counts"] = batch_replace_counts
+            if deduped > 0 and self._workbook_has_transaction_data(wb):
+                new_file_id, _ = self._upload_workbook_bytes(
+                    wb=wb,
+                    slack_client=slack_client,
+                    channel_id=channel_id,
+                    client_id=client_id,
+                    fy=fy,
+                    filename=filename,
+                    seen_doc_keys=seen_doc_keys,
+                    kind=kind,
+                    client_name=client_name,
+                    prev_file_id=prev_file_id,
+                )
+                if new_file_id:
+                    result["slack_file_id"] = new_file_id
+                    result["reshared"] = True
             return result
 
-        new_bytes = self._to_bytes(wb)
-        upload_result = slack_client.files_upload_v2(
-            channel=channel_id,
+        new_file_id, _ = self._upload_workbook_bytes(
+            wb=wb,
+            slack_client=slack_client,
+            channel_id=channel_id,
+            client_id=client_id,
+            fy=fy,
             filename=filename,
-            file=new_bytes,
-            title=filename,
+            seen_doc_keys=seen_doc_keys,
+            kind=kind,
+            client_name=client_name,
+            prev_file_id=prev_file_id,
         )
-        new_file_id = self._extract_uploaded_file_id(upload_result)
-        if new_file_id:
-            self._set_pointer(
-                client_id,
-                fy,
-                new_file_id,
-                seen_doc_keys=list(seen_doc_keys),
-                channel_id=channel_id,
-                kind=kind,
-                # Persist so mutation ops (amend_row / remove_row) can reconstruct
-                # the client-scoped filename without an extra profile lookup.
-                client_name=client_name,
-            )
-
-        # Fix 1: Delete the OLD Slack file AFTER the new upload + pointer update
-        # succeed so the channel never has zero ledger files. Only delete when there
-        # was a previous file AND it differs from the newly uploaded file.
-        if prev_file_id and new_file_id and prev_file_id != new_file_id:
-            try:
-                slack_client.files_delete(file=prev_file_id)
-            except Exception:  # noqa: BLE001 — cosmetic, log but never crash append
-                logger.warning(
-                    "Could not delete superseded ledger file %s (non-fatal).",
-                    prev_file_id,
-                )
 
         result = {
             "slack_file_id": new_file_id,
@@ -667,10 +957,11 @@ class SlackLedgerStore:
 
     @staticmethod
     def _get_or_create_sheet(wb: Workbook, sheet_name: str, kind: str):
-        """Return the named sheet, creating it (with no header) if absent.
+        """Return the named sheet, creating it (with bank header when needed) if absent.
 
         For the bank workbook the first fresh sheet is titled "Bank"; the first
         real account batch renames it instead of leaving an empty placeholder.
+        Additional bank account/currency tabs get a canonical header row immediately.
         """
         if sheet_name in wb.sheetnames:
             return wb[sheet_name]
@@ -679,7 +970,10 @@ class SlackLedgerStore:
             sheet = wb["Bank"]
             sheet.title = sheet_name
             return sheet
-        return wb.create_sheet(sheet_name)
+        sheet = wb.create_sheet(sheet_name)
+        if kind == "bank":
+            sheet.append(list(BankStatementExporter.BANK_COLS))
+        return sheet
 
     # ------------------------------------------------------------------ #
     # Public read API

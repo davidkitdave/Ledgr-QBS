@@ -49,10 +49,10 @@ import pytest
 # ──────────────────────────────────────────────────────────────────────────────
 
 _REPO_ROOT = pathlib.Path(__file__).parent.parent.parent
-_AGENT_MODULE = str(_REPO_ROOT / "accounting_agents")
 _EVALSET_PATH = str(
     pathlib.Path(__file__).parent / "datasets" / "ledgr.evalset.json"
 )
+_EVAL_CONFIG_PATH = str(pathlib.Path(__file__).parent / "eval_config.yaml")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Skip guard — no creds, no live LLM calls
@@ -79,6 +79,7 @@ _CASE_IDS = [
     "B3_chat_show_client_profile_trajectory",
     "B4_chat_summarize_by_category_trajectory",
     "B5_chat_multi_turn_fye_then_currency",
+    "B6_chat_invoice_account_code_trajectory",
     # Cluster C — SG GST rule regression
     "C6_gst_non_registered_invoice_all_nt",
     "C7_gst_registered_invoice_standard_rated",
@@ -95,26 +96,9 @@ _CASE_IDS = [
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.eval
-@pytest.mark.skipif(not _HAS_CREDS, reason=_SKIP_REASON)
-@pytest.mark.asyncio
-@pytest.mark.parametrize("eval_case_id", _CASE_IDS)
-async def test_golden_eval_case(eval_case_id: str) -> None:
-    """Run AgentEvaluator.evaluate for a single case from the golden evalset.
-
-    Each parametrised node exercises one cluster from the master-plan §10.B
-    gate. Failures here block Step 2 (extract reviewer) from merging.
-
-    AgentEvaluator.evaluate() loads the .test.json / evalset file, constructs
-    an EvalSet, runs the agent, and asserts on tool_trajectory_avg_score +
-    response_match_score per the config in eval_config.yaml.
-    """
-    # Import here so missing ADK deps don't break collection in the default suite.
+async def _run_golden_eval_case(eval_case_id: str) -> None:
+    """Run AgentEvaluator.evaluate_eval_set for one golden case."""
     from google.adk.evaluation.agent_evaluator import AgentEvaluator
-
-    # evaluate() accepts a full evalset file path; it runs ALL cases in the
-    # file. For per-case isolation we build a minimal single-case evalset in
-    # memory and delegate to evaluate_eval_set, which accepts an EvalSet obj.
     import json
 
     from google.adk.evaluation.eval_case import (
@@ -128,7 +112,8 @@ async def test_golden_eval_case(eval_case_id: str) -> None:
     from google.adk.evaluation.eval_set import EvalSet
     from google.genai import types as genai_types
 
-    # Load the full evalset JSON and pull out just this case.
+    from tests.eval.eval_routing import agent_module_for_case
+
     raw = json.loads(pathlib.Path(_EVALSET_PATH).read_text())
     raw_case = next(
         (c for c in raw["eval_cases"] if c["eval_id"] == eval_case_id),
@@ -138,7 +123,6 @@ async def test_golden_eval_case(eval_case_id: str) -> None:
         f"Case {eval_case_id!r} not found in {_EVALSET_PATH}"
     )
 
-    # Build typed Invocation objects.
     invocations: list[Invocation] = []
     for inv_raw in raw_case.get("conversation", []):
         uc_raw = inv_raw["user_content"]
@@ -176,7 +160,6 @@ async def test_golden_eval_case(eval_case_id: str) -> None:
             )
         )
 
-    # Build SessionInput if present.
     session_input = None
     if raw_case.get("session_input"):
         si = raw_case["session_input"]
@@ -197,9 +180,6 @@ async def test_golden_eval_case(eval_case_id: str) -> None:
         eval_cases=[eval_case],
     )
 
-    # Criteria: tool_trajectory_avg_score=1.0 (anti-random-walk gate per
-    # master plan §10.B) + response_match_score=0.5 (loose; final_response
-    # values are short anchor strings, not full prose).
     eval_config = EvalConfig(
         criteria={
             "tool_trajectory_avg_score": BaseCriterion(threshold=1.0),
@@ -208,12 +188,28 @@ async def test_golden_eval_case(eval_case_id: str) -> None:
     )
 
     await AgentEvaluator.evaluate_eval_set(
-        agent_module=_AGENT_MODULE,
+        agent_module=agent_module_for_case(eval_case_id),
         eval_set=eval_set,
         eval_config=eval_config,
         num_runs=1,
         print_detailed_results=True,
     )
+
+
+@pytest.mark.eval
+@pytest.mark.skipif(not _HAS_CREDS, reason=_SKIP_REASON)
+@pytest.mark.parametrize("eval_case_id", _CASE_IDS)
+def test_golden_eval_case(eval_case_id: str) -> None:
+    """Run AgentEvaluator.evaluate for a single case from the golden evalset.
+
+    Each parametrised node exercises one cluster from the master-plan §10.B
+    gate. Failures here block Step 2 (extract reviewer) from merging.
+
+    AgentEvaluator.evaluate() loads the .test.json / evalset file, constructs
+    an EvalSet, runs the agent, and asserts on tool_trajectory_avg_score +
+    response_match_score per the config in eval_config.yaml.
+    """
+    asyncio.run(_run_golden_eval_case(eval_case_id))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -223,18 +219,14 @@ async def test_golden_eval_case(eval_case_id: str) -> None:
 
 @pytest.mark.eval
 @pytest.mark.skipif(not _HAS_CREDS, reason=_SKIP_REASON)
-@pytest.mark.asyncio
-async def test_golden_eval_full_set() -> None:
-    """Run AgentEvaluator.evaluate() across the entire ledgr evalset file.
+def test_golden_eval_full_set() -> None:
+    """Run AgentEvaluator across all golden cases, routed per lane.
 
-    Use this for a full regression sweep. The per-case parametrised test above
-    is better for pinpointing failures during development.
+    Chat cases (B*) use ``accounting_agents.chat_eval.agent``; doc cases use
+    ``accounting_agents.agent``. There is no single root agent for both lanes.
     """
-    from google.adk.evaluation.agent_evaluator import AgentEvaluator
+    import json
 
-    await AgentEvaluator.evaluate(
-        agent_module=_AGENT_MODULE,
-        eval_dataset_file_path_or_dir=_EVALSET_PATH,
-        num_runs=1,
-        print_detailed_results=True,
-    )
+    raw = json.loads(pathlib.Path(_EVALSET_PATH).read_text())
+    for raw_case in raw["eval_cases"]:
+        asyncio.run(_run_golden_eval_case(raw_case["eval_id"]))

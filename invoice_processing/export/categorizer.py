@@ -130,7 +130,7 @@ def _llm_match_lines(
     """
     from google.genai import types
 
-    from ..shared_libraries.genai_client import default_model, make_client
+    from ..shared_libraries.genai_client import lite_model, make_client
 
     coa_for_prompt = [
         {"key": a.key, "description": a.description, "account_type": a.account_type or ""}
@@ -190,7 +190,7 @@ def _llm_match_lines(
     try:
         client = make_client()
         resp = client.models.generate_content(
-            model=model or default_model(),
+            model=model or lite_model(),
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",

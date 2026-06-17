@@ -37,6 +37,15 @@ except ImportError:
 if "GOOGLE_GENAI_USE_VERTEXAI" not in os.environ:
     os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "FALSE"
 
+from invoice_processing.shared_libraries.model_config import (  # noqa: E402,F401
+    MODEL_CHAT,
+    MODEL_LITE,
+    MODEL_READ,
+    MODEL_STD,
+    model_for,
+    resolve_model as _resolve_model,
+)
+
 # ---------------------------------------------------------------------------
 # Environment helpers
 # ---------------------------------------------------------------------------
@@ -51,44 +60,6 @@ def _env_prefix() -> str:
     """
     env = (os.environ.get("LEDGR_ENV") or "dev").strip().lower()
     return "[dev] " if env == "dev" else ""
-
-
-def _resolve_model(tier: str) -> str:
-    """Return the model name for ``tier`` ('lite' or 'std').
-
-    Resolution order:
-    1. ``LEDGR_MODEL_<TIER>`` env override — allows flipping per env without
-       code changes (e.g. set LEDGR_MODEL_LITE in a Cloud Run secret when
-       gemini-2.5-flash-lite reaches asia-southeast1).
-    2. Per-env default:
-       - dev / unset  → lite=gemini-2.5-flash-lite, std=gemini-2.5-flash
-                        (AI Studio, US/global availability)
-       - prod         → both=gemini-2.5-flash
-                        (Vertex asia-southeast1; flash-lite not yet available there)
-    """
-    override = os.environ.get(f"LEDGR_MODEL_{tier.upper()}")
-    if override:
-        return override
-    env = (os.environ.get("LEDGR_ENV") or "dev").strip().lower()
-    if env == "prod":
-        return "gemini-2.5-flash"
-    return "gemini-2.5-flash-lite" if tier == "lite" else "gemini-2.5-flash"
-
-
-# ---------------------------------------------------------------------------
-# Model tier constants (env-overridable)
-# ---------------------------------------------------------------------------
-
-#: Lighter model for simpler documents: invoices, receipts, coordinator routing.
-MODEL_LITE: str = _resolve_model("lite")
-
-#: Stronger model for complex documents: bank statements.
-MODEL_STD: str = _resolve_model("std")
-
-#: Phase 1 faithful-read model (Drive-like DocumentRecord capture). Defaults to flash.
-MODEL_READ: str = (
-    os.environ.get("LEDGR_MODEL_READ") or "gemini-2.5-flash"
-)
 
 
 # ---------------------------------------------------------------------------
@@ -111,20 +82,6 @@ def _ns(name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Helper
+# Model tier constants — defined in invoice_processing.shared_libraries.model_config
+# Configure via LEDGR_MODEL_* in .env (see .env.example).
 # ---------------------------------------------------------------------------
-
-def model_for(complexity: str) -> str:
-    """Return the model name for the given complexity tier.
-
-    Args:
-        complexity: ``"lite"`` for simpler documents (invoices, routing),
-                    ``"std"`` or anything else for complex documents (bank
-                    statements).
-
-    Returns:
-        The model string suitable for passing to ``LlmAgent(model=...)``.
-    """
-    if complexity.lower() == "lite":
-        return MODEL_LITE
-    return MODEL_STD

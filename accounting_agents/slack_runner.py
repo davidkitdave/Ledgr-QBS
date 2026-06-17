@@ -54,6 +54,7 @@ from accounting_agents.assistant import (
     PENDING_REEXTRACT_KEY,
     PENDING_WRITE_KEY,
     PROCESSING_LOG_KEY,
+    THREAD_FOCUS_KEY,
 )
 from accounting_agents.config import _env_prefix
 
@@ -897,6 +898,21 @@ async def persist_and_deliver(
                 "payload": payload,
                 "workbook_name": append_result.get("filename") or "",
             }
+        # Phase 1 (thread-context fix): persist processing_log BEFORE the early
+        # return so multi-file batch drops stay visible to the chat lane. The
+        # delivery_message_ts is the per-doc thread_ts at this point; the batch
+        # coordinator patches it to the job-summary ts at batch end via
+        # ``_patch_processing_log_thread`` (see _message handler).
+        if batches and not append_result.get("all_deduped"):
+            _record_processing_log(
+                state=state,
+                payload=payload,
+                batches=batches,
+                append_result=append_result,
+                client_store=client_store or _DEFAULT_CLIENT_STORE,
+                delivery_message_ts=thread_ts,
+                channel_id=channel_id,
+            )
         return append_result
 
     if append_result.get("appended", 0) > 0 and batches:
@@ -919,6 +935,8 @@ async def persist_and_deliver(
             batches=batches,
             append_result=append_result,
             client_store=client_store or _DEFAULT_CLIENT_STORE,
+            delivery_message_ts=thread_ts,
+            channel_id=channel_id,
         )
 
     return append_result
@@ -931,10 +949,25 @@ def _record_processing_log(
     batches: list[dict],
     append_result: dict,
     client_store,
+    delivery_message_ts: Optional[str] = None,
+    channel_id: Optional[str] = None,
+    invoice_ids: Optional[list[str]] = None,
 ) -> None:
-    """Persist extraction metadata so the chat assistant can introspect deliveries."""
+    """Persist extraction metadata so the chat assistant can introspect deliveries.
+
+    ``delivery_message_ts`` and ``channel_id`` (Phase 2) are the Slack message
+    timestamp the delivery card is parented under and the channel it lives in;
+    they let the chat lane resolve a thread reply back to the specific batch the
+    user is asking about (``raw_thread_ts`` in answer_question).
+    """
     client_id = str(payload.get("client_id") or state.get("client_id") or "").strip()
-    file_id = str(state.get("file_id") or "").strip()
+    # File id may be on top-level state (fresh ADK run) OR inside the ledger payload
+    # (older session snapshot); accept both so the entry always has a stable id.
+    file_id = str(
+        state.get("file_id")
+        or payload.get("file_id")
+        or ""
+    ).strip()
     if not client_id or not file_id:
         return
     from datetime import datetime, timezone
@@ -942,6 +975,21 @@ def _record_processing_log(
     doc_type = str(state.get(nodes.DOC_TYPE_KEY) or payload.get("kind") or "invoice").strip().lower()
     extraction_path = str(state.get(nodes.EXTRACTION_PATH_KEY) or "unknown").strip().lower()
     row_count = sum(len(b.get("rows") or []) for b in batches)
+    if row_count == 0:
+        summary_table = (
+            state.get("ledger_summary_table")
+            or state.get("summary_table")
+            or []
+        )
+        if isinstance(summary_table, list) and summary_table:
+            row_count = len(summary_table)
+        else:
+            try:
+                row_count = int(state.get("row_count") or 0)
+            except (TypeError, ValueError):
+                row_count = 0
+    if not invoice_ids:
+        invoice_ids = _invoice_ids_from_batches(batches)
     entry = {
         "file_id": file_id,
         "filename": str(state.get("source_filename") or file_id),
@@ -952,6 +1000,14 @@ def _record_processing_log(
         "fy": str(payload.get("fy") or append_result.get("fy") or ""),
         "soa_legacy_path": doc_type == "statement_of_account" or extraction_path == "legacy",
     }
+    # Phase 2: thread-context linkage. Optional keys only — older entries (pre-fix)
+    # simply lack them and the resolver skips.
+    if delivery_message_ts:
+        entry["delivery_message_ts"] = delivery_message_ts
+    if channel_id:
+        entry["channel_id"] = channel_id
+    if invoice_ids:
+        entry["invoice_ids"] = list(invoice_ids)
     try:
         client_store.append_processing_log(client_id=client_id, file_id=file_id, entry=entry)
     except Exception:  # noqa: BLE001 — log write is best-effort
@@ -1091,6 +1147,89 @@ def _build_batch_aggregate_blocks(
     return summary, blocks
 
 
+def _bank_batch_dedup_callout(
+    deferred_items: list[dict],
+    flush_results: list[dict],
+    channel_id: str,
+) -> tuple[list[dict], str]:
+    """Build Replace/Keep dedup card when a bank batch fully deduped at flush.
+
+    Returns ``(blocks, stash_key)`` where ``stash_key`` keys pending replace
+    payloads for the ``ledgr_dedup_replace`` action handler.
+    """
+    if not deferred_items or not flush_results:
+        return [], ""
+    deduped = sum(int(r.get("deduped") or 0) for r in flush_results)
+    appended = sum(int(r.get("appended") or 0) for r in flush_results)
+    if deduped == 0 or appended > 0:
+        return [], ""
+
+    payload = (deferred_items[0].get("payload") or {})
+    if (payload.get("kind") or "invoice") != "bank":
+        return [], ""
+
+    batches: list[dict] = []
+    for item in deferred_items:
+        batches.extend(item.get("batches") or [])
+    if not batches:
+        return [], ""
+
+    all_rows = [r for b in batches for r in (b.get("rows") or [])]
+    txn_rows = [
+        r for r in all_rows
+        if (r.get("Description") or "") not in ("BALANCE B/F", "TOTALS")
+    ]
+    month = nodes._month_label(txn_rows) or "this month"
+    fy_str = str(payload.get("fy") or "0")
+    try:
+        fy_int = int(fy_str)
+    except (TypeError, ValueError):
+        fy_int = 0
+    vendor = payload.get("client_name") or "bank statement"
+    workbook = (flush_results[0].get("filename") or "") if flush_results else ""
+    n_incoming = len(txn_rows)
+    client_id = str(payload.get("client_id") or "")
+
+    stash_key = f"{client_id}|{channel_id}|{fy_str}|{month}"
+    blocks = dedup_callout_card(
+        vendor=vendor,
+        fy=fy_int,
+        month=month,
+        existing={"rows": n_incoming, "date_range": month, "workbook": workbook},
+        incoming={"rows": n_incoming, "date_range": month, "file_label": workbook},
+        op_id=stash_key,
+        channel_id=channel_id,
+    )
+    return blocks, stash_key
+
+
+def _stash_bank_dedup_replace(
+    ledger_store: Any,
+    deferred_items: list[dict],
+    *,
+    stash_key: str,
+) -> None:
+    """Persist incoming bank batches so Replace can re-merge without re-upload."""
+    if not hasattr(ledger_store, "stash_bank_dedup_replace"):
+        return
+    batches: list[dict] = []
+    payload: dict = {}
+    for item in deferred_items:
+        payload = item.get("payload") or payload
+        batches.extend(item.get("batches") or [])
+    if not batches:
+        return
+    ledger_store.stash_bank_dedup_replace(
+        stash_key=stash_key,
+        client_id=str(payload.get("client_id") or ""),
+        fy=str(payload.get("fy") or ""),
+        kind=str(payload.get("kind") or "bank"),
+        software=str(payload.get("software") or "qbs"),
+        client_name=str(payload.get("client_name") or ""),
+        batches=batches,
+    )
+
+
 def _post_batch_aggregate_delivery(
     slack_client: Any,
     channel_id: str,
@@ -1116,7 +1255,7 @@ async def _flush_deferred_ledger_writes(
     slack_client: Any,
     channel_id: str,
     batch_deferred: list[dict],
-) -> None:
+) -> list[dict]:
     """Merge stashed ledger payloads across the batch and write the workbook ONCE.
 
     Each per-doc run in batch mode added a ``deferred_ledger`` to its result
@@ -1125,6 +1264,10 @@ async def _flush_deferred_ledger_writes(
     :meth:`SlackLedgerStore.append_rows` once per group. The merged
     ``workbook_name`` is then back-patched onto each ``deferred_delivery`` entry
     so the aggregate delivery card references the right file.
+
+    Returns one :meth:`SlackLedgerStore.append_rows` result dict per FY group
+    (empty when nothing was stashed). Callers use ``appended`` / ``deduped`` to
+    reconcile the Job summary and decide whether to show delivery preview tables.
 
     Errors here are non-fatal: the delivery message still posts; the workbook
     may simply miss the late write until a later file drop re-runs the same FY.
@@ -1160,8 +1303,9 @@ async def _flush_deferred_ledger_writes(
             grp["effective_replace"] = True
 
     if not groups:
-        return
+        return []
 
+    flush_results: list[dict] = []
     for grp in groups.values():
         if not grp["batches"]:
             continue
@@ -1184,6 +1328,7 @@ async def _flush_deferred_ledger_writes(
                 grp["client_id"], grp["fy"], grp["kind"],
             )
             continue
+        flush_results.append(append_result or {})
         workbook_name = (append_result or {}).get("filename") or ""
         if not workbook_name:
             continue
@@ -1197,6 +1342,7 @@ async def _flush_deferred_ledger_writes(
                 and (payload.get("kind") or "invoice") == grp["kind"]
             ):
                 item["workbook_name"] = workbook_name
+    return flush_results
 
 
 def _terminal_status_line(append_result: dict, _payload: Optional[dict] = None) -> str:
@@ -1373,8 +1519,16 @@ def _add_reaction(slack_client: Any, channel_id: str, ts: Optional[str], name: s
         return
     try:
         slack_client.reactions_add(channel=channel_id, timestamp=ts, name=name)
-    except Exception:  # noqa: BLE001 - cosmetic
-        logger.debug("reactions_add(%s) failed for %s/%s", name, channel_id, ts)
+    except Exception as exc:  # noqa: BLE001 - cosmetic
+        err = str(exc).lower()
+        if "missing_scope" in err or "not_allowed_token" in err:
+            logger.warning(
+                "reactions_add(%s) blocked (missing reactions:write?) — "
+                "reinstall the Slack app from slack/manifest*.json",
+                name,
+            )
+        else:
+            logger.debug("reactions_add(%s) failed for %s/%s", name, channel_id, ts)
 
 
 def _remove_reaction(slack_client: Any, channel_id: str, ts: Optional[str], name: str) -> None:
@@ -1385,6 +1539,110 @@ def _remove_reaction(slack_client: Any, channel_id: str, ts: Optional[str], name
         slack_client.reactions_remove(channel=channel_id, timestamp=ts, name=name)
     except Exception:  # noqa: BLE001 - cosmetic
         logger.debug("reactions_remove(%s) failed for %s/%s", name, channel_id, ts)
+
+
+# --------------------------------------------------------------------------- #
+# Chat-lane agentic UX (Phase 4): eyes ack + assistant thinking status
+# --------------------------------------------------------------------------- #
+
+_CHAT_TOOL_LOADING: dict[str, str] = {
+    "lookup_row": "Looking up that invoice in the ledger…",
+    "explain_categorization": "Checking why this account code was chosen…",
+    "explain_tax_treatment": "Checking the tax treatment…",
+    "diagnose_assistant_context": "Checking what's loaded for this client…",
+    "get_document_processing_detail": "Reviewing how that document was extracted…",
+    "list_recent_documents": "Listing recent documents…",
+    "list_processing_history": "Checking processing history…",
+    "summarize_recent_activity": "Summarizing recent activity…",
+}
+
+_CHAT_LOADING_MESSAGES: tuple[str, ...] = (
+    "Working on your question…",
+    "Checking your ledger…",
+    "Reviewing the loaded data…",
+)
+
+
+def _chat_ux_enabled() -> bool:
+    """Feature flag for chat-lane Slack UX (default on). Set ``LEDGR_CHAT_UX=0`` to disable."""
+    return os.getenv("LEDGR_CHAT_UX", "1").strip().lower() not in ("0", "false", "no")
+
+
+def _chat_stream_enabled() -> bool:
+    """Optional Phase 5 streaming (default off). Requires slack-sdk ≥ 3.40."""
+    return os.getenv("LEDGR_CHAT_STREAM", "0").strip().lower() in ("1", "true", "yes")
+
+
+def _ack_chat_turn(slack_client: Any, channel_id: str, user_message_ts: Optional[str]) -> None:
+    """Instant 👀 on the user's message so they know the agent saw it."""
+    if _chat_ux_enabled():
+        _add_reaction(slack_client, channel_id, user_message_ts, "eyes")
+
+
+def _set_chat_thinking(
+    slack_client: Any,
+    channel_id: str,
+    thread_ts: Optional[str],
+    *,
+    stage: Optional[str] = None,
+) -> None:
+    """Show Slack's native 'is thinking…' shimmer in the thread."""
+    if not _chat_ux_enabled() or not thread_ts:
+        return
+    loading = list(_CHAT_LOADING_MESSAGES)
+    if stage:
+        loading.insert(0, stage)
+    try:
+        slack_client.assistant_threads_setStatus(
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            status="is thinking...",
+            loading_messages=loading[:10],
+        )
+    except Exception:  # noqa: BLE001 — cosmetic
+        logger.debug(
+            "assistant_threads_setStatus failed channel=%s thread=%s",
+            channel_id, thread_ts, exc_info=True,
+        )
+
+
+def _clear_chat_thinking(slack_client: Any, channel_id: str, thread_ts: Optional[str]) -> None:
+    """Clear the thinking shimmer (Slack also auto-clears on reply)."""
+    if not _chat_ux_enabled() or not thread_ts:
+        return
+    try:
+        slack_client.assistant_threads_setStatus(
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            status="",
+        )
+    except Exception:  # noqa: BLE001 — cosmetic
+        logger.debug(
+            "assistant_threads_setStatus(clear) failed channel=%s thread=%s",
+            channel_id, thread_ts, exc_info=True,
+        )
+
+
+def _finish_chat_ack(
+    slack_client: Any, channel_id: str, user_message_ts: Optional[str]
+) -> None:
+    """Swap 👀 for ✅ on the user's message after a successful reply."""
+    if not _chat_ux_enabled() or not user_message_ts:
+        return
+    _remove_reaction(slack_client, channel_id, user_message_ts, "eyes")
+    _add_reaction(slack_client, channel_id, user_message_ts, "white_check_mark")
+
+
+def _function_call_names(event: Any) -> list[str]:
+    """Return tool names from an ADK event's function-call parts."""
+    getter = getattr(event, "get_function_calls", None)
+    calls = getter() if callable(getter) else []
+    names: list[str] = []
+    for fc in calls or []:
+        name = getattr(fc, "name", None)
+        if name:
+            names.append(str(name))
+    return names
 
 
 # --------------------------------------------------------------------------- #
@@ -1886,6 +2144,192 @@ async def _read_session_state(
         logger.debug("get_session failed for %s/%s; falling back to empty state",
                      user_id, session_id)
     return {}
+
+
+_DOC_SNAPSHOT_FIELDS: tuple[str, ...] = (
+    "doc_type",
+    "extraction_path",
+    "review_reasons",
+    "source_filename",
+    "summary_table",
+    "normalized_invoice_count",
+    "soa_legacy_path",
+)
+
+
+def _coerce_snapshot_fields(state: dict) -> dict:
+    """Pick the chat-relevant fields out of a per-document session state.
+
+    Returns a fresh dict with a small, LLM-friendly subset. The
+    ``summary_table`` is reduced to its length so the JSON payload stays
+    small even for very long documents. Anything missing in the source
+    state is omitted from the result (the chat tools handle absent fields
+    gracefully).
+    """
+    if not isinstance(state, dict):
+        return {}
+    out: dict = {}
+    for key in _DOC_SNAPSHOT_FIELDS:
+        val = state.get(key)
+        if val is None:
+            continue
+        if key == "summary_table":
+            try:
+                out["summary_table_size"] = len(val)
+            except TypeError:
+                continue
+            continue
+        out[key] = val
+    return out
+
+
+async def _snapshot_doc_sessions(
+    runner: Any,
+    app_name: str,
+    channel_id: str,
+    file_ids: list[str],
+) -> dict:
+    """Read-only snapshot of per-document session state for chat introspection.
+
+    For each ``file_id`` in ``file_ids``, try to load the per-document ADK
+    session (``{channel_id}:{file_id}``) and pull out a small subset of
+    fields the chat agent can cite. The runner never writes here — it is
+    pure introspection data injected into ``state["document_sessions"]``
+    so the chat tools stay free of Firestore / ADK session I/O.
+
+    Returns:
+        A dict ``{file_id: snapshot_dict, ...}``; missing/unreadable
+        files are simply absent from the mapping.
+    """
+    out: dict = {}
+    if not runner or not file_ids:
+        return out
+    for fid in file_ids:
+        if not fid:
+            continue
+        session_id = f"{channel_id}:{fid}"
+        try:
+            sess = await runner.session_service.get_session(
+                app_name=app_name, user_id=session_id, session_id=session_id
+            )
+        except Exception:  # noqa: BLE001 - best-effort
+            continue
+        if not sess or not getattr(sess, "state", None):
+            continue
+        snap = _coerce_snapshot_fields(sess.state)
+        if snap:
+            out[fid] = snap
+    return out
+
+
+_DOC_BACKFILL_KEYS: tuple[str, ...] = (
+    "delivered",
+    "final_status",
+    "summary_table",
+    "extraction_path",
+)
+
+
+def _build_processing_log_entry(file_id: str, state: dict) -> dict:
+    """Build a ``processing_log`` entry from an ADK session state snapshot."""
+    from datetime import datetime, timezone
+
+    doc_type = str(
+        state.get("doc_type") or state.get("_doc_type") or "invoice"
+    ).strip().lower()
+    extraction_path = str(
+        state.get("extraction_path") or "unknown"
+    ).strip().lower()
+    summary_table = state.get("summary_table") or []
+    try:
+        row_count = int(state.get("row_count") or len(summary_table) or 0)
+    except (TypeError, ValueError):
+        row_count = 0
+    return {
+        "file_id": file_id,
+        "filename": str(
+            state.get("source_filename") or state.get("filename") or file_id
+        ),
+        "doc_type": doc_type,
+        "extraction_path": extraction_path,
+        "delivered_at": (
+            state.get("delivered_at")
+            or state.get("finalized_at")
+            or datetime.now(timezone.utc).isoformat()
+        ),
+        "row_count": row_count,
+        "fy": str(state.get("fy") or ""),
+        "soa_legacy_path": (
+            doc_type == "statement_of_account" or extraction_path == "legacy"
+        ),
+        "backfilled": True,
+    }
+
+
+async def _lazy_backfill_processing_log(
+    *,
+    client_store: Any,
+    client_id: str,
+    channel_id: str,
+    app_name: str,
+    limit: int = 20,
+) -> list[dict]:
+    """Reconstruct the recent processing log for ``client_id`` from doc sessions.
+
+    Used by ``answer_question`` when the persisted log is empty so the
+    chat agent sees historical deliveries without a manual script run.
+    Same logic as :mod:`scripts.backfill_processing_log` but capped and
+    scoped to the current channel.
+
+    Returns:
+        A list of backfilled processing_log entries (possibly empty).
+    """
+    # The doc runner lives on the chat runner's session service; reuse it
+    # when the chat runner's session_service is the same one Firestore
+    # session service uses. Otherwise, walk whatever session service the
+    # chat runner exposes.
+    from accounting_agents.sessions import FirestoreSessionService
+
+    out: list[dict] = []
+    try:
+        svc = FirestoreSessionService()
+        resp = await svc.list_sessions(
+            app_name="accounting_agents_document", user_id=channel_id
+        )
+        sessions = list(getattr(resp, "sessions", resp) or [])
+    except Exception:  # noqa: BLE001
+        return out
+    for sess_meta in sessions[:limit]:
+        session_id = (
+            sess_meta.get("id")
+            if isinstance(sess_meta, dict)
+            else getattr(sess_meta, "id", None)
+        )
+        if not session_id or not str(session_id).startswith(f"{channel_id}:"):
+            continue
+        file_id = str(session_id).split(":", 1)[-1]
+        try:
+            sess = await svc.get_session(
+                app_name="accounting_agents_document",
+                user_id=channel_id,
+                session_id=session_id,
+            )
+        except Exception:  # noqa: BLE001
+            continue
+        state = getattr(sess, "state", None) or {}
+        if not state or not any(k in state for k in _DOC_BACKFILL_KEYS):
+            continue
+        entry = _build_processing_log_entry(file_id, state)
+        try:
+            client_store.append_processing_log(
+                client_id=client_id, file_id=file_id, entry=entry
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "lazy backfill persist failed for file_id=%s", file_id
+            )
+        out.append(entry)
+    return out
 
 
 def _vendor_from_inv_dict(first: dict) -> Optional[str]:
@@ -2606,6 +3050,7 @@ async def _handle_chat_turn(
     db: Any,
 ) -> None:
     """Route one user text turn to the ADK chat assistant (single code path)."""
+    thinking_ts = thread_ts or raw_thread_ts or message_ts
     try:
         await answer_question(
             runner=chat_runner,
@@ -2623,6 +3068,9 @@ async def _handle_chat_turn(
         )
     except Exception:
         logger.exception("answer_question failed for channel %s", channel_id)
+        if _chat_ux_enabled():
+            _clear_chat_thinking(slack_client, channel_id, thinking_ts)
+            _remove_reaction(slack_client, channel_id, message_ts, "eyes")
         _post_message(
             slack_client,
             channel_id,
@@ -2993,6 +3441,832 @@ async def _execute_pending_reextract(
     return dispatched
 
 
+def _dominant_fy_from_processing_log(processing_log: list) -> str | None:
+    """Return the FY label that appears most often in the processing log."""
+    from collections import Counter
+
+    counts: Counter[str] = Counter()
+    for entry in processing_log or []:
+        if not isinstance(entry, dict):
+            continue
+        fy = str(entry.get("fy") or "").strip()
+        if fy:
+            counts[fy] += 1
+    if not counts:
+        return None
+    return counts.most_common(1)[0][0]
+
+
+def _fy_hint_from_question(question: str, processing_log: list) -> str | None:
+    """If the user's message names a file/invoice, return its FY from the log."""
+    from accounting_agents.assistant_tools._helpers import filename_matches_query
+    import re
+
+    q = (question or "").strip()
+    if not q:
+        return None
+    tokens = re.findall(r"[\w][\w-]*", q)
+    for entry in processing_log or []:
+        if not isinstance(entry, dict):
+            continue
+        fn = str(entry.get("filename") or "")
+        fy = str(entry.get("fy") or "").strip()
+        if not fn or not fy:
+            continue
+        if filename_matches_query(q, fn):
+            return fy
+        for tok in tokens:
+            if len(tok) >= 3 and filename_matches_query(tok, fn):
+                return fy
+    return None
+
+
+def _invoice_ids_from_batches(batches: list[dict]) -> list[str]:
+    """Collect invoice numbers from exporter row dicts in delivery batches."""
+    ids: list[str] = []
+    for batch in batches or []:
+        for row in batch.get("rows") or []:
+            if not isinstance(row, dict):
+                continue
+            inv = (
+                row.get("*InvoiceNumber")
+                or row.get("Invoice Number")
+                or row.get("Reference")
+            )
+            if inv:
+                token = str(inv).strip()
+                if token and token not in ids:
+                    ids.append(token)
+    return ids
+
+
+def _data_table_cell_text(cell: Any) -> str:
+    if isinstance(cell, dict):
+        return str(cell.get("text") or "").strip()
+    return str(cell or "").strip()
+
+
+def _map_delivery_table_headers(headers: list[str]) -> dict[str, int]:
+    """Map logical preview keys to column indices in a delivery data_table."""
+    mapping: dict[str, int] = {}
+    for idx, header in enumerate(headers):
+        hl = header.lower().strip()
+        if hl in {"invoice #", "invoice number", "invoice", "inv #"}:
+            mapping.setdefault("invoice_id", idx)
+        elif "account" in hl or hl in {"coa", "account / coa"}:
+            mapping.setdefault("account_code", idx)
+        elif hl in {"invoice date", "date"}:
+            mapping.setdefault("date", idx)
+        elif hl == "description":
+            mapping.setdefault("description", idx)
+        elif hl in {
+            "contact", "vendor", "customer", "vendor name", "customer name",
+        }:
+            mapping.setdefault("vendor", idx)
+        elif ".pdf" in hl or "filename" in hl or "source" in hl:
+            mapping.setdefault("filename", idx)
+    return mapping
+
+
+def _parse_delivery_data_table_rows(replies_resp: Any) -> list[dict]:
+    """Parse ledger preview rows from delivery-card ``data_table`` blocks."""
+    try:
+        messages = (replies_resp or {}).get("messages") or []
+    except Exception:  # noqa: BLE001
+        return []
+    if not messages:
+        return []
+    parent = messages[0]
+    preview_rows: list[dict] = []
+    for block in parent.get("blocks") or []:
+        if not isinstance(block, dict) or block.get("type") != "data_table":
+            continue
+        table_rows = block.get("rows") or []
+        if len(table_rows) < 2:
+            continue
+        headers = [_data_table_cell_text(c) for c in table_rows[0]]
+        col_map = _map_delivery_table_headers(headers)
+        if not col_map:
+            continue
+        for data_row in table_rows[1:]:
+            cells = [_data_table_cell_text(c) for c in data_row]
+            if not any(cells):
+                continue
+            record: dict[str, str] = {}
+            for key, col_idx in col_map.items():
+                if col_idx < len(cells) and cells[col_idx]:
+                    record[key] = cells[col_idx]
+            if record:
+                preview_rows.append(record)
+    return preview_rows
+
+
+def _prefetch_thread_ledger_matches(
+    ledger_rows: list[dict],
+    *,
+    invoice_ids: list[str],
+    filenames: list[str],
+    preview_rows: list[dict] | None = None,
+    limit: int = 10,
+) -> list[dict]:
+    """Pre-resolve ledger row matches for thread-scoped invoice questions."""
+    import re
+
+    from accounting_agents.assistant import _normalize_row_for_tools
+    from accounting_agents.assistant_tools._helpers import row_search_text
+
+    needles: list[str] = []
+    for inv in invoice_ids or []:
+        token = str(inv or "").strip().lower()
+        if token:
+            needles.append(token)
+    for fn in filenames or []:
+        for inv in re.findall(r"\b\d{2}-D\d+\b", str(fn), re.IGNORECASE):
+            needles.append(inv.lower())
+    for row in preview_rows or []:
+        inv = str(row.get("invoice_id") or "").strip().lower()
+        if inv:
+            needles.append(inv)
+    needles = list(dict.fromkeys(n for n in needles if n))
+    if not needles or not ledger_rows:
+        return []
+
+    matches: list[dict] = []
+    for idx, raw in enumerate(ledger_rows):
+        row = _normalize_row_for_tools(raw if isinstance(raw, dict) else {})
+        text = row_search_text(row)
+        if not any(n in text for n in needles):
+            continue
+        matches.append({
+            "row_index": idx,
+            "sheet": row.get("_sheet"),
+            "account_code": (
+                row.get("Account Code / COA")
+                or row.get("*AccountCode")
+                or row.get("category")
+            ),
+            "invoice_id": (
+                row.get("*InvoiceNumber")
+                or row.get("Invoice Number")
+                or row.get("Reference")
+            ),
+            "description": row.get("Description") or row.get("*Description"),
+            "vendor": row.get("Vendor") or row.get("*ContactName"),
+            "date": row.get("Date") or row.get("*InvoiceDate"),
+        })
+        if len(matches) >= limit:
+            break
+    return matches
+
+
+def _resolve_thread_delivery_context(
+    *,
+    raw_thread_ts: Optional[str],
+    channel_id: Optional[str],
+    processing_log: list[dict],
+    slack_client: Any = None,
+) -> dict:
+    """Return thread-scoped delivery metadata for ``state_delta``.
+
+    Phase 3 (thread context): when a user replies in the thread under a delivery
+    card (ADR-0007 job summary), the chat lane should treat the question as about
+    that delivery's files. We resolve that by:
+
+    1. Filtering the client's processing_log for entries whose
+       ``delivery_message_ts`` matches ``raw_thread_ts`` (Phase 2 wrote it).
+    2. Falling back to ``conversations.replies`` parsing of the parent delivery
+       message blocks when the Firestore filter is empty (older deliveries
+       written before Phase 2 — pre-existing log entries lack the field).
+    3. Returning an empty dict for top-level (non-thread) messages so the
+       chat lane keeps its existing channel-wide behaviour.
+
+    The returned dict keys (all optional) are meant for direct injection into
+    ``state_delta`` so the assistant's instruction preamble and tools can
+    read them. Keys follow the ``thread_delivery_*`` convention so they are
+    easy to grep and so the chat instruction can name them with the
+    ``{+key?+}`` ADK placeholder syntax.
+    """
+    import re
+
+    if not raw_thread_ts:
+        return {}
+
+    replies_resp: Any = None
+    if slack_client is not None and channel_id:
+        try:
+            replies_resp = slack_client.conversations_replies(
+                channel=channel_id, ts=raw_thread_ts, limit=10,
+            )
+        except Exception:  # noqa: BLE001 — fallback is best-effort
+            logger.debug(
+                "conversations_replies failed for channel=%s ts=%s",
+                channel_id, raw_thread_ts, exc_info=True,
+            )
+
+    preview_rows = _parse_delivery_data_table_rows(replies_resp)
+
+    scoped: list[dict] = []
+    for entry in processing_log or []:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("delivery_message_ts") or "") == str(raw_thread_ts):
+            scoped.append(entry)
+
+    # Fallback: older processing_log entries lack delivery_message_ts. Parse
+    # the parent delivery message via conversations.replies to recover the
+    # filenames (and FY, if present) so the chat lane still gets context.
+    if not scoped and replies_resp is not None:
+        parsed = _parse_thread_delivery_blocks(replies_resp)
+        parent_fy = _delivery_fy_from_replies(replies_resp)
+        scoped = _enrich_scoped_from_processing_log(
+            parsed, processing_log, parent_fy=parent_fy,
+        )
+
+    if not scoped and not preview_rows:
+        return {}
+
+    filenames = [
+        str(e.get("filename") or e.get("file_id") or "")
+        for e in scoped
+        if e.get("filename") or e.get("file_id")
+    ]
+    for prow in preview_rows:
+        fn = str(prow.get("filename") or "").strip()
+        if fn and fn not in filenames:
+            filenames.append(fn)
+    invoice_ids: list[str] = []
+    for e in scoped:
+        for inv in e.get("invoice_ids") or []:
+            if inv:
+                invoice_ids.append(str(inv))
+        # Recover an invoice number from the filename when the log entry did
+        # not have a separate invoice_ids list (the common case pre-Phase 2).
+        if not e.get("invoice_ids"):
+            fn = str(e.get("filename") or "")
+            inv = str(e.get("invoice_id") or "")
+            if inv and inv not in invoice_ids:
+                invoice_ids.append(inv)
+            elif fn:
+                for inv in re.findall(r"\b\d{2}-D\d+\b", fn, re.IGNORECASE):
+                    if inv not in invoice_ids:
+                        invoice_ids.append(inv)
+    for prow in preview_rows:
+        inv = str(prow.get("invoice_id") or "").strip()
+        if inv and inv not in invoice_ids:
+            invoice_ids.append(inv)
+    fy_counts: dict[str, int] = {}
+    for e in scoped:
+        fy = str(e.get("fy") or "").strip()
+        if fy:
+            fy_counts[fy] = fy_counts.get(fy, 0) + 1
+    dominant_fy = (
+        max(fy_counts.items(), key=lambda kv: kv[1])[0] if fy_counts else ""
+    )
+    if not dominant_fy and replies_resp is not None:
+        dominant_fy = _delivery_fy_from_replies(replies_resp)
+
+    return {
+        "thread_delivery_message_ts": str(raw_thread_ts),
+        "thread_delivery_filenames": filenames,
+        "thread_delivery_invoice_ids": invoice_ids,
+        "thread_delivery_fy": dominant_fy,
+        "thread_delivery_preview_rows": preview_rows,
+        "thread_scoped_processing_log": scoped,
+    }
+
+
+def _delivery_fy_from_replies(replies_resp: Any) -> str:
+    """Extract FY label (e.g. ``2025``) from a delivery parent message."""
+    import re
+
+    try:
+        messages = (replies_resp or {}).get("messages") or []
+    except Exception:  # noqa: BLE001
+        return ""
+    if not messages:
+        return ""
+    parent = messages[0]
+    chunks: list[str] = [str(parent.get("text") or "")]
+    for block in parent.get("blocks") or []:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") in {"section", "rich_text"}:
+            text_obj = block.get("text") or {}
+            if isinstance(text_obj, dict) and text_obj.get("text"):
+                chunks.append(str(text_obj["text"]))
+    blob = "\n".join(chunks)
+    m = re.search(r"FY\s*(\d{4})", blob, re.IGNORECASE)
+    return m.group(1) if m else ""
+
+
+def _enrich_scoped_from_processing_log(
+    parsed: list[dict],
+    processing_log: list[dict],
+    *,
+    parent_fy: str = "",
+) -> list[dict]:
+    """Join fallback parser output with real processing_log rows by filename."""
+    if not parsed:
+        return []
+    enriched: list[dict] = []
+    for item in parsed:
+        fn = str(item.get("filename") or "").strip()
+        inv = str(item.get("invoice_id") or "").strip()
+        match: dict | None = None
+        for entry in processing_log or []:
+            if not isinstance(entry, dict):
+                continue
+            entry_fn = str(entry.get("filename") or "")
+            if fn and entry_fn and (fn in entry_fn or entry_fn in fn):
+                match = dict(entry)
+                break
+            if inv and inv in entry_fn:
+                match = dict(entry)
+                break
+        if match:
+            match.setdefault("filename", fn or match.get("filename") or "")
+            if parent_fy and not match.get("fy"):
+                match["fy"] = parent_fy
+            enriched.append(match)
+        else:
+            row = dict(item)
+            if parent_fy and not row.get("fy"):
+                row["fy"] = parent_fy
+            enriched.append(row)
+    return enriched
+
+
+def _parse_thread_delivery_blocks(replies_resp: Any) -> list[dict]:
+    """Best-effort extraction of delivery metadata from a parent Slack message.
+
+    Used as the fallback path for older deliveries whose processing_log entry
+    does NOT carry ``delivery_message_ts``. We look for mrkdwn blocks,
+    ``data_table`` cells, and invoice-id patterns (``25-D15``).
+    """
+    import re
+
+    try:
+        messages = (replies_resp or {}).get("messages") or []
+    except Exception:  # noqa: BLE001
+        return []
+    if not messages:
+        return []
+    parent = messages[0]
+    parent_fy = _delivery_fy_from_replies(replies_resp)
+    filenames: list[str] = []
+    invoice_ids: list[str] = []
+    text_blobs: list[str] = [str(parent.get("text") or "")]
+    for block in parent.get("blocks") or []:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") in {"section", "rich_text"}:
+            text = (block.get("text") or {}).get("text") if block.get("text") else ""
+            if not text and "elements" in block:
+                parts = []
+                for el in block["elements"] or []:
+                    if isinstance(el, dict) and "text" in el:
+                        parts.append(str(el["text"]))
+                text = "".join(parts)
+            if text:
+                text_blobs.append(str(text))
+            for line in (text or "").splitlines():
+                cleaned = line.strip().strip("`*_~<>")
+                for prefix in ("•", "-", "*", "·"):
+                    if cleaned.startswith(prefix):
+                        cleaned = cleaned[len(prefix):].strip()
+                if cleaned.endswith(".pdf") or cleaned.endswith(".PDF"):
+                    filenames.append(cleaned)
+        elif block.get("type") == "data_table":
+            for row in block.get("rows") or []:
+                for cell in row or []:
+                    txt = str((cell or {}).get("text") if isinstance(cell, dict) else "")
+                    if not txt:
+                        continue
+                    if ".pdf" in txt.lower():
+                        filenames.append(txt.strip())
+                    for inv in re.findall(r"\b\d{2}-D\d+\b", txt, re.IGNORECASE):
+                        if inv not in invoice_ids:
+                            invoice_ids.append(inv)
+    for blob in text_blobs:
+        for inv in re.findall(r"\b\d{2}-D\d+\b", blob, re.IGNORECASE):
+            if inv not in invoice_ids:
+                invoice_ids.append(inv)
+    entries: list[dict] = []
+    seen: set[str] = set()
+    for fn in filenames:
+        key = fn.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        entries.append({
+            "filename": fn, "file_id": "", "fy": parent_fy,
+            "from_replies_fallback": True,
+        })
+    for inv in invoice_ids:
+        if inv.lower() in seen:
+            continue
+        seen.add(inv.lower())
+        entries.append({
+            "filename": "", "invoice_id": inv, "file_id": "", "fy": parent_fy,
+            "from_replies_fallback": True,
+        })
+    return entries
+
+
+def _patch_processing_log_delivery_ts(
+    client_store,
+    *,
+    client_id: str,
+    channel_id: str,
+    delivery_message_ts: str,
+    file_ids: list[str],
+    fy: str = "",
+    per_file: list[dict] | None = None,
+) -> None:
+    """Backfill ``delivery_message_ts`` on batch processing_log entries (Phase 2)."""
+    if not (client_store and client_id and delivery_message_ts and file_ids):
+        return
+    by_id: dict[str, dict] = {}
+    for item in per_file or []:
+        if isinstance(item, dict):
+            fid = str(item.get("file_id") or "").strip()
+            if fid:
+                by_id[fid] = item
+    for file_id in file_ids:
+        fid = str(file_id or "").strip()
+        if not fid:
+            continue
+        patch: dict = {
+            "delivery_message_ts": delivery_message_ts,
+            "channel_id": channel_id,
+        }
+        if fy:
+            patch["fy"] = fy
+        extra = by_id.get(fid) or {}
+        if extra.get("row_count") is not None:
+            patch["row_count"] = extra["row_count"]
+        inv_ids = extra.get("invoice_ids")
+        if inv_ids:
+            patch["invoice_ids"] = list(inv_ids)
+        try:
+            client_store.append_processing_log(
+                client_id=client_id, file_id=fid, entry=patch,
+            )
+        except Exception:  # noqa: BLE001 — best-effort
+            logger.debug(
+                "processing_log backfill failed client=%s file=%s",
+                client_id, fid, exc_info=True,
+            )
+
+
+def _pick_chat_fy(
+    *,
+    best_fy: str | None,
+    fy_summaries: list[dict],
+    processing_log: list,
+    question: str,
+    fye_month: int | None,
+    ledger_store: Any,
+    client_id: str,
+) -> str:
+    """Choose which FY workbook to load for this chat turn (not hard-coded).
+
+    Priority:
+    1. User message matches a processing-log entry → that entry's FY (if workbook has data).
+    2. ``best_fy_for_chat`` (most rows across pointers).
+    3. Dominant FY in processing log (if that workbook has data).
+    4. ``latest_fy`` / calendar FY fallback.
+    """
+    by_fy = {str(s.get("fy") or ""): s for s in fy_summaries if isinstance(s, dict)}
+
+    def _row_count(fy_label: str) -> int:
+        s = by_fy.get(str(fy_label), {})
+        try:
+            return int(s.get("row_count") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    fy = best_fy or "unknown"
+
+    hint_fy = _fy_hint_from_question(question, processing_log)
+    if hint_fy and _row_count(hint_fy) > 0:
+        return hint_fy
+
+    if fy != "unknown" and _row_count(fy) > 0:
+        return fy
+
+    log_fy = _dominant_fy_from_processing_log(processing_log)
+    if log_fy and _row_count(log_fy) > 0:
+        return log_fy
+
+    if fy != "unknown":
+        return fy
+
+    latest = ledger_store.latest_fy(client_id) if hasattr(ledger_store, "latest_fy") else None
+    if latest:
+        return str(latest)
+    if fye_month:
+        from datetime import date as _date
+        from invoice_processing.export.fy import fy_for_date
+
+        return str(fy_for_date(_date.today(), int(fye_month)))
+    return "unknown"
+
+
+async def _persist_direct_chat_turn(
+    runner: Any,
+    app_name: str,
+    channel_id: str,
+    session_id: str,
+    *,
+    question: str,
+    answer: str,
+    thread_focus: dict | None = None,
+) -> None:
+    """Append a synthetic user/model turn plus optional thread_focus to the session."""
+    if not question and not answer and not thread_focus:
+        return
+    try:
+        from google.adk.events.event import Event
+        from google.adk.events.event_actions import EventActions
+
+        session = await runner.session_service.get_session(
+            app_name=app_name, user_id=channel_id, session_id=session_id
+        )
+        if session is None:
+            return
+        if question:
+            await runner.session_service.append_event(
+                session,
+                Event(
+                    author="user",
+                    content=types.Content(
+                        role="user",
+                        parts=[types.Part(text=question)],
+                    ),
+                ),
+            )
+        if answer:
+            await runner.session_service.append_event(
+                session,
+                Event(
+                    author="assistant",
+                    content=types.Content(
+                        role="model",
+                        parts=[types.Part(text=answer)],
+                    ),
+                ),
+            )
+        if thread_focus:
+            await runner.session_service.append_event(
+                session,
+                Event(
+                    author="assistant",
+                    actions=EventActions(
+                        state_delta={THREAD_FOCUS_KEY: thread_focus}
+                    ),
+                ),
+            )
+    except Exception:  # noqa: BLE001 — session history is best-effort
+        logger.exception("failed to persist direct chat turn")
+
+
+def _question_asks_account_code(question: str) -> bool:
+    """True when the user is asking about a COA / account code in this thread."""
+    import re
+
+    q = (question or "").lower()
+    if re.search(
+        r"account\s*code|acount\s*code|why.*\bcoa\b|categoriz|why.*\d-\d|why.*\d{3}",
+        q,
+    ):
+        return True
+    if re.search(
+        r"what.*(description|mean|name)|describe.*code|meaning of|"
+        r"what does.*code|tell me more|explain.*code|that account|the account code",
+        q,
+    ):
+        return True
+    if re.search(r"\b\d{3}-[A-Z]\d{2}\b", question or "", re.I):
+        return True
+    return False
+
+
+def _question_asks_coa_description(question: str) -> bool:
+    """True when the user wants the COA name/meaning, not why it was chosen."""
+    import re
+
+    q = (question or "").lower()
+    return bool(
+        re.search(
+            r"what.*(description|mean|name)|describe.*code|meaning of|"
+            r"what does.*code|what is the description",
+            q,
+        )
+    )
+
+
+def _invoice_needles_from_question(question: str, thread_ctx: dict) -> list[str]:
+    import re
+
+    needles = [
+        m.lower() for m in re.findall(r"\b\d{2}-D\d+\b", question or "", re.I)
+    ]
+    focus = thread_ctx.get(THREAD_FOCUS_KEY) or {}
+    if isinstance(focus, dict):
+        inv = str(focus.get("invoice_id") or "").lower()
+        if inv and inv not in needles:
+            needles.append(inv)
+    for inv in thread_ctx.get("thread_delivery_invoice_ids") or []:
+        token = str(inv).lower()
+        if token and token not in needles:
+            needles.append(token)
+    return needles
+
+
+def _build_thread_focus(
+    *,
+    invoice_id: str,
+    account_code: str,
+    vendor: str = "",
+    line_description: str = "",
+    row_index: int | None = None,
+) -> dict:
+    focus: dict = {
+        "invoice_id": invoice_id,
+        "account_code": account_code,
+    }
+    if vendor:
+        focus["vendor"] = vendor
+    if line_description:
+        focus["line_description"] = line_description
+    if row_index is not None:
+        focus["row_index"] = row_index
+    return focus
+
+
+def _try_direct_thread_account_code_answer(
+    question: str,
+    *,
+    state_delta: dict,
+) -> tuple[str | None, dict | None]:
+    """Compose a direct reply when thread context already has ledger rows.
+
+    Returns ``(answer_text, thread_focus)`` or ``(None, None)`` when the direct
+    path does not apply.
+    """
+    import json
+    import re
+
+    if not _question_asks_account_code(question):
+        return None, None
+    preview_rows = state_delta.get("thread_delivery_preview_rows") or []
+    ledger_matches = state_delta.get("thread_delivery_ledger_matches") or []
+    focus = state_delta.get(THREAD_FOCUS_KEY) or {}
+    if not preview_rows and not ledger_matches and not focus:
+        return None, None
+
+    needles = _invoice_needles_from_question(question, state_delta)
+    needle = needles[0] if needles else ""
+
+    preview_hit: dict | None = None
+    for row in preview_rows:
+        inv = str(row.get("invoice_id") or "").lower()
+        if not needle or inv == needle.lower():
+            preview_hit = row
+            break
+
+    ledger_hit: dict | None = None
+    for match in ledger_matches:
+        inv = str(match.get("invoice_id") or "").lower()
+        if not needle or inv == needle.lower() or needle.lower() in inv:
+            ledger_hit = match
+            break
+    if not ledger_hit and ledger_matches:
+        ledger_hit = ledger_matches[0]
+    if not ledger_hit and isinstance(focus, dict) and focus.get("account_code"):
+        ledger_hit = {
+            "invoice_id": focus.get("invoice_id"),
+            "account_code": focus.get("account_code"),
+            "vendor": focus.get("vendor"),
+            "description": focus.get("line_description"),
+            "row_index": focus.get("row_index"),
+        }
+
+    acct = (ledger_hit or {}).get("account_code") or (preview_hit or {}).get(
+        "account_code"
+    ) or (focus.get("account_code") if isinstance(focus, dict) else "")
+    if not acct:
+        return None, None
+
+    inv_label = (
+        (ledger_hit or {}).get("invoice_id")
+        or (preview_hit or {}).get("invoice_id")
+        or (focus.get("invoice_id") if isinstance(focus, dict) else "")
+        or (needle.upper() if needle else "")
+        or "this invoice"
+    )
+    vendor = (ledger_hit or {}).get("vendor") or (preview_hit or {}).get("vendor") or ""
+    desc = (
+        (ledger_hit or {}).get("description")
+        or (preview_hit or {}).get("description")
+        or ""
+    )
+    row_index = (ledger_hit or {}).get("row_index")
+    if row_index is None and isinstance(focus, dict):
+        row_index = focus.get("row_index")
+
+    thread_focus = _build_thread_focus(
+        invoice_id=str(inv_label),
+        account_code=str(acct),
+        vendor=str(vendor or ""),
+        line_description=str(desc or ""),
+        row_index=int(row_index) if row_index is not None else None,
+    )
+
+    class _ToolCtx:
+        def __init__(self, state: dict):
+            self.state = state
+
+    if _question_asks_coa_description(question):
+        try:
+            from accounting_agents.assistant import lookup_coa_account
+
+            coa_raw = lookup_coa_account(_ToolCtx(state_delta), account_code=str(acct))
+            coa = json.loads(coa_raw)
+            if coa.get("status") == "found":
+                name = coa.get("description") or ""
+                acct_type = coa.get("account_type") or ""
+                lines = [
+                    f"Account code **{acct}** in your chart of accounts is "
+                    f"**{name}**.",
+                ]
+                if acct_type:
+                    lines.append(f"Account type: {acct_type}.")
+                if inv_label and inv_label != "this invoice":
+                    lines.append(
+                        f"This is the code posted for invoice **{inv_label}** "
+                        f"in this delivery."
+                    )
+                if desc:
+                    lines.append(f"Line: {desc}.")
+                return "\n\n".join(lines), thread_focus
+        except Exception:  # noqa: BLE001
+            logger.debug("direct COA description lookup failed", exc_info=True)
+
+    acct_display = str(acct)
+    reason_text = ""
+
+    try:
+        from accounting_agents.assistant import explain_categorization
+
+        if ledger_hit and ledger_hit.get("row_index") is not None:
+            expl = json.loads(
+                explain_categorization(
+                    _ToolCtx(state_delta),
+                    row_index=str(ledger_hit["row_index"]),
+                )
+            )
+        elif vendor and desc:
+            expl = json.loads(
+                explain_categorization(
+                    _ToolCtx(state_delta),
+                    vendor_name=vendor,
+                    line_description=desc,
+                )
+            )
+        else:
+            expl = {}
+        if expl.get("account_name"):
+            acct_display = f"{acct} ({expl['account_name']})"
+        if expl.get("reason"):
+            reason_text = str(expl["reason"])
+    except Exception:  # noqa: BLE001 — direct path still cites ledger row
+        logger.debug("direct thread explain_categorization failed", exc_info=True)
+
+    wrong_code = re.search(r"\b\d-\d{3,4}\b", question or "")
+    lines = [
+        f"Invoice **{inv_label}** in this batch is posted to account "
+        f"**{acct_display}**.",
+    ]
+    if desc:
+        lines.append(f"Line: {desc}.")
+    if vendor:
+        lines.append(f"Vendor: {vendor}.")
+    if wrong_code and wrong_code.group(0) != str(acct):
+        lines.append(
+            f"(You asked about {wrong_code.group(0)} — the ledger row uses "
+            f"**{acct}**, not that code.)"
+        )
+    if reason_text:
+        lines.append(f"Categorization logic: {reason_text}")
+    elif ledger_hit:
+        lines.append("Source: FY ledger workbook row for this delivery.")
+    else:
+        lines.append("Source: delivery card table posted with this batch.")
+    return "\n\n".join(lines), thread_focus
+
+
 async def answer_question(
     *,
     runner: Any,
@@ -3035,6 +4309,12 @@ async def answer_question(
     # assistant sees the full multi-turn history. Day-bucket fallback for
     # top-level messages keeps a series of channel-level questions coherent.
     session_id = _chat_session_id(channel_id, raw_thread_ts, message_ts)
+    thinking_ts = thread_ts or raw_thread_ts or message_ts
+    ux = _chat_ux_enabled()
+    answer_text = ""
+    last_tool_text = ""
+    if ux:
+        _ack_chat_turn(slack_client, channel_id, message_ts)
 
     async with _SEM:
         await _ensure_session(runner, app_name, channel_id, session_id)
@@ -3044,15 +4324,49 @@ async def answer_question(
         client_id = profile_delta.get("client_id") or channel_id
         fye_month = profile_delta.get("fye_month")
 
-        # Pick the best FY: latest pointer with data, else current FY from today.
-        fy: str = "unknown"
-        latest = await asyncio.to_thread(ledger_store.latest_fy, client_id)
-        if latest:
-            fy = latest
-        elif fye_month:
-            from datetime import date as _date
-            from invoice_processing.export.fy import fy_for_date
-            fy = str(fy_for_date(_date.today(), int(fye_month)))
+        processing_log: list[dict] = []
+        if client_store and client_id:
+            try:
+                processing_log = await asyncio.to_thread(
+                    client_store.list_processing_log, client_id, limit=20
+                )
+            except Exception:  # noqa: BLE001 — log read is non-fatal
+                logger.exception(
+                    "list_processing_log failed for client %s", client_id
+                )
+        if client_store and not processing_log and client_id:
+            try:
+                processing_log = await _lazy_backfill_processing_log(
+                    client_store=client_store,
+                    client_id=client_id,
+                    channel_id=channel_id,
+                    app_name=app_name,
+                )
+            except Exception:  # noqa: BLE001 — best-effort
+                logger.exception(
+                    "lazy backfill failed for client=%s channel=%s",
+                    client_id, channel_id,
+                )
+
+        fy_summaries: list[dict] = []
+        best_fy: str | None = None
+        if hasattr(ledger_store, "best_fy_for_chat"):
+            try:
+                best_fy, fy_summaries = await asyncio.to_thread(
+                    ledger_store.best_fy_for_chat, client_id, slack_client
+                )
+            except Exception:  # noqa: BLE001 — never block chat on FY selection
+                logger.exception("best_fy_for_chat failed for client %s", client_id)
+
+        fy = _pick_chat_fy(
+            best_fy=best_fy,
+            fy_summaries=fy_summaries,
+            processing_log=processing_log,
+            question=question,
+            fye_month=fye_month,
+            ledger_store=ledger_store,
+            client_id=client_id,
+        )
 
         # Fetch ledger rows (returns [] if no workbook exists yet).
         try:
@@ -3072,19 +4386,102 @@ async def answer_question(
             **profile_delta,
             LEDGER_DATA_KEY: ledger_rows,
             "onboarding_required": not bool(profile_delta.get("software")),
+            # Diagnostic counts for the assistant preamble + tools.
+            "fy_loaded": fy,
+            "ledger_row_count": len(ledger_rows),
+            "fy_pointers": fy_summaries,
         }
 
-        processing_log: list[dict] = []
-        if client_store and client_id:
-            try:
-                processing_log = await asyncio.to_thread(
-                    client_store.list_processing_log, client_id, limit=20
-                )
-            except Exception:  # noqa: BLE001 — log read is non-fatal
-                logger.exception(
-                    "list_processing_log failed for client %s", client_id
-                )
         state_delta[PROCESSING_LOG_KEY] = processing_log
+        state_delta["processing_log_count"] = len(processing_log)
+
+        # Phase 3 (thread context): scope the chat turn to the delivery card
+        # the user is replying under. Resolved BEFORE FY selection so the
+        # thread-scoped FY can take priority in _pick_chat_fy.
+        thread_ctx = _resolve_thread_delivery_context(
+            raw_thread_ts=raw_thread_ts,
+            channel_id=channel_id,
+            processing_log=processing_log,
+            slack_client=slack_client,
+        )
+        if thread_ctx:
+            state_delta.update(thread_ctx)
+            scoped_log = thread_ctx.get("thread_scoped_processing_log")
+            if isinstance(scoped_log, list) and scoped_log:
+                state_delta[PROCESSING_LOG_KEY] = scoped_log
+                state_delta["processing_log_count"] = len(scoped_log)
+            # Prefer the delivery batch FY over client-wide best_fy.
+            thread_fy = thread_ctx.get("thread_delivery_fy") or ""
+            if thread_fy:
+                fy = thread_fy
+                state_delta["fy_loaded"] = fy
+                try:
+                    ledger_rows = await asyncio.to_thread(
+                        ledger_store.read_rows,
+                        client_id=client_id,
+                        fy=fy,
+                        slack_client=slack_client,
+                        channel_id=channel_id,
+                    )
+                    state_delta[LEDGER_DATA_KEY] = ledger_rows
+                    state_delta["ledger_row_count"] = len(ledger_rows)
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "thread-scoped read_rows failed channel=%s fy=%s",
+                        channel_id, fy,
+                    )
+            preview_rows = thread_ctx.get("thread_delivery_preview_rows") or []
+            if ledger_rows and (
+                thread_ctx.get("thread_delivery_invoice_ids")
+                or thread_ctx.get("thread_delivery_filenames")
+                or preview_rows
+            ):
+                matches = _prefetch_thread_ledger_matches(
+                    ledger_rows,
+                    invoice_ids=thread_ctx.get("thread_delivery_invoice_ids") or [],
+                    filenames=thread_ctx.get("thread_delivery_filenames") or [],
+                    preview_rows=preview_rows,
+                )
+                if matches:
+                    state_delta["thread_delivery_ledger_matches"] = matches
+
+        # P1: inject pending HITL reviews for the channel so the chat agent
+        # can answer "anything waiting on me?" without a Firestore round-trip.
+        pending_reviews: list[dict] = []
+        if db is not None:
+            try:
+                from accounting_agents.hitl import list_pending_interrupts
+                pending_reviews = await asyncio.to_thread(
+                    list_pending_interrupts, db, channel_id, limit=25
+                )
+            except Exception:  # noqa: BLE001 — diagnostic injection is best-effort
+                logger.exception(
+                    "list_pending_interrupts failed for channel %s", channel_id
+                )
+        state_delta["pending_reviews"] = pending_reviews
+        state_delta["pending_review_count"] = len(pending_reviews)
+
+        # P1: snapshot per-document session state for files referenced in the
+        # processing log so the chat can introspect them read-only.
+        file_ids: list[str] = []
+        plog_for_snapshots = state_delta.get(PROCESSING_LOG_KEY) or processing_log
+        for entry in plog_for_snapshots:
+            if not isinstance(entry, dict):
+                continue
+            fid = entry.get("file_id")
+            if fid:
+                file_ids.append(str(fid))
+        doc_sessions: dict = {}
+        if runner and file_ids:
+            try:
+                doc_sessions = await _snapshot_doc_sessions(
+                    runner, app_name, channel_id, file_ids
+                )
+            except Exception:  # noqa: BLE001 — best-effort
+                logger.exception(
+                    "_snapshot_doc_sessions failed for channel %s", channel_id
+                )
+        state_delta["document_sessions"] = doc_sessions
 
         # Pre-write the freshly-fetched ledger rows into the session state NOW,
         # before run_async, so the value is unconditionally overwritten on every
@@ -3097,8 +4494,48 @@ async def answer_question(
         # (P0-2 fix, 2026-06-15)
         await _apply_state_delta(
             runner, app_name, channel_id, session_id,
-            {LEDGER_DATA_KEY: ledger_rows},
+            state_delta,
         )
+
+        try:
+            live_session = await runner.session_service.get_session(
+                app_name=app_name, user_id=channel_id, session_id=session_id
+            )
+            if live_session and live_session.state.get(THREAD_FOCUS_KEY):
+                state_delta[THREAD_FOCUS_KEY] = live_session.state[THREAD_FOCUS_KEY]
+        except Exception:  # noqa: BLE001
+            pass
+
+        direct_answer, thread_focus = _try_direct_thread_account_code_answer(
+            question, state_delta=state_delta,
+        )
+        if direct_answer:
+            if thread_focus:
+                state_delta[THREAD_FOCUS_KEY] = thread_focus
+                await _apply_state_delta(
+                    runner, app_name, channel_id, session_id,
+                    {THREAD_FOCUS_KEY: thread_focus},
+                )
+            await _persist_direct_chat_turn(
+                runner,
+                app_name,
+                channel_id,
+                session_id,
+                question=question,
+                answer=direct_answer,
+                thread_focus=thread_focus,
+            )
+            if ux:
+                _clear_chat_thinking(slack_client, channel_id, thinking_ts)
+                _finish_chat_ack(slack_client, channel_id, message_ts)
+            _post_message(
+                slack_client, channel_id, direct_answer, thread_ts=thread_ts,
+            )
+            return {
+                "status": "answered",
+                "text": direct_answer,
+                "direct": True,
+            }
 
         # Cap the model's per-turn context to the most recent 20 events so a
         # long chat thread does not grow unboundedly. ADK 2.2.0 API:
@@ -3112,6 +4549,9 @@ async def answer_question(
         run_config = RunConfig(
             get_session_config=GetSessionConfig(num_recent_events=20)
         )
+
+        if ux:
+            _set_chat_thinking(slack_client, channel_id, thinking_ts)
 
         # Chat-lane confirm bridge (ADR-0009): the user's "yes" arrives as plain
         # Slack text, not a FunctionResponse. If the session has an unanswered
@@ -3146,6 +4586,13 @@ async def answer_question(
             state_delta=state_delta,
             run_config=run_config,
         ):
+            if ux:
+                for tool_name in _function_call_names(event):
+                    stage = _CHAT_TOOL_LOADING.get(tool_name)
+                    if stage:
+                        _set_chat_thinking(
+                            slack_client, channel_id, thinking_ts, stage=stage
+                        )
             text = extract_final_text(event)
             if text:
                 answer_text = text
@@ -3263,6 +4710,9 @@ async def answer_question(
         answer_text = last_tool_text or (
             "I couldn't find an answer. Please try rephrasing your question."
         )
+
+    if ux:
+        _finish_chat_ack(slack_client, channel_id, message_ts)
 
     _post_message(slack_client, channel_id, answer_text, thread_ts=thread_ts)
     return {"status": "answered", "text": answer_text}
@@ -3415,6 +4865,7 @@ def build_async_app(
     """
     from slack_bolt.async_app import AsyncApp
 
+    from app.commands import ledgr_slash_command_name
     from app.slack_app import (
         handle_ledgr_command,
         handle_member_joined,
@@ -4082,9 +5533,6 @@ def build_async_app(
 
     @async_app.action("ledgr_dedup_replace")
     async def _dedup_replace(ack, body, client):
-        # User explicitly clicked Replace — queue the replace intent as PENDING_REPLACE_MONTH
-        # so the pipeline can drain it on the next available turn (same pattern as
-        # PENDING_LEARN_KEY). This avoids unwinding the two-turn chat-tool confirm flow.
         await ack()
         action_value = (body.get("actions") or [{}])[0].get("value") or ""
         channel_id_dr = (body.get("channel") or {}).get("id") or ""
@@ -4093,18 +5541,76 @@ def build_async_app(
             parts = action_value.split("|", 3)
             vendor_raw = urllib.parse.unquote(parts[0]) if len(parts) > 0 else ""
             month_raw = urllib.parse.unquote(parts[2]) if len(parts) > 2 else ""
+            stash_key = (
+                urllib.parse.unquote(parts[3])
+                if len(parts) > 3 and parts[3] not in ("", "-")
+                else ""
+            )
         except Exception:  # noqa: BLE001
-            vendor_raw, month_raw = "", ""
+            vendor_raw, month_raw, stash_key = "", "", ""
         label = f"{month_raw} · {vendor_raw}" if (vendor_raw and month_raw) else action_value
+
+        replaced = False
+        if stash_key and isinstance(ledger_store, SlackLedgerStore):
+            try:
+                stash = await asyncio.to_thread(
+                    ledger_store.consume_bank_dedup_replace, stash_key,
+                )
+                if stash and stash.get("batches"):
+                    doc_keys = [
+                        str(b.get("doc_key") or "")
+                        for b in stash["batches"]
+                        if b.get("doc_key")
+                    ]
+                    await asyncio.to_thread(
+                        ledger_store.purge_seen_doc_keys,
+                        stash["client_id"],
+                        stash["fy"],
+                        doc_keys,
+                    )
+                    append_result = await asyncio.to_thread(
+                        ledger_store.append_rows,
+                        client_id=stash["client_id"],
+                        fy=stash["fy"],
+                        slack_client=sync_client,
+                        channel_id=channel_id_dr,
+                        batches=stash["batches"],
+                        software=stash.get("software") or "qbs",
+                        kind=stash.get("kind") or "bank",
+                        client_name=stash.get("client_name") or "",
+                    )
+                    replaced = int(append_result.get("appended") or 0) > 0
+            except Exception:  # noqa: BLE001
+                logger.exception("dedup_replace: bank re-merge failed stash=%s", stash_key)
+
         if channel_id_dr and message_ts_dr:
             try:
-                sync_client.chat_postEphemeral(
-                    channel=channel_id_dr,
-                    user=(body.get("user") or {}).get("id") or "",
-                    text=f"Will replace {label} — re-upload the file to trigger re-processing.",
-                )
+                if replaced:
+                    outcome = (
+                        f"✅ Replaced {label} in your bank statement workbook."
+                    )
+                    sync_client.chat_update(
+                        channel=channel_id_dr,
+                        ts=message_ts_dr,
+                        text=outcome,
+                        blocks=[
+                            {
+                                "type": "section",
+                                "text": {"type": "mrkdwn", "text": outcome},
+                            }
+                        ],
+                    )
+                else:
+                    sync_client.chat_postEphemeral(
+                        channel=channel_id_dr,
+                        user=(body.get("user") or {}).get("id") or "",
+                        text=(
+                            f"Will replace {label} — re-upload the file "
+                            "to trigger re-processing."
+                        ),
+                    )
             except Exception:  # noqa: BLE001
-                logger.debug("dedup_replace: could not post ephemeral")
+                logger.debug("dedup_replace: could not post outcome")
 
     @async_app.action("ledgr_dedup_keep")
     async def _dedup_keep(ack, body, client):
@@ -4159,7 +5665,7 @@ def build_async_app(
             lambda: "client-" + os.urandom(6).hex(),
         )
 
-    @async_app.command("/ledgr")
+    @async_app.command(ledgr_slash_command_name())
     async def _ledgr(ack, body, client):
         await ack()
         await asyncio.to_thread(
@@ -4259,19 +5765,18 @@ def build_async_app(
                     "status": "in_progress",
                 })
 
-            # Post the placeholder summary (top-level, no thread_ts). In
-            # batch mode the message carries a BatchKit ``plan`` block listing
-            # every document as a task; in single-doc mode we fall back to
-            # the plain text job summary for compatibility.
-            initial_blocks: Optional[list] = None
+            # Post the placeholder summary (top-level, no thread_ts) with the
+            # BatchKit ``plan`` block listing every document. Single and
+            # multi-file drops use the same plan block UX; this matches the
+            # intent of ADR-0007 (one Job summary per drop) and keeps the
+            # per-doc "thinking" stages visible in the main channel.
             from app.blocks import batch_processing_plan_blocks
-            if total > 1:
-                initial_blocks = batch_processing_plan_blocks(
-                    total=total,
-                    done=0,
-                    doc_rows=list(doc_rows),
-                    channel_id=channel_id,
-                )
+            initial_blocks = batch_processing_plan_blocks(
+                total=total,
+                done=0,
+                doc_rows=list(doc_rows),
+                channel_id=channel_id,
+            )
             initial_text = job_progress_text(total=total, done=0)
             try:
                 post_kwargs: dict = {"channel": channel_id, "text": initial_text}
@@ -4302,8 +5807,14 @@ def build_async_app(
             software_hint = ""
             fy_hint = ""
             kind_hint = ""
-            batch_defer = total > 1
+            # Single-file drops now use the same main-channel UX as multi-file:
+            # processing "thinking" stages render on the top-level job summary
+            # (batch_processing_plan_blocks), and the delivery preview tables
+            # merge into the same top-level final edit. HITL review cards
+            # continue to thread under summary_ts (ADR-0007).
+            batch_defer = True
             batch_deferred: list[dict] = []
+            batch_file_ids: list[str] = []
             _last_progress_refresh = [0.0]
             _PROGRESS_REFRESH_MIN_S = 1.5
 
@@ -4328,25 +5839,20 @@ def build_async_app(
                     duplicates=duplicates,
                 )
                 try:
-                    if total > 1:
-                        blocks = batch_processing_plan_blocks(
-                            total=total,
-                            done=done,
-                            doc_rows=list(doc_rows),
-                            channel_id=channel_id,
-                        )
-                        sync_client.chat_update(
-                            channel=channel_id,
-                            ts=summary_ts,
-                            text=progress_text,
-                            blocks=blocks,
-                        )
-                    else:
-                        sync_client.chat_update(
-                            channel=channel_id,
-                            ts=summary_ts,
-                            text=progress_text,
-                        )
+                    # Use the plan block for every drop (single + multi) so the
+                    # user sees live per-doc thinking on the top-level message.
+                    blocks = batch_processing_plan_blocks(
+                        total=total,
+                        done=done,
+                        doc_rows=list(doc_rows),
+                        channel_id=channel_id,
+                    )
+                    sync_client.chat_update(
+                        channel=channel_id,
+                        ts=summary_ts,
+                        text=progress_text,
+                        blocks=blocks,
+                    )
                 except Exception:  # noqa: BLE001
                     logger.debug("job progress update failed", exc_info=True)
                     try:
@@ -4363,10 +5869,9 @@ def build_async_app(
 
                 Finds the row matching the doc's filename and updates its
                 stage/detail/status in place; then refreshes the placeholder
-                with the live plan block.
+                with the live plan block. Runs for every drop size — single
+                files update the same top-level plan block as multi-file drops.
                 """
-                if total <= 1:
-                    return
                 label = update.get("file_label") or ""
                 for row in doc_rows:
                     if row.get("file_label") == label:
@@ -4467,6 +5972,7 @@ def build_async_app(
                 status = (result or {}).get("status")
                 if status == "delivered":
                     posted += 1
+                    batch_file_ids.append(file_id)
                     append = (result or {}).get("append") or {}
                     deferred = append.get("deferred_delivery")
                     if deferred:
@@ -4487,54 +5993,100 @@ def build_async_app(
 
             _refresh_job_progress(force=True)
 
-            # Batch-end: in multi-file mode, run the workbook append exactly ONCE
-            # per (client, fy, kind) group. Each per-doc run stashed a
-            # ``deferred_ledger`` carrying its batches + payload + effective_replace;
-            # we merge here and call ``append_rows`` so the user sees ONE
-            # files_upload_v2 + ONE files_delete (per FY) instead of N mid-batch
-            # re-uploads. Single-file drops short-circuit (batch_deferred is empty).
+            # Batch-end: merge stashed ledger payloads and write the workbook ONCE
+            # per (client, fy, kind) group — applies to single- and multi-file drops
+            # whenever ``defer_ledger_persist`` was used.
+            flush_results: list[dict] = []
             if batch_deferred and ledger_store is not None:
-                await _flush_deferred_ledger_writes(
+                flush_results = await _flush_deferred_ledger_writes(
                     ledger_store=ledger_store,
                     slack_client=sync_client,
                     channel_id=channel_id,
                     batch_deferred=batch_deferred,
                 )
 
-            # Edit the summary in-place with the final tally (ADR-0007). For
-            # multi-file batches we ALSO append the aggregate delivery blocks
-            # so the whole batch — job progress, tally, and ledger preview —
-            # lives in ONE top-level message instead of two.
+            ledger_appended = sum(int(r.get("appended") or 0) for r in flush_results)
+            ledger_deduped = sum(int(r.get("deduped") or 0) for r in flush_results)
+
+            # Edit the summary in-place with the final tally (ADR-0007). Always
+            # merge delivery preview blocks from extracted rows when the batch
+            # stashed payloads — independent of whether Firestore deduped at flush.
             if summary_ts:
                 try:
-                    final_text = job_summary_text(
-                        total=total,
-                        posted=posted,
-                        needs_review=needs_review,
-                        rejected=rejected,
-                        duplicates=duplicates,
-                        software=software_hint,
-                        fy=fy_hint,
-                        kind=kind_hint,
+                    delivery_summary, agg_blocks = (
+                        _build_batch_aggregate_blocks(batch_deferred, channel_id)
+                        if batch_deferred else ("", [])
                     )
+                    if delivery_summary:
+                        final_text = delivery_summary
+                        if ledger_deduped > 0 and ledger_appended == 0:
+                            final_text += " _(workbook unchanged)_"
+                    else:
+                        final_text = job_summary_text(
+                            total=total,
+                            posted=posted,
+                            needs_review=needs_review,
+                            rejected=rejected,
+                            duplicates=duplicates,
+                            software=software_hint,
+                            fy=fy_hint,
+                            kind=kind_hint,
+                        )
                     update_kwargs: dict = {
                         "channel": channel_id,
                         "ts": summary_ts,
                         "text": final_text,
                     }
-                    if batch_deferred:
-                        # Merge: job summary section + delivery card.
-                        _, agg_blocks = _build_batch_aggregate_blocks(
-                            batch_deferred, channel_id,
-                        )
-                        update_kwargs["blocks"] = [
-                            {"type": "section",
-                             "text": {"type": "mrkdwn", "text": final_text}},
-                            *agg_blocks,
-                        ]
+                    if batch_deferred and agg_blocks:
+                        blocks_out = list(agg_blocks)
+                        # Same-period bank re-drop: surface Replace / Keep callout.
+                        if (
+                            ledger_appended == 0
+                            and ledger_deduped > 0
+                            and kind_hint == "bank"
+                        ):
+                            dedup_blocks, stash_key = _bank_batch_dedup_callout(
+                                batch_deferred, flush_results, channel_id,
+                            )
+                            if dedup_blocks:
+                                blocks_out.extend(dedup_blocks)
+                                if ledger_store is not None and stash_key:
+                                    _stash_bank_dedup_replace(
+                                        ledger_store,
+                                        batch_deferred,
+                                        stash_key=stash_key,
+                                    )
+                        update_kwargs["blocks"] = blocks_out
                     sync_client.chat_update(**update_kwargs)
                 except Exception:  # noqa: BLE001 - cosmetic
                     logger.exception("failed to update Job summary in %s", channel_id)
+                # Phase 2 backfill: patch delivery_message_ts onto per-doc log
+                # entries written during the batch loop (summary_ts is the thread parent).
+                if batch_file_ids and store is not None:
+                    profile = store.get_by_channel(channel_id)
+                    cid = getattr(profile, "client_id", None) or ""
+                    if cid:
+                        per_file_meta: list[dict] = []
+                        for fid, deferred in zip(
+                            batch_file_ids, batch_deferred, strict=False,
+                        ):
+                            batches = (deferred or {}).get("batches") or []
+                            per_file_meta.append({
+                                "file_id": fid,
+                                "row_count": sum(
+                                    len(b.get("rows") or []) for b in batches
+                                ),
+                                "invoice_ids": _invoice_ids_from_batches(batches),
+                            })
+                        _patch_processing_log_delivery_ts(
+                            store,
+                            client_id=cid,
+                            channel_id=channel_id,
+                            delivery_message_ts=summary_ts,
+                            file_ids=batch_file_ids,
+                            fy=fy_hint,
+                            per_file=per_file_meta,
+                        )
             elif batch_deferred:
                 # No summary_ts (rare — placeholder post failed) — fall back to a
                 # separate delivery post for backwards-compat.
