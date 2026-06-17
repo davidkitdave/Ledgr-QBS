@@ -80,6 +80,33 @@ async def slack_events(request: Request) -> Response:
     return await _bolt_handler.handle(request)
 
 
+@app.get("/slack/install")
+async def slack_install(request: Request) -> Response:
+    """Start the multi-workspace OAuth flow (the public "Add to Slack" link).
+
+    Delegates to the Bolt handler, which serves the install page / redirect to
+    Slack's authorize URL when the app is built in OAuth mode. Returns 503 until
+    the handler is initialized by the lifespan.
+    """
+    if _bolt_handler is None:
+        return Response(content="server not ready", status_code=503)
+    return await _bolt_handler.handle(request)
+
+
+@app.get("/slack/oauth_redirect")
+async def slack_oauth_redirect(request: Request) -> Response:
+    """OAuth callback endpoint Slack redirects to after the user approves.
+
+    Must match the redirect URL registered in the Slack app config
+    (``…/slack/oauth_redirect``). Delegates to the Bolt handler, which exchanges
+    the ``code`` for a bot token and persists the install via the configured
+    ``installation_store``. Returns 503 until the handler is initialized.
+    """
+    if _bolt_handler is None:
+        return Response(content="server not ready", status_code=503)
+    return await _bolt_handler.handle(request)
+
+
 # ---------------------------------------------------------------------------
 # Local dev entrypoint
 # ---------------------------------------------------------------------------

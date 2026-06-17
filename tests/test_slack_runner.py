@@ -7588,3 +7588,130 @@ def test_classify_node_invoice_lane_no_longer_calls_resolve_direction():
         "classify_node should NOT call DIRECTION_FN for the invoice lane; "
         "the Understand call now owns direction_for_client."
     )
+
+
+# --------------------------------------------------------------------------- #
+# Multi-workspace OAuth install flow (build_async_app)
+# --------------------------------------------------------------------------- #
+
+
+def _oauth_build_kwargs(monkeypatch):
+    """Common setup for OAuth-mode build_async_app tests.
+
+    Sets the four OAuth env vars so ``app.config.missing_slack_oauth()`` returns
+    empty, and returns Firestore-backed stores with injected fake clients so no
+    network is touched. The caller passes these into ``build_async_app``.
+    """
+    monkeypatch.setenv("SLACK_CLIENT_ID", "123.456")
+    monkeypatch.setenv("SLACK_CLIENT_SECRET", "shh-secret")
+    monkeypatch.setenv("SLACK_SIGNING_SECRET", "signing-secret")
+    monkeypatch.setenv("SLACK_BASE_URL", "https://example.test")
+    from app.installation_store import (
+        FirestoreInstallationStore,
+        FirestoreOAuthStateStore,
+    )
+
+    installation_store = FirestoreInstallationStore(client=FakeFirestore())
+    state_store = FirestoreOAuthStateStore(client=FakeFirestore())
+    return installation_store, state_store
+
+
+def test_build_async_app_oauth_mode_configures_oauth_flow(monkeypatch):
+    """With full OAuth env present, build_async_app returns an OAuth-mode app.
+
+    Asserts the Bolt app has an ``oauth_flow`` whose settings carry our scopes,
+    install/redirect paths, and the injected Firestore-backed stores.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from accounting_agents import slack_runner
+    from app.slack_app import BOT_SCOPES
+
+    installation_store, state_store = _oauth_build_kwargs(monkeypatch)
+    runner = SimpleNamespace(app_name="accounting_agents")
+
+    with patch("invoice_processing.export.client_context.FirestoreClientStore"), \
+         patch.object(slack_runner, "build_chat_runner",
+                      return_value=SimpleNamespace(app_name="accounting_agents_assistant")):
+        async_app = build_async_app(
+            runner=runner,
+            ledger_store=MagicMock(),
+            db=MagicMock(),
+            installation_store=installation_store,
+            state_store=state_store,
+        )
+
+    assert async_app.oauth_flow is not None
+    settings = async_app.oauth_flow.settings
+    assert list(settings.scopes) == list(BOT_SCOPES)
+    assert settings.install_path == "/slack/install"
+    assert settings.redirect_uri_path == "/slack/oauth_redirect"
+    assert settings.installation_store is installation_store
+    assert settings.state_store is state_store
+
+
+def test_build_async_app_oauth_mode_defaults_to_firestore_stores(monkeypatch):
+    """Without injected stores, OAuth mode constructs Firestore-backed stores.
+
+    Construction must not touch the network (the stores' ``_db()`` is lazy), so
+    this also guards that default construction stays import-safe.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from accounting_agents import slack_runner
+    from app.installation_store import (
+        FirestoreInstallationStore,
+        FirestoreOAuthStateStore,
+    )
+
+    monkeypatch.setenv("SLACK_CLIENT_ID", "123.456")
+    monkeypatch.setenv("SLACK_CLIENT_SECRET", "shh-secret")
+    monkeypatch.setenv("SLACK_SIGNING_SECRET", "signing-secret")
+    monkeypatch.setenv("SLACK_BASE_URL", "https://example.test")
+    runner = SimpleNamespace(app_name="accounting_agents")
+
+    with patch("invoice_processing.export.client_context.FirestoreClientStore"), \
+         patch.object(slack_runner, "build_chat_runner",
+                      return_value=SimpleNamespace(app_name="accounting_agents_assistant")):
+        async_app = build_async_app(
+            runner=runner,
+            ledger_store=MagicMock(),
+            db=MagicMock(),
+        )
+
+    assert async_app.oauth_flow is not None
+    settings = async_app.oauth_flow.settings
+    assert isinstance(settings.installation_store, FirestoreInstallationStore)
+    assert isinstance(settings.state_store, FirestoreOAuthStateStore)
+
+
+def test_build_async_app_falls_back_to_token_mode_without_oauth_env(monkeypatch):
+    """With OAuth env absent, build_async_app keeps the token (socket/dev) mode.
+
+    ``oauth_flow`` must be ``None`` so the existing socket-mode + test behavior is
+    preserved unchanged.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from accounting_agents import slack_runner
+
+    for var in (
+        "SLACK_CLIENT_ID",
+        "SLACK_CLIENT_SECRET",
+        "SLACK_BASE_URL",
+        "SLACK_OAUTH_STATE_SECRET",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+    runner = SimpleNamespace(app_name="accounting_agents")
+
+    with patch("invoice_processing.export.client_context.FirestoreClientStore"), \
+         patch.object(slack_runner, "build_chat_runner",
+                      return_value=SimpleNamespace(app_name="accounting_agents_assistant")):
+        async_app = build_async_app(
+            runner=runner,
+            ledger_store=MagicMock(),
+            db=MagicMock(),
+        )
+
+    assert async_app.oauth_flow is None

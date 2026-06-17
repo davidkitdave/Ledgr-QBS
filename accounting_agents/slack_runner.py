@@ -4889,6 +4889,8 @@ def build_async_app(
     store=None,
     bot_token: Optional[str] = None,
     chat_runner=None,
+    installation_store=None,
+    state_store=None,
 ):
     """Build the Bolt ``AsyncApp`` wired to the document + HITL + chat handlers.
 
@@ -4924,7 +4926,49 @@ def build_async_app(
 
     app_name = runner.app_name
     token = bot_token or os.environ.get("SLACK_BOT_TOKEN")
-    async_app = AsyncApp(token=token)
+
+    # Multi-workspace OAuth (distribution) vs single-token (socket/dev) mode.
+    # When the full OAuth config is present (SLACK_CLIENT_ID/SECRET,
+    # SLACK_SIGNING_SECRET, SLACK_BASE_URL — see app.config.missing_slack_oauth),
+    # build the app in OAuth mode so other firms can self-install via the public
+    # "Add to Slack" link. Otherwise fall back to the bot-token mode the socket
+    # path + tests rely on (the socket entrypoint strips the OAuth env vars first,
+    # so this branch is never taken there). The Firestore-backed stores' ``_db()``
+    # is lazy, so constructing the defaults touches no network.
+    import app.config as _app_config
+
+    if not _app_config.missing_slack_oauth():
+        from app.installation_store import (
+            FirestoreInstallationStore,
+            FirestoreOAuthStateStore,
+        )
+        from app.slack_app import BOT_SCOPES
+        from slack_bolt.oauth.async_oauth_settings import AsyncOAuthSettings
+
+        settings = _app_config.get_settings()
+        if installation_store is None:
+            installation_store = FirestoreInstallationStore()
+        if state_store is None:
+            state_store = FirestoreOAuthStateStore()
+        # NOTE: bolt-python's AsyncOAuthSettings has NO ``state_secret`` kwarg
+        # (that is a bolt-js concept). The state CSRF value is issued + verified
+        # by the ``state_store`` together with a signed browser cookie; no
+        # separate secret is accepted here. (Confirmed against the installed
+        # slack_bolt/oauth/async_oauth_settings.py signature.)
+        async_app = AsyncApp(
+            signing_secret=settings.slack_signing_secret,
+            oauth_settings=AsyncOAuthSettings(
+                client_id=settings.slack_client_id,
+                client_secret=settings.slack_client_secret,
+                scopes=BOT_SCOPES,
+                installation_store=installation_store,
+                state_store=state_store,
+                install_path="/slack/install",
+                redirect_uri_path="/slack/oauth_redirect",
+            ),
+        )
+    else:
+        async_app = AsyncApp(token=token)
 
     # Bolt hands async handlers an AsyncWebClient, but ALL our downstream Slack Web
     # API calls (files_info, chat_postMessage, reactions, files_upload_v2,
