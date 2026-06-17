@@ -254,7 +254,7 @@ def test_classify_routes_invoice():
     nodes.DIRECTION_FN = _spy_resolve
 
     ctx = FakeContext(_base_state())
-    event = asyncio.run(nodes.classify_node(ctx))
+    event = asyncio.run(nodes.classify_node._func(ctx))
 
     assert event.actions.route == nodes.ROUTE_INVOICE
     assert ctx.state[nodes.DOC_TYPE_KEY] == "invoice"
@@ -277,7 +277,7 @@ def test_classify_routes_bank_statement():
     )
 
     ctx = FakeContext(_base_state())
-    event = asyncio.run(nodes.classify_node(ctx))
+    event = asyncio.run(nodes.classify_node._func(ctx))
 
     assert event.actions.route == nodes.ROUTE_BANK
     assert ctx.state[nodes.DOC_TYPE_KEY] == "bank_statement"
@@ -287,7 +287,7 @@ def test_classify_routes_bank_statement():
 def test_classify_missing_artifact_raises():
     ctx = FakeContext({})  # no artifact-name key
     with pytest.raises(ValueError):
-        asyncio.run(nodes.classify_node(ctx))
+        asyncio.run(nodes.classify_node._func(ctx))
 
 
 # =========================================================================== #
@@ -302,7 +302,7 @@ def test_invoice_bundle_fanout_three():
     _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(bundle))
 
     ctx = FakeContext(_base_state(**{nodes.DIRECTION_KEY: "purchase"}))
-    event = asyncio.run(nodes.extract_invoice_node(ctx))
+    event = asyncio.run(nodes.extract_invoice_node._func(ctx))
 
     assert event.output == {"count": 3}
     normalized = ctx.state[nodes.NORMALIZED_KEY]
@@ -319,7 +319,7 @@ def test_multi_receipt_page_fanout_four():
     _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(bundle))
 
     ctx = FakeContext(_base_state(**{nodes.DIRECTION_KEY: "purchase"}))
-    event = asyncio.run(nodes.extract_invoice_node(ctx))
+    event = asyncio.run(nodes.extract_invoice_node._func(ctx))
 
     assert event.output == {"count": 4}
     assert len(ctx.state[nodes.NORMALIZED_KEY]) == 4
@@ -336,7 +336,7 @@ def test_soa_skip_extracts_only_embedded_invoice():
     _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(bundle))
 
     ctx = FakeContext(_base_state(**{nodes.DIRECTION_KEY: "purchase"}))
-    event = asyncio.run(nodes.extract_invoice_node(ctx))
+    event = asyncio.run(nodes.extract_invoice_node._func(ctx))
 
     assert event.output == {"count": 1}
     normalized = ctx.state[nodes.NORMALIZED_KEY]
@@ -397,7 +397,7 @@ def test_soa_phantom_invoices_dropped_by_normalize_bundle():
     _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(bundle))
 
     ctx = FakeContext(_base_state(**{nodes.DIRECTION_KEY: "purchase"}))
-    event = asyncio.run(nodes.extract_invoice_node(ctx))
+    event = asyncio.run(nodes.extract_invoice_node._func(ctx))
 
     # Gate must have dropped the 2 phantoms — only the real invoice survives.
     assert event.output == {"count": 1}, (
@@ -416,7 +416,7 @@ def test_invoice_node_defaults_direction_to_purchase():
         ExtractedInvoiceBundle(invoices=[_ex_invoice("INV-X")])
     ))
     ctx = FakeContext(_base_state())  # no direction in state
-    asyncio.run(nodes.extract_invoice_node(ctx))
+    asyncio.run(nodes.extract_invoice_node._func(ctx))
     assert ctx.state[nodes.NORMALIZED_KEY][0]["doc_type"] == "purchase"
 
 
@@ -438,9 +438,9 @@ def test_categorize_and_tax_chain():
     nodes.CATEGORIZE_FN = _fake_categorize
 
     ctx = FakeContext(_base_state(**{nodes.DIRECTION_KEY: "purchase"}))
-    asyncio.run(nodes.extract_invoice_node(ctx))
-    asyncio.run(nodes.categorize_node(ctx))
-    asyncio.run(nodes.tax_node(ctx))
+    asyncio.run(nodes.extract_invoice_node._func(ctx))
+    asyncio.run(nodes.categorize_node._func(ctx))
+    asyncio.run(nodes.tax_node._func(ctx))
 
     line = ctx.state[nodes.NORMALIZED_KEY][0]["lines"][0]
     assert line["account_code"] == "500"
@@ -482,7 +482,7 @@ def test_bank_node_multi_account_list():
     nodes.EXTRACT_BANK_FN = lambda data, mime, **kw: (ex_bank, "vision")
 
     ctx = FakeContext(_base_state())
-    event = asyncio.run(nodes.extract_bank_node(ctx))
+    event = asyncio.run(nodes.extract_bank_node._func(ctx))
 
     assert event.output == {"count": 2}
     statements = ctx.state[nodes.BANK_STATEMENTS_KEY]
@@ -540,9 +540,9 @@ def test_consolidate_node_bank_sheet_titles_multi_currency():
     nodes.EXTRACT_BANK_FN = lambda data, mime, **kw: (ex_bank, "vision")
     state = _base_state(**{nodes.DOC_TYPE_KEY: "bank_statement"})
     ctx = FakeContext(state)
-    asyncio.run(nodes.extract_bank_node(ctx))
-    asyncio.run(nodes.route_node(ctx))
-    asyncio.run(nodes.consolidate_node(ctx))
+    asyncio.run(nodes.extract_bank_node._func(ctx))
+    asyncio.run(nodes.route_node._func(ctx))
+    asyncio.run(nodes.consolidate_node._func(ctx))
 
     payload = ctx.state[nodes.LEDGER_ROWS_KEY]
     assert payload["kind"] == "bank"
@@ -571,7 +571,7 @@ def test_bank_node_accepts_bare_statement():
     )
     nodes.EXTRACT_BANK_FN = lambda data, mime, **kw: ex_bank  # no tuple
     ctx = FakeContext(_base_state())
-    event = asyncio.run(nodes.extract_bank_node(ctx))
+    event = asyncio.run(nodes.extract_bank_node._func(ctx))
     assert event.output == {"count": 1}
 
 
@@ -585,8 +585,8 @@ def test_route_node_invoice_fy_and_sheet():
         ExtractedInvoiceBundle(invoices=[_ex_invoice("INV-1"), _ex_invoice("INV-2")])
     ))
     ctx = FakeContext(_base_state(**{nodes.DIRECTION_KEY: "purchase"}))
-    asyncio.run(nodes.extract_invoice_node(ctx))
-    event = asyncio.run(nodes.route_node(ctx))
+    asyncio.run(nodes.extract_invoice_node._func(ctx))
+    event = asyncio.run(nodes.route_node._func(ctx))
 
     assert event.output == {"count": 2}
     routes = ctx.state[nodes.ROUTES_KEY]
@@ -608,8 +608,8 @@ def test_route_node_bank_workbook():
     )
     nodes.EXTRACT_BANK_FN = lambda data, mime, **kw: (ex_bank, "vision")
     ctx = FakeContext(_base_state(**{nodes.DOC_TYPE_KEY: "bank_statement"}))
-    asyncio.run(nodes.extract_bank_node(ctx))
-    event = asyncio.run(nodes.route_node(ctx))
+    asyncio.run(nodes.extract_bank_node._func(ctx))
+    event = asyncio.run(nodes.route_node._func(ctx))
 
     assert event.output == {"count": 1}
     assert ctx.state[nodes.ROUTES_KEY][0]["workbook"] == "BankStatement_FY2025.xlsx"
@@ -673,9 +673,9 @@ def test_route_node_bank_fy_when_first_currency_has_no_transactions():
         "fye_month": 12,
         "source_filename": "4. DBS - Jun 2024.pdf",
     }))
-    asyncio.run(nodes.extract_bank_node(ctx))
-    asyncio.run(nodes.route_node(ctx))
-    asyncio.run(nodes.consolidate_node(ctx))
+    asyncio.run(nodes.extract_bank_node._func(ctx))
+    asyncio.run(nodes.route_node._func(ctx))
+    asyncio.run(nodes.consolidate_node._func(ctx))
 
     routes = ctx.state[nodes.ROUTES_KEY]
     assert all(r["fy"] == 2024 for r in routes)
@@ -718,8 +718,8 @@ def test_route_node_bank_fy_from_period_when_all_currencies_empty():
         nodes.DOC_TYPE_KEY: "bank_statement",
         "fye_month": 12,
     }))
-    asyncio.run(nodes.extract_bank_node(ctx))
-    asyncio.run(nodes.route_node(ctx))
+    asyncio.run(nodes.extract_bank_node._func(ctx))
+    asyncio.run(nodes.route_node._func(ctx))
     assert ctx.state[nodes.ROUTES_KEY][0]["fy"] == 2024
 
 
@@ -747,8 +747,8 @@ def test_route_node_bank_apr_2024_calendar_fye():
         nodes.DOC_TYPE_KEY: "bank_statement",
         "fye_month": 12,
     }))
-    asyncio.run(nodes.extract_bank_node(ctx))
-    event = asyncio.run(nodes.route_node(ctx))
+    asyncio.run(nodes.extract_bank_node._func(ctx))
+    event = asyncio.run(nodes.route_node._func(ctx))
 
     assert event.output == {"count": 1}
     assert ctx.state[nodes.ROUTES_KEY][0]["fy"] == 2024
@@ -774,7 +774,7 @@ def test_apply_decision_node_applies_line_edits():
     decision = {"decision": "edit", "edits": {"lines": [
         {"index": 0, "account_code": "6010", "tax_treatment": "ZR", "net_amount": 44.74}
     ]}}
-    asyncio.run(nodes.apply_decision_node(ctx, decision))
+    asyncio.run(nodes.apply_decision_node._func(ctx, decision))
     line = ctx.state[nodes.NORMALIZED_KEY][0]["lines"][0]
     assert line["account_code"] == "6010"
     assert line["tax_treatment"] == "ZR"
@@ -797,7 +797,7 @@ def test_apply_decision_node_edit_does_not_silently_drop_canonical_fields():
         ],
     }]
     ctx = FakeContext(state)
-    asyncio.run(nodes.apply_decision_node(
+    asyncio.run(nodes.apply_decision_node._func(
         ctx,
         {"decision": "edit", "edits": {"lines": [
             {"index": 0, "tax_treatment": "ZR", "net_amount": 88.00}
@@ -812,7 +812,7 @@ def test_apply_decision_node_reject_clears_invoices():
     state = _base_state()
     state[nodes.NORMALIZED_KEY] = [{"invoice_number": "INV-1", "lines": []}]
     ctx = FakeContext(state)
-    asyncio.run(nodes.apply_decision_node(ctx, {"decision": "reject"}))
+    asyncio.run(nodes.apply_decision_node._func(ctx, {"decision": "reject"}))
     assert ctx.state[nodes.NORMALIZED_KEY] == []
     assert ctx.state[nodes.APPROVAL_STATUS_KEY] == "reject"
 
@@ -821,7 +821,7 @@ def test_apply_decision_node_autoapprove_passthrough():
     state = _base_state()
     state[nodes.NORMALIZED_KEY] = [{"invoice_number": "INV-1", "lines": []}]
     ctx = FakeContext(state)
-    asyncio.run(nodes.apply_decision_node(ctx, None))  # no HITL → node_input is None
+    asyncio.run(nodes.apply_decision_node._func(ctx, None))  # no HITL → node_input is None
     assert ctx.state[nodes.NORMALIZED_KEY] == [{"invoice_number": "INV-1", "lines": []}]
 
 
@@ -829,7 +829,7 @@ def test_apply_decision_node_approve_passes_through_with_status():
     state = _base_state()
     state[nodes.NORMALIZED_KEY] = [{"invoice_number": "INV-1", "lines": []}]
     ctx = FakeContext(state)
-    asyncio.run(nodes.apply_decision_node(ctx, {"decision": "approve"}))
+    asyncio.run(nodes.apply_decision_node._func(ctx, {"decision": "approve"}))
     assert ctx.state[nodes.NORMALIZED_KEY] == [{"invoice_number": "INV-1", "lines": []}]
     assert ctx.state[nodes.APPROVAL_STATUS_KEY] == "approve"
 
@@ -846,7 +846,7 @@ def test_apply_decision_node_edit_edge_cases_no_op(edits_payload, expected_line)
         "lines": [{"description": "Room", "account_code": None, "tax_treatment": "SR", "net_amount": 51.49}],
     }]
     ctx = FakeContext(state)
-    asyncio.run(nodes.apply_decision_node(ctx, {"decision": "edit", "edits": edits_payload}))
+    asyncio.run(nodes.apply_decision_node._func(ctx, {"decision": "edit", "edits": edits_payload}))
     assert ctx.state[nodes.NORMALIZED_KEY][0]["lines"][0] == expected_line
 
 
@@ -859,7 +859,7 @@ def test_apply_decision_node_edit_with_multi_invoice_logs_warning(caplog):
     ]
     ctx = FakeContext(state)
     with caplog.at_level(logging.WARNING, logger="accounting_agents.nodes"):
-        asyncio.run(nodes.apply_decision_node(ctx, {"decision": "edit", "edits": {"lines": [{"index": 0, "account_code": "6010"}]}}))
+        asyncio.run(nodes.apply_decision_node._func(ctx, {"decision": "edit", "edits": {"lines": [{"index": 0, "account_code": "6010"}]}}))
     assert any("invoice_index" in r.message for r in caplog.records)
     # First invoice mutated, second untouched
     assert ctx.state[nodes.NORMALIZED_KEY][0]["lines"][0]["account_code"] == "6010"
@@ -880,7 +880,7 @@ def test_deliver_invoice_names_client_scoped_ledger():
             "batches": [{"sheet": "Purchase", "rows": [{"Total Amount": 10}]}],
         }
     })
-    asyncio.run(nodes.deliver_node(ctx))
+    asyncio.run(nodes.deliver_node._func(ctx))
     summary = ctx.state[nodes.DELIVER_SUMMARY_KEY]
     assert "Company-A" in summary
     assert "Ledger FY2026" in summary
@@ -904,7 +904,7 @@ def test_deliver_bank_names_bank_statement_not_ledger():
             }],
         }
     })
-    asyncio.run(nodes.deliver_node(ctx))
+    asyncio.run(nodes.deliver_node._func(ctx))
     summary = ctx.state[nodes.DELIVER_SUMMARY_KEY]
     assert "Sample Bank Client Pte Ltd" in summary
     assert "Bank Statement FY2025" in summary
@@ -949,7 +949,7 @@ def test_extract_node_self_referential_flagged_for_review():
 
     state = _base_state(**{nodes.DIRECTION_KEY: "self_referential"})
     ctx = FakeContext(state)
-    asyncio.run(nodes.extract_invoice_node(ctx))
+    asyncio.run(nodes.extract_invoice_node._func(ctx))
 
     normalized_list = ctx.state[nodes.NORMALIZED_KEY]
     assert len(normalized_list) == 1
@@ -974,7 +974,7 @@ def test_extract_node_unknown_direction_flagged_for_review():
 
     state = _base_state(**{nodes.DIRECTION_KEY: "unknown"})
     ctx = FakeContext(state)
-    asyncio.run(nodes.extract_invoice_node(ctx))
+    asyncio.run(nodes.extract_invoice_node._func(ctx))
 
     normalized_list = ctx.state[nodes.NORMALIZED_KEY]
     assert len(normalized_list) == 1
@@ -995,7 +995,7 @@ def test_extract_node_clean_purchase_unaffected():
 
     state = _base_state(**{nodes.DIRECTION_KEY: "purchase"})
     ctx = FakeContext(state)
-    asyncio.run(nodes.extract_invoice_node(ctx))
+    asyncio.run(nodes.extract_invoice_node._func(ctx))
 
     inv = ctx.state[nodes.NORMALIZED_KEY][0]
     note = inv.get("reconcile_note") or ""
@@ -1049,7 +1049,7 @@ def test_extract_node_usd_doc_sgd_client_books_in_usd():
 
     state = _base_state(**{nodes.DIRECTION_KEY: "purchase", "base_currency": "SGD"})
     ctx = FakeContext(state)
-    asyncio.run(nodes.extract_invoice_node(ctx))
+    asyncio.run(nodes.extract_invoice_node._func(ctx))
 
     inv = ctx.state[nodes.NORMALIZED_KEY][0]
     assert inv.get("needs_fx_review") is False, (
@@ -1082,7 +1082,7 @@ def test_extract_node_usd_doc_with_fx_rate_converts_amounts():
 
     state = _base_state(**{nodes.DIRECTION_KEY: "purchase", "base_currency": "SGD"})
     ctx = FakeContext(state)
-    asyncio.run(nodes.extract_invoice_node(ctx))
+    asyncio.run(nodes.extract_invoice_node._func(ctx))
 
     inv = ctx.state[nodes.NORMALIZED_KEY][0]
     assert inv.get("needs_fx_review") is False, (
@@ -1105,7 +1105,7 @@ def test_extract_node_myr_client_myr_doc_not_flagged():
 
     state = _base_state(**{nodes.DIRECTION_KEY: "purchase", "base_currency": "MYR"})
     ctx = FakeContext(state)
-    asyncio.run(nodes.extract_invoice_node(ctx))
+    asyncio.run(nodes.extract_invoice_node._func(ctx))
 
     inv = ctx.state[nodes.NORMALIZED_KEY][0]
     assert inv.get("needs_fx_review") is False, (
@@ -1277,7 +1277,7 @@ def test_guard_no_warning_below_thresholds(caplog):
     ))
     ctx = FakeContext(_base_state(**{nodes.DIRECTION_KEY: "purchase"}))
     with caplog.at_level(logging.WARNING, logger="accounting_agents.nodes"):
-        asyncio.run(nodes.extract_invoice_node(ctx))
+        asyncio.run(nodes.extract_invoice_node._func(ctx))
 
     # No size-guard warnings should appear (filter to guard-specific messages only).
     guard_warnings = [
@@ -1348,7 +1348,7 @@ def test_extract_invoice_document_node_passes_review_hint_to_extractor():
         nodes.DOC_TYPE_KEY: "invoice",
         "review_hint": "read as a credit note",
     }))
-    asyncio.run(nodes.extract_invoice_document_node(ctx))
+    asyncio.run(nodes.extract_invoice_document_node._func(ctx))
 
     assert captured["hint"] == "read as a credit note"
 
@@ -1368,6 +1368,245 @@ def test_extract_invoice_document_node_omits_hint_when_no_review_hint():
         nodes.DIRECTION_KEY: "purchase",
         nodes.DOC_TYPE_KEY: "invoice",
     }))
-    asyncio.run(nodes.extract_invoice_document_node(ctx))
+    asyncio.run(nodes.extract_invoice_document_node._func(ctx))
 
     assert captured["saw_key"] is False
+
+
+# =========================================================================== #
+# Codec round-trip — guards against the prior tax_visible_on_document /
+# direction_reason leakage. See accounting_agents/normalized_invoice_codec.py
+# and ADR-0014 / ADR-0015 for the fields that MUST survive.
+# =========================================================================== #
+
+
+def _round_trip_invoice(inv):
+    """Serialize via nodes shim, deserialize back. Returns (rebuilt_inv, dict)."""
+    d = nodes._inv_to_dict(inv)
+    return nodes._dict_to_inv(d), d
+
+
+def test_normalized_invoice_codec_round_trip_preserves_tax_visible_on_document():
+    """Regression: prior codec silently dropped this field on Firestore round-trip."""
+    from datetime import date as _date
+
+    from invoice_processing.export.models import InvoiceLine, NormalizedInvoice
+
+    inv = NormalizedInvoice(
+        invoice_number="INV-001",
+        invoice_date=_date(2025, 1, 15),
+        tax_visible_on_document=False,   # the exact field the old codec dropped
+        direction_reason="Expense claim — currency column matched, no Tax/GST",
+        lines=[InvoiceLine(description="Mileage", net_amount=100.0)],
+    )
+
+    rebuilt, _ = _round_trip_invoice(inv)
+
+    assert rebuilt.tax_visible_on_document is False, (
+        "tax_visible_on_document must survive the round-trip; "
+        "the old _dict_to_inv silently dropped it, which broke downstream "
+        "categorization and HITL review (see ADR-0014)."
+    )
+    assert rebuilt.direction_reason == inv.direction_reason
+    assert rebuilt.invoice_date == inv.invoice_date
+    assert rebuilt.lines[0].description == "Mileage"
+    assert rebuilt.lines[0].net_amount == 100.0
+
+
+def test_normalized_invoice_codec_round_trip_handles_all_fields():
+    """Every field on the dataclass must survive intact (round-trip identity)."""
+    from datetime import date as _date
+
+    from invoice_processing.export.models import InvoiceLine, NormalizedInvoice, PartyInfo
+
+    inv = NormalizedInvoice(
+        doc_type="sales",
+        invoice_number="INV-002",
+        invoice_date=_date(2025, 3, 1),
+        due_date=_date(2025, 3, 31),
+        currency="USD",
+        po_number="PO-9",
+        supplier=PartyInfo(name="Acme Co", country="US", gst_regno="US-EIN-12"),
+        customer=PartyInfo(name="Client Co", country="SG", gst_regno="201912345A"),
+        lines=[
+            InvoiceLine(
+                description="Widget",
+                quantity=2.0,
+                unit_amount=50.0,
+                net_amount=100.0,
+                gst_amount=9.0,
+                account_code="4000",
+                item_code="WID-1",
+                tax_keyword="SR",
+                tax_treatment="SR",
+                tax_confidence=0.95,
+                tax_flagged=False,
+                tax_reason="local standard-rated",
+            )
+        ],
+        doc_subtotal=100.0,
+        doc_gst_total=9.0,
+        doc_total=109.0,
+        our_gst_registered=True,
+        fx_rate=1.35,
+        original_total=80.74,
+        original_currency="USD",
+        needs_fx_review=False,
+        reconciled=True,
+        reconcile_note="OK",
+        tax_visible_on_document=True,
+        direction_reason="Letterhead shows Client Co as buyer",
+    )
+
+    rebuilt, d = _round_trip_invoice(inv)
+
+    assert rebuilt.doc_type == "sales"
+    assert rebuilt.invoice_number == "INV-002"
+    assert rebuilt.invoice_date == _date(2025, 3, 1)
+    assert rebuilt.due_date == _date(2025, 3, 31)
+    assert rebuilt.currency == "USD"
+    assert rebuilt.po_number == "PO-9"
+    assert rebuilt.supplier.name == "Acme Co"
+    assert rebuilt.supplier.country == "US"
+    assert rebuilt.supplier.gst_regno == "US-EIN-12"
+    assert rebuilt.customer.name == "Client Co"
+    assert rebuilt.customer.country == "SG"
+    assert rebuilt.customer.gst_regno == "201912345A"
+    assert len(rebuilt.lines) == 1
+    line = rebuilt.lines[0]
+    assert line.description == "Widget"
+    assert line.quantity == 2.0
+    assert line.unit_amount == 50.0
+    assert line.net_amount == 100.0
+    assert line.gst_amount == 9.0
+    assert line.account_code == "4000"
+    assert line.item_code == "WID-1"
+    assert line.tax_keyword == "SR"
+    assert line.tax_treatment == "SR"
+    assert line.tax_confidence == 0.95
+    assert line.tax_flagged is False
+    assert line.tax_reason == "local standard-rated"
+    assert rebuilt.doc_subtotal == 100.0
+    assert rebuilt.doc_gst_total == 9.0
+    assert rebuilt.doc_total == 109.0
+    assert rebuilt.our_gst_registered is True
+    assert rebuilt.fx_rate == 1.35
+    assert rebuilt.original_total == 80.74
+    assert rebuilt.original_currency == "USD"
+    assert rebuilt.needs_fx_review is False
+    assert rebuilt.reconciled is True
+    assert rebuilt.reconcile_note == "OK"
+    assert rebuilt.tax_visible_on_document is True
+    assert rebuilt.direction_reason == "Letterhead shows Client Co as buyer"
+
+
+def test_normalized_invoice_codec_date_serialized_as_iso_string():
+    """The on-the-wire dict shape must use ISO date strings (Firestore-safe)."""
+    from datetime import date as _date
+
+    from invoice_processing.export.models import NormalizedInvoice
+
+    inv = NormalizedInvoice(
+        invoice_number="INV-DATE",
+        invoice_date=_date(2025, 12, 1),
+    )
+    d = nodes._inv_to_dict(inv)
+
+    assert d["invoice_date"] == "2025-12-01"
+    assert d["due_date"] is None  # explicit None, not missing key
+
+
+def test_normalized_invoice_codec_backward_compatible_with_existing_dicts():
+    """Old serialized dicts (missing tax_visible_on_document / direction_reason)
+    must still deserialize into valid NormalizedInvoice instances."""
+    from invoice_processing.export.models import NormalizedInvoice
+
+    old_dict = {
+        "doc_type": "purchase",
+        "invoice_number": "INV-OLD",
+        "invoice_date": "2024-06-01",
+        "due_date": None,
+        "currency": "SGD",
+        "po_number": None,
+        "supplier": {"name": "Old Supplier"},
+        "customer": {},
+        "lines": [],
+        "doc_subtotal": None,
+        "doc_gst_total": None,
+        "doc_total": None,
+        "our_gst_registered": True,
+        "fx_rate": 1.0,
+        "original_total": None,
+        "original_currency": None,
+        "needs_fx_review": False,
+        "reconciled": True,
+        "reconcile_note": None,
+        # NOTE: no tax_visible_on_document, no direction_reason — pre-ADR-0014 shape
+    }
+
+    rebuilt = nodes._dict_to_inv(old_dict)
+
+    assert isinstance(rebuilt, NormalizedInvoice)
+    assert rebuilt.invoice_number == "INV-OLD"
+    assert rebuilt.supplier.name == "Old Supplier"
+    # New fields default to None — graceful upgrade from older sessions.
+    assert rebuilt.tax_visible_on_document is None
+    assert rebuilt.direction_reason is None
+
+
+def test_bank_statement_codec_round_trip():
+    """Same round-trip guarantee for bank statements."""
+    from datetime import date as _date
+
+    from invoice_processing.export.models import BankStatement, BankTransaction
+
+    stmt = BankStatement(
+        bank_name="DBS",
+        account_number="001",
+        currency="SGD",
+        statement_period="2024-01-01 to 2024-01-31",
+        opening_balance=100.0,
+        closing_balance=500.0,
+        transactions=[
+            BankTransaction(
+                date=_date(2024, 1, 5),
+                description="Coffee",
+                withdrawal=4.5,
+                deposit=None,
+                balance=95.5,
+                math_ok=True,
+                note="",
+            ),
+            BankTransaction(
+                date=_date(2024, 1, 10),
+                description="Salary",
+                withdrawal=None,
+                deposit=400.0,
+                balance=495.5,
+                math_ok=True,
+            ),
+        ],
+        source_file_id="F-1",
+        extract_mode="digital",
+        reconciled=True,
+        reconcile_note="OK",
+    )
+
+    d = nodes._bank_to_dict(stmt)
+    rebuilt = nodes._dict_to_bank(d)
+
+    assert rebuilt.bank_name == "DBS"
+    assert rebuilt.account_number == "001"
+    assert rebuilt.currency == "SGD"
+    assert rebuilt.opening_balance == 100.0
+    assert rebuilt.closing_balance == 500.0
+    assert rebuilt.source_file_id == "F-1"
+    assert rebuilt.extract_mode == "digital"
+    assert rebuilt.reconciled is True
+    assert rebuilt.reconcile_note == "OK"
+    assert len(rebuilt.transactions) == 2
+    assert rebuilt.transactions[0].date == _date(2024, 1, 5)
+    assert rebuilt.transactions[0].withdrawal == 4.5
+    assert rebuilt.transactions[0].deposit is None
+    assert rebuilt.transactions[1].deposit == 400.0
+    assert rebuilt.transactions[1].balance == 495.5

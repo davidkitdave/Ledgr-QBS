@@ -60,6 +60,13 @@ from invoice_processing.export.exporters import (
 from invoice_processing.export.models import BankStatement, NormalizedInvoice
 from invoice_processing.export.routing import DocRoute, route_document
 from invoice_processing.export.tax_classifier import TaxClassifier
+
+from .normalized_invoice_codec import (
+    bank_to_dict,
+    dict_to_bank,
+    dict_to_invoice,
+    invoice_to_dict,
+)
 from invoice_processing.extract.bank_statement_extractor import (
     extract_bank_statement,
     to_bank_statements,
@@ -305,6 +312,7 @@ def _effective_fye_month(state: dict) -> tuple[int, bool]:
 # --------------------------------------------------------------------------- #
 
 
+@node
 async def classify_node(ctx) -> Event:
     """Classify the uploaded PDF and route to the invoice or bank-statement lane.
 
@@ -395,6 +403,7 @@ def _apply_invoice_process_result(ctx, result: InvoiceProcessResult) -> None:
     )
 
 
+@node
 async def extract_invoice_document_node(ctx) -> Event:
     """Understand or legacy extraction — single orchestrated invoice lane step."""
     data, mime_type = await _load_pdf_bytes(ctx)
@@ -486,9 +495,10 @@ async def normalize_document_node(ctx) -> Event:
     return Event(output={"count": len(normalized)})
 
 
+@node
 async def extract_invoice_node(ctx) -> Event:
     """Invoice lane: understand or legacy extraction in one step."""
-    return await extract_invoice_document_node(ctx)
+    return await extract_invoice_document_node._func(ctx)
 
 
 def _normalize_bundle(ctx, bundle: ExtractedInvoiceBundle) -> list[NormalizedInvoice]:
@@ -564,6 +574,7 @@ def _normalize_bundle(ctx, bundle: ExtractedInvoiceBundle) -> list[NormalizedInv
     return normalized
 
 
+@node
 async def categorize_node(ctx) -> Event:
     """Fill COA account codes per normalized invoice (COA from client profile)."""
     invoices = _normalized_from_state(ctx.state)
@@ -599,6 +610,7 @@ async def categorize_node(ctx) -> Event:
     return Event(output={"count": len(invoices)})
 
 
+@node
 async def tax_node(ctx) -> Event:
     """Classify SG GST treatment per line, per normalized invoice."""
     invoices = _normalized_from_state(ctx.state)
@@ -991,6 +1003,7 @@ def _apply_review_clarify(ctx, decision, pdf_payload: bytes | tuple[bytes, str])
     # through unchanged.
 
 
+@node
 async def extract_bank_node(ctx) -> Event:
     """Extract a bank statement into a list of BankStatements.
 
@@ -1018,6 +1031,7 @@ async def extract_bank_node(ctx) -> Event:
     return Event(output={"count": len(statements)})
 
 
+@node
 async def apply_decision_node(ctx, node_input=None) -> Event:
     """Apply the human's ApproveDecision (resume node_input) to the run state.
 
@@ -1084,6 +1098,7 @@ async def apply_decision_node(ctx, node_input=None) -> Event:
     return Event(output={"decision": choice})
 
 
+@node
 async def route_node(ctx) -> Event:
     """Compute FY + sheet/direction routing metadata (NO GCS)."""
     fye_month, _defaulted = _effective_fye_month(ctx.state)
@@ -1285,6 +1300,7 @@ def _doc_key(state: dict, sheet: str, identity: str, index: int, *, period: str 
     return f"{sheet}:{ident}"
 
 
+@node
 async def consolidate_node(ctx) -> Event:
     """Gather this run's rows into a serializable ``state[LEDGER_ROWS_KEY]`` payload.
 
@@ -1472,6 +1488,7 @@ def compose_delivery_summary(payload: dict) -> str:
     )
 
 
+@node
 async def deliver_node(ctx) -> Event:
     """Emit the final user-facing summary text (NO Slack I/O).
 
@@ -1497,57 +1514,28 @@ async def deliver_node(ctx) -> Event:
 # --------------------------------------------------------------------------- #
 # Serialization helpers — NormalizedInvoice / BankStatement <-> plain dict
 # (workflow state must be JSON-serializable basic types)
+#
+# The real implementations live in `.normalized_invoice_codec`. The shims
+# below keep call sites unchanged (tests still use ``nodes._inv_to_dict`` /
+# ``nodes._dict_to_inv``) while routing every round-trip through the codec
+# so ``tax_visible_on_document`` and ``direction_reason`` are preserved.
 # --------------------------------------------------------------------------- #
-from dataclasses import asdict  # noqa: E402
 
 
 def _inv_to_dict(inv: NormalizedInvoice) -> dict:
-    d = asdict(inv)
-    d["invoice_date"] = inv.invoice_date.isoformat() if inv.invoice_date else None
-    d["due_date"] = inv.due_date.isoformat() if inv.due_date else None
-    return d
+    return invoice_to_dict(inv)
 
 
 def _dict_to_inv(d: dict) -> NormalizedInvoice:
-    from invoice_processing.export.models import InvoiceLine, PartyInfo
-
-    sup = PartyInfo(**(d.get("supplier") or {}))
-    cus = PartyInfo(**(d.get("customer") or {}))
-    lines = [InvoiceLine(**ld) for ld in (d.get("lines") or [])]
-    return NormalizedInvoice(
-        doc_type=d.get("doc_type", "purchase"),
-        invoice_number=d.get("invoice_number"),
-        invoice_date=_parse_iso(d.get("invoice_date")),
-        due_date=_parse_iso(d.get("due_date")),
-        currency=d.get("currency", "SGD"),
-        po_number=d.get("po_number"),
-        supplier=sup,
-        customer=cus,
-        lines=lines,
-        doc_subtotal=d.get("doc_subtotal"),
-        doc_gst_total=d.get("doc_gst_total"),
-        doc_total=d.get("doc_total"),
-        our_gst_registered=bool(d.get("our_gst_registered", True)),
-        fx_rate=d.get("fx_rate"),
-        original_total=d.get("original_total"),
-        original_currency=d.get("original_currency"),
-        needs_fx_review=bool(d.get("needs_fx_review", False)),
-        reconciled=bool(d.get("reconciled", True)),
-        reconcile_note=d.get("reconcile_note"),
-    )
+    return dict_to_invoice(d)
 
 
 def _normalized_from_state(state: dict) -> list[NormalizedInvoice]:
-    return [_dict_to_inv(d) for d in (state.get(NORMALIZED_KEY) or [])]
+    return [dict_to_invoice(d) for d in (state.get(NORMALIZED_KEY) or [])]
 
 
 def _bank_to_dict(s: BankStatement) -> dict:
-    d = asdict(s)
-    d["transactions"] = [
-        {**asdict(t), "date": t.date.isoformat() if t.date else None}
-        for t in s.transactions
-    ]
-    return d
+    return bank_to_dict(s)
 
 
 def _bank_from_state(state: dict) -> list[dict]:
@@ -1555,23 +1543,11 @@ def _bank_from_state(state: dict) -> list[dict]:
 
 
 def _dict_to_bank(d: dict) -> BankStatement:
-    from dataclasses import fields as _dc_fields
-
-    from invoice_processing.export.models import BankTransaction
-
-    txn_fields = {f.name for f in _dc_fields(BankTransaction)}
-    txns = []
-    for t in d.get("transactions") or []:
-        td = {k: v for k, v in t.items() if k in txn_fields}
-        td["date"] = _parse_iso(td.get("date"))
-        txns.append(BankTransaction(**td))
-    bank_fields = {f.name for f in _dc_fields(BankStatement)} - {"transactions"}
-    fields = {k: v for k, v in d.items() if k in bank_fields}
-    return BankStatement(transactions=txns, **fields)
+    return dict_to_bank(d)
 
 
 def _bank_statements_from_state(state: dict) -> list[BankStatement]:
-    return [_dict_to_bank(d) for d in (state.get(BANK_STATEMENTS_KEY) or [])]
+    return [dict_to_bank(d) for d in (state.get(BANK_STATEMENTS_KEY) or [])]
 
 
 def _parse_statement_period_anchor(period: Optional[str]) -> Optional[date]:

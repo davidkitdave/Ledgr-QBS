@@ -4,7 +4,7 @@
 # Usage:
 #   bash scripts/deploy.sh
 #
-# Reads values from .env (GOOGLE_API_KEY, GOOGLE_GENAI_USE_VERTEXAI, GCS_BUCKET,
+# Reads values from .env (GOOGLE_API_KEY, GOOGLE_GENAI_USE_VERTEXAI,
 # SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, SLACK_SIGNING_SECRET, SLACK_OAUTH_STATE_SECRET).
 #
 # Two-step (handles the redirect-URL chicken-and-egg):
@@ -31,8 +31,7 @@ URL="$(gcloud run deploy "${SERVICE}" --source . --region "${REGION}" \
 echo "  Cloud Run URL: ${URL}"
 
 # --- build the env-var list from whatever is present in .env ---
-ENV_PAIRS="GCS_BUCKET=${GCS_BUCKET:-ledgr-qbs-source-bucket}"
-ENV_PAIRS+=",GOOGLE_GENAI_USE_VERTEXAI=${GOOGLE_GENAI_USE_VERTEXAI:-FALSE}"
+ENV_PAIRS="GOOGLE_GENAI_USE_VERTEXAI=${GOOGLE_GENAI_USE_VERTEXAI:-FALSE}"
 [[ -n "${GOOGLE_API_KEY:-}" ]]            && ENV_PAIRS+=",GOOGLE_API_KEY=${GOOGLE_API_KEY}"
 [[ -n "${SLACK_SIGNING_SECRET:-}" ]]     && ENV_PAIRS+=",SLACK_SIGNING_SECRET=${SLACK_SIGNING_SECRET}"
 [[ -n "${SLACK_CLIENT_ID:-}" ]]          && ENV_PAIRS+=",SLACK_CLIENT_ID=${SLACK_CLIENT_ID}"

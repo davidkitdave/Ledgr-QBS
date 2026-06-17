@@ -152,7 +152,8 @@ one balance shared across all of that firm's Client channels, not one per Client
 
 ## Billable unit
 What one credit pays for, which differs by document kind:
-- **Bank statement:** one **page** = 1 credit.
+- **Bank statement:** one **source-PDF page** = 1 credit (the uploaded
+  document's page count, not the number of extracted transaction rows).
 - **Invoice / receipt:** one **unique document written to the ledger** = 1 credit —
   *not* per page. One PDF may hold several invoices, or one scanned page several
   receipts (each counts); one invoice spanning several pages counts once. A skipped

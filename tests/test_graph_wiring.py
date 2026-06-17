@@ -390,18 +390,18 @@ def test_placeholder_spine_invoice_pass_reaches_deliver():
     assert ctx.state["approval_status"] == "auto_approved"
 
     # apply_decision_node sees no resume input (auto-approve) -> passthrough.
-    asyncio.run(nodes.apply_decision_node(ctx, None))
+    asyncio.run(nodes.apply_decision_node._func(ctx, None))
 
-    asyncio.run(nodes.route_node(ctx))
+    asyncio.run(nodes.route_node._func(ctx))
     assert len(ctx.state[nodes.ROUTES_KEY]) == 1
 
-    consolidate = asyncio.run(nodes.consolidate_node(ctx))
+    consolidate = asyncio.run(nodes.consolidate_node._func(ctx))
     assert consolidate.output["consolidated"] == 1
     # consolidate_node prepares a Slack-agnostic ledger payload in state.
     assert ctx.state[nodes.LEDGER_ROWS_KEY]["kind"] == "invoice"
     assert len(ctx.state[nodes.LEDGER_ROWS_KEY]["batches"]) == 1
 
-    deliver = asyncio.run(nodes.deliver_node(ctx))
+    deliver = asyncio.run(nodes.deliver_node._func(ctx))
     assert deliver.output["delivered"] is True
     assert ctx.state["delivered"] is True
 
@@ -427,12 +427,12 @@ def test_placeholder_spine_bank_pass_reaches_deliver():
     assert _drain_gate(ctx) == []
     assert ctx.state["approval_status"] == "auto_approved"
     # apply_decision_node sees no resume input (auto-approve) -> passthrough.
-    asyncio.run(nodes.apply_decision_node(ctx, None))
-    asyncio.run(nodes.route_node(ctx))
+    asyncio.run(nodes.apply_decision_node._func(ctx, None))
+    asyncio.run(nodes.route_node._func(ctx))
     assert len(ctx.state[nodes.ROUTES_KEY]) == 1
-    assert asyncio.run(nodes.consolidate_node(ctx)).output["consolidated"] == 1
+    assert asyncio.run(nodes.consolidate_node._func(ctx)).output["consolidated"] == 1
     assert ctx.state[nodes.LEDGER_ROWS_KEY]["kind"] == "bank"
-    assert asyncio.run(nodes.deliver_node(ctx)).output["delivered"] is True
+    assert asyncio.run(nodes.deliver_node._func(ctx)).output["delivered"] is True
 
 
 def _drain_gate(ctx) -> list:

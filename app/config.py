@@ -18,7 +18,6 @@ class Settings:
     slack_app_token: Optional[str]   # xapp-… required for Socket Mode
     gcp_project: Optional[str]
     location: Optional[str]
-    gcs_bucket: Optional[str]        # GCS bucket for source + workbook archiving
     # Multi-workspace OAuth (plan task #5.1) — installable distribution.
     slack_client_id: Optional[str]
     slack_client_secret: Optional[str]
@@ -36,7 +35,6 @@ def get_settings() -> Settings:
             os.environ.get("PROJECT_ID") or os.environ.get("GOOGLE_CLOUD_PROJECT")
         ),
         location=os.environ.get("LOCATION"),
-        gcs_bucket=os.environ.get("GCS_BUCKET", "ledgr-qbs-source-bucket"),
         slack_client_id=os.environ.get("SLACK_CLIENT_ID"),
         slack_client_secret=os.environ.get("SLACK_CLIENT_SECRET"),
         slack_oauth_state_secret=os.environ.get("SLACK_OAUTH_STATE_SECRET"),

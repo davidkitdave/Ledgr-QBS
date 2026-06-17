@@ -404,7 +404,7 @@ def test_driver_full_pass_both_interrupts_side_effects_once():
 
     async def _count_consolidate(ctx):
         counters["consolidate"] += 1
-        return await real_consolidate(ctx)
+        return await real_consolidate._func(ctx)
 
     nodes.CLASSIFY_FN = _count_classify
     nodes.DIRECTION_FN = lambda cls, **k: "purchase"
@@ -468,7 +468,7 @@ def test_driver_full_pass_auto_approve_no_pause():
 
     async def _count_consolidate(ctx):
         counters["consolidate"] += 1
-        return await real_consolidate(ctx)
+        return await real_consolidate._func(ctx)
 
     nodes.CLASSIFY_FN = lambda d, m, *, model: ClassificationResult(
         doc_type="invoice", confidence=0.95, reason="test"

@@ -7581,7 +7581,7 @@ def test_classify_node_invoice_lane_no_longer_calls_resolve_direction():
     from accounting_agents import nodes
     import inspect
 
-    source = inspect.getsource(nodes.classify_node)
+    source = inspect.getsource(nodes.classify_node._func)
     # In the invoice branch (the path after `if doc_type == "bank_statement"`),
     # there must be no `DIRECTION_FN(` call.
     assert "DIRECTION_FN(" not in source, (

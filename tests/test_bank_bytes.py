@@ -270,7 +270,7 @@ def test_extract_bank_node_digital_bytes_uses_pdfplumber(monkeypatch):
     nodes.EXTRACT_BANK_FN = real_bse.extract_bank_statement
     try:
         ctx = _FakeCtx(_make_digital_pdf_bytes())
-        event = asyncio.run(nodes.extract_bank_node(ctx))
+        event = asyncio.run(nodes.extract_bank_node._func(ctx))
     finally:
         nodes.EXTRACT_BANK_FN = saved
 
@@ -292,7 +292,7 @@ def test_extract_bank_node_scanned_bytes_uses_vision(monkeypatch):
     nodes.EXTRACT_BANK_FN = real_bse.extract_bank_statement
     try:
         ctx = _FakeCtx(_make_scanned_pdf_bytes())
-        event = asyncio.run(nodes.extract_bank_node(ctx))
+        event = asyncio.run(nodes.extract_bank_node._func(ctx))
     finally:
         nodes.EXTRACT_BANK_FN = saved
 
