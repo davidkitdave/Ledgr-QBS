@@ -4979,10 +4979,30 @@ def build_async_app(
     # un-awaited coroutines.
     from slack_sdk import WebClient as _SyncWebClient
 
-    sync_client = _SyncWebClient(token=token)
+    def _sync_client_for(context=None, client=None):
+        """Per-workspace sync WebClient. OAuth mode: context['bot_token'] is the
+        installing workspace's token (Bolt authorize via installation_store);
+        token mode: the single bot token. Falls back to the injected client's
+        token, then the build-time token.
+
+        This is the multi-workspace correctness fix: every listener rebinds its
+        local ``sync_client`` from THIS, so an event from firm A never posts with
+        firm B's token (the previous single global client did).
+        """
+        tok = None
+        if context is not None:
+            tok = context.get("bot_token")
+        if not tok and client is not None:
+            tok = getattr(client, "token", None)
+        return _SyncWebClient(token=tok or token)
+
+    # Defensive default for any non-handler reference; every listener below
+    # shadows this per-event via ``_sync_client_for(context, client)``.
+    sync_client = _SyncWebClient(token=token)  # noqa: F841 - defensive default; listeners shadow per-event
 
     @async_app.event("file_shared")
-    async def _file_shared(event, body, client):
+    async def _file_shared(event, body, client, context=None):
+        sync_client = _sync_client_for(context, client)
         eid = body.get("event_id") or f"{event.get('type')}:{event.get('event_ts') or event.get('ts')}"
         if _seen.seen_before(eid):
             logger.debug("dedup: dropping duplicate file_shared event %s", eid)
@@ -5025,7 +5045,7 @@ def build_async_app(
             file_id, channel_id,
         )
 
-    async def _run_action(ack, body, client, decision):
+    async def _run_action(ack, body, client, decision, sync_client):
         await ack()
         action = (body.get("actions") or [{}])[0]
         op_id = action.get("value")
@@ -5042,11 +5062,13 @@ def build_async_app(
         )
 
     @async_app.action("approve")
-    async def _approve(ack, body, client):
-        await _run_action(ack, body, client, "approve")
+    async def _approve(ack, body, client, context=None):
+        sync_client = _sync_client_for(context, client)
+        await _run_action(ack, body, client, "approve", sync_client)
 
     @async_app.action("edit")
-    async def _edit(ack, body, client):
+    async def _edit(ack, body, client, context=None):
+        sync_client = _sync_client_for(context, client)
         # The gate's RequestInput only accepts the schema-validated ApproveDecision;
         # per-line edits require a Block-Kit modal where the user can correct fields.
         # Edit opens a per-line modal pre-filled with the proposed extraction.
@@ -5075,7 +5097,8 @@ def build_async_app(
         )
 
     @async_app.view("ledgr_invoice_edit")
-    async def _edit_submit(ack, body, client):
+    async def _edit_submit(ack, body, client, context=None):
+        sync_client = _sync_client_for(context, client)
         await ack()
         view = body["view"]
         # Empty op_id falls through to handle_approval_action which logs and no-ops
@@ -5112,12 +5135,13 @@ def build_async_app(
                 )
 
     @async_app.action("reject")
-    async def _reject(ack, body, client):
-        await _run_action(ack, body, client, "reject")
+    async def _reject(ack, body, client, context=None):
+        sync_client = _sync_client_for(context, client)
+        await _run_action(ack, body, client, "reject", sync_client)
 
     # --- mid-flow extract-review HITL (review_extraction_node) ---
 
-    async def _run_review_action(ack, body, action_str, hint=None):
+    async def _run_review_action(ack, body, action_str, sync_client, hint=None):
         await ack()
         action = (body.get("actions") or [{}])[0]
         op_id = action.get("value")
@@ -5135,15 +5159,18 @@ def build_async_app(
         )
 
     @async_app.action("review_confirm")
-    async def _review_confirm(ack, body, client):
-        await _run_review_action(ack, body, "confirm_as_is")
+    async def _review_confirm(ack, body, client, context=None):
+        sync_client = _sync_client_for(context, client)
+        await _run_review_action(ack, body, "confirm_as_is", sync_client)
 
     @async_app.action("review_reject")
-    async def _review_reject(ack, body, client):
-        await _run_review_action(ack, body, "reject")
+    async def _review_reject(ack, body, client, context=None):
+        sync_client = _sync_client_for(context, client)
+        await _run_review_action(ack, body, "reject", sync_client)
 
     @async_app.action("review_reextract")
-    async def _review_reextract(ack, body, client):
+    async def _review_reextract(ack, body, client, context=None):
+        sync_client = _sync_client_for(context, client)
         # Open a hint-input modal so the human can describe what the extractor
         # missed.  Mirrors the Edit button: ack() immediately, then views_open
         # with the trigger_id (Slack invalidates it after a few seconds).
@@ -5157,7 +5184,8 @@ def build_async_app(
         )
 
     @async_app.view("ledgr_review_hint")
-    async def _review_hint_submit(ack, body, client):
+    async def _review_hint_submit(ack, body, client, context=None):
+        sync_client = _sync_client_for(context, client)
         await ack()
         view = body["view"]
         op_id = view.get("private_metadata") or ""
@@ -5183,7 +5211,8 @@ def build_async_app(
     # --- Step 8: proactive post-delivery re-extract offer ---
 
     @async_app.action("proactive_redo")
-    async def _proactive_redo(ack, body, client):
+    async def _proactive_redo(ack, body, client, context=None):
+        sync_client = _sync_client_for(context, client)
         # The doc is already filed (no paused interrupt). Open a hint modal so the
         # human can describe what the extractor missed; submit runs the re-extract.
         await ack()
@@ -5197,7 +5226,7 @@ def build_async_app(
 
     # --- COA confirmation card actions (ADR-0006 path A) ---
 
-    async def _handle_coa_confirm(ack, body, client, *, message_ts: str) -> None:
+    async def _handle_coa_confirm(ack, body, client, sync_client, *, message_ts: str) -> None:
         await ack()
         action = (body.get("actions") or [{}])[0]
         file_id = (action.get("value") or "").strip()
@@ -5255,12 +5284,14 @@ def build_async_app(
             logger.debug("ledgr_coa_confirm: could not update confirm card")
 
     @async_app.action("ledgr_coa_confirm")
-    async def _ledgr_coa_confirm(ack, body, client):
+    async def _ledgr_coa_confirm(ack, body, client, context=None):
+        sync_client = _sync_client_for(context, client)
         message_ts = (body.get("message") or {}).get("ts") or ""
-        await _handle_coa_confirm(ack, body, client, message_ts=message_ts)
+        await _handle_coa_confirm(ack, body, client, sync_client, message_ts=message_ts)
 
     @async_app.action("ledgr_coa_as_document")
-    async def _ledgr_coa_as_document(ack, body, client):
+    async def _ledgr_coa_as_document(ack, body, client, context=None):
+        sync_client = _sync_client_for(context, client)
         # User explicitly chose "process as document" — fall through to the
         # document pipeline. Re-download the file and forward to process_file_event.
         await ack()
@@ -5340,7 +5371,8 @@ def build_async_app(
             logger.debug("ledgr_coa_as_document: could not update card")
 
     @async_app.action("ledgr_coa_cancel")
-    async def _ledgr_coa_cancel(ack, body, client):
+    async def _ledgr_coa_cancel(ack, body, client, context=None):
+        sync_client = _sync_client_for(context, client)
         await ack()
         message_ts = (body.get("message") or {}).get("ts") or ""
         channel_id = (body.get("channel") or {}).get("id") or ""
@@ -5365,7 +5397,8 @@ def build_async_app(
             logger.debug("ledgr_coa_cancel: could not update card")
 
     @async_app.view("ledgr_proactive_redo")
-    async def _proactive_redo_submit(ack, body, client):
+    async def _proactive_redo_submit(ack, body, client, context=None):
+        sync_client = _sync_client_for(context, client)
         # The button-click + modal-submit IS the confirmation — run the re-extract
         # directly (NOT a paused-interrupt resume; the document is already filed).
         await ack()
@@ -5407,7 +5440,8 @@ def build_async_app(
     # --- per-doc card inline action handlers ---
 
     @async_app.action("ledgr_per_doc_reextract")
-    async def _per_doc_reextract(ack, body, client):
+    async def _per_doc_reextract(ack, body, client, context=None):
+        sync_client = _sync_client_for(context, client)
         # Same flow as proactive_redo: open the hint modal; the submit handler
         # (ledgr_proactive_redo) will drain it via _execute_pending_reextract.
         await ack()
@@ -5420,7 +5454,8 @@ def build_async_app(
         )
 
     @async_app.action("ledgr_per_doc_edit")
-    async def _per_doc_edit(ack, body, client):
+    async def _per_doc_edit(ack, body, client, context=None):
+        sync_client = _sync_client_for(context, client)
         # Editing an already-filed doc is not yet supported via the per-doc card.
         # Post an ephemeral explaining the limitation; full filed-doc edit is a
         # follow-up commit.
@@ -5441,7 +5476,8 @@ def build_async_app(
                 logger.debug("per_doc_edit: could not post ephemeral")
 
     @async_app.action("ledgr_per_doc_view_row")
-    async def _per_doc_view_row(ack, body, client):
+    async def _per_doc_view_row(ack, body, client, context=None):
+        sync_client = _sync_client_for(context, client)
         await ack()
         channel_id_vr = (body.get("channel") or {}).get("id") or ""
         user_id = (body.get("user") or {}).get("id") or ""
@@ -5471,12 +5507,13 @@ def build_async_app(
         pass  # implemented inline in each handler; this function documents the contract.
 
     @async_app.action("ledgr_doc_feedback")
-    async def _doc_feedback(ack, body, client):
+    async def _doc_feedback(ack, body, client, context=None):
         """Native context_actions feedback_buttons handler.
 
         Button value format: ``pos|<doc_ref>`` or ``neg|<doc_ref>``
         where doc_ref = ``file_id|vendor|account_code|tax_code`` (%-encoded fields).
         """
+        sync_client = _sync_client_for(context, client)
         await ack()
         action = (body.get("actions") or [{}])[0]
         raw_value = action.get("value") or ""
@@ -5538,8 +5575,9 @@ def build_async_app(
                 logger.debug("doc_feedback: could not post ephemeral")
 
     @async_app.action("ledgr_doc_feedback_pos")
-    async def _doc_feedback_pos(ack, body, client):
+    async def _doc_feedback_pos(ack, body, client, context=None):
         """Fallback 👍 handler (actions block path)."""
+        sync_client = _sync_client_for(context, client)
         await ack()
         action = (body.get("actions") or [{}])[0]
         raw_value = action.get("value") or ""
@@ -5581,8 +5619,9 @@ def build_async_app(
                 logger.debug("doc_feedback_pos: could not post ephemeral")
 
     @async_app.action("ledgr_doc_feedback_neg")
-    async def _doc_feedback_neg(ack, body, client):
+    async def _doc_feedback_neg(ack, body, client, context=None):
         """Fallback 👎 handler (actions block path)."""
+        sync_client = _sync_client_for(context, client)
         await ack()
         action = (body.get("actions") or [{}])[0]
         raw_value = action.get("value") or ""
@@ -5618,7 +5657,8 @@ def build_async_app(
     # --- dedup callout card action handlers ---
 
     @async_app.action("ledgr_dedup_replace")
-    async def _dedup_replace(ack, body, client):
+    async def _dedup_replace(ack, body, client, context=None):
+        sync_client = _sync_client_for(context, client)
         await ack()
         action_value = (body.get("actions") or [{}])[0].get("value") or ""
         channel_id_dr = (body.get("channel") or {}).get("id") or ""
@@ -5699,7 +5739,8 @@ def build_async_app(
                 logger.debug("dedup_replace: could not post outcome")
 
     @async_app.action("ledgr_dedup_keep")
-    async def _dedup_keep(ack, body, client):
+    async def _dedup_keep(ack, body, client, context=None):
+        sync_client = _sync_client_for(context, client)
         # No-op on the ledger. Edit the dedup card in-place to a kept-existing outcome line.
         await ack()
         action_value = (body.get("actions") or [{}])[0].get("value") or ""
@@ -5732,7 +5773,8 @@ def build_async_app(
     # --- onboarding + commands (reuse parked sync handlers off-thread) ---
 
     @async_app.action("ledgr_setup_open")
-    async def _setup_open(body, ack, client):
+    async def _setup_open(body, ack, client, context=None):
+        sync_client = _sync_client_for(context, client)
         await ack()
         prefill = await _derive_setup_prefill(sync_client, body)
         await asyncio.to_thread(
@@ -5740,7 +5782,8 @@ def build_async_app(
         )
 
     @async_app.view("ledgr_onboarding")
-    async def _onboarding(body, ack, client):
+    async def _onboarding(body, ack, client, context=None):
+        sync_client = _sync_client_for(context, client)
         await ack()
         await asyncio.to_thread(
             handle_onboarding_submit,
@@ -5752,26 +5795,29 @@ def build_async_app(
         )
 
     @async_app.command(ledgr_slash_command_name())
-    async def _ledgr(ack, body, client):
+    async def _ledgr(ack, body, client, context=None):
+        sync_client = _sync_client_for(context, client)
         await ack()
         await asyncio.to_thread(
             handle_ledgr_command, lambda *a, **k: None, body, sync_client, store
         )
 
     @async_app.event("member_joined_channel")
-    async def _member_joined(event, body, context, client):
+    async def _member_joined(event, body, client, context=None):
+        sync_client = _sync_client_for(context, client)
         eid = body.get("event_id") or f"{event.get('type')}:{event.get('event_ts') or event.get('ts')}"
         if _seen.seen_before(eid):
             logger.debug("dedup: dropping duplicate member_joined_channel event %s", eid)
             return
-        bot_user_id = context.get("bot_user_id") or ""
+        bot_user_id = (context or {}).get("bot_user_id") or ""
         await asyncio.to_thread(handle_member_joined, body, None, sync_client, bot_user_id)
 
     # --- text-question + file-upload handler ---
 
     @async_app.event("app_mention")
-    async def _app_mention(event, body, client):
+    async def _app_mention(event, body, client, context=None):
         """Handle @Ledgr mentions explicitly (Slack also sends message.channels)."""
+        sync_client = _sync_client_for(context, client)
         eid = body.get("event_id") or f"app_mention:{event.get('ts')}"
         if _seen.seen_before(eid):
             return
@@ -5796,7 +5842,8 @@ def build_async_app(
         )
 
     @async_app.event("message")
-    async def _message(event, body, client):
+    async def _message(event, body, client, context=None):
+        sync_client = _sync_client_for(context, client)
         # Dedup: Slack socket-mode can redeliver the same event on reconnect.
         # One guard per message event_id covers both the file and text paths so
         # a redelivery of a file_share message is suppressed exactly once.

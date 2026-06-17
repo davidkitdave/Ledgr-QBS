@@ -7715,3 +7715,235 @@ def test_build_async_app_falls_back_to_token_mode_without_oauth_env(monkeypatch)
         )
 
     assert async_app.oauth_flow is None
+
+
+# =========================================================================== #
+# Multi-workspace per-event token isolation (OAuth distribution correctness)
+#
+# In OAuth/distribution mode Bolt runs `authorize` PER incoming event against
+# the installation_store and populates ``context["bot_token"]`` with THAT
+# workspace's bot token. The runner must build its outbound (sync) WebClient
+# per-event from that token, so an event from firm A never posts with firm B's
+# token. These tests drive representative listeners with two different fake
+# contexts and assert the captured outbound token follows the context.
+# =========================================================================== #
+
+
+def _capture_all_listeners(
+    runner_mock=None, ledger_store_mock=None, db_mock=None, build_token="xoxb-BUILDTIME",
+):
+    """Build the Bolt app with fakes; return ``(registered, fresh_seen, tokens)``.
+
+    Mirrors ``_capture_message_handler`` / ``_capture_hitl_handlers`` but records
+    events, actions, views, and commands so per-workspace-token tests can drive
+    any representative handler.
+
+    ``slack_sdk.WebClient`` is patched DURING the build so the build-time import
+    binding (``from slack_sdk import WebClient as _SyncWebClient``) and every
+    per-event ``_sync_client_for`` construction route through a factory that
+    records the token used into ``tokens`` and returns a MagicMock carrying
+    ``.token``. Tests clear ``tokens`` after build to drop the build-time
+    construction, then assert on the per-event tokens.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from app.slack_app import _SeenEvents
+    from accounting_agents import slack_runner
+
+    registered = {"events": {}, "actions": {}, "views": {}, "commands": {}}
+
+    def event_decorator(name):
+        def decorator(fn):
+            registered["events"][name] = fn
+            return fn
+        return decorator
+
+    def action_decorator(action_id, *a, **k):
+        def decorator(fn):
+            registered["actions"][action_id] = fn
+            return fn
+        return decorator
+
+    def view_decorator(callback_id, *a, **k):
+        def decorator(fn):
+            registered["views"][callback_id] = fn
+            return fn
+        return decorator
+
+    def command_decorator(name, *a, **k):
+        def decorator(fn):
+            registered["commands"][name] = fn
+            return fn
+        return decorator
+
+    fake_app = MagicMock()
+    fake_app.event = event_decorator
+    fake_app.action = action_decorator
+    fake_app.view = view_decorator
+    fake_app.command = command_decorator
+
+    tokens: list = []
+
+    def _webclient_factory(token=None, *a, **k):
+        tokens.append(token)
+        m = MagicMock()
+        m.token = token
+        return m
+
+    fresh_seen = _SeenEvents()
+    rm = runner_mock or MagicMock()
+    rm.app_name = "acc"
+
+    with patch.object(slack_runner, "_seen", fresh_seen), \
+         patch("slack_bolt.async_app.AsyncApp", return_value=fake_app), \
+         patch("slack_sdk.WebClient", side_effect=_webclient_factory), \
+         patch.dict(os.environ, {"SLACK_BOT_TOKEN": build_token}), \
+         patch("invoice_processing.export.client_context.FirestoreClientStore"), \
+         patch.object(slack_runner, "build_chat_runner",
+                      return_value=SimpleNamespace(app_name="accounting_agents_assistant")):
+        build_async_app(
+            runner=rm,
+            ledger_store=ledger_store_mock or MagicMock(),
+            db=db_mock or MagicMock(),
+        )
+
+    return registered, fresh_seen, tokens
+
+
+def test_message_handler_uses_per_workspace_token_from_context():
+    """The message/file_share listener builds its outbound client from
+    ``context['bot_token']`` — firm A's event uses xoxb-AAA, firm B's xoxb-BBB.
+
+    This proves per-workspace isolation: two events with different installation
+    tokens never share an outbound client. The build-time global token is
+    irrelevant once a per-event context is present.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from accounting_agents import slack_runner
+
+    registered, _, tokens = _capture_all_listeners()
+    handler = registered["events"]["message"]
+
+    def _drive(bot_token: str, channel: str, ev_id: str):
+        tokens.clear()  # drop the build-time construction; capture only per-event
+        body = {"event_id": ev_id}
+        event = {
+            "type": "message",
+            "subtype": "file_share",
+            "ts": "200.001",
+            "channel": channel,
+            "files": [{"id": "FZ1"}],
+        }
+        mock_pfe = AsyncMock(return_value={"status": "delivered"})
+        with patch.object(slack_runner, "process_file_event", mock_pfe), \
+             patch.object(slack_runner, "download_pdf_bytes", return_value=b"%PDF fake"):
+            asyncio.run(handler(
+                event=event,
+                body=body,
+                client=MagicMock(),
+                context={"bot_token": bot_token},
+            ))
+        return list(tokens)
+
+    tokens_a = _drive("xoxb-AAA", "C-FIRM-A", "Ev-ws-A")
+    tokens_b = _drive("xoxb-BBB", "C-FIRM-B", "Ev-ws-B")
+
+    # The per-event outbound client was built with firm A's token, then firm B's.
+    assert "xoxb-AAA" in tokens_a
+    assert "xoxb-BBB" not in tokens_a
+    assert "xoxb-BBB" in tokens_b
+    assert "xoxb-AAA" not in tokens_b
+
+
+def test_action_handler_uses_per_workspace_token_from_context():
+    """An action listener (``ledgr_coa_cancel``) also builds its outbound client
+    from ``context['bot_token']`` — proving per-workspace isolation on the
+    action/view lane too (xoxb-AAA then xoxb-BBB)."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    # The build-time WebClient factory (patched inside _capture_all_listeners) is
+    # captured by the runner's _sync_client_for closure, so every per-event
+    # construction records into the same ``tokens`` list — no re-patch needed.
+    registered, _, tokens = _capture_all_listeners()
+    handler = registered["actions"]["ledgr_coa_cancel"]
+
+    def _drive(bot_token: str):
+        tokens.clear()
+        body = {
+            "actions": [{"action_id": "ledgr_coa_cancel", "value": ""}],
+            "channel": {"id": "C-CANCEL"},
+            "message": {"ts": "300.001"},
+        }
+        asyncio.run(handler(
+            ack=AsyncMock(),
+            body=body,
+            client=MagicMock(),
+            context={"bot_token": bot_token},
+        ))
+        return list(tokens)
+
+    tokens_a = _drive("xoxb-AAA")
+    tokens_b = _drive("xoxb-BBB")
+
+    assert "xoxb-AAA" in tokens_a
+    assert "xoxb-BBB" not in tokens_a
+    assert "xoxb-BBB" in tokens_b
+    assert "xoxb-AAA" not in tokens_b
+
+
+def test_listener_falls_back_to_build_time_token_without_context():
+    """With ``context=None`` (socket/dev mode, or unit tests that call handlers
+    directly) the listener must fall back gracefully — to the injected client's
+    ``.token`` then the build-time token — so single-workspace behavior is
+    unchanged. Here no per-event token is available, so the build-time token wins.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    registered, _, tokens = _capture_all_listeners(build_token="xoxb-BUILDTIME")
+    handler = registered["actions"]["ledgr_coa_cancel"]
+
+    tokens.clear()
+    body = {
+        "actions": [{"action_id": "ledgr_coa_cancel", "value": ""}],
+        "channel": {"id": "C-CANCEL"},
+        "message": {"ts": "300.002"},
+    }
+
+    # No `context` kwarg and a bolt client with no usable token → falls back
+    # to the build-time token captured by the _sync_client_for closure.
+    bolt_client = MagicMock()
+    bolt_client.token = None
+    asyncio.run(handler(ack=AsyncMock(), body=body, client=bolt_client))
+
+    # The per-event rebind happened, and with nothing better it used the
+    # build-time token — i.e. single-workspace/socket behavior is preserved.
+    assert tokens == ["xoxb-BUILDTIME"]
+
+
+def test_listener_falls_back_to_injected_client_token():
+    """When no ``context['bot_token']`` is present but the injected Bolt client
+    carries a ``.token``, the outbound client is built from that token (the
+    second fallback rung)."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    registered, _, tokens = _capture_all_listeners()
+    handler = registered["actions"]["ledgr_coa_cancel"]
+
+    tokens.clear()
+    body = {
+        "actions": [{"action_id": "ledgr_coa_cancel", "value": ""}],
+        "channel": {"id": "C-CANCEL"},
+        "message": {"ts": "300.003"},
+    }
+
+    bolt_client = MagicMock()
+    bolt_client.token = "xoxb-FROM-INJECTED"
+    asyncio.run(handler(
+        ack=AsyncMock(),
+        body=body,
+        client=bolt_client,
+        context={},  # present but no bot_token → fall through to client.token
+    ))
+
+    assert tokens == ["xoxb-FROM-INJECTED"]
