@@ -41,6 +41,8 @@
         "member_joined_channel",
         "message.channels",
         "message.groups",
+        "message.im",
+        "app_mention",
         "file_shared"
       ]
     },

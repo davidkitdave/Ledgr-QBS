@@ -697,6 +697,48 @@ class FirestoreClientStore:
         db = self._firestore()
         db.collection(self._collection).document(client_id).set({"status": status}, merge=True)
 
+    def append_processing_log(
+        self, *, client_id: str, file_id: str, entry: dict
+    ) -> None:
+        """Write one document-delivery record under ``clients/{id}/processing_log/{file_id}``."""
+        if not (client_id and file_id and entry):
+            return
+        db = self._firestore()
+        (
+            db.collection(self._collection)
+            .document(client_id)
+            .collection("processing_log")
+            .document(file_id)
+            .set(entry, merge=True)
+        )
+
+    def list_processing_log(
+        self, client_id: Optional[str], *, limit: int = 20
+    ) -> list[dict]:
+        """Return recent processing-log entries for a client (newest first)."""
+        if not client_id:
+            return []
+        cap = max(1, min(int(limit), 50))
+        db = self._firestore()
+        entries: list[dict] = []
+        for snap in (
+            db.collection(self._collection)
+            .document(client_id)
+            .collection("processing_log")
+            .stream()
+        ):
+            row = snap.to_dict() or {}
+            doc_id = (
+                row.get("file_id")
+                or getattr(snap, "id", None)
+                or getattr(getattr(snap, "reference", None), "_doc_id", None)
+            )
+            if doc_id:
+                row["file_id"] = doc_id
+            entries.append(row)
+        entries.sort(key=lambda r: str(r.get("delivered_at") or ""), reverse=True)
+        return entries[:cap]
+
     def add_correction(self, *, client_id: str, vendor: str,
                        account_code: Optional[str] = None,
                        tax_code: Optional[str] = None) -> None:

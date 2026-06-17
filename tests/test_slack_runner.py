@@ -15,7 +15,8 @@ Covers:
 from __future__ import annotations
 
 import asyncio
-
+import os
+import tempfile
 from types import SimpleNamespace
 from unittest.mock import patch
 import pytest
@@ -1664,6 +1665,54 @@ def test_message_text_only_routes_to_question_not_file():
     mock_aq.assert_called_once()
     assert mock_aq.call_args.kwargs["question"] == "What is my GST balance?"
     assert mock_aq.call_args.kwargs["channel_id"] == "C-qa"
+
+
+def test_message_extraction_question_routes_to_agent_not_upload_nudge():
+    """Thread questions containing 'extraction' must reach the chat agent, not a canned nudge."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from accounting_agents import slack_runner
+
+    handler, _ = _capture_message_handler_with_slack_client(FakeSlackClient())
+
+    body = {"event_id": "Ev-extract-1"}
+    event = {
+        "type": "message",
+        "ts": "111.004",
+        "channel": "C-soa",
+        "text": "can you check is the extraction for the SOA using the right one?",
+    }
+    fake_client = MagicMock()
+    mock_aq = AsyncMock(return_value={"status": "answered", "text": "legacy path"})
+
+    with patch.object(slack_runner, "answer_question", mock_aq):
+        asyncio.run(handler(event=event, body=body, client=fake_client))
+
+    mock_aq.assert_called_once()
+    assert "extraction" in mock_aq.call_args.kwargs["question"].lower()
+
+
+def test_batch_plan_task_titles_have_no_emoji_shortcodes(monkeypatch):
+    """Plan block task titles are plain text — no :hourglass_flowing_sand: literals."""
+    from app import native_blocks_compat
+    from app.blocks import batch_processing_plan_blocks
+
+    monkeypatch.delenv("LEDGR_BATCH_EXPANDED_PROGRESS", raising=False)
+    monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
+    native_blocks_compat._PROBE_CACHE.pop("C-plan-emoji", None)
+
+    doc_rows = [
+        {"file_label": "soa.pdf", "stage": "Understanding", "status": "in_progress"},
+        {"file_label": "inv.pdf", "stage": "complete", "status": "complete"},
+    ]
+    blocks = batch_processing_plan_blocks(
+        total=2, done=1, doc_rows=doc_rows, channel_id="C-plan-emoji",
+    )
+    plan = next(b for b in blocks if b.get("type") == "plan")
+    for task in plan["tasks"]:
+        title = task.get("title") or ""
+        assert ":hourglass_flowing_sand:" not in title
+        assert ":white_check_mark:" not in title
+        assert ":x:" not in title
 
 
 # =========================================================================== #
@@ -4855,12 +4904,9 @@ def test_feedback_neg_opens_proactive_redo_modal():
 # =========================================================================== #
 
 
-def _capture_file_shared_handler(store_mock=None):
-    """Build the Bolt async app and return the registered ``file_shared`` handler.
-
-    The helper mirrors ``_capture_message_handler`` but captures ``file_shared``
-    instead of ``message``.  ``store_mock`` is passed directly to
-    ``build_async_app`` so tests can control what ``store.get_by_channel`` returns.
+def _capture_file_shared_handler(store_mock=None, *, sync_client_mock=None):
+    """Build the Bolt async app and return the registered ``file_shared`` handler
+    plus the sync Slack client mock so tests can assert on the card it posts.
     """
     from unittest.mock import MagicMock, patch
 
@@ -4885,9 +4931,11 @@ def _capture_file_shared_handler(store_mock=None):
     rm = MagicMock()
     rm.app_name = "acc"
 
+    sync_mock = sync_client_mock or MagicMock()
+
     with patch.object(slack_runner, "_seen", fresh_seen), \
          patch("slack_bolt.async_app.AsyncApp", return_value=fake_app), \
-         patch("slack_sdk.WebClient", return_value=MagicMock()), \
+         patch("slack_sdk.WebClient", return_value=sync_mock), \
          patch("invoice_processing.export.client_context.FirestoreClientStore"), \
          patch.object(slack_runner, "build_chat_runner",
                       return_value=SimpleNamespace(app_name="accounting_agents_assistant")):
@@ -4898,25 +4946,27 @@ def _capture_file_shared_handler(store_mock=None):
             store=store_mock or MagicMock(),
         )
 
-    return registered["file_shared"], fresh_seen
+    return registered["file_shared"], fresh_seen, sync_mock
 
 
-def test_file_shared_routes_xlsx_to_coa_when_pending_coa():
-    """An xlsx file_shared on a pending_coa channel must call run_coa_ingest and
-    NOT call process_file_event (P0-1 fix verification).
+def test_file_shared_offers_coa_card_when_xlsx_dropped_on_pending():
+    """An xlsx file_shared on a pending_coa channel must post a confirm card
+    (ADR-0006 activation gate) and must NOT auto-ingest or call process_file_event.
     """
     from unittest.mock import AsyncMock, MagicMock, patch
 
+    import openpyxl
+
     from accounting_agents import slack_runner
 
-    # Channel profile whose status is pending_coa (no real profile object needed —
-    # _coa_pending is True when resolved is None or status=="pending_coa").
     store_mock = MagicMock()
-    store_mock.get_by_channel.return_value = None  # no profile → pending_coa=True
+    store_mock.get_by_channel.return_value = None  # no profile → pending_coa
 
-    handler, _ = _capture_file_shared_handler(store_mock=store_mock)
+    sync_mock = MagicMock()
+    handler, _, sync_mock = _capture_file_shared_handler(
+        store_mock=store_mock, sync_client_mock=sync_mock,
+    )
 
-    # Simulate a file_shared event for an xlsx COA file.
     event = {
         "type": "file_shared",
         "event_ts": "300.001",
@@ -4924,7 +4974,7 @@ def test_file_shared_routes_xlsx_to_coa_when_pending_coa():
         "channel_id": "C-coa-pending",
         "file": {
             "id": "FXLSX1",
-            "name": "COA & List.xlsx",
+            "name": "Client Setup.xlsx",
             "filetype": "xlsx",
             "mimetype": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         },
@@ -4933,66 +4983,139 @@ def test_file_shared_routes_xlsx_to_coa_when_pending_coa():
     fake_bolt_client = MagicMock()
 
     mock_pfe = AsyncMock(return_value={"status": "delivered"})
-    mock_coa = MagicMock()  # run_coa_ingest is sync, called via asyncio.to_thread
+    mock_coa = MagicMock()
+
+    tmp = tempfile.mkdtemp(prefix="ledgr_coa_offer_test_")
+    coa_path = os.path.join(tmp, "Client Setup.xlsx")
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "COA"
+    ws.append(["Account code", "Description", "Account type", "Financial Statement"])
+    ws.append(["6100", "Sales", "Revenue", "Profit and Loss"])
+    ws.append(["6200", "Rent", "Expense", "Profit and Loss"])
+    wb.save(coa_path)
 
     with patch.object(slack_runner, "process_file_event", mock_pfe), \
          patch("app.slack_app.run_coa_ingest", mock_coa), \
-         patch("app.slack_app.slack_download_file", return_value="/tmp/fake/COA.xlsx"):
+         patch("app.slack_app.slack_download_file", return_value=coa_path):
         asyncio.run(handler(event=event, body=body, client=fake_bolt_client))
 
-    # COA ingest must have been invoked …
-    mock_coa.assert_called_once()
-    coa_kwargs = mock_coa.call_args.kwargs
-    assert coa_kwargs["channel_id"] == "C-coa-pending"
-    # … and the regular document pipeline must NOT have been called.
+    # The card was posted on the sync client.
+    assert sync_mock.chat_postMessage.called
+    post_kwargs = sync_mock.chat_postMessage.call_args.kwargs
+    assert "blocks" in post_kwargs
+    assert "actions" in [b.get("type") for b in post_kwargs["blocks"]]
+    action_ids = [
+        e.get("action_id")
+        for b in post_kwargs["blocks"]
+        if b.get("type") == "actions"
+        for e in b.get("elements", [])
+    ]
+    assert "ledgr_coa_confirm" in action_ids
+    # No silent ingest.
+    mock_coa.assert_not_called()
     mock_pfe.assert_not_called()
 
 
-def test_file_shared_rejects_xlsx_when_not_pending_coa():
-    """An xlsx file_shared on an already-onboarded channel (not pending_coa) must
-    NOT call run_coa_ingest.  Documents are now owned by the message/file_share
-    handler, so _file_shared just drops the event silently for non-COA uploads —
-    safety net: we are not blanket-allowing xlsx anywhere on the file_shared path.
-    """
+def test_file_shared_offer_card_says_replace_on_active_channel():
+    """An xlsx on an already-active channel posts a 'Replace COA' card."""
     from unittest.mock import AsyncMock, MagicMock, patch
+
+    import openpyxl
 
     from accounting_agents import slack_runner
 
-    # Channel has an active profile (status != "pending_coa").
     active_profile = SimpleNamespace(status="active")
     store_mock = MagicMock()
     store_mock.get_by_channel.return_value = active_profile
 
-    handler, _ = _capture_file_shared_handler(store_mock=store_mock)
+    sync_mock = MagicMock()
+    handler, _, sync_mock = _capture_file_shared_handler(
+        store_mock=store_mock, sync_client_mock=sync_mock,
+    )
 
     event = {
         "type": "file_shared",
-        "event_ts": "300.002",
-        "file_id": "FXLSX2",
-        "channel_id": "C-onboarded",
+        "event_ts": "300.003",
+        "file_id": "FXLSX3",
+        "channel_id": "C-active",
         "file": {
-            "id": "FXLSX2",
-            "name": "COA & List.xlsx",
+            "id": "FXLSX3",
+            "name": "Sample Test Group - Client Setup.xlsx",
             "filetype": "xlsx",
             "mimetype": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         },
     }
-    body = {"event_id": "Ev-coa-xlsx-2"}
+    body = {"event_id": "Ev-coa-xlsx-3"}
     fake_bolt_client = MagicMock()
 
     mock_pfe = AsyncMock(return_value={"status": "rejected"})
     mock_coa = MagicMock()
 
+    tmp = tempfile.mkdtemp(prefix="ledgr_coa_replace_test_")
+    coa_path = os.path.join(tmp, "Client Setup.xlsx")
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "COA"
+    ws.append(["Account code", "Description", "Account type", "Financial Statement"])
+    ws.append(["6100", "Sales", "Revenue", "Profit and Loss"])
+    ws.append(["6200", "Rent", "Expense", "Profit and Loss"])
+    wb.save(coa_path)
+
     with patch.object(slack_runner, "process_file_event", mock_pfe), \
          patch("app.slack_app.run_coa_ingest", mock_coa), \
-         patch("app.slack_app.slack_download_file", return_value="/tmp/fake/COA.xlsx"):
+         patch("app.slack_app.slack_download_file", return_value=coa_path):
         asyncio.run(handler(event=event, body=body, client=fake_bolt_client))
 
-    # COA ingest must NOT have been called (channel is not pending_coa).
+    post_kwargs = sync_mock.chat_postMessage.call_args.kwargs
+    confirm_btn = next(
+        e
+        for b in post_kwargs["blocks"]
+        if b.get("type") == "actions"
+        for e in b.get("elements", [])
+        if e.get("action_id") == "ledgr_coa_confirm"
+    )
+    assert confirm_btn["text"]["text"] == "Replace COA"
+    assert confirm_btn.get("style") == "danger"
     mock_coa.assert_not_called()
-    # Document processing must NOT be called from the file_shared path — the
-    # message/file_share handler owns it. Verify the race-fix invariant: the
-    # same file id cannot start a document run from both events.
+
+
+def test_file_shared_offer_does_not_run_pfe_for_non_spreadsheet():
+    """A non-spreadsheet file on file_shared still falls through silently (the
+    document pipeline lives on the message handler)."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from accounting_agents import slack_runner
+
+    store_mock = MagicMock()
+    store_mock.get_by_channel.return_value = None
+
+    sync_mock = MagicMock()
+    handler, _, sync_mock = _capture_file_shared_handler(
+        store_mock=store_mock, sync_client_mock=sync_mock,
+    )
+
+    event = {
+        "type": "file_shared",
+        "event_ts": "300.004",
+        "file_id": "FPDF1",
+        "channel_id": "C-coa-pending",
+        "file": {
+            "id": "FPDF1",
+            "name": "Invoice.pdf",
+            "filetype": "pdf",
+            "mimetype": "application/pdf",
+        },
+    }
+    body = {"event_id": "Ev-pdf-1"}
+    fake_bolt_client = MagicMock()
+
+    mock_pfe = AsyncMock(return_value={"status": "delivered"})
+
+    with patch.object(slack_runner, "process_file_event", mock_pfe):
+        asyncio.run(handler(event=event, body=body, client=fake_bolt_client))
+
+    assert not sync_mock.chat_postMessage.called
     mock_pfe.assert_not_called()
 
 
@@ -5476,7 +5599,7 @@ def test_file_shared_defer_does_not_poison_message_handler_dedup():
     store_mock = MagicMock()
     store_mock.get_by_channel.return_value = active_profile
 
-    file_handler, _ = _capture_file_shared_handler(store_mock=store_mock)
+    file_handler, _, _ = _capture_file_shared_handler(store_mock=store_mock)
     msg_handler, _ = _capture_message_handler_with_slack_client(FakeSlackClient())
 
     pdf_event = {
@@ -5535,7 +5658,7 @@ def test_file_shared_does_not_process_documents():
     store_mock = MagicMock()
     store_mock.get_by_channel.return_value = active_profile
 
-    handler, _ = _capture_file_shared_handler(store_mock=store_mock)
+    handler, _, _ = _capture_file_shared_handler(store_mock=store_mock)
 
     event = {
         "type": "file_shared",
@@ -6075,12 +6198,12 @@ def test_persist_and_deliver_defer_ledger_persist_stashes_payload():
 # =========================================================================== #
 
 
-def test_batch_processing_plan_blocks_emits_native_plan_block(monkeypatch):
-    """The batch-level thinking plan emits a single ``plan`` block with one task per doc."""
+def test_batch_processing_plan_blocks_uses_native_plan_by_default(monkeypatch):
+    """Batch progress uses the agent thinking plan block when native blocks are supported."""
     from app import native_blocks_compat
     from app.blocks import batch_processing_plan_blocks
 
-    # Force native plan blocks for this assertion.
+    monkeypatch.delenv("LEDGR_BATCH_EXPANDED_PROGRESS", raising=False)
     monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
     native_blocks_compat._PROBE_CACHE.pop("C-batch-thinking", None)
 
@@ -6096,27 +6219,37 @@ def test_batch_processing_plan_blocks_emits_native_plan_block(monkeypatch):
         channel_id="C-batch-thinking",
     )
     plan_blocks = [b for b in blocks if b.get("type") == "plan"]
-    assert len(plan_blocks) == 1, (
-        f"expected exactly 1 plan block, got {len(plan_blocks)}: {blocks}"
+    assert len(plan_blocks) == 1
+    assert plan_blocks[0]["title"] == "Processing batch (3 documents)"
+    assert len(plan_blocks[0]["tasks"]) == 4  # overall + 3 docs
+    for t in plan_blocks[0]["tasks"]:
+        if "output" in t:
+            assert isinstance(t["output"], dict)
+            assert t["output"].get("type") == "rich_text"
+
+
+def test_batch_processing_plan_blocks_expanded_section_when_opt_in(monkeypatch):
+    """LEDGR_BATCH_EXPANDED_PROGRESS=1 uses always-visible section text (opt-in)."""
+    from app import native_blocks_compat
+    from app.blocks import batch_processing_plan_blocks
+
+    monkeypatch.setenv("LEDGR_BATCH_EXPANDED_PROGRESS", "1")
+    monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
+    native_blocks_compat._PROBE_CACHE.pop("C-batch-expanded", None)
+
+    doc_rows = [
+        {"file_label": "a.pdf", "stage": "complete", "status": "complete", "detail": "ok"},
+    ]
+    blocks = batch_processing_plan_blocks(
+        total=1,
+        done=1,
+        doc_rows=doc_rows,
+        channel_id="C-batch-expanded",
     )
-    plan = plan_blocks[0]
-    # 1 overall + 3 per-doc tasks.
-    assert len(plan["tasks"]) == 4, (
-        f"expected 4 tasks (overall + 3 docs), got {len(plan['tasks'])}: {plan['tasks']}"
-    )
-    # First task is the overall progress tracker.
-    assert plan["tasks"][0]["task_id"] == "overall"
-    # Remaining tasks are per-doc, with file labels in their titles.
-    titles = [t["title"] for t in plan["tasks"][1:]]
-    assert "Contractor Beta.pdf" in titles[0]
-    assert "Telco-A.pdf" in titles[1]
-    assert "Supplier Gamma.pdf" in titles[2]
-    # Completed docs are marked complete in the task status.
-    statuses = [t["status"] for t in plan["tasks"][1:]]
-    assert statuses[0] == "complete", (
-        f"completed doc must show complete status; got {statuses}"
-    )
-    assert statuses[1] == "in_progress"
+    assert not any(b.get("type") == "plan" for b in blocks)
+    sections = [b for b in blocks if b.get("type") == "section"]
+    assert len(sections) == 1
+    assert "Overall progress — 1/1 done" in sections[0]["text"]["text"]
 
 
 def test_batch_processing_plan_blocks_falls_back_when_native_unsupported(monkeypatch):
@@ -6137,21 +6270,21 @@ def test_batch_processing_plan_blocks_falls_back_when_native_unsupported(monkeyp
         ],
         channel_id="C-fallback",
     )
-    # No plan block in the fallback path.
+    # No plan block — expanded section layout (always visible).
     assert not any(b.get("type") == "plan" for b in blocks)
-    # Section + context are emitted.
     assert any(b.get("type") == "section" for b in blocks)
-    assert any(b.get("type") == "context" for b in blocks)
+    assert blocks[0].get("expand") is True
 
 
-def test_batch_six_files_post_initial_plan_block(monkeypatch):
-    """First chat_postMessage in a 6-file drop carries a ``plan`` block (batch thinking)."""
+def test_batch_six_files_post_initial_native_plan_block(monkeypatch):
+    """First chat_postMessage in a 6-file drop carries the native agent thinking plan."""
     from unittest.mock import AsyncMock, MagicMock, patch
 
     from accounting_agents import slack_runner
     from app import native_blocks_compat
     from app.slack_app import _SeenEvents
 
+    monkeypatch.delenv("LEDGR_BATCH_EXPANDED_PROGRESS", raising=False)
     monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
     native_blocks_compat._PROBE_CACHE.pop("C-batch-plan", None)
 
@@ -6168,8 +6301,6 @@ def test_batch_six_files_post_initial_plan_block(monkeypatch):
         "files": [{"id": f"FP-{i}"} for i in range(6)],
     }
     fake_client = MagicMock()
-    # All docs return immediately as delivered (no stages fire callbacks here
-    # since we mock process_file_event).
     mock_pfe = AsyncMock(side_effect=[
         {"status": "delivered", "append": {"appended": 0, "software": "Xero", "fy": "2026",
                                             "kind": "invoice", "deferred_delivery": None}}
@@ -6180,17 +6311,17 @@ def test_batch_six_files_post_initial_plan_block(monkeypatch):
          patch.object(slack_runner, "download_pdf_bytes", return_value=b"%PDF fake"):
         asyncio.run(handler(event=event, body=body, client=fake_client))
 
-    # First top-level post must carry a plan block.
+    # First top-level post must carry the native plan block (agent thinking pattern).
     top_level = [p for p in slack._posts if not p.get("thread_ts")]
     assert len(top_level) == 1
     first_post = top_level[0]
     blocks = first_post.get("blocks") or []
     plan_blocks = [b for b in blocks if b.get("type") == "plan"]
-    assert plan_blocks, (
-        f"first batch post must include a plan block; got: {blocks}"
-    )
-    # Plan has overall + 6 per-doc tasks.
-    assert len(plan_blocks[0]["tasks"]) == 1 + 6
+    assert plan_blocks, "expected a native plan block in the batch progress message"
+    plan = plan_blocks[0]
+    assert plan["title"] == "Processing batch (6 documents)"
+    # 1 overall + 6 docs = 7 tasks
+    assert len(plan["tasks"]) == 7
 
 
 # =========================================================================== #

@@ -198,11 +198,10 @@ def _extract_intent(node_input) -> str:
 
 @node
 async def help_node(ctx) -> Event:
-    """Return a short help message when the coordinator can't classify the turn."""
+    """Defensive fallback when text misroutes through the coordinator graph."""
     message = (
-        "I help process accounting documents. Upload an invoice, receipt, or bank "
-        "statement and I'll extract, categorize, and add it to your ledger — or "
-        "ask me a question about your ledger."
+        "I'm forwarding you to the accounting assistant — ask me about your "
+        "ledger, extraction pipeline, or drop PDFs in this channel to process them."
     )
     ctx.state["help_message"] = message
     return Event(output={"message": message})

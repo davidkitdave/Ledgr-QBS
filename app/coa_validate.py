@@ -99,8 +99,8 @@ def validate_coa(rows: list[dict]) -> CoaValidationResult:
             has_expense = True
 
     if len(code_styles) > 1:
-        errors.append(
-            "Account codes use mixed formats — use a consistent code scheme throughout."
+        warnings.append(
+            "Account codes use mixed formats — consider a consistent code scheme throughout."
         )
     if "other" in code_styles:
         errors.append(

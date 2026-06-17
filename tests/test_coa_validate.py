@@ -80,6 +80,16 @@ class TestValidateCoaCodes:
         ]
         assert validate_coa(rows).ok
 
+    def test_mixed_code_formats_warn_but_pass(self):
+        """Real QBS Client Setup exports may mix numeric and alphanumeric codes."""
+        rows = [
+            _row(code="6100", description="Sales", account_type="Revenue"),
+            _row(code="EXP01", description="Rent", account_type="Expense"),
+        ]
+        result = validate_coa(rows)
+        assert result.ok
+        assert any("mixed format" in w.lower() for w in result.warnings)
+
 
 class TestValidateCoaCoverage:
     def test_expense_only_fails(self):

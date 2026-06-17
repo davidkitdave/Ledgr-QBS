@@ -488,7 +488,7 @@ def test_assistant_agent_is_root_multi_turn():
     from accounting_agents.assistant import assistant_agent
 
     assert assistant_agent.mode is None
-    assert len(assistant_agent.tools) == 17
+    assert len(assistant_agent.tools) == 18
 
 
 def test_write_tools_registered_with_confirmation():
@@ -1272,3 +1272,78 @@ def test_reextract_registered_in_tool_list_with_confirmation():
         and t.func.__name__ == "re_extract_document"
     )
     assert tool._require_confirmation is True
+
+
+def test_explain_document_processing_soa_legacy_path():
+    from accounting_agents.assistant import PROCESSING_LOG_KEY, explain_document_processing
+
+    ctx = _FakeToolContext({
+        PROCESSING_LOG_KEY: [
+            {
+                "file_id": "F-SOA-1",
+                "filename": "vendor_soa.pdf",
+                "doc_type": "statement_of_account",
+                "extraction_path": "legacy",
+                "soa_legacy_path": True,
+                "row_count": 12,
+                "delivered_at": "2026-06-16T12:00:00+00:00",
+                "fy": "2025",
+            }
+        ]
+    })
+    raw = explain_document_processing(ctx, filename="vendor_soa.pdf")
+    data = json.loads(raw)
+    assert data["extraction_path"] == "legacy"
+    assert data["doc_type"] == "statement_of_account"
+    assert "legacy DocumentRecord" in data["summary"]
+
+
+def test_explain_document_processing_understand_path():
+    from accounting_agents.assistant import PROCESSING_LOG_KEY, explain_document_processing
+
+    ctx = _FakeToolContext({
+        PROCESSING_LOG_KEY: [
+            {
+                "file_id": "F-INV-1",
+                "filename": "invoice.pdf",
+                "doc_type": "invoice",
+                "extraction_path": "understand",
+                "soa_legacy_path": False,
+                "row_count": 2,
+                "delivered_at": "2026-06-16T13:00:00+00:00",
+                "fy": "2025",
+            }
+        ]
+    })
+    raw = explain_document_processing(ctx)
+    data = json.loads(raw)
+    assert data["extraction_path"] == "understand"
+    assert "Understand single-call" in data["summary"]
+
+
+def test_list_recent_documents_enriched_with_processing_log():
+    from accounting_agents.assistant import PROCESSING_LOG_KEY, list_recent_documents
+
+    rows = [
+        {
+            "Date": "01/12/2025",
+            "Source Filename": "invoice.pdf",
+            "Doc Type": "P",
+            "Source Amount": 100.0,
+        }
+    ]
+    ctx = _FakeToolContext({
+        LEDGER_DATA_KEY: rows,
+        PROCESSING_LOG_KEY: [
+            {
+                "filename": "invoice.pdf",
+                "file_id": "F-INV-1",
+                "doc_type": "invoice",
+                "extraction_path": "understand",
+            }
+        ],
+    })
+    data = json.loads(list_recent_documents(ctx))
+    doc = data["documents"][0]
+    assert doc["extraction_path"] == "understand"
+    assert doc["file_id"] == "F-INV-1"

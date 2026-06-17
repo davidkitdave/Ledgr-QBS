@@ -53,6 +53,7 @@ from accounting_agents.assistant import (
     PENDING_LEARN_KEY,
     PENDING_REEXTRACT_KEY,
     PENDING_WRITE_KEY,
+    PROCESSING_LOG_KEY,
 )
 from accounting_agents.config import _env_prefix
 
@@ -91,6 +92,10 @@ from app.blocks import (
 )
 from app.slack_app import _SeenEvents
 from invoice_processing.export.client_context import FirestoreClientStore
+
+def _strip_slack_mentions(text: str) -> str:
+    import re
+    return re.sub(r"<@[A-Z0-9]+>", "", text or "").strip()
 
 # One shared dedup set for all handlers in this module (process-local; see
 # app.slack_app._SeenEvents for the Cloud Run note about multi-instance gaps).
@@ -188,6 +193,111 @@ def _is_coa_upload(f: object, *, coa_pending: bool) -> bool:
         return False
     from app.slack_app import _is_spreadsheet
     return bool(_is_spreadsheet(f))
+
+
+#: Outcome of :func:`_offer_coa_confirmation`.
+_OFFER_OUTCOME_CONFIRM_CARD = "confirm_card"
+_OFFER_OUTCOME_DISAMBIG_CARD = "disambiguation_card"
+_OFFER_OUTCOME_AS_DOCUMENT = "as_document"
+_OFFER_OUTCOME_NO_FILE = "no_file"
+
+
+async def _offer_coa_confirmation(
+    *,
+    sync_client,
+    channel_id: str,
+    file_id: str,
+    file_payload: dict,
+    channel_state: str,
+) -> str:
+    """Download a dropped spreadsheet, classify it, and post the right card.
+
+    Returns a short outcome string the caller can use for logging / dedup
+    bookkeeping. The function is best-effort: any IO or parse failure posts a
+    fallback "process as document" message so the upload is never silently
+    dropped.
+    """
+    import shutil as _shutil
+    import tempfile as _tempfile
+
+    from app.coa_detect import SpreadsheetKind, classify_spreadsheet
+    from app.slack_app import slack_download_file as _dl
+    from app.blocks import (
+        coa_confirm_blocks,
+        coa_unknown_disambiguation_blocks,
+    )
+    from app.coa_ingest import preview_coa_from_file
+
+    filename = (
+        (file_payload or {}).get("name")
+        or (file_payload or {}).get("title")
+        or "spreadsheet"
+    )
+    task_dir = _tempfile.mkdtemp(prefix="ledgr_coa_offer_")
+    try:
+        try:
+            local_path = await asyncio.to_thread(_dl, sync_client, file_id, task_dir)
+        except Exception:  # noqa: BLE001 - never let download fail silently
+            logger.exception("coa confirm: download failed for file %s", file_id)
+            sync_client.chat_postMessage(
+                channel=channel_id,
+                text=(
+                    f":grey_question: I couldn't download `{filename}` to inspect it. "
+                    "Re-upload and I'll ask whether to use it as a COA."
+                ),
+            )
+            return _OFFER_OUTCOME_NO_FILE
+
+        kind = classify_spreadsheet(local_path)
+        logger.info(
+            "coa confirm: classified file=%s as %s channel_state=%s",
+            file_id, kind.value, channel_state,
+        )
+
+        if kind is SpreadsheetKind.LEDGER_CANDIDATE:
+            # Spreadsheets that look like ledger exports fall through to the
+            # document pipeline; no COA card needed.
+            return _OFFER_OUTCOME_AS_DOCUMENT
+
+        preview = preview_coa_from_file(local_path)
+        if not preview:
+            sync_client.chat_postMessage(
+                channel=channel_id,
+                text=(
+                    f":grey_question: I couldn't read `{filename}`. "
+                    "Re-upload and I'll try again."
+                ),
+            )
+            return _OFFER_OUTCOME_NO_FILE
+
+        if kind is SpreadsheetKind.UNKNOWN:
+            sync_client.chat_postMessage(
+                channel=channel_id,
+                blocks=coa_unknown_disambiguation_blocks(
+                    file_id=file_id, filename=filename,
+                ),
+            )
+            return _OFFER_OUTCOME_DISAMBIG_CARD
+
+        sync_client.chat_postMessage(
+            channel=channel_id,
+            blocks=coa_confirm_blocks(
+                preview=preview,
+                file_id=file_id,
+                channel_state=channel_state,
+                filename=filename,
+            ),
+        )
+        return _OFFER_OUTCOME_CONFIRM_CARD
+    finally:
+        _shutil.rmtree(task_dir, ignore_errors=True)
+
+
+def _channel_state_label(resolved) -> str:
+    """Return ``"active"`` / ``"pending_coa"`` for the confirm card copy."""
+    if resolved is None:
+        return "pending_coa"
+    return getattr(resolved, "status", None) or "pending_coa"
 
 
 def _per_question_session_id(channel_id: str, message_ts: str) -> str:
@@ -645,6 +755,7 @@ async def persist_and_deliver(
     defer_slack_delivery: bool = False,
     batch_mode: bool = False,  # noqa: ARG001 - threaded for symmetry; not used here
     defer_ledger_persist: bool = False,
+    client_store=None,
 ) -> dict:
     """Read the finished session's ledger payload → append to the FY workbook → post.
 
@@ -801,7 +912,52 @@ async def persist_and_deliver(
     elif summary and not append_result.get("all_deduped"):
         _post_message(slack_client, channel_id, summary, thread_ts=thread_ts)
 
+    if batches and not append_result.get("all_deduped"):
+        _record_processing_log(
+            state=state,
+            payload=payload,
+            batches=batches,
+            append_result=append_result,
+            client_store=client_store or _DEFAULT_CLIENT_STORE,
+        )
+
     return append_result
+
+
+def _record_processing_log(
+    *,
+    state: dict,
+    payload: dict,
+    batches: list[dict],
+    append_result: dict,
+    client_store,
+) -> None:
+    """Persist extraction metadata so the chat assistant can introspect deliveries."""
+    client_id = str(payload.get("client_id") or state.get("client_id") or "").strip()
+    file_id = str(state.get("file_id") or "").strip()
+    if not client_id or not file_id:
+        return
+    from datetime import datetime, timezone
+
+    doc_type = str(state.get(nodes.DOC_TYPE_KEY) or payload.get("kind") or "invoice").strip().lower()
+    extraction_path = str(state.get(nodes.EXTRACTION_PATH_KEY) or "unknown").strip().lower()
+    row_count = sum(len(b.get("rows") or []) for b in batches)
+    entry = {
+        "file_id": file_id,
+        "filename": str(state.get("source_filename") or file_id),
+        "doc_type": doc_type,
+        "extraction_path": extraction_path,
+        "delivered_at": datetime.now(timezone.utc).isoformat(),
+        "row_count": row_count,
+        "fy": str(payload.get("fy") or append_result.get("fy") or ""),
+        "soa_legacy_path": doc_type == "statement_of_account" or extraction_path == "legacy",
+    }
+    try:
+        client_store.append_processing_log(client_id=client_id, file_id=file_id, entry=entry)
+    except Exception:  # noqa: BLE001 — log write is best-effort
+        logger.exception(
+            "processing_log write failed for client=%s file=%s", client_id, file_id
+        )
 
 
 def _post_delivery_card(
@@ -1568,6 +1724,7 @@ async def process_file_event(
             defer_slack_delivery=defer_slack_delivery,
             batch_mode=batch_mode,
             defer_ledger_persist=defer_ledger_persist,
+            client_store=client_store,
         )
 
         if outcome["status"] == "paused":
@@ -1987,6 +2144,7 @@ async def _finalize_run_outcome(
     defer_slack_delivery: bool = False,
     batch_mode: bool = False,
     defer_ledger_persist: bool = False,
+    client_store=None,
 ) -> dict:
     """Shared post-run tail: post the right card or deliver, based on the event stream.
 
@@ -2103,6 +2261,7 @@ async def _finalize_run_outcome(
         defer_slack_delivery=defer_slack_delivery,
         batch_mode=batch_mode,
         defer_ledger_persist=defer_ledger_persist,
+        client_store=client_store or _DEFAULT_CLIENT_STORE,
     )
     status = "duplicate" if append_result.get("all_deduped") else "delivered"
 
@@ -2287,6 +2446,7 @@ async def handle_approval_action(
             app_name=app_name,
             user_id=user_id,
             thread_ts=thread_ts,
+            client_store=_DEFAULT_CLIENT_STORE,
         )
     else:
         update_interrupt_status(db, op_id, "rejected")
@@ -2421,6 +2581,7 @@ async def handle_review_action(
         user_id=interrupt.get("user_id") or session_id,
         file_id=interrupt.get("slack_file_id") or "",
         thread_ts=interrupt.get("thread_ts"),
+        client_store=_DEFAULT_CLIENT_STORE,
     )
     return {"status": "resumed", "op_id": op_id, "outcome": outcome, "events": len(events)}
 
@@ -2428,6 +2589,47 @@ async def handle_review_action(
 # --------------------------------------------------------------------------- #
 # Text-question → Q&A path
 # --------------------------------------------------------------------------- #
+
+
+async def _handle_chat_turn(
+    *,
+    chat_runner: Any,
+    ledger_store: SlackLedgerStore,
+    slack_client: Any,
+    channel_id: str,
+    question: str,
+    client_store,
+    message_ts: Optional[str],
+    thread_ts: Optional[str],
+    raw_thread_ts: Optional[str],
+    doc_runner: Any,
+    db: Any,
+) -> None:
+    """Route one user text turn to the ADK chat assistant (single code path)."""
+    try:
+        await answer_question(
+            runner=chat_runner,
+            ledger_store=ledger_store,
+            slack_client=slack_client,
+            channel_id=channel_id,
+            question=question,
+            app_name=chat_runner.app_name,
+            client_store=client_store,
+            message_ts=message_ts,
+            thread_ts=thread_ts,
+            raw_thread_ts=raw_thread_ts,
+            doc_runner=doc_runner,
+            db=db,
+        )
+    except Exception:
+        logger.exception("answer_question failed for channel %s", channel_id)
+        _post_message(
+            slack_client,
+            channel_id,
+            "Sorry — I hit an error answering that. Check the bot logs, or try "
+            "dropping your PDFs directly in the channel.",
+            thread_ts=thread_ts,
+        )
 
 
 def _verify_row_signature(
@@ -2869,7 +3071,20 @@ async def answer_question(
             "channel_id": channel_id,
             **profile_delta,
             LEDGER_DATA_KEY: ledger_rows,
+            "onboarding_required": not bool(profile_delta.get("software")),
         }
+
+        processing_log: list[dict] = []
+        if client_store and client_id:
+            try:
+                processing_log = await asyncio.to_thread(
+                    client_store.list_processing_log, client_id, limit=20
+                )
+            except Exception:  # noqa: BLE001 — log read is non-fatal
+                logger.exception(
+                    "list_processing_log failed for client %s", client_id
+                )
+        state_delta[PROCESSING_LOG_KEY] = processing_log
 
         # Pre-write the freshly-fetched ledger rows into the session state NOW,
         # before run_async, so the value is unconditionally overwritten on every
@@ -3239,45 +3454,26 @@ def build_async_app(
         channel_id = event.get("channel_id") or event.get("channel")
         if not file_id or not channel_id:
             return
-        # COA-routing path B (ADR-0006): mirror the message-handler gate so that
-        # drag-dropped xlsx/csv files land in run_coa_ingest when the channel is
-        # not-yet-onboarded / pending_coa.  Without this check _is_coa_upload is
-        # never consulted on the file_shared path and .xlsx is rejected by the
-        # global _ACCEPTED_EXTENSIONS allow-list in process_file_event (P0-1).
+        # COA-routing path B (ADR-0006): spreadsheets dropped on a not-yet-onboarded
+        # / pending_coa / active channel are OFFERED as a COA (parse-back confirm
+        # card) so the user explicitly approves ingestion. The previous
+        # auto-routing skipped this confirmation step (the design intent in
+        # ADR-0006) and accidentally treated any pending_coa xlsx as a COA.
         _resolved = store.get_by_channel(channel_id)
-        _coa_pending = _resolved is None or getattr(_resolved, "status", None) == "pending_coa"
         file_payload = event.get("file") or {"id": file_id}
 
-        if _is_coa_upload(file_payload, coa_pending=_coa_pending):
-            # File-level dedup only when this handler actually processes the file.
+        from app.slack_app import _is_spreadsheet
+        if isinstance(file_payload, dict) and _is_spreadsheet(file_payload):
             if _seen.seen_before(f"file:{file_id}"):
                 logger.debug("dedup: file %s already being processed", file_id)
                 return
-            logger.info(
-                "file_shared: routing spreadsheet %s to COA ingest for channel %s",
-                file_id, channel_id,
+            await _offer_coa_confirmation(
+                sync_client=sync_client,
+                channel_id=channel_id,
+                file_id=file_id,
+                file_payload=file_payload,
+                channel_state=_channel_state_label(_resolved),
             )
-            import shutil as _shutil
-            import tempfile as _tempfile
-
-            from app.slack_app import run_coa_ingest as _run_coa_ingest
-            from app.slack_app import slack_download_file as _dl
-
-            def _say_in_channel(**kwargs):
-                sync_client.chat_postMessage(channel=channel_id, **kwargs)
-
-            task_dir = _tempfile.mkdtemp(prefix="ledgr_coa_")
-            try:
-                local_path = await asyncio.to_thread(_dl, sync_client, file_id, task_dir)
-                await asyncio.to_thread(
-                    _run_coa_ingest,
-                    channel_id=channel_id,
-                    file_path=local_path,
-                    store=store,
-                    say_fn=_say_in_channel,
-                )
-            finally:
-                _shutil.rmtree(task_dir, ignore_errors=True)
             return
 
         # Document uploads: the message/file_share handler is the sole owner of
@@ -3461,6 +3657,175 @@ def build_async_app(
             trigger_id=body["trigger_id"],
             view=proactive_redo_modal(file_id),
         )
+
+    # --- COA confirmation card actions (ADR-0006 path A) ---
+
+    async def _handle_coa_confirm(ack, body, client, *, message_ts: str) -> None:
+        await ack()
+        action = (body.get("actions") or [{}])[0]
+        file_id = (action.get("value") or "").strip()
+        channel_id = (body.get("channel") or {}).get("id") or ""
+        if not file_id or not channel_id:
+            return
+        # Use the existing ingest pipeline; the confirm click IS the activation
+        # gate required by ADR-0006.
+        import shutil as _shutil
+        import tempfile as _tempfile
+
+        from app.slack_app import run_coa_ingest as _run_coa_ingest
+        from app.slack_app import slack_download_file as _dl
+
+        def _say(**kwargs):
+            sync_client.chat_postMessage(channel=channel_id, **kwargs)
+
+        task_dir = _tempfile.mkdtemp(prefix="ledgr_coa_confirm_")
+        try:
+            local_path = await asyncio.to_thread(_dl, sync_client, file_id, task_dir)
+            await asyncio.to_thread(
+                _run_coa_ingest,
+                channel_id=channel_id,
+                file_path=local_path,
+                store=store,
+                say_fn=_say,
+            )
+        except Exception:  # noqa: BLE001 - cosmetic; reply so the user knows
+            logger.exception("ledgr_coa_confirm: ingest failed for %s", file_id)
+            _say(
+                text=(
+                    ":warning: I couldn't use that file as a COA. "
+                    "Re-upload and try again."
+                ),
+            )
+        finally:
+            _shutil.rmtree(task_dir, ignore_errors=True)
+        # Acknowledge the card so the user sees their click was received.
+        try:
+            sync_client.chat_update(
+                channel=channel_id,
+                ts=message_ts,
+                text="COA confirmed.",
+                blocks=[
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": ":white_check_mark: COA confirmed.",
+                        },
+                    }
+                ],
+            )
+        except Exception:  # noqa: BLE001 - cosmetic
+            logger.debug("ledgr_coa_confirm: could not update confirm card")
+
+    @async_app.action("ledgr_coa_confirm")
+    async def _ledgr_coa_confirm(ack, body, client):
+        message_ts = (body.get("message") or {}).get("ts") or ""
+        await _handle_coa_confirm(ack, body, client, message_ts=message_ts)
+
+    @async_app.action("ledgr_coa_as_document")
+    async def _ledgr_coa_as_document(ack, body, client):
+        # User explicitly chose "process as document" — fall through to the
+        # document pipeline. Re-download the file and forward to process_file_event.
+        await ack()
+        action = (body.get("actions") or [{}])[0]
+        file_id = (action.get("value") or "").strip()
+        channel_id = (body.get("channel") or {}).get("id") or ""
+        message_ts = (body.get("message") or {}).get("ts") or ""
+        if not file_id or not channel_id:
+            return
+        # Soft-gate on client profile: same check as the document path. If the
+        # client isn't onboarded yet, nudge them to set up first.
+        client_store_local = _DEFAULT_CLIENT_STORE
+        profile_delta = _profile_state_delta(client_store_local, channel_id)
+        if not profile_delta or not profile_delta.get("software"):
+            sync_client.chat_postMessage(
+                channel=channel_id,
+                text=(
+                    "I don't have this client set up yet — run */ledgr settings* to "
+                    "choose the accounting software and financial year, then re-drop the document."
+                ),
+            )
+            return
+        # The original file is already in Slack storage; re-route through the
+        # standard document path. We use a fresh file_id look-up so the existing
+        # download/validation pipeline does the right thing.
+        try:
+            result = await process_file_event(
+                runner=runner,
+                ledger_store=ledger_store,
+                db=db,
+                slack_client=sync_client,
+                channel_id=channel_id,
+                file_id=file_id,
+                app_name=app_name,
+                download_fn=download_pdf_bytes,
+                thread_ts=None,
+                source_filename=_resolve_file_name(sync_client, file_id, None),
+                hint="",
+                replace=False,
+                defer_slack_delivery=False,
+                batch_mode=False,
+                defer_ledger_persist=False,
+                status_callback=None,
+            )
+            logger.info(
+                "ledgr_coa_as_document: processed %s as document status=%s",
+                file_id, (result or {}).get("status"),
+            )
+        except Exception:  # noqa: BLE001 - cosmetic
+            logger.exception(
+                "ledgr_coa_as_document: process_file_event failed for %s", file_id
+            )
+            sync_client.chat_postMessage(
+                channel=channel_id,
+                text=(
+                    ":warning: I couldn't process that file as a document. "
+                    "Re-upload and try again."
+                ),
+            )
+            return
+        try:
+            sync_client.chat_update(
+                channel=channel_id,
+                ts=message_ts,
+                text="Processing as document.",
+                blocks=[
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": ":page_facing_up: Processing as document.",
+                        },
+                    }
+                ],
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("ledgr_coa_as_document: could not update card")
+
+    @async_app.action("ledgr_coa_cancel")
+    async def _ledgr_coa_cancel(ack, body, client):
+        await ack()
+        message_ts = (body.get("message") or {}).get("ts") or ""
+        channel_id = (body.get("channel") or {}).get("id") or ""
+        if not channel_id or not message_ts:
+            return
+        try:
+            sync_client.chat_update(
+                channel=channel_id,
+                ts=message_ts,
+                text="COA upload cancelled.",
+                blocks=[
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": ":x: COA upload cancelled.",
+                        },
+                    }
+                ],
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("ledgr_coa_cancel: could not update card")
 
     @async_app.view("ledgr_proactive_redo")
     async def _proactive_redo_submit(ack, body, client):
@@ -3812,6 +4177,32 @@ def build_async_app(
 
     # --- text-question + file-upload handler ---
 
+    @async_app.event("app_mention")
+    async def _app_mention(event, body, client):
+        """Handle @Ledgr mentions explicitly (Slack also sends message.channels)."""
+        eid = body.get("event_id") or f"app_mention:{event.get('ts')}"
+        if _seen.seen_before(eid):
+            return
+        channel_id = event.get("channel")
+        if not channel_id:
+            return
+        text = _strip_slack_mentions(event.get("text") or "")
+        if not text:
+            text = "Hello"
+        await _handle_chat_turn(
+            chat_runner=chat_runner,
+            ledger_store=ledger_store,
+            slack_client=sync_client,
+            channel_id=channel_id,
+            question=text,
+            client_store=store,
+            message_ts=event.get("ts"),
+            thread_ts=event.get("thread_ts") or event.get("ts"),
+            raw_thread_ts=event.get("thread_ts"),
+            doc_runner=runner,
+            db=db,
+        )
+
     @async_app.event("message")
     async def _message(event, body, client):
         # Dedup: Slack socket-mode can redeliver the same event on reconnect.
@@ -3837,6 +4228,8 @@ def build_async_app(
         channel_id = event.get("channel")
         if not channel_id:
             return
+
+        user_hint = _strip_slack_mentions(event.get("text") or "")
 
         # File-upload path: message subtype "file_share" OR event carries a
         # "files" list (some Slack app configurations omit the subtype but still
@@ -3879,15 +4272,22 @@ def build_async_app(
                     doc_rows=list(doc_rows),
                     channel_id=channel_id,
                 )
+            initial_text = job_progress_text(total=total, done=0)
             try:
-                resp = sync_client.chat_postMessage(
-                    channel=channel_id,
-                    text=job_progress_text(total=total, done=0),
-                    **({"blocks": initial_blocks} if initial_blocks else {}),
-                )
+                post_kwargs: dict = {"channel": channel_id, "text": initial_text}
+                if initial_blocks:
+                    post_kwargs["blocks"] = initial_blocks
+                resp = sync_client.chat_postMessage(**post_kwargs)
             except Exception:  # noqa: BLE001 - cosmetic; never abort the upload
                 logger.exception("failed to post Job summary in %s", channel_id)
-                resp = None
+                try:
+                    resp = sync_client.chat_postMessage(
+                        channel=channel_id,
+                        text=initial_text,
+                    )
+                except Exception:
+                    logger.exception("failed to post fallback Job summary in %s", channel_id)
+                    resp = None
             summary_ts: Optional[str] = None
             if resp is not None:
                 data = resp.data if hasattr(resp, "data") else resp
@@ -3904,10 +4304,29 @@ def build_async_app(
             kind_hint = ""
             batch_defer = total > 1
             batch_deferred: list[dict] = []
+            _last_progress_refresh = [0.0]
+            _PROGRESS_REFRESH_MIN_S = 1.5
 
-            def _refresh_job_progress() -> None:
+            def _refresh_job_progress(*, force: bool = False) -> None:
                 if not summary_ts:
                     return
+                import time as _time
+                now = _time.monotonic()
+                if (
+                    not force
+                    and done < total
+                    and (now - _last_progress_refresh[0]) < _PROGRESS_REFRESH_MIN_S
+                ):
+                    return
+                _last_progress_refresh[0] = now
+                progress_text = job_progress_text(
+                    total=total,
+                    done=done,
+                    posted=posted,
+                    needs_review=needs_review,
+                    rejected=rejected,
+                    duplicates=duplicates,
+                )
                 try:
                     if total > 1:
                         blocks = batch_processing_plan_blocks(
@@ -3919,31 +4338,25 @@ def build_async_app(
                         sync_client.chat_update(
                             channel=channel_id,
                             ts=summary_ts,
-                            text=job_progress_text(
-                                total=total,
-                                done=done,
-                                posted=posted,
-                                needs_review=needs_review,
-                                rejected=rejected,
-                                duplicates=duplicates,
-                            ),
+                            text=progress_text,
                             blocks=blocks,
                         )
                     else:
                         sync_client.chat_update(
                             channel=channel_id,
                             ts=summary_ts,
-                            text=job_progress_text(
-                                total=total,
-                                done=done,
-                                posted=posted,
-                                needs_review=needs_review,
-                                rejected=rejected,
-                                duplicates=duplicates,
-                            ),
+                            text=progress_text,
                         )
                 except Exception:  # noqa: BLE001
                     logger.debug("job progress update failed", exc_info=True)
+                    try:
+                        sync_client.chat_update(
+                            channel=channel_id,
+                            ts=summary_ts,
+                            text=progress_text,
+                        )
+                    except Exception:
+                        logger.debug("job progress text-only update failed", exc_info=True)
 
             def _batch_status_cb(update: dict) -> None:
                 """Callback fired by process_file_event on each stage change.
@@ -3965,15 +4378,13 @@ def build_async_app(
                         break
                 _refresh_job_progress()
 
-            # COA-routing path A (ADR-0006): resolve once per batch whether
-            # spreadsheets should be treated as COA uploads.  A channel with no
-            # profile or status==pending_coa routes xlsx/csv to run_coa_ingest;
-            # an active client's spreadsheets fall through to process_file_event
-            # (they are treated as ordinary documents, e.g. bank statements).
-            from app.slack_app import run_coa_ingest as _run_coa_ingest
+            # COA-routing path A (ADR-0006): spreadsheets dropped alongside
+            # documents are OFFERED as a COA via a confirm card; only non-spreadsheet
+            # files (PDFs, images) flow into process_file_event. This replaced the
+            # old auto-routing so users explicitly approve COA use (ADR-0006).
+            from app.slack_app import _is_spreadsheet
 
             _resolved = store.get_by_channel(channel_id)
-            _coa_pending = _resolved is None or getattr(_resolved, "status", None) == "pending_coa"
 
             def _say_in_channel(**kwargs):
                 sync_client.chat_postMessage(channel=channel_id, **kwargs)
@@ -4019,27 +4430,19 @@ def build_async_app(
                     file_id, channel_id,
                 )
 
-                # COA-routing path A (ADR-0006): a spreadsheet dropped on a
-                # not-yet-onboarded / pending_coa channel is a Chart-of-Accounts
-                # upload, not a document to process.
-                if _is_coa_upload(f, coa_pending=_coa_pending):
-                    logger.info("routing spreadsheet %s to COA ingest for channel %s", file_id, channel_id)
-                    import shutil as _shutil
-                    import tempfile as _tempfile
-
-                    from app.slack_app import slack_download_file as _dl
-                    task_dir = _tempfile.mkdtemp(prefix="ledgr_coa_")
-                    try:
-                        local_path = await asyncio.to_thread(_dl, sync_client, file_id, task_dir)
-                        await asyncio.to_thread(
-                            _run_coa_ingest,
-                            channel_id=channel_id,
-                            file_path=local_path,
-                            store=store,
-                            say_fn=_say_in_channel,
-                        )
-                    finally:
-                        _shutil.rmtree(task_dir, ignore_errors=True)
+                # Offer every spreadsheet (any channel state) as a COA candidate.
+                # The confirm card carries the active/replace copy; non-spreadsheet
+                # files (PDFs, images) fall through to the document pipeline.
+                if isinstance(f, dict) and _is_spreadsheet(f):
+                    await _offer_coa_confirmation(
+                        sync_client=sync_client,
+                        channel_id=channel_id,
+                        file_id=file_id,
+                        file_payload=f,
+                        channel_state=_channel_state_label(_resolved),
+                    )
+                    done += 1
+                    _refresh_job_progress()
                     continue
 
                 result = await process_file_event(
@@ -4053,6 +4456,7 @@ def build_async_app(
                     download_fn=download_pdf_bytes,
                     thread_ts=summary_ts,
                     source_filename=_resolve_file_name(sync_client, file_id, f),
+                    hint=user_hint,
                     defer_slack_delivery=batch_defer,
                     batch_mode=batch_defer,
                     defer_ledger_persist=batch_defer,
@@ -4080,6 +4484,8 @@ def build_async_app(
                 elif status == "rejected_unreadable":
                     rejected += 1
                 _refresh_job_progress()
+
+            _refresh_job_progress(force=True)
 
             # Batch-end: in multi-file mode, run the workbook append exactly ONCE
             # per (client, fy, kind) group. Each per-doc run stashed a
@@ -4139,7 +4545,7 @@ def build_async_app(
             return
 
         # Text-question path: plain user message with no files.
-        text = (event.get("text") or "").strip()
+        text = user_hint
         if not text:
             return
 
@@ -4153,13 +4559,12 @@ def build_async_app(
         logger.info(
             "question received via message: channel=%s ts=%s", channel_id, message_ts
         )
-        await answer_question(
-            runner=chat_runner,
+        await _handle_chat_turn(
+            chat_runner=chat_runner,
             ledger_store=ledger_store,
             slack_client=sync_client,
             channel_id=channel_id,
             question=text,
-            app_name=chat_runner.app_name,
             client_store=store,
             message_ts=message_ts,
             thread_ts=thread_ts,

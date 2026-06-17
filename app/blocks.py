@@ -33,6 +33,11 @@ def software_label(software: str) -> str:
     return "QBS Ledger"
 
 
+def _enc(val: str | None) -> str:
+    """%encode a value (used in Slack action ``value`` payloads)."""
+    return urllib.parse.quote(str(val or ""), safe="") or "-"
+
+
 _XERO_PURCHASE_COLS: list[PreviewColumn] = [
     PreviewColumn("Contact",      "*ContactName",   "raw_text"),
     PreviewColumn("Invoice #",    "*InvoiceNumber", "raw_text"),
@@ -203,6 +208,42 @@ def processing_plan_blocks(
     ]
 
 
+def _batch_progress_expanded_blocks(
+    *,
+    headline: str,
+    total: int,
+    done: int,
+    doc_rows: list[dict],
+) -> list[dict]:
+    """Always-visible batch progress (section + context).
+
+    Slack native ``plan`` blocks collapse back to closed on every
+    ``chat.update`` — there is no server-side ``expanded`` flag. For batch
+    follow-along UX we use section+context so every doc line stays visible
+    while the coordinator edits the placeholder message in place.
+    """
+    lines: list[str] = [f"*{headline}*", f"_Overall progress — {done}/{total} done_"]
+    for i, row in enumerate(doc_rows, start=1):
+        marker = _STATUS_MARKER.get(row.get("status") or "in_progress", ":white_circle:")
+        stage = row.get("stage") or "queued"
+        label = row.get("file_label") or f"doc {i}"
+        line = f"{marker} doc {i}/{total} — `{label}` — {stage}"
+        if row.get("detail"):
+            line += f" · {row['detail']}"
+        lines.append(line)
+    body = "\n".join(lines)
+    # Slack section mrkdwn limit is 3000 chars; truncate safely for huge batches.
+    if len(body) > 2900:
+        body = body[:2900] + "\n…"
+    return [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": body},
+            "expand": True,
+        },
+    ]
+
+
 def batch_processing_plan_blocks(
     *,
     total: int,
@@ -229,69 +270,76 @@ def batch_processing_plan_blocks(
 
     Falls back to a section + context block list when the channel doesn't
     support native ``plan`` blocks.
+
+    **Batch UX:** Uses the native ``plan`` block (agent thinking pattern) when the
+    channel supports it. Slack may collapse the chevron on each ``chat.update`` —
+    that is a platform limitation. Set ``LEDGR_BATCH_EXPANDED_PROGRESS=1`` to opt
+    into always-visible section text instead.
     """
+    import os
+
     headline = title or f"Processing batch ({total} document{'s' if total != 1 else ''})"
+    use_expanded = os.environ.get("LEDGR_BATCH_EXPANDED_PROGRESS", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    if use_expanded or not supports_native_blocks(channel_id):
+        return _batch_progress_expanded_blocks(
+            headline=headline,
+            total=total,
+            done=done,
+            doc_rows=doc_rows,
+        )
     if supports_native_blocks(channel_id):
         tasks = []
         for i, row in enumerate(doc_rows, start=1):
             status = row.get("status") or "in_progress"
             stage = row.get("stage") or "queued"
             label = row.get("file_label") or f"doc {i}"
+            # Plan block task titles are plain text — Slack emoji shortcodes do not render.
             title_line = f"doc {i}/{total} — {label}"
-            if status == "complete":
-                title_line = f":white_check_mark: {title_line}"
-            elif status == "failed":
-                title_line = f":x: {title_line}"
-            else:
-                title_line = f":hourglass_flowing_sand: {title_line}"
             task: dict = {
                 "task_id": f"doc_{i}",
                 "title": title_line,
-                "status": "complete" if status == "complete" else "in_progress",
+                "status": (
+                    "complete"
+                    if status == "complete"
+                    else ("failed" if status == "failed" else "in_progress")
+                ),
             }
             detail_bits: list[str] = [stage]
             if row.get("detail"):
                 detail_bits.append(str(row["detail"]))
             if detail_bits:
-                task["output"] = " · ".join(detail_bits)
+                task["output"] = _rich_text_from_string(" · ".join(detail_bits))
             tasks.append(task)
         # Add an "overall" task that summarizes how many docs have finished —
         # helpful at-a-glance state for the user looking at the plan block.
         overall_status = "complete" if done >= total else "in_progress"
+        overall_task: dict = {
+            "task_id": "overall",
+            "title": f"Overall progress — {done}/{total} done",
+            "status": overall_status,
+            "output": _rich_text_from_string(f"{done} of {total} documents processed"),
+        }
         return [
             {
                 "type": "plan",
                 "title": headline,
                 "tasks": [
-                    {
-                        "task_id": "overall",
-                        "title": f"Overall progress — {done}/{total} done",
-                        "status": overall_status,
-                    },
+                    overall_task,
                     *tasks,
                 ],
             }
         ]
-    # Fallback: section header + per-doc line.
-    lines: list[str] = []
-    for i, row in enumerate(doc_rows, start=1):
-        marker = _STATUS_MARKER.get(row.get("status") or "in_progress", ":white_circle:")
-        stage = row.get("stage") or "queued"
-        label = row.get("file_label") or f"doc {i}"
-        line = f"{marker} doc {i}/{total} — {label} — {stage}"
-        if row.get("detail"):
-            line += f" · {row['detail']}"
-        lines.append(line)
-    return [
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": f"*{headline}*"},
-        },
-        {
-            "type": "context",
-            "elements": [{"type": "mrkdwn", "text": "\n".join(lines)}],
-        },
-    ]
+    # Fallback: section header + per-doc line (non-native channels).
+    return _batch_progress_expanded_blocks(
+        headline=headline,
+        total=total,
+        done=done,
+        doc_rows=doc_rows,
+    )
 
 
 _MONTHS = [
@@ -1008,8 +1056,6 @@ def make_feedback_doc_ref(
     Each field is %-encoded to keep ``|`` safe as a delimiter.
     Falls back to ``"-"`` for any missing field so the value is never blank.
     """
-    def _enc(val: str | None) -> str:
-        return urllib.parse.quote(str(val or ""), safe="") or "-"
 
     return "|".join([
         _enc(file_id),
@@ -1050,6 +1096,199 @@ def coa_validation_failed_blocks(errors: list[str]) -> list:
             },
         }
     ]
+
+
+def coa_confirm_blocks(
+    *,
+    preview: dict,
+    file_id: str,
+    channel_state: str,
+    filename: str = "",
+) -> list:
+    """Confirmation card: ask the user before persisting a COA upload.
+
+    ``preview`` is a serialised :class:`app.coa_detect.CoaPreview` (the runner
+    builds it from :func:`app.coa_detect.preview_coa`). The card shows account
+    counts, a small sample, validation errors and warnings, and three buttons:
+
+    * ``ledgr_coa_confirm`` — persist rows + activate the client.
+    * ``ledgr_coa_as_document`` — fall through to the document pipeline.
+    * ``ledgr_coa_cancel`` — dismiss the upload without doing anything.
+
+    The confirm button is omitted entirely when validation has hard errors so
+    the user cannot click through into a broken ingest.
+    """
+    n_accounts = preview.get("n_accounts", 0)
+    n_income = preview.get("n_income", 0)
+    n_expense = preview.get("n_expense", 0)
+    sample = preview.get("sample") or []
+    errors = preview.get("errors") or []
+    warnings = preview.get("warnings") or []
+    source = preview.get("source") or "xlsx"
+
+    headline = (
+        f":abacus: Looks like a chart of accounts — *{n_accounts}* accounts "
+        f"({n_income} income · {n_expense} expense) parsed from `{source}`."
+    )
+    if channel_state == "active":
+        headline = (
+            f":abacus: Looks like a chart of accounts — *{n_accounts}* accounts. "
+            "This will replace the current chart for this client."
+        )
+
+    body_sections: list = [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": headline},
+        }
+    ]
+
+    if filename:
+        body_sections.append(
+            {
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": f"File: `{filename}`"}],
+            }
+        )
+
+    if sample:
+        sample_lines = [
+            f"• `{_enc(r.get('code') or '—')}` — {_enc(r.get('description') or '')} "
+            f"({_enc(r.get('account_type') or '?')})"
+            for r in sample
+        ]
+        body_sections.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "*Preview (first 5 accounts):*\n" + "\n".join(sample_lines),
+                },
+            }
+        )
+
+    if errors:
+        bullets = "\n".join(f"• {e}" for e in errors)
+        body_sections.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        ":warning: *Validation errors — fix the file and re-upload:*\n"
+                        f"{bullets}"
+                    ),
+                },
+            }
+        )
+
+    if warnings:
+        bullets = "\n".join(f"• {w}" for w in warnings)
+        body_sections.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f":information_source: *Warnings:*\n{bullets}",
+                },
+            }
+        )
+
+    confirm_value = f"{file_id}"
+    actions: list = []
+    if not errors:
+        if channel_state == "active":
+            actions.append(
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Replace COA"},
+                    "style": "danger",
+                    "action_id": "ledgr_coa_confirm",
+                    "value": confirm_value,
+                }
+            )
+        else:
+            actions.append(
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Use as COA"},
+                    "style": "primary",
+                    "action_id": "ledgr_coa_confirm",
+                    "value": confirm_value,
+                }
+            )
+    actions.append(
+        {
+            "type": "button",
+            "text": {"type": "plain_text", "text": "Process as document"},
+            "action_id": "ledgr_coa_as_document",
+            "value": confirm_value,
+        }
+    )
+    actions.append(
+        {
+            "type": "button",
+            "text": {"type": "plain_text", "text": "Cancel"},
+            "action_id": "ledgr_coa_cancel",
+            "value": confirm_value,
+        }
+    )
+    body_sections.append({"type": "actions", "elements": actions})
+    return body_sections
+
+
+def coa_unknown_disambiguation_blocks(*, file_id: str, filename: str = "") -> list:
+    """Card for spreadsheets that don't look like a COA OR a ledger.
+
+    Lets the user pick a path explicitly instead of guessing.
+    """
+    sections: list = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    ":grey_question: I can't tell what this spreadsheet is. "
+                    "Is it a chart of accounts, or should I process it as a document?"
+                ),
+            },
+        }
+    ]
+    if filename:
+        sections.append(
+            {
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": f"File: `{filename}`"}],
+            }
+        )
+    value = f"{file_id}"
+    sections.append(
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Use as COA"},
+                    "style": "primary",
+                    "action_id": "ledgr_coa_confirm",
+                    "value": value,
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Process as document"},
+                    "action_id": "ledgr_coa_as_document",
+                    "value": value,
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "Cancel"},
+                    "action_id": "ledgr_coa_cancel",
+                    "value": value,
+                },
+            ],
+        }
+    )
+    return sections
 
 
 def ledgr_help_blocks() -> list:

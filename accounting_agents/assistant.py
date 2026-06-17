@@ -51,7 +51,10 @@ import logging
 from datetime import date, datetime, timedelta
 
 from google.adk.agents import LlmAgent
+from google.adk.agents.callback_context import CallbackContext
+from google.adk.models import LlmRequest, LlmResponse
 from google.adk.tools import FunctionTool, ToolContext
+from google.genai import types
 
 from invoice_processing.export.categorizer import resolve_account
 from invoice_processing.export.client_context import (
@@ -88,6 +91,31 @@ PENDING_LEARN_KEY = "pending_learn_mapping"
 #: the document pipeline (with the hint + ``replace=True``) per spec via
 #: ``process_file_event`` — the tool itself never downloads or runs anything.
 PENDING_REEXTRACT_KEY = "pending_reextract"
+
+#: Recent document-processing deliveries injected by the Slack runner (ADR chat introspection).
+PROCESSING_LOG_KEY = "processing_log"
+
+#: Substrings that suggest a ledger-data question when onboarding is incomplete.
+_LEDGER_QUESTION_HINTS: frozenset[str] = frozenset(
+    {
+        "ledger",
+        "balance",
+        "gst",
+        "pnl",
+        "profit",
+        "invoice",
+        "coa",
+        "account",
+        "withdrawal",
+        "deposit",
+        "row",
+        "categor",
+        "tax",
+        "spend",
+        "revenue",
+        "expense",
+    }
+)
 
 #: Invoice sheets the write tools may mutate. Bank sheets carry a derived running
 #: balance (memory ``bank-ledger-continuous-sorted``) so amending/removing one
@@ -522,6 +550,8 @@ def show_client_profile(tool_context: ToolContext) -> str:
     if not client_name:
         return "No client profile is loaded yet for this channel."
 
+    software = state.get("software")
+    onboarding_required = bool(state.get("onboarding_required")) or not software
     coa = state.get("coa")
     entity_memory = state.get("entity_memory")
     coa_count = len(coa) if isinstance(coa, list) else 0
@@ -534,6 +564,8 @@ def show_client_profile(tool_context: ToolContext) -> str:
             "base_currency": state.get("base_currency"),
             "tax_registered": state.get("tax_registered"),
             "fye_month": state.get("fye_month"),
+            "software": software,
+            "onboarding_required": onboarding_required,
             "coa_count": coa_count,
             "entity_memory_count": entity_memory_count,
         },
@@ -921,10 +953,128 @@ def list_recent_documents(tool_context: ToolContext, limit: str = "10") -> str:
         key=lambda d: (_parse_row_date(d["date"]) or date.min, d["filename"]),
         reverse=True,
     )[:cap]
+
+    log_by_filename: dict[str, dict] = {}
+    log_by_file_id: dict[str, dict] = {}
+    try:
+        raw_log = tool_context.state.get(PROCESSING_LOG_KEY) or []
+        if isinstance(raw_log, list):
+            for entry in raw_log:
+                if not isinstance(entry, dict):
+                    continue
+                fn = str(entry.get("filename") or "").strip().lower()
+                fid = str(entry.get("file_id") or "").strip()
+                if fn:
+                    log_by_filename[fn] = entry
+                if fid:
+                    log_by_file_id[fid] = entry
+    except Exception:  # noqa: BLE001
+        pass
+
     for doc in documents:
         doc["total"] = round(doc["total"], 2)
+        meta = log_by_filename.get(str(doc.get("filename") or "").strip().lower())
+        if meta:
+            doc["extraction_path"] = meta.get("extraction_path")
+            doc["pipeline_doc_type"] = meta.get("doc_type")
+            doc["file_id"] = meta.get("file_id")
 
     return json.dumps({"documents": documents}, ensure_ascii=False)
+
+
+def explain_document_processing(
+    tool_context: ToolContext,
+    filename: str = "",
+    file_id: str = "",
+) -> str:
+    """Explain which extraction pipeline processed a filed document.
+
+    Reads the ``processing_log`` injected by the Slack runner. Use when the user
+    asks whether SOA vs invoice routing was correct, or understand vs legacy path.
+
+    Args:
+        tool_context: Injected by ADK; provides session state.
+        filename: Optional source filename to look up (case-insensitive).
+        file_id: Optional Slack file id (takes precedence over filename).
+
+    Returns:
+        JSON with ``doc_type``, ``extraction_path``, ``soa_legacy_path``,
+        ``row_count``, ``delivered_at``, and a short ``summary`` string.
+    """
+    raw_log = tool_context.state.get(PROCESSING_LOG_KEY) or []
+    if not isinstance(raw_log, list) or not raw_log:
+        return (
+            "No processing history is loaded for this channel yet. "
+            "Drop a document first, or ask after a delivery completes."
+        )
+
+    needle_file = filename.strip().lower()
+    needle_id = file_id.strip()
+    match: dict | None = None
+    if needle_id:
+        for entry in raw_log:
+            if isinstance(entry, dict) and str(entry.get("file_id") or "") == needle_id:
+                match = entry
+                break
+    elif needle_file:
+        for entry in raw_log:
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("filename") or "").strip().lower() == needle_file:
+                match = entry
+                break
+    else:
+        match = raw_log[0] if isinstance(raw_log[0], dict) else None
+
+    if not match:
+        return json.dumps(
+            {
+                "error": "not_found",
+                "message": "No matching delivery in the recent processing log.",
+                "recent": [
+                    {
+                        "filename": e.get("filename"),
+                        "file_id": e.get("file_id"),
+                        "doc_type": e.get("doc_type"),
+                        "extraction_path": e.get("extraction_path"),
+                    }
+                    for e in raw_log[:5]
+                    if isinstance(e, dict)
+                ],
+            },
+            ensure_ascii=False,
+        )
+
+    doc_type = str(match.get("doc_type") or "unknown")
+    path = str(match.get("extraction_path") or "unknown")
+    soa_legacy = bool(match.get("soa_legacy_path"))
+    if doc_type == "statement_of_account" or soa_legacy:
+        pipeline_note = (
+            "This document used the legacy DocumentRecord path (required for SOA "
+            "packages and complex multi-doc splits per ADR-0011)."
+        )
+    elif path == "understand":
+        pipeline_note = (
+            "This document used the Understand single-call extraction path "
+            "(Drive-style summary + ledger lines)."
+        )
+    else:
+        pipeline_note = f"Extraction path recorded as {path!r}."
+
+    return json.dumps(
+        {
+            "filename": match.get("filename"),
+            "file_id": match.get("file_id"),
+            "doc_type": doc_type,
+            "extraction_path": path,
+            "soa_legacy_path": soa_legacy,
+            "row_count": match.get("row_count"),
+            "delivered_at": match.get("delivered_at"),
+            "fy": match.get("fy"),
+            "summary": pipeline_note,
+        },
+        ensure_ascii=False,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -1754,6 +1904,15 @@ Explain + lookup tools (when the user asks *why* or *where*):
 - ``summarize_recent_activity``: spend and activity in the last N days (default 30).
 - ``lookup_row``: find ledger rows matching a text query (vendor, description, account).
 - ``list_recent_documents``: list source documents grouped from the loaded FY ledger.
+- ``explain_document_processing``: which extraction pipeline ran (understand vs legacy,
+  SOA vs invoice) for a recently delivered file — use for "was extraction correct?"
+  questions.
+
+Upload / process help (when the user asks how to add documents):
+- Explain that they drop PDF invoices or bank statements directly in the Slack channel
+  (multi-select in one message works). Processing starts automatically on file drop;
+  @mention is optional. You CAN answer questions that contain words like "extract",
+  "process", or "upload" — interpret intent from context; do not refuse them.
 
 Write tools (when the user asks you to FIX, DELETE, or CLEAR a ledger line or month):
 - ``amend_ledger_row``: change one field (``account`` / ``amount`` / ``description``
@@ -1838,10 +1997,54 @@ def assistant_instruction(ctx) -> str:
     return preamble + _BASE_INSTRUCTION
 
 
+def _onboarding_before_model(
+    callback_context: CallbackContext, llm_request: LlmRequest
+) -> LlmResponse | None:
+    """Block ledger-data questions when the channel is not onboarded yet."""
+    try:
+        state = callback_context.state
+        if state.get("software") or state.get("client_name"):
+            return None
+        if not state.get("onboarding_required"):
+            return None
+    except Exception:  # noqa: BLE001
+        return None
+
+    last_user = ""
+    try:
+        contents = llm_request.contents or []
+        if contents and contents[-1].role == "user":
+            parts = contents[-1].parts or []
+            if parts and parts[0].text:
+                last_user = parts[0].text.lower()
+    except Exception:  # noqa: BLE001
+        return None
+
+    if not any(hint in last_user for hint in _LEDGER_QUESTION_HINTS):
+        return None
+
+    return LlmResponse(
+        content=types.Content(
+            role="model",
+            parts=[
+                types.Part(
+                    text=(
+                        "This client channel is not set up yet — run */ledgr settings* "
+                        "to choose the accounting software and financial year first. "
+                        "After onboarding, drop PDFs in the channel and ask me ledger "
+                        "questions anytime."
+                    )
+                )
+            ],
+        )
+    )
+
+
 assistant_agent = LlmAgent(
     name="assistant",
     model=config.MODEL_LITE,
     instruction=assistant_instruction,
+    before_model_callback=_onboarding_before_model,
     tools=[
         bank_totals,
         summarize_by_category,
@@ -1855,6 +2058,7 @@ assistant_agent = LlmAgent(
         summarize_recent_activity,
         lookup_row,
         list_recent_documents,
+        explain_document_processing,
         FunctionTool(amend_ledger_row, require_confirmation=True),
         FunctionTool(remove_ledger_row, require_confirmation=True),
         FunctionTool(replace_recorded_month, require_confirmation=True),
@@ -1870,6 +2074,7 @@ __all__ = [
     "PENDING_WRITE_KEY",
     "PENDING_LEARN_KEY",
     "PENDING_REEXTRACT_KEY",
+    "PROCESSING_LOG_KEY",
     "GST_THRESHOLD_SGD",
     "amend_ledger_row",
     "remove_ledger_row",
@@ -1888,4 +2093,5 @@ __all__ = [
     "summarize_recent_activity",
     "lookup_row",
     "list_recent_documents",
+    "explain_document_processing",
 ]

@@ -54,6 +54,14 @@ shared graph.
 - Profile + ledger context is injected into the chat session via `state_delta` each turn (as today),
   so the agent "knows the client".
 
+## Slack Bolt boundary (2026-06-16 addendum)
+
+The Slack layer must **not** pre-empt the chat assistant with substring keyword gates or canned
+replies for conversational turns. File drops vs text is the only deterministic routing at the Bolt
+layer; intent (upload help, extraction questions, ledger lookups) is handled by the root
+``LlmAgent`` + tools. Real policy guardrails (e.g. un-onboarded channel asking ledger questions)
+belong in ADK ``before_model_callback``, not Bolt ``if any(w in text)`` checks.
+
 ## Alternatives rejected
 
 - **In-graph `mode='chat'`** — impossible; crashes graph validation (see Context).

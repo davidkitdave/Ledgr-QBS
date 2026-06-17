@@ -174,6 +174,39 @@ def standard_coa_rows() -> list[dict]:
         return json.load(fh)
 
 
+def preview_coa_from_file(path: str) -> Optional[dict]:
+    """Parse + validate a candidate COA without persisting.
+
+    Returns ``None`` when the file is unreadable; otherwise a dict with
+    ``rows``, ``validation`` (errors / warnings), ``source`` (file
+    extension) and the convenience counts the confirm card needs. See
+    :mod:`app.coa_detect` for the classification that decides when to
+    call this.
+    """
+    from app.coa_detect import CoaPreview
+
+    ext = Path(path).suffix.lower().lstrip(".") or "xlsx"
+    try:
+        rows = coa_rows_from_file(path)
+    except Exception:  # noqa: BLE001 - best effort, caller shows error
+        logger.exception("preview_coa_from_file: parse failed for %s", path)
+        return None
+    from app.coa_validate import validate_coa
+
+    validation = validate_coa(rows)
+    preview = CoaPreview(rows=rows, validation=validation, source=ext)
+    return {
+        "rows": preview.rows,
+        "n_accounts": preview.n_accounts,
+        "n_income": preview.n_income,
+        "n_expense": preview.n_expense,
+        "sample": preview.sample(5),
+        "errors": list(validation.errors),
+        "warnings": list(validation.warnings),
+        "source": preview.source,
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Orchestration (injected store + say_fn)
 # --------------------------------------------------------------------------- #
