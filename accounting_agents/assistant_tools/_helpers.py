@@ -7,7 +7,7 @@ def filename_matches_query(needle: str, stored: str) -> bool:
     """Return True when ``needle`` identifies ``stored`` (full or partial).
 
     Users often say ``25-D15`` while the processing log has
-    ``25-D15-Podaima Paid.pdf`` and Xero ledger rows group as
+    ``25-D15-Company-A.pdf`` and Xero ledger rows group as
     ``Xero:25-D15``. Match all three shapes.
     """
     n = (needle or "").strip().lower()

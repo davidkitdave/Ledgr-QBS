@@ -1,0 +1,87 @@
+# ADR-0015 eval config — rubric LLM-judge + 3 custom deterministic metrics.
+#
+# This file complements ``eval_config.yaml`` (which is used for the chat
+# trajectory gate on the existing golden evalset, A1-E10 + B3-B6). The
+# ADR-0015 config drives the F-cluster (F1-F12) and any future
+# extraction-pipeline cases that need:
+#
+#   - rubric-based LLM-as-judge (4 rubrics, threshold 0.9)
+#   - three deterministic custom metrics from
+#     ``tests.eval.custom_metrics`` (sheet_routing, header_mapping,
+#     tax_type_routing) — each with its own threshold 0.9
+#
+# Total threshold per case: 0.9 on every metric. The SimplePromptOptimizer
+# loop (``scripts/eval_loop.py``) reads this file and re-evaluates the
+# system instruction until the validation set clears 0.9 across the
+# board. See ``docs/adr/0015-eval-driven-prompt-loop.md``.
+#
+# ADK reference: https://adk.dev/evaluate/criteria/index.md
+# EvalConfig schema: google.adk.evaluation.eval_config.EvalConfig
+
+criteria:
+  # Built-in ADK LLM-as-judge metric. Judges each invocation against the
+  # rubrics below using ``judge_model`` with ``num_samples`` independent
+  # samples aggregated by majority vote. Threshold 0.9 (out of 1.0) means
+  # at least 4 of 5 samples must mark the response as pass-quality.
+  rubric_based_final_response_quality_v1:
+    threshold: 0.9
+    judge_model_options:
+      judge_model: gemini-2.5-flash
+      num_samples: 5
+    rubrics:
+      - rubric_id: extraction_completeness
+        rubric_content:
+          text_property: |
+            All visible labeled fields (invoice number, date, currency, parties,
+            totals) and per-line ledger lines are captured from the document.
+            No fabricated values: document_total reconciles to line nets + GST
+            and matches the footer. Missing fields are flagged, not invented.
+      - rubric_id: direction_correctness
+        rubric_content:
+          text_property: |
+            direction_for_client matches the money flow in the client's books.
+            Expense claims and reimbursements resolve to 'purchase'; trade
+            invoices with a clear From / Bill-To block resolve to 'purchase'
+            when the client is the recipient and 'sales' when the client is
+            the issuer. When the client identity does not appear on the
+            document, the field is 'unknown' rather than a guess.
+      - rubric_id: tax_visibility_correct
+        rubric_content:
+          text_property: |
+            tax_visible_on_document is true only when the document shows a
+            literal 'Tax' / 'GST' / 'VAT' row, column, or percentage. A
+            'Total', 'Amount', 'Subtotal', 'Currency' or 'Grand Total' column
+            is NOT a tax column. When the field is false, every per-line
+            gst_amount is 0 — the export layer must never invent tax.
+      - rubric_id: header_smartness
+        rubric_content:
+          text_property: |
+            Exporter row headers are mapped per target system (Xero vs QBS).
+            Every required column is present (ContactName, InvoiceNumber,
+            InvoiceDate, AccountCode, TaxType, TaxAmount, Currency) and no
+            required column is missing. The sales sheet uses '*Description';
+            the purchase sheet uses 'Description'. The same logical field
+            may appear under either name based on the target sheet.
+  # Custom deterministic metrics — thresholds per ADR-0015.
+  sheet_routing_score:
+    threshold: 0.9
+  header_mapping_score:
+    threshold: 0.9
+  tax_type_routing_score:
+    threshold: 0.9
+  currency_routing_score:
+    threshold: 0.9
+
+custom_metrics:
+  sheet_routing_score:
+    code_config:
+      name: tests.eval.custom_metrics.adk_sheet_routing_score
+  header_mapping_score:
+    code_config:
+      name: tests.eval.custom_metrics.adk_header_mapping_score
+  tax_type_routing_score:
+    code_config:
+      name: tests.eval.custom_metrics.adk_tax_type_routing_score
+  currency_routing_score:
+    code_config:
+      name: tests.eval.custom_metrics.adk_currency_routing_score

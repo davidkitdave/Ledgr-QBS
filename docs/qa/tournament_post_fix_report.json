@@ -1,5 +1,5 @@
 {
-  "client": "Acme Client Pte. Ltd.",
+  "client": "Company-A",
   "hermetic": false,
   "fixtures": [
     "vendor_invoice_sample",
@@ -13,7 +13,7 @@
   "results": [
     {
       "variant": "V3",
-      "path": "~/Desktop/LocalTest/TestDoc/Sample Test Group/Acme Client Pte. Ltd./Purchase/FY2026/INV-2026-003-sample.pdf",
+      "path": "~/Desktop/LocalTest/TestDoc/Sample Test Group/Company-A/Purchase/FY2026/INV-2026-003-sample.pdf",
       "error": null,
       "document_count": 1,
       "invoice_count": 1,
@@ -46,7 +46,7 @@
     },
     {
       "variant": "V3",
-      "path": "~/Desktop/LocalTest/TestDoc/Sample Test Group/Acme Client Pte. Ltd./Purchase/FY2025/INV-2025-012-sample.pdf",
+      "path": "~/Desktop/LocalTest/TestDoc/Sample Test Group/Company-A/Purchase/FY2025/INV-2025-012-sample.pdf",
       "error": null,
       "document_count": 1,
       "invoice_count": 1,
@@ -79,7 +79,7 @@
     },
     {
       "variant": "V3",
-      "path": "~/Desktop/LocalTest/TestDoc/Sample Test Group/Acme Client Pte. Ltd./Purchase/FY2025/MGT-2025-011-sample.pdf",
+      "path": "~/Desktop/LocalTest/TestDoc/Sample Test Group/Company-A/Purchase/FY2025/MGT-2025-011-sample.pdf",
       "error": null,
       "document_count": 1,
       "invoice_count": 1,
@@ -112,7 +112,7 @@
     },
     {
       "variant": "V3",
-      "path": "~/Desktop/LocalTest/TestDoc/Sample Test Group/Acme Client Pte. Ltd./Purchase/FY2026/EXP-2026-040-sample.pdf",
+      "path": "~/Desktop/LocalTest/TestDoc/Sample Test Group/Company-A/Purchase/FY2026/EXP-2026-040-sample.pdf",
       "error": null,
       "document_count": 1,
       "invoice_count": 1,

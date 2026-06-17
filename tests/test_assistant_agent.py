@@ -1509,7 +1509,7 @@ def test_diagnose_assistant_context_empty_ledger():
     )
 
     ctx = _FakeToolContext({
-        "client_name": "Auditair",
+        "client_name": "Company-A",
         "software": "Xero Ledger",
         "fy_loaded": "2026",
         "ledger_row_count": 0,
@@ -1522,7 +1522,7 @@ def test_diagnose_assistant_context_empty_ledger():
     })
     data = json.loads(diagnose_assistant_context(ctx))
     assert data["status"] == "success"
-    assert data["client_name"] == "Auditair"
+    assert data["client_name"] == "Company-A"
     assert data["software"] == "Xero Ledger"
     assert data["fy_loaded"] == "2026"
     assert data["ledger_row_count"] == 0
@@ -1645,7 +1645,7 @@ def test_get_document_processing_detail_merges_session_snapshot():
 
 
 def test_get_document_processing_detail_partial_filename_match():
-    """Users say ``25-D15``; log stores ``25-D15-Podaima Paid.pdf``."""
+    """Users say ``25-D15``; log stores ``25-D15-Company-A.pdf``."""
     from accounting_agents.assistant import (
         PROCESSING_LOG_KEY,
         get_document_processing_detail,
@@ -1654,7 +1654,7 @@ def test_get_document_processing_detail_partial_filename_match():
     ctx = _FakeToolContext({
         PROCESSING_LOG_KEY: [
             {
-                "filename": "25-D15-Podaima Paid.pdf",
+                "filename": "25-D15-Company-A.pdf",
                 "file_id": "F-D15",
                 "doc_type": "invoice",
                 "extraction_path": "understand",
@@ -1676,7 +1676,7 @@ def test_lookup_row_finds_xero_invoice_number():
             {
                 "_sheet": "Purchase",
                 "*InvoiceNumber": "25-D12",
-                "*ContactName": "Darrell Podaima",
+                "*ContactName": "Person-1",
                 "*Description": "Professional services",
                 "*AccountCode": "6-3000",
                 "*UnitAmount": "500.00",
@@ -1686,7 +1686,7 @@ def test_lookup_row_finds_xero_invoice_number():
     data = json.loads(lookup_row(ctx, query="25-D12"))
     assert len(data["matches"]) == 1
     assert data["matches"][0]["account_code"] == "6-3000"
-    assert "Darrell" in (data["matches"][0].get("vendor") or "")
+    assert "Person-1" in (data["matches"][0].get("vendor") or "")
 
 
 def test_lookup_row_falls_back_to_processing_log_when_ledger_empty():
@@ -1697,7 +1697,7 @@ def test_lookup_row_falls_back_to_processing_log_when_ledger_empty():
         "fy_loaded": "2026",
         PROCESSING_LOG_KEY: [
             {
-                "filename": "25-D12-Podaima Paid.pdf",
+                "filename": "25-D12-Company-A.pdf",
                 "file_id": "F-D12",
                 "fy": "2025",
                 "doc_type": "invoice",
@@ -1810,7 +1810,7 @@ def test_explain_posted_line_combines_ledger_and_coa():
         LEDGER_DATA_KEY: [
             {
                 "*InvoiceNumber": "25-D15",
-                "*ContactName": "Darrell Podaima",
+                "*ContactName": "Person-1",
                 "*Description": "Consulting fees",
                 "*AccountCode": "902-A02",
             }
@@ -1818,7 +1818,7 @@ def test_explain_posted_line_combines_ledger_and_coa():
         "coa": [{"code": "902-A02", "description": "Professional Fees"}],
         "processing_log": [
             {
-                "filename": "25-D15-Podaima Paid.pdf",
+                "filename": "25-D15-Company-A.pdf",
                 "file_id": "F-D15",
                 "invoice_ids": ["25-D15"],
                 "extraction_path": "understand",
@@ -1829,7 +1829,7 @@ def test_explain_posted_line_combines_ledger_and_coa():
     assert data["status"] == "found"
     assert data["posted_account_code"] == "902-A02"
     assert data["coa_description"] == "Professional Fees"
-    assert data["vendor"] == "Darrell Podaima"
+    assert data["vendor"] == "Person-1"
 
 
 def test_diagnostic_tools_registered_on_assistant_agent():

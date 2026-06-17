@@ -34,7 +34,7 @@ Ledgr has **two eval lanes** with different root agents:
 | **Doc (A, C–E)** | `accounting_agents` | Per-case in ADK evalset | `pytest tests/eval/ -m eval` or ADK `AgentEvaluator` |
 
 Stock `agents-cli eval generate` does **not** seed ADK session state, so chat cases
-(especially B6 Auditair invoice account-code) must use the local bridge script below.
+(especially B6 Company-A invoice account-code) must use the local bridge script below.
 
 ### Chat lane (recommended for tool-trajectory iteration)
 
@@ -42,7 +42,7 @@ Stock `agents-cli eval generate` does **not** seed ADK session state, so chat ca
 # Full chat loop: generate traces + grade
 ./scripts/ledgr_eval_chat.sh
 
-# Single case (e.g. Auditair B6)
+# Single case (e.g. Company-A B6)
 ./scripts/ledgr_eval_chat.sh B6_chat_invoice_account_code_trajectory
 
 # Manual steps:
@@ -84,7 +84,7 @@ and path references (see `anonymisation-note.md`).
 Ground-truth workbook for bank statement totals:
 - `${LEDGR_TEST_BANK_DIR}/bank-statement-fy2025.xlsx`
 
-Developers map these env vars to their local test-firm folder (see private memory `cast-unity-test-data` for the concrete mapping on the developer's machine). Real client/firm names never appear in committed files (per project rule `no-real-client-data-in-repo`).
+Developers map these env vars to their local test-firm folder (see private memory `company-a-test-data` for the concrete mapping on the developer's machine). Real client/firm names never appear in committed files (per project rule `no-real-client-data-in-repo`).
 
 ## Eval Case Clusters
 

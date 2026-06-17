@@ -54,12 +54,12 @@ def _line_net_amount(line: InvoiceLine, inv: NormalizedInvoice) -> float:
 def _tax_amount(line: InvoiceLine, inv: NormalizedInvoice, clf: TaxClassifier) -> float:
     if not inv.our_gst_registered:
         return 0.0
+    if inv.tax_visible_on_document is False:
+        return 0.0
     if line.tax_treatment != "SR":
         return 0.0
     if line.gst_amount:
         return round(float(line.gst_amount), 2)
-    if line.net_amount:
-        return round(float(line.net_amount) * clf.rate_for_date(inv.invoice_date), 2)
     return 0.0
 
 

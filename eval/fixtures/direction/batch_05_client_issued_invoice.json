@@ -1,10 +1,10 @@
 {
-  "client": "Acme Client Pte. Ltd.",
+  "client": "Company-A",
   "client_uen": "201700001A",
   "file_label": "Client-Issued-INV-26-042.pdf",
   "expected_direction": "sales",
   "from_party": {
-    "name": "Acme Client Pte. Ltd.",
+    "name": "Company-A",
     "uen": "201700001A",
     "role": "issuer"
   },

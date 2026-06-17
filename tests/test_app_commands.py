@@ -393,7 +393,7 @@ class TestHandleLedgrCommandProfile:
             def get_by_channel(self, cid):
                 return ClientContext(
                     client_id="CL-1",
-                    client_name="Acme Client Pte. Ltd.",
+                    client_name="Company-A",
                     accounting_software="Xero",
                     fye_month=10,
                     tax_registered=False,
@@ -411,7 +411,7 @@ class TestHandleLedgrCommandProfile:
             for blk in call.get("blocks", [])
             if isinstance(blk.get("text"), dict)
         )
-        assert "Acme Client Pte. Ltd." in joined and "Xero" in joined
+        assert "Company-A" in joined and "Xero" in joined
 
     def test_ledgr_profile_no_client_posts_guidance(self):
         from app.slack_app import handle_ledgr_command

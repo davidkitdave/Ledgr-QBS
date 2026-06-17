@@ -12,6 +12,25 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 
+class EvidenceRef(BaseModel):
+    """Grounding pointer for a captured or booked value."""
+
+    page: int = Field(default=1, description="1-based page number")
+    source: str = Field(
+        default="explicit_label",
+        description=(
+            "explicit_label | inferred_letterhead | table_cell | stamp | "
+            "inferred_block | capture_row"
+        ),
+    )
+    confidence: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description="Model confidence that this value is visible on the document",
+    )
+
+
 class LabeledField(BaseModel):
     label: str = Field(description="Human-readable field label as printed or inferred")
     value: str = Field(description="Field value as printed on the document")
@@ -22,6 +41,10 @@ class LabeledField(BaseModel):
             "explicit_label | inferred_letterhead | table_cell | stamp | "
             "inferred_block"
         ),
+    )
+    evidence: Optional[EvidenceRef] = Field(
+        default=None,
+        description="Optional grounding metadata for critic / HITL review",
     )
 
 
@@ -46,6 +69,10 @@ class LineCapture(BaseModel):
     tax_label: Optional[str] = Field(
         None,
         description="Verbatim tax wording only, e.g. GST15%, N/A, SR — not a treatment decision",
+    )
+    evidence: Optional[EvidenceRef] = Field(
+        default=None,
+        description="Grounding for this row when extracted from a table or form grid",
     )
 
 

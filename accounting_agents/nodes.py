@@ -137,6 +137,7 @@ NORMALIZED_KEY = "normalized_invoices"
 DOCUMENT_RECORDS_KEY = "document_records"
 LEDGER_SUMMARY_TABLE_KEY = "ledger_summary_table"
 EXTRACTION_PATH_KEY = "extraction_path"
+BOOKING_PROPOSALS_KEY = "booking_proposals"
 BANK_STATEMENTS_KEY = "bank_statements"
 ROUTES_KEY = "doc_routes"
 
@@ -385,6 +386,10 @@ def _apply_invoice_process_result(ctx, result: InvoiceProcessResult) -> None:
         ctx.state["skipped_pages"] = result.skipped_pages
     if result.document_read_notes:
         ctx.state["document_read_notes"] = result.document_read_notes
+    if result.booking_proposals is not None:
+        ctx.state[BOOKING_PROPOSALS_KEY] = _guard_state_payload(
+            BOOKING_PROPOSALS_KEY, result.booking_proposals
+        )
     ctx.state[NORMALIZED_KEY] = _guard_state_payload(
         NORMALIZED_KEY, [_inv_to_dict(i) for i in result.normalized]
     )
@@ -644,7 +649,7 @@ def detect_struggle(state: dict) -> tuple[bool, list[str]]:
     extraction_path = (state.get(EXTRACTION_PATH_KEY) or "").strip().lower()
     records_raw = state.get(DOCUMENT_RECORDS_KEY)
     doc_records: list = []
-    if extraction_path != "understand" and records_raw is not None:
+    if extraction_path not in ("understand", "capture_book") and records_raw is not None:
         if not records_raw:
             reasons.append("read_empty")
         for idx, raw in enumerate(records_raw):
@@ -695,7 +700,10 @@ def detect_struggle(state: dict) -> tuple[bool, list[str]]:
         # (already computed upstream; carry the note for the critic).
         if not inv.reconciled:
             note = inv.reconcile_note or "totals do not reconcile"
-            totals_ok = note.strip().lower().startswith("reconciled")
+            totals_ok = (
+                note.strip().lower().startswith("reconciled")
+                or "· ok" in note.lower()
+            )
             if not totals_ok:
                 reasons.append(f"unreconciled: {label} ({note})")
             elif "direction unknown" in note or "self-referential" in note:
@@ -743,21 +751,33 @@ def _reviewer_llm(state: dict, reasons: list[str], *, model: str) -> dict:
 
     from invoice_processing.shared_libraries.genai_client import make_client
 
-    from invoice_processing.extract.document_record import DocumentRecord
-
     record_summary: list[str] = []
     for raw in state.get(DOCUMENT_RECORDS_KEY) or []:
-        doc = DocumentRecord.model_validate(raw) if isinstance(raw, dict) else raw
-        record_summary.append(
-            f"labels={len(doc.labeled_fields)} lines={len(doc.line_items)} "
-            f"tables={len(doc.tables)} parties={len(doc.parties)}"
-        )
+        if isinstance(raw, dict):
+            record_summary.append(
+                f"labels={len(raw.get('labeled_fields') or [])} "
+                f"lines={len(raw.get('line_items') or [])} "
+                f"tables={len(raw.get('tables') or [])} "
+                f"parties={len(raw.get('parties') or [])}"
+            )
+        else:
+            record_summary.append(
+                f"labels={len(raw.labeled_fields)} lines={len(raw.line_items)} "
+                f"tables={len(raw.tables)} parties={len(raw.parties)}"
+            )
+
+    capture_json = json.dumps(state.get(DOCUMENT_RECORDS_KEY) or [], default=str)
+    booking_json = json.dumps(state.get(BOOKING_PROPOSALS_KEY) or [], default=str)
 
     instruction = (
         "You are a meticulous bookkeeping QA reviewer. An automated reader "
         "extracted an invoice/receipt and a deterministic checker flagged these "
         "concerns:\n"
         + "\n".join(f"- {r}" for r in reasons)
+        + "\n\nPhase 1 capture JSON (ground truth for what is visible on the document):\n"
+        + capture_json
+        + "\n\nBooking proposal JSON (posting granularity — must reconcile to capture footer):\n"
+        + booking_json
         + "\n\nPhase 1 capture summary:\n"
         + "\n".join(f"- {s}" for s in record_summary)
         + "\n\nNormalized extraction JSON:\n"
@@ -1179,25 +1199,31 @@ def _approval_summary(reasons: list[str]) -> str:
 
 def _read_preview_from_state(state: dict, *, max_fields: int = 8) -> str:
     """Compact Phase 1 labeled_fields preview for the approval card."""
-    from invoice_processing.extract.document_record import DocumentRecord
-
     raw = state.get(DOCUMENT_RECORDS_KEY) or []
     if not raw:
         return ""
     lines: list[str] = ["*What was read from the document:*"]
     for idx, item in enumerate(raw[:3]):
-        doc = DocumentRecord.model_validate(item) if isinstance(item, dict) else item
         prefix = f"Doc {idx + 1}: " if len(raw) > 1 else ""
         shown = 0
-        for field in doc.labeled_fields:
+        if isinstance(item, dict):
+            labeled_fields = item.get("labeled_fields") or []
+            annotations = item.get("annotations") or []
+        else:
+            labeled_fields = item.labeled_fields
+            annotations = item.annotations
+        for field in labeled_fields:
+            label = field.get("label") if isinstance(field, dict) else field.label
+            value = field.get("value") if isinstance(field, dict) else field.value
             if shown >= max_fields:
-                lines.append(f"{prefix}… ({len(doc.labeled_fields) - shown} more fields)")
+                lines.append(f"{prefix}… ({len(labeled_fields) - shown} more fields)")
                 break
-            lines.append(f"{prefix}{field.label}: {field.value}")
+            lines.append(f"{prefix}{label}: {value}")
             shown += 1
-        if doc.annotations and shown < max_fields:
-            for ann in doc.annotations[:2]:
-                lines.append(f"{prefix}📝 {ann.text}")
+        if annotations and shown < max_fields:
+            for ann in annotations[:2]:
+                text = ann.get("text") if isinstance(ann, dict) else ann.text
+                lines.append(f"{prefix}📝 {text}")
     return "\n".join(lines)
 
 

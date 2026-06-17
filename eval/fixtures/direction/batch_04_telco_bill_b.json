@@ -1,5 +1,5 @@
 {
-  "client": "Acme Client Pte. Ltd.",
+  "client": "Company-A",
   "client_uen": "201700001A",
   "file_label": "Telco-B-Aug-2026.pdf",
   "expected_direction": "purchase",
@@ -9,7 +9,7 @@
     "role": "issuer"
   },
   "to_party": {
-    "name": "Acme Client Pte. Ltd.",
+    "name": "Company-A",
     "uen": "201700001A",
     "role": "recipient"
   },

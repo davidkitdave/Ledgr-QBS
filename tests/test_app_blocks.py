@@ -391,13 +391,13 @@ def _flat_text(blocks):
 
 def test_profile_summary_shows_all_registered_fields():
     blocks = profile_summary_blocks({
-        "client_name": "Acme Client Pte. Ltd.",
+        "client_name": "Company-A",
         "accounting_software": "Xero",
         "fye_month": 10,
         "gst_registered": False,
     })
     text = _flat_text(blocks)
-    assert "Acme Client Pte. Ltd." in text
+    assert "Company-A" in text
     assert "Xero" in text
     assert "October" in text          # fye_month 10 -> month name
     assert "Not GST-registered" in text
@@ -813,7 +813,7 @@ class TestPerDocCardNative:
         assert "subtext" not in card
 
     def test_body_length_cap_with_long_workbook(self):
-        long_wb = "A" * 300 + ".xlsx"
+        long_wb = "A" * 600 + ".xlsx"
         doc = ProcessedDoc(
             path="/tmp/d.pdf",
             doc_type="invoice",
@@ -1106,15 +1106,15 @@ class TestDedupCalloutCardNative:
             assert btn["value"]
             assert btn["value"] != ""
 
-    def test_body_capped_at_200_chars_with_ellipsis(self):
-        # date_range must be long enough to push the body over 200 chars.
-        long_dr = "D" * 250
+    def test_body_capped_at_500_chars_with_ellipsis(self):
+        # date_range must be long enough to push the body over 500 chars.
+        long_dr = "D" * 550
         existing_long = {"rows": 1, "date_range": long_dr, "workbook": "Ledger_FY2025.xlsx"}
         card = dedup_callout_card(
             vendor="V", fy=2025, month="Jan 2025",
             existing=existing_long, incoming=_INCOMING,
         )[0]
-        assert len(card["body"]["text"]) <= 200
+        assert len(card["body"]["text"]) <= 500
         assert card["body"]["text"].endswith("…")
 
     def test_both_buttons_share_same_value(self):
@@ -1776,7 +1776,7 @@ class TestApprovalCardBlocksNative:
             assert btn["value"] == "OP-99"
 
     def test_long_summary_overflow_in_context_block(self):
-        long_summary = "A" * 250
+        long_summary = "A" * 550
         blocks = approval_card_blocks(summary=long_summary, op_id="OP-1")
         assert len(blocks) == 2
         assert blocks[1]["type"] == "context"
@@ -1864,8 +1864,16 @@ class TestReviewCardBlocksNative:
         blocks = review_card_blocks(question="q", op_id="RV-1")
         assert not any(b["type"] == "context" for b in blocks)
 
+    def test_review_card_native_body_respects_slack_limit(self):
+        long_q = "Q" * 400
+        blocks = review_card_blocks(
+            question=long_q, op_id="RV-1", reasons=["missing_required: invoice #1"]
+        )
+        assert blocks[0]["type"] == "card"
+        assert len(blocks[0]["body"]["text"]) <= 200
+
     def test_long_question_overflow_in_context_block(self):
-        long_q = "Q" * 250
+        long_q = "Q" * 550
         blocks = review_card_blocks(question=long_q, op_id="RV-1")
         context_blocks = [b for b in blocks if b["type"] == "context"]
         assert any(long_q in el["text"] for b in context_blocks for el in b["elements"])

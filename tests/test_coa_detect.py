@@ -72,7 +72,7 @@ def ledger_xlsx(tmp_path: Path) -> str:
         sheet_name="Ledger",
         headers=["Contact", "Invoice #", "Invoice Date", "Unit Amount", "Total"],
         rows=[
-            ("Acme Client Pte. Ltd.", "INV-1", "2025-03-15", 100, 110),
+            ("Company-A", "INV-1", "2025-03-15", 100, 110),
             ("Sample Vendor Inc", "INV-2", "2025-03-16", 50, 55),
         ],
     )

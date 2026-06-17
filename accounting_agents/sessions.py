@@ -208,9 +208,11 @@ class FirestoreSessionService(BaseSessionService):
 
         # Persist the merged session state + last_update_time.
         session.last_update_time = event.timestamp
-        self._session_ref(app_name, user_id, session_id).set(
-            self._session_to_doc(session), merge=True
-        )
+        from accounting_agents.firestore_safe import firestore_safe_state
+
+        safe_doc = self._session_to_doc(session)
+        safe_doc["state"] = firestore_safe_state(dict(session.state))
+        self._session_ref(app_name, user_id, session_id).set(safe_doc, merge=True)
         return event
 
     # ------------------------------------------------------------------ #

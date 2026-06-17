@@ -128,6 +128,6 @@ Discovery prefers `**/Purchase/**/*.pdf`. Explicit fixtures:
 
 ```bash
 uv run python -m eval.ledger_eval --paths \
-  ~/Desktop/LocalTest/TestDoc/Sample\ Test\ Group/Acme Client\ International\ Pte.\ Ltd./Purchase/FY2026/INV-2026-003-Vendor Alpha\ Paid.pdf \
+  ~/Desktop/LocalTest/TestDoc/Sample\ Test\ Group/Company-A/Purchase/FY2026/INV-2026-003-Vendor Alpha\ Paid.pdf \
   ~/Desktop/LocalTest/TestDoc/MYDoc/Sample\ Auto\ Enterprise/Purchase/SOA-SAMPLE-DEC-2025_.pdf
 ```

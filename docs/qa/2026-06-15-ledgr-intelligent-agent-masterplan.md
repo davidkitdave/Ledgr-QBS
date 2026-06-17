@@ -90,7 +90,7 @@ developer's local `${LEDGR_TEST_DOC_DIR}` (a real test-firm folder with a multi-
 structure, kept outside the repo per memory `no-real-client-data-in-repo`). Bank statements live
 in `${LEDGR_TEST_BANK_DIR}`. Live QA happens in the developer's own Slack workspace. The §10 eval
 set references these via env-var-relative paths only — no real client/sub-client names committed.
-Memory `cast-unity-test-data` carries the concrete mapping privately.
+Memory `company-a-test-data` carries the concrete mapping privately.
 
 **G. Step 3 shipped 2026-06-15 (C-1 explain + lookup).** Five read-only chat tools added to
 `assistant_agent`: `explain_categorization`, `explain_tax_treatment`, `summarize_recent_activity`,
@@ -107,7 +107,7 @@ capability) and surfaced two gaps the original plan does not cover:
 - **Test-channel scope (one per documented capability):**
   - **Sample Bank Client** — SG, clean digital invoices → happy-path + cost gate (reviewer must NOT fire,
     categorizer must NOT fall to LLM on known vendors).
-  - **Acme Client Pte. Ltd.** — SG, second SG client → tax/categorizer diversity.
+  - **Company-A** — SG, second SG client → tax/categorizer diversity.
   - **Sample Partner** — SG, scanned bank statement → multi-account → multi-tab split per memory
     `bank-statement-requirements` + FY bank ledger continuity per memory
     `bank-ledger-continuous-sorted`.

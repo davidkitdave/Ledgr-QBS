@@ -208,6 +208,31 @@ def processing_plan_blocks(
     ]
 
 
+def batch_overall_progress_line(
+    *,
+    total: int,
+    done: int,
+    doc_rows: list[dict],
+) -> str:
+    """Human overall line — active work is not '0 processed'."""
+    complete = sum(1 for r in doc_rows if r.get("status") == "complete")
+    failed = sum(1 for r in doc_rows if r.get("status") == "failed")
+    in_progress = sum(1 for r in doc_rows if r.get("status") == "in_progress")
+    if complete >= total:
+        return f"{complete} of {total} complete"
+    parts: list[str] = []
+    if in_progress:
+        parts.append(f"{in_progress} in progress")
+    if complete:
+        parts.append(f"{complete} complete")
+    if failed:
+        parts.append(f"{failed} failed")
+    queued = max(0, total - complete - failed - in_progress)
+    if queued and not in_progress:
+        parts.append(f"{queued} queued")
+    return " · ".join(parts) if parts else f"{done}/{total} done"
+
+
 def _batch_progress_expanded_blocks(
     *,
     headline: str,
@@ -222,7 +247,8 @@ def _batch_progress_expanded_blocks(
     follow-along UX we use section+context so every doc line stays visible
     while the coordinator edits the placeholder message in place.
     """
-    lines: list[str] = [f"*{headline}*", f"_Overall progress — {done}/{total} done_"]
+    overall = batch_overall_progress_line(total=total, done=done, doc_rows=doc_rows)
+    lines: list[str] = [f"*{headline}*", f"_Overall — {overall}_"]
     for i, row in enumerate(doc_rows, start=1):
         marker = _STATUS_MARKER.get(row.get("status") or "in_progress", ":white_circle:")
         stage = row.get("stage") or "queued"
@@ -330,11 +356,12 @@ def batch_processing_plan_blocks(
         # Add an "overall" task that summarizes how many docs have finished —
         # helpful at-a-glance state for the user looking at the plan block.
         overall_status = "complete" if done >= total else "in_progress"
+        overall_line = batch_overall_progress_line(total=total, done=done, doc_rows=doc_rows)
         overall_task: dict = {
             "task_id": "overall",
-            "title": f"Overall progress — {done}/{total} done",
+            "title": f"Overall — {overall_line}",
             "status": overall_status,
-            "output": _rich_text_from_string(f"{done} of {total} documents processed"),
+            "output": _rich_text_from_string(overall_line),
         }
         return [
             {
@@ -611,7 +638,9 @@ def _per_doc_line(doc) -> str:
 
 
 _MAX_CARD_TITLE = 150
-_MAX_CARD_BODY = 200
+_MAX_CARD_BODY = 500
+# Slack native ``card`` block body/subtitle hard limit (API rejects at 201).
+_MAX_NATIVE_CARD_BODY = 200
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -677,6 +706,8 @@ def _per_doc_card_native(doc, *, actions: list[str], op_id: str | None) -> list[
     else:
         # Try plain-dict doc shape first (keys: counterparty, invoice_number, etc.)
         counterparty = _doc_get(doc, "counterparty")
+        norm = None
+        direction = (_doc_get(doc, "direction") or "").strip().lower()
         if counterparty is not None:
             title_raw = counterparty.strip() or "Unknown"
             inv_no = _doc_get(doc, "invoice_number")
@@ -689,7 +720,8 @@ def _per_doc_card_native(doc, *, actions: list[str], op_id: str | None) -> list[
         else:
             # Object-style ProcessedDoc
             norm = _doc_get(doc, "normalized")
-            direction = (_doc_get(doc, "direction") or "").strip().lower()
+            if not direction:
+                direction = (_doc_get(doc, "direction") or "").strip().lower()
             party = None
             if norm is not None:
                 party = norm.customer if direction == "sales" else norm.supplier
@@ -705,10 +737,20 @@ def _per_doc_card_native(doc, *, actions: list[str], op_id: str | None) -> list[
             account_code = None
 
         subtitle_parts = []
+        direction_reason = _doc_get(doc, "direction_reason")
+        if direction_reason is None and norm is not None:
+            direction_reason = getattr(norm, "direction_reason", None)
+        if not direction and norm is not None:
+            direction = (getattr(norm, "doc_type", None) or "").strip().lower()
+        if direction in ("purchase", "sales"):
+            sheet = "Purchase" if direction == "purchase" else "Sales"
+            subtitle_parts.append(sheet)
         if inv_no:
             subtitle_parts.append(f"Invoice #{inv_no}")
         if date_str:
             subtitle_parts.append(date_str)
+        if direction_reason:
+            subtitle_parts.append(direction_reason)
         subtitle_raw = " · ".join(subtitle_parts)
 
         body_parts = [_fmt_money(total, currency)]
@@ -746,7 +788,7 @@ def _per_doc_card_native(doc, *, actions: list[str], op_id: str | None) -> list[
     if subtitle_raw:
         card["subtitle"] = {"type": "mrkdwn", "text": _truncate(subtitle_raw, _MAX_CARD_TITLE)}
     if full_body:
-        card["body"] = {"type": "mrkdwn", "text": _truncate(full_body, _MAX_CARD_BODY)}
+        card["body"] = {"type": "mrkdwn", "text": _truncate(full_body, _MAX_NATIVE_CARD_BODY)}
 
     # reconciled check: plain dicts use key "reconciled", objects use attribute.
     reconciled = _doc_get(doc, "reconciled")
@@ -757,9 +799,9 @@ def _per_doc_card_native(doc, *, actions: list[str], op_id: str | None) -> list[
             label = "failed to process"
         else:
             label = "needs review"
-        reason = note if len(note) <= _MAX_CARD_BODY else note[: _MAX_CARD_BODY - 1] + "…"
+        reason = note if len(note) <= _MAX_NATIVE_CARD_BODY else note[: _MAX_NATIVE_CARD_BODY - 1] + "…"
         subtext = f"{label} — {reason}" if reason else label
-        subtext_val = subtext[: _MAX_CARD_BODY] if len(subtext) > _MAX_CARD_BODY else subtext
+        subtext_val = subtext[: _MAX_NATIVE_CARD_BODY] if len(subtext) > _MAX_NATIVE_CARD_BODY else subtext
         # Bug 1 fix: subtext must also be a mrkdwn text object.
         card["subtext"] = {"type": "mrkdwn", "text": subtext_val}
 
@@ -1345,6 +1387,7 @@ def job_summary_text(
     posted: int,
     needs_review: int = 0,
     rejected: int = 0,
+    failed: int = 0,
     duplicates: int = 0,
     software: str = "",
     fy: str = "",
@@ -1358,6 +1401,10 @@ def job_summary_text(
 
     ``kind`` ("bank" / "invoice") picks the destination noun so a bank statement
     is never mislabelled a "ledger".
+
+    ``failed`` (transient infra errors like Gemini 503) is reported separately
+    from ``rejected`` so the user can retry without believing the document was
+    permanently refused.
     """
     fyl = f" FY{fy}" if fy else ""
     noun = "bank statement" if kind == "bank" else "ledger"
@@ -1369,14 +1416,16 @@ def job_summary_text(
         parts.append(f"{duplicates} already recorded")
     if needs_review:
         parts.append(f"{needs_review} need{'s' if needs_review == 1 else ''} your review")
+    if failed:
+        parts.append(f"{failed} failed — retry")
     if rejected:
         parts.append(f"{rejected} rejected")
 
-    processed = total - rejected
+    processed = total - rejected - failed
     head = f"📥 Received {total} file{'s' if total != 1 else ''}"
-    if rejected and processed:
+    if (rejected or failed) and processed:
         head += f" · {processed} processed"
-    elif not rejected:
+    elif not (rejected or failed):
         head = f"📥 Processed {total} document{'s' if total != 1 else ''}"
 
     if parts:
@@ -1391,9 +1440,14 @@ def job_progress_text(
     posted: int = 0,
     needs_review: int = 0,
     rejected: int = 0,
+    failed: int = 0,
     duplicates: int = 0,
 ) -> str:
-    """Live batch-drop progress line (updated after each document completes)."""
+    """Live batch-drop progress line (updated after each document completes).
+
+    ``failed`` (e.g. transient Gemini 503) is shown separately from ``rejected``
+    so a retryable infrastructure failure is not labelled as a permanent reject.
+    """
     if done <= 0:
         return f"📥 Received {total} document{'s' if total != 1 else ''} — starting…"
     tail: list[str] = []
@@ -1403,6 +1457,8 @@ def job_progress_text(
         tail.append(f"{duplicates} already recorded")
     if needs_review:
         tail.append(f"{needs_review} need{'s' if needs_review == 1 else ''} review")
+    if failed:
+        tail.append(f"{failed} failed — retry")
     if rejected:
         tail.append(f"{rejected} rejected")
     detail = f" ({', '.join(tail)})" if tail else ""
@@ -1506,7 +1562,7 @@ def approval_card_blocks(
     if supports_native_blocks(channel_id):
         title_text = "📒 Review needed before adding to the ledger"
         subtitle_text = doc_label or ""
-        body_text = _truncate(summary, _MAX_CARD_BODY)
+        body_text = _truncate(summary, _MAX_NATIVE_CARD_BODY)
         card: dict = {
             "type": "card",
             "title": {"type": "mrkdwn", "text": title_text},
@@ -1518,7 +1574,7 @@ def approval_card_blocks(
             card["body"] = {"type": "mrkdwn", "text": body_text}
         blocks: list[dict] = [card]
         # If summary was truncated, emit the full text in a context block.
-        if len(summary) > _MAX_CARD_BODY:
+        if len(summary) > _MAX_NATIVE_CARD_BODY:
             blocks.append(
                 {
                     "type": "context",
@@ -1615,7 +1671,7 @@ def review_card_blocks(
 
     if supports_native_blocks(channel_id):
         title_text = "🔍 Extraction needs your input"
-        body_text = _truncate(question, _MAX_CARD_BODY)
+        body_text = _truncate(question, _MAX_NATIVE_CARD_BODY)
         card: dict = {
             "type": "card",
             "title": {"type": "mrkdwn", "text": title_text},
@@ -1624,7 +1680,7 @@ def review_card_blocks(
         }
         blocks: list[dict] = [card]
         # Full question overflow goes into context block.
-        if len(question) > _MAX_CARD_BODY:
+        if len(question) > _MAX_NATIVE_CARD_BODY:
             blocks.append(
                 {
                     "type": "context",
@@ -1805,7 +1861,7 @@ def proactive_redo_blocks(
 
     if supports_native_blocks(channel_id):
         title_text = "🔄 Want to re-extract this with a hint?"
-        body_text = _truncate(body, _MAX_CARD_BODY)
+        body_text = _truncate(body, _MAX_NATIVE_CARD_BODY)
         card: dict = {
             "type": "card",
             "title": {"type": "mrkdwn", "text": title_text},
@@ -1814,7 +1870,7 @@ def proactive_redo_blocks(
         }
         blocks: list[dict] = [card]
         # If body was truncated, emit full text in context block.
-        if len(body) > _MAX_CARD_BODY:
+        if len(body) > _MAX_NATIVE_CARD_BODY:
             blocks.append(
                 {
                     "type": "context",
@@ -1987,7 +2043,7 @@ def dedup_callout_card(
         f"*Existing:* {existing.get('rows', 0)} rows · {existing.get('date_range', '—')}\n"
         f"*Incoming:* {incoming.get('rows', 0)} rows · {incoming.get('date_range', '—')}"
     )
-    body_text = body_raw if len(body_raw) <= _MAX_CARD_BODY else body_raw[: _MAX_CARD_BODY - 1] + "…"
+    body_text = body_raw if len(body_raw) <= _MAX_NATIVE_CARD_BODY else body_raw[: _MAX_NATIVE_CARD_BODY - 1] + "…"
 
     btn_value = _dedup_value(vendor, fy, month, op_id)
     replace_btn = {

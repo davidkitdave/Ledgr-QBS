@@ -34,6 +34,11 @@ C  SG GST regression      C6 (non-registered → NT), C7 (registered → SR),
                           C8 (zero-rated line → ZR)
 D  HITL Edit round-trip   D9 (tax_treatment/net_amount field names)
 E  Adversarial            E10 (unreadable doc flagged, not silently written)
+F  Direction / DocKind    F1-F12 (ADR-0015 eval gate — no hardcoded rules,
+                          direction + doc_kind + tax_visible correctness
+                          for expense claims, telco splits, non-GST clients,
+                          overseas suppliers, no-tax sales, credit notes,
+                          ambiguous → unknown)
 """
 
 from __future__ import annotations
@@ -88,6 +93,19 @@ _CASE_IDS = [
     "D9_hitl_edit_round_trip_field_names",
     # Cluster E — adversarial / optional
     "E10_adversarial_unreadable_pdf_flagged",
+    # Cluster F — direction / doc_kind (ADR-0015)
+    "F1_expense_claim_no_tax_purchase",
+    "F2_expense_claim_overseas_purchase",
+    "F3_invoice_sales_local_gst_registered",
+    "F4_invoice_purchase_local_gst_registered",
+    "F5_invoice_purchase_telco_split",
+    "F6_invoice_purchase_overseas_no_gst",
+    "F7_invoice_purchase_no_tax_gst_registered_client",
+    "F8_invoice_sales_no_tax_gst_registered_client",
+    "F9_non_gst_client_purchase_with_supplier_gst",
+    "F10_non_gst_client_sales_with_gst_shown",
+    "F11_credit_note_sales",
+    "F12_ambiguous_unknown",
 ]
 
 

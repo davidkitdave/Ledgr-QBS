@@ -2,7 +2,7 @@
 
 **Plan:** `slack_delivery_batch_ux_8e549468.plan.md` (Phases A–C)  
 **Channel (live target):** `#acme-client-test` (`C0123456789`)  
-**Client:** Acme Client Pte. Ltd. — Oct FYE (`fye_month=10`), Xero
+**Client:** Company-A — Oct FYE (`fye_month=10`), Xero
 
 ---
 
@@ -132,7 +132,7 @@ When Slack upload API is available:
 ```json
 {"status": "delivered",
  "append": {"slack_file_id": "F0BAR87D0SF", "appended": 2, "deduped": 0,
-            "filename": "Acme Client Pte. Ltd. - Ledger_FY2025.xlsx",
+            "filename": "Company-A - Ledger_FY2025.xlsx",
             "kind": "invoice", "software": "Xero", "fy": "2025"}}
 ```
 
@@ -186,7 +186,7 @@ handler is the sole owner and:
   Gemini misread the parties (classifier) or the parties came through
   the understand extract but the deterministic direction disagreed.
 
-- `eval/client_eval.py` — run with `--client "Acme Client Pte. Ltd." --limit-per-client 20` for direction accuracy. Baseline pre-Task-2 was ~60%; live retest is the next QA step (this round did not run it — needs the user's local Acme Client corpus).
+- `eval/client_eval.py` — run with `--client "Company-A" --limit-per-client 20` for direction accuracy. Baseline pre-Task-2 was ~60%; live retest is the next QA step (this round did not run it — needs the user's local Acme Client corpus).
 
 ## R2.6 ADR — Cloud Pub/Sub job queue (proposed, not implemented)
 

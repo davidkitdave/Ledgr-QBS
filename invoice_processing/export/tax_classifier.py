@@ -56,6 +56,29 @@ class TaxClassifier:
 
     # -- per-line classification ------------------------------------------------
     def classify_line(self, line: InvoiceLine, inv: NormalizedInvoice) -> InvoiceLine:
+        # Overseas supplier with no GST line on the document -> out-of-scope
+        # (review for reverse charge) BEFORE the tax_visible short-circuit.
+        # An overseas supplier legitimately has no SG GST line; the short-
+        # circuit would otherwise silently mark it NT and miss the reverse-
+        # charge review. ADR-0015 SG-GST decision table, F6 row.
+        if (
+            inv.doc_type == "purchase"
+            and inv.supplier.is_overseas
+            and inv.tax_visible_on_document is False
+        ):
+            line.tax_treatment = "OS"
+            line.tax_confidence = 0.55
+            line.tax_flagged = True
+            line.tax_reason = "OS: overseas supplier, no GST — review Reverse Charge"
+            return line
+
+        if inv.tax_visible_on_document is False:
+            line.tax_treatment = "NT"
+            line.tax_confidence = 0.95
+            line.tax_flagged = False
+            line.tax_reason = "NT: no tax column on document"
+            return line
+
         if inv.doc_type == "sales":
             code, conf, flag, reason = self._classify_sales(line, inv)
         else:
@@ -172,7 +195,7 @@ class TaxClassifier:
             return "SR", 0.85, False, "SR: explicit standard-rate signal in description"
         # 6. Supplier not GST-registered / no GST -> no tax.
         if not supplier.gst_registered and (not gst or gst == 0):
-            return "NT", 0.7, False, "NT: supplier not GST-registered / no GST line"
+            return "NT", 0.95, False, "NT: supplier not GST-registered / no GST line"
         # 7. Indeterminate -> legal default SR, flagged.
         return "SR", 0.4, True, "SR(default): indeterminate — review"
 

@@ -330,14 +330,23 @@ def _has_currency_conflict(
     return len(seen) > 1
 
 
-def reconcile(ex: ExtractedInvoice, *, tol_abs: float = 0.05, tol_rel: float = 0.01) -> tuple[bool, str]:
-    """Check that the ledger lines tie out to the document totals.
+def reconcile(
+    ex: ExtractedInvoice,
+    *,
+    tol_abs: float = 0.05,
+    tol_rel: float = 0.01,
+    tax_visible_on_document: Optional[bool] = None,
+    subtotal_in_capture: Optional[bool] = None,
+) -> tuple[bool, str]:
+    """Check that ledger lines tie out to document totals (footer-first).
 
-    Returns (ok, detail). ok=False means the summary grouping dropped/duplicated money and
-    should be flagged for human review. Uses max(tol_abs, tol_rel*reference) tolerance.
+    When ``subtotal_in_capture`` is False, skip subtotal-only checks (fixes false
+    alarms when the capture has no Sub Total row). When
+    ``tax_visible_on_document`` is False, skip GST checks.
     """
     net_sum = sum(l.net_amount or 0.0 for l in ex.lines)
     gst_sum = sum(l.gst_amount or 0.0 for l in ex.lines)
+    line_total = net_sum + gst_sum
 
     mismatches: list[str] = []
 
@@ -347,15 +356,20 @@ def reconcile(ex: ExtractedInvoice, *, tol_abs: float = 0.05, tol_rel: float = 0
         tol = max(tol_abs, tol_rel * abs(reference))
         if abs(computed - reference) > tol:
             mismatches.append(
-                f"{label}: lines={computed:.2f} vs doc={reference:.2f} (diff={computed - reference:+.2f}, tol={tol:.2f})"
+                f"{label}: lines={computed:.2f} vs doc={reference:.2f} "
+                f"(diff={computed - reference:+.2f}, tol={tol:.2f})"
             )
 
-    _check("subtotal", net_sum, ex.subtotal)
-    _check("gst", gst_sum, ex.gst_total)
-    _check("total", net_sum + gst_sum, ex.total)
+    if subtotal_in_capture is not False:
+        _check("subtotal", net_sum, ex.subtotal)
+    if tax_visible_on_document is not False:
+        _check("gst", gst_sum, ex.gst_total)
+    _check("total", line_total, ex.total)
 
     if mismatches:
         return False, "; ".join(mismatches)
+    if ex.total is not None:
+        return True, f"Lines total ${line_total:.2f} · Footer ${ex.total:.2f} · OK"
     return True, "reconciled"
 
 

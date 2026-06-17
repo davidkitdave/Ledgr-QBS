@@ -30,8 +30,8 @@ from invoice_processing.extract.document_normalizer import normalize_document_bu
 from invoice_processing.extract.record_merge import merge_document_records
 
 SAMPLE_TEST_CLIENT_CTX = ClientContext(
-    client_id="acme-client",
-    client_name="Acme Client Pte. Ltd.",
+    client_id="company-a",
+    client_name="Company-A",
     fye_month=3,
     accounting_software="QBS Ledger",
     tax_registered=True,
@@ -42,9 +42,9 @@ SAMPLE_TEST_CLIENT_CTX = ClientContext(
     ],
 )
 
-SAMPLE_AUTO_SOA = ClientContext(
-    client_id="sample-auto-enterprise",
-    client_name="Sample Auto Enterprise Sdn Bhd",
+SAMPLE_TEST_VENDOR = ClientContext(
+    client_id="company-b",
+    client_name="Company-B",
     fye_month=12,
     accounting_software="QBS Ledger",
     tax_registered=True,
@@ -61,17 +61,17 @@ FIXTURES = [
         "label": "sample_test_group",
         "client": SAMPLE_TEST_CLIENT_CTX,
         "pdfs": [
-            _HOME / "Desktop/LocalTest/TestDoc/Sample Test Group/Acme Client Pte. Ltd./Purchase/FY2026/INV-2026-003-sample.pdf",
-            _HOME / "Desktop/LocalTest/TestDoc/Sample Test Group/Acme Client Pte. Ltd./Purchase/FY2025/INV-2025-012-sample.pdf",
-            _HOME / "Desktop/LocalTest/TestDoc/Sample Test Group/Acme Client Pte. Ltd./Purchase/FY2025/MGT-2025-011-sample.pdf",
-            _HOME / "Desktop/LocalTest/TestDoc/Sample Test Group/Acme Client Pte. Ltd./Purchase/FY2026/EXP-2026-040-sample.pdf",
+            _HOME / "Desktop/LocalTest/TestDoc/Sample Test Group/Company-A/Purchase/FY2026/INV-2026-003-sample.pdf",
+            _HOME / "Desktop/LocalTest/TestDoc/Sample Test Group/Company-A/Purchase/FY2025/INV-2025-012-sample.pdf",
+            _HOME / "Desktop/LocalTest/TestDoc/Sample Test Group/Company-A/Purchase/FY2025/MGT-2025-011-sample.pdf",
+            _HOME / "Desktop/LocalTest/TestDoc/Sample Test Group/Company-A/Purchase/FY2026/EXP-2026-040-sample.pdf",
         ],
     },
     {
         "label": "sample_vendor_soa",
-        "client": SAMPLE_AUTO_SOA,
+        "client": SAMPLE_TEST_VENDOR,
         "pdfs": [
-            _HOME / "Desktop/LocalTest/TestDoc/MYDoc/Sample Auto Enterprise/Purchase/SOA-SAMPLE-DEC-2025_.pdf",
+            _HOME / "Desktop/LocalTest/TestDoc/MYDoc/Company-B/Purchase/SOA-SAMPLE-DEC-2025_.pdf",
         ],
     },
 ]

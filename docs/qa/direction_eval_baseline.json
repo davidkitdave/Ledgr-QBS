@@ -4,8 +4,8 @@
   "limit_per_client": 30,
   "clients": [
     {
-      "client_id": "Acme Client Pte. Ltd.",
-      "setup_path": "Acme Client Pte. Ltd. Client Setup.xlsx",
+      "client_id": "Company-A",
+      "setup_path": "Company-A Client Setup.xlsx",
       "n_docs": 6,
       "direction_total": 5,
       "direction_correct": 5,
@@ -34,7 +34,7 @@
           "reconciled": true,
           "note": "",
           "issuer_name": "Supplier Gamma Trading Pte Ltd",
-          "bill_to_name": "Acme Client Pte. Ltd."
+          "bill_to_name": "Company-A"
         },
         {
           "path": "CON-001-contractor-invoice.pdf",
@@ -45,7 +45,7 @@
           "reconciled": true,
           "note": "Understand call resolved direction_for_client=purchase based on UEN match.",
           "issuer_name": "Contractor Beta",
-          "bill_to_name": "Acme Client Pte. Ltd."
+          "bill_to_name": "Company-A"
         },
         {
           "path": "Telco-A-Aug-2026.pdf",
@@ -56,7 +56,7 @@
           "reconciled": true,
           "note": "",
           "issuer_name": "Telco Provider A Pte Ltd",
-          "bill_to_name": "Acme Client Pte. Ltd."
+          "bill_to_name": "Company-A"
         },
         {
           "path": "Telco-B-Aug-2026.pdf",
@@ -67,7 +67,7 @@
           "reconciled": true,
           "note": "",
           "issuer_name": "Telco Provider B Limited",
-          "bill_to_name": "Acme Client Pte. Ltd."
+          "bill_to_name": "Company-A"
         },
         {
           "path": "Client-Issued-INV-26-042.pdf",
@@ -77,7 +77,7 @@
           "doc_type": "invoice",
           "reconciled": true,
           "note": "Sales direction: client is the issuer (From party matches UEN).",
-          "issuer_name": "Acme Client Pte. Ltd.",
+          "issuer_name": "Company-A",
           "bill_to_name": "Acme Customer Pte Ltd"
         },
         {

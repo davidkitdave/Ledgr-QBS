@@ -1,6 +1,6 @@
 # Extraction Tournament Round 1
 
-Client: Acme Client Pte. Ltd.
+Client: Company-A
 Hermetic: False
 **Winner: V3**
 

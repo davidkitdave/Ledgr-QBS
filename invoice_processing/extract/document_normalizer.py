@@ -1,6 +1,7 @@
 """Phase 2 — map DocumentRecord capture to NormalizedInvoice(s).
 
-Deterministic rules + client profile; no per-vendor Python branches.
+FROZEN for SOA packages only (ADR-0014). Invoice/receipt lane uses
+Capture → Book → Verify; do not add new heuristics here.
 """
 
 from __future__ import annotations
@@ -55,12 +56,14 @@ def slim_document_record_for_state(record: DocumentRecord) -> dict:
 
     Telco bills (and other wide captures) keep labeled_fields/totals for Phase 2
     summary mapping; hundreds of line_items are dropped so Firestore session
-    events stay under nested-entity limits.
+    events stay under nested-entity limits. Table ``rows`` are flattened because
+    Firestore cannot store ``list[list[str]]``.
     """
     d = record.model_dump()
     if _is_telco_bill(record) or len(record.line_items) > _MAX_LINE_SUM_FALLBACK:
         d["line_items"] = []
-        d["tables"] = []
+    # Firestore cannot persist list[list]; line_items already hold grid rows.
+    d["tables"] = []
     return d
 
 

@@ -322,9 +322,9 @@ class TestExistingRulesUnchanged:
         line, inv = _purchase(desc="Hawker food stall", gst=None, gst_regno=None, is_overseas=False)
         result = CLF.classify_line(line, inv)
         assert result.tax_treatment == "NT"
-        # NT at confidence 0.7 is below the 0.8 threshold → flagged=True (review needed)
-        assert result.tax_confidence == 0.7
-        assert result.tax_flagged  # below threshold, so flagged for review
+        # NT at confidence 0.95 — expected for no-GST supplier; not flagged for review
+        assert result.tax_confidence == 0.95
+        assert result.tax_flagged is False
 
     def test_overseas_no_gst_flags_os(self):
         line, inv = _purchase(desc="Consulting", gst=None, gst_regno=None, is_overseas=True)

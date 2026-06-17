@@ -21,7 +21,7 @@ from .document_normalizer import normalize_document_bundle
 from .document_record import DocumentRecordBundle
 from .record_merge import merge_document_records
 
-SAMPLE_TEST_CLIENT = "Acme Client Pte. Ltd."
+SAMPLE_TEST_CLIENT = "Company-A"
 SAMPLE_TEST_BASE = Path.home() / "Desktop/LocalTest/TestDoc/Sample Test Group" / SAMPLE_TEST_CLIENT
 SAMPLE_TEST_DOCS = [
     SAMPLE_TEST_BASE / "Purchase/FY2026/INV-2026-003-sample.pdf",
@@ -29,10 +29,6 @@ SAMPLE_TEST_DOCS = [
     SAMPLE_TEST_BASE / "Purchase/FY2025/MGT-2025-011-sample.pdf",
     SAMPLE_TEST_BASE / "Purchase/FY2026/EXP-2026-040-sample.pdf",
 ]
-# Back-compat aliases (deprecated)
-CAST_UNITY_CLIENT = SAMPLE_TEST_CLIENT
-CAST_UNITY_BASE = SAMPLE_TEST_BASE
-CAST_UNITY_DOCS = SAMPLE_TEST_DOCS
 
 PHASE1_PROMPT_SEGMENTATION = PHASE1_PROMPT  # production winner (V3) merged into PHASE1_PROMPT
 

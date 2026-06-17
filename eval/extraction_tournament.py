@@ -24,8 +24,8 @@ from invoice_processing.extract.document_record import (
     PartyCapture,
 )
 from invoice_processing.extract.extraction_spine import (
-    CAST_UNITY_CLIENT,
-    CAST_UNITY_DOCS,
+    SAMPLE_TEST_CLIENT,
+    SAMPLE_TEST_DOCS,
     ExtractionContext,
     ExtractionVariant,
     result_to_dict,
@@ -67,12 +67,12 @@ def _synthetic_bundle(fixture_id: str) -> DocumentRecordBundle:
             labeled_fields=[
                 LabeledField(label="Invoice Number", value="INV-2026-003"),
                 LabeledField(label="From", value="Vendor Alpha Pte Ltd"),
-                LabeledField(label="Bill To", value="Acme Client - AC"),
+                LabeledField(label="Bill To", value="Company-A - AC"),
                 LabeledField(label="Date Range", value="Jan 2026"),
             ],
             parties=[
                 PartyCapture(name="Vendor Alpha Pte Ltd", role_hint="sender_block"),
-                PartyCapture(name="Acme Client", role_hint="to_block"),
+                PartyCapture(name="Company-A", role_hint="to_block"),
             ],
             line_items=[
                 LineCapture(description="PTTEP/UOA monitoring audit", quantity=1, net_amount=500.0),
@@ -89,12 +89,12 @@ def _synthetic_bundle(fixture_id: str) -> DocumentRecordBundle:
                 LabeledField(label="Invoice Number", value="MGT-2025-011-INV"),
                 LabeledField(label="Invoice Date", value="15 Jan 2025"),
                 LabeledField(label="From", value="ACME REGIONAL LTD"),
-                LabeledField(label="To", value="Acme Client Pte Ltd"),
+                LabeledField(label="To", value="Company-A"),
                 LabeledField(label="Currency", value="USD"),
             ],
             parties=[
                 PartyCapture(name="ACME REGIONAL LTD", role_hint="letterhead"),
-                PartyCapture(name="Acme Client Pte Ltd", role_hint="to_block"),
+                PartyCapture(name="Company-A", role_hint="to_block"),
             ],
             line_items=[
                 LineCapture(description="Consultation Management Fee", quantity=1, net_amount=6500.0),
@@ -123,10 +123,10 @@ def _synthetic_bundle(fixture_id: str) -> DocumentRecordBundle:
 
 def _fixture_paths() -> list[tuple[str, Path]]:
     mapping = [
-        ("vendor_invoice_sample", CAST_UNITY_DOCS[0]),
-        ("vendor_invoice_d12", CAST_UNITY_DOCS[1]),
-        ("management_fees", CAST_UNITY_DOCS[2]),
-        ("expense_claim", CAST_UNITY_DOCS[3]),
+        ("vendor_invoice_sample", SAMPLE_TEST_DOCS[0]),
+        ("vendor_invoice_d12", SAMPLE_TEST_DOCS[1]),
+        ("management_fees", SAMPLE_TEST_DOCS[2]),
+        ("expense_claim", SAMPLE_TEST_DOCS[3]),
     ]
     out: list[tuple[str, Path]] = []
     for fid, path in mapping:
@@ -144,7 +144,7 @@ def run_tournament(
     ctx = context or ExtractionContext(
         direction="purchase",
         base_currency="SGD",
-        client_name=CAST_UNITY_CLIENT,
+        client_name=SAMPLE_TEST_CLIENT,
     )
     fixtures = _fixture_paths()
     if hermetic:
@@ -218,7 +218,7 @@ def run_tournament(
     winner = ranking[0].variant if ranking else "V1"
 
     return {
-        "client": CAST_UNITY_CLIENT,
+        "client": SAMPLE_TEST_CLIENT,
         "hermetic": hermetic,
         "fixtures": [f[0] for f in fixtures],
         "variants": [v.value for v in variants],
@@ -289,7 +289,7 @@ def main() -> None:
     variant_map = {v.value: v for v in ALL_VARIANTS}
     variants = [variant_map[v.strip().upper()] for v in args.variants.split(",") if v.strip()]
 
-    ctx = ExtractionContext(client_name=CAST_UNITY_CLIENT, model=args.model)
+    ctx = ExtractionContext(client_name=SAMPLE_TEST_CLIENT, model=args.model)
     report = run_tournament(variants=variants, hermetic=args.hermetic, context=ctx)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)

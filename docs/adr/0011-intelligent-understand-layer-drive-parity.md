@@ -1,8 +1,18 @@
 # 0011 — Intelligent Understand layer (Drive parity), not regex pummeling
 
-- **Status:** Accepted — **implemented 2026-06-16**
+- **Status:** Accepted — **implemented 2026-06-16**; default path **superseded 2026-06-17** by [ADR-0014](0014-simple-intelligent-puzzle.md) (Capture → Book → Verify)
 - **Date:** 2026-06-16
 - **Deciders:** Ledgr team
+
+> **2026-06-17 amendment:** Understand is once again the **default** hot path
+> (`LEDGR_UNDERSTAND_EXTRACT` defaults on). ADR-0014's two-call Capture → Book →
+> Verify pipeline is retained as opt-in via `LEDGR_CAPTURE_BOOK=1` (used for SOA
+> experiments and A/B only). Single-call Understand matches Google's recommended
+> pattern (one `generate_content` with PDF `Part` + Pydantic schema) and lowers
+> 503 risk. The `tax_visible_on_document` field on `DocumentLedgerExtract`
+> propagates to `NormalizedInvoice` so the export layer keeps the no-invented-tax
+> guarantee from ADR-0014 without a second LLM call. SOA packages alone use
+> legacy `DocumentRecordBundle` + `document_normalizer.py`.
 
 ## Context
 
@@ -48,14 +58,29 @@ For **standard invoices, receipts, and telco/utility bills**:
 - Orchestrator: `process_invoice_document()` shared by graph nodes and eval harness
 - Graph node: `extract_invoice_document_node` replaces separate extract + normalize
 
-Feature flag: `LEDGR_UNDERSTAND_EXTRACT` (default **on**; set `0` for legacy path).
+Feature flag: `LEDGR_UNDERSTAND_EXTRACT` (default **on**).
+
+### Default path
+
+`extract_document_ledger()` — single multimodal Gemini call returning
+`DocumentLedgerExtract` (PDF `Part` + Pydantic schema). See ADR-0014 for the
+tax-discipline export guarantees carried forward.
+
+### ADR-0014 pipeline (opt-in)
+
+Capture → Book → Verify via `LEDGR_CAPTURE_BOOK=1` (default off). See ADR-0014.
 
 ### Legacy path (retained)
 
-For **SOA packages, expense claims, and complex multi-doc splits** only:
+For **SOA packages** only:
 
 - `DocumentRecordBundle` + `document_normalizer.py` (Phase 1 + Phase 2)
-- Routed when `doc_type == statement_of_account` or flag is off
+- Routed when `doc_type == statement_of_account`
+
+### Understand path (opt-out)
+
+To force-off the default Understand path: `LEDGR_UNDERSTAND_EXTRACT=0`.
+Routes then fall back to ADR-0014 capture-book or legacy SOA normalizer.
 
 ### Slack UX (ADR-0007 complement)
 

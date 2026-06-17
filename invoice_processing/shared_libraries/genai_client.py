@@ -29,7 +29,12 @@ def _use_vertex() -> bool:
 
 
 def retry_http_options() -> types.HttpOptions:
-    return types.HttpOptions(retry_options=types.HttpRetryOptions(initial_delay=1, attempts=3))
+    """Retry transient 5xx/429 with exponential backoff.
+
+    Google SDK defaults are ~4 attempts with backoff to 60s; we keep at least
+    that floor so 503s during capacity spikes don't surface to users.
+    """
+    return types.HttpOptions(retry_options=types.HttpRetryOptions(initial_delay=1, attempts=5))
 
 
 def make_client(project: Optional[str] = None, location: Optional[str] = None) -> genai.Client:

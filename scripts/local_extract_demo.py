@@ -14,7 +14,7 @@ from invoice_processing.extract.document_extractor import extract_document_bundl
 from invoice_processing.extract.document_normalizer import normalize_document_bundle
 from invoice_processing.extract.record_merge import merge_document_records
 
-CLIENT = "Acme Client Pte. Ltd."
+CLIENT = "Company-A"
 BASE = Path.home() / "Desktop/LocalTest/TestDoc/Sample Test Group" / CLIENT
 
 DOCS = [

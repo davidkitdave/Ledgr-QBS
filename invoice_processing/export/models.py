@@ -95,6 +95,10 @@ class NormalizedInvoice:
     reconciled: bool = True
     reconcile_note: Optional[str] = None
 
+    # Set by capture/book when no Tax/GST column exists — drives classifier + export.
+    tax_visible_on_document: Optional[bool] = None
+    direction_reason: Optional[str] = None
+
     @property
     def counterparty(self) -> PartyInfo:
         """The other party: supplier for purchases, customer for sales."""

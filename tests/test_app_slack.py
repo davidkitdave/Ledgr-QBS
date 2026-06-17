@@ -254,7 +254,7 @@ class TestHandleOnboardingSubmit:
 
     def test_onboarding_posts_profile_summary_then_coa_prompt(self):
         body = _submit_body(
-            client_name="Acme Client Pte. Ltd.",
+            client_name="Company-A",
             fye_month="10", accounting_software="Xero", gst_value="no",
             channel_id="C1",
         )

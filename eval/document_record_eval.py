@@ -190,9 +190,9 @@ def write_baseline(results: list[dict[str, Any]]) -> None:
 
 
 FIXTURE_PDF_MAP = {
-    "vendor_invoice_sample": Path.home() / "Desktop/LocalTest/TestDoc/Sample Test Group/Acme Client Pte. Ltd./Purchase/FY2026/INV-2026-003-sample.pdf",
-    "management_fees_sample": Path.home() / "Desktop/LocalTest/TestDoc/Sample Test Group/Acme Client Pte. Ltd./Purchase/FY2025/MGT-2025-011-sample.pdf",
-    "expense_claim_sample": Path.home() / "Desktop/LocalTest/TestDoc/Sample Test Group/Acme Client Pte. Ltd./Purchase/FY2026/EXP-2026-040-sample.pdf",
+    "vendor_invoice_sample": Path.home() / "Desktop/LocalTest/TestDoc/Sample Test Group/Company-A/Purchase/FY2026/INV-2026-003-sample.pdf",
+    "management_fees_sample": Path.home() / "Desktop/LocalTest/TestDoc/Sample Test Group/Company-A/Purchase/FY2025/MGT-2025-011-sample.pdf",
+    "expense_claim_sample": Path.home() / "Desktop/LocalTest/TestDoc/Sample Test Group/Company-A/Purchase/FY2026/EXP-2026-040-sample.pdf",
 }
 
 

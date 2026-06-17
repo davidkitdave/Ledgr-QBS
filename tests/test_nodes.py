@@ -876,13 +876,13 @@ def test_deliver_invoice_names_client_scoped_ledger():
     ctx = FakeContext({
         nodes.LEDGER_ROWS_KEY: {
             "fy": "2026", "kind": "invoice", "software": "Xero",
-            "client_name": "Acme Client Pte. Ltd.",
+            "client_name": "Company-A",
             "batches": [{"sheet": "Purchase", "rows": [{"Total Amount": 10}]}],
         }
     })
     asyncio.run(nodes.deliver_node(ctx))
     summary = ctx.state[nodes.DELIVER_SUMMARY_KEY]
-    assert "Acme Client Pte. Ltd." in summary
+    assert "Company-A" in summary
     assert "Ledger FY2026" in summary
     # An invoice is a ledger, never a bank statement.
     assert "Bank Statement" not in summary

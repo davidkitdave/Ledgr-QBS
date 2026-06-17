@@ -32,7 +32,7 @@ _TEST_ROOT = _HOME / "Desktop/LocalTest/TestDoc"
 
 ACME_CLIENT = ClientContext(
     client_id="acme-client",
-    client_name="Acme Client Pte. Ltd.",
+    client_name="Company-A",
     fye_month=3,
     accounting_software="Xero",
     tax_registered=False,
@@ -79,7 +79,7 @@ def _discover_telco_pdfs() -> list[Path]:
 def _fixture_pdfs() -> list[tuple[str, ClientContext, Path]]:
     fixtures: list[tuple[str, ClientContext, Path]] = []
     acme_client_dir = (
-        _TEST_ROOT / "Sample Test Group/Acme Client Pte. Ltd./Purchase"
+        _TEST_ROOT / "Sample Test Group/Company-A/Purchase"
     )
     for name in (
         "FY2025/MGT-2025-011-sample.pdf",

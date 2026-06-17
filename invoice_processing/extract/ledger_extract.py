@@ -1,5 +1,12 @@
 """Drive-parity document understanding — one structured Gemini call.
 
+Default invoice extraction path (ADR-0011): a single multimodal ``generate_content``
+with the PDF ``Part`` plus a Pydantic ``response_schema``. Matches Google's
+recommended pattern for invoice extraction.
+
+ADR-0014's two-call Capture → Book → Verify pipeline is available as opt-in via
+``LEDGR_CAPTURE_BOOK=1`` (SOA experiments only); not the default.
+
 Returns a human-readable summary table plus ledger-ready lines in a single
 ``DocumentLedgerExtract``. Maps to :class:`NormalizedInvoice` via a thin adapter
 that reuses ``reconcile`` / ``to_normalized`` from ``invoice_extractor``.
@@ -34,32 +41,100 @@ from .invoice_extractor import (
 def _build_understand_prompt(client_name: Optional[str], client_uen: Optional[str]) -> str:
     """Return the Understand prompt with client context appended for direction.
 
-    When client identity is provided, the prompt explicitly asks Gemini to
-    determine ``direction_for_client`` by comparing the document's
-    From/To parties against the client. This replaces the legacy
-    ``resolve_direction()`` fuzzy-match pass for the invoice lane (kept for
-    bank/SOA only).
+    Prompt is principle-based (no Python-style rule branching) per ADR-0015.
+    Schema ``description=`` strings carry the per-field rules; the prompt
+    body teaches the model how to read the document and decide direction from
+    visible signals. All party names in the appended exemplars are
+    placeholders (Company-A / Company-B / Person-1) — never real client or
+    vendor names. Direction classification is decided in one multimodal call
+    by comparing the document's From / To parties against the client; the
+    legacy ``resolve_direction()`` fuzzy-match pass is kept for bank / SOA
+    only.
     """
-    base = """Extract billing details from this document for accounting review.
+    base = """You are an SG bookkeeper reading a single document for a known client.
+
+Decide direction by who pays whom in the client's books, using whichever of
+these visible signals is present: From / Bill-To / Sender / Recipient blocks,
+header letterhead vs claimant signature, the words "Claim",
+"Reimbursement", "Invoice", "Receipt", "Credit Note". The company on a
+letterhead is not automatically the issuer; on a reimbursement form the
+claimant signing the form is the supplier. If the client identity is not on
+the document, return "unknown".
 
 Produce:
 - A Drive-style summary_table (Category / Details pairs) for human review.
-- ledger_lines at the granularity a bookkeeper would post (not every itemized row).
+- ledger_lines at the granularity a bookkeeper would post (not every
+  itemized row).
+- doc_kind classifying the document shape (invoice / receipt /
+  expense_claim / credit_note / other).
+- claimant_name when doc_kind == expense_claim (the person signing the form;
+  the company letterhead is the approver, not the issuer).
+- tax_visible_on_document strictly per the schema description (true only
+  when a literal "GST" / "Tax" / "VAT" row, column, or percentage appears).
 
-Rules:
-- Simple invoice/receipt: usually one ledger line with the service total.
-- Telco/utility bill (Telco Provider A, Telco Provider B, M1): exactly two summary ledger lines —
-  one standard-rated GST bucket and one zero-rated bucket from the bill summary.
-  Do NOT emit per-phone or per-call detail lines.
-- Multi-line trade invoice: one ledger line per visible item row when there is no
-  separate summary section.
-- document_reference is the invoice or bill number — NOT a GST registration number.
+Granularity:
+- Simple invoice / receipt: usually one ledger line with the service total.
+- Telco / utility bill: exactly two summary ledger lines — one standard-rated
+  GST bucket and one zero-rated bucket from the bill summary. Do NOT emit
+  per-phone or per-call detail lines.
+- Multi-line trade invoice: one ledger line per visible item row when there
+  is no separate summary section.
+
+Arithmetic:
+- document_reference is the invoice or bill number — NOT a GST registration
+  number.
 - document_date as ISO yyyy-mm-dd.
 - Ensure ledger line nets + GST reconcile to document_total.
-- from_party: the entity that ISSUED or SENT the document (the seller / vendor /
-  billing party). Capture their UEN / tax reg no if visible.
+- from_party: the entity that ISSUED or SENT the document (the seller /
+  vendor / billing party). Capture their UEN / tax reg no if visible.
 - to_party: the entity the document is ADDRESSED or BILLED to (the buyer /
-  recipient / bill-to party). Capture their UEN / tax reg no if visible."""
+  recipient / bill-to party). Capture their UEN / tax reg no if visible.
+- tax_visible_on_document: true ONLY when the document shows a Tax / GST
+  column or a tax / GST amount. When false, set per-line gst_amount = 0 and
+  gst_total = null — the export layer must NEVER invent tax.
+- currency: read it from the document, not the client. Primary: the document's
+  dedicated Currency column when present (if every row agrees, use that code).
+  Secondary: the total footer (e.g. "TOTAL USD $1,195.11" -> USD). Foreign
+  codes embedded in Details text (e.g. "BHT 4466.68 x 0.0295" -- a per-line FX
+  conversion note) are NOT the document currency when a Currency column says
+  otherwise. Never infer from letterhead, the SG address, or base_currency.
+  When every line and the footer agree on USD, currency is USD even if the
+  client books in SGD.
+
+Examples (synthetic -- placeholders, no real names):
+
+[Doc 1] Header "<Company-A>" letterhead. Body title: "EXPENSE CLAIM".
+Claimant field: "<Person-1>". Task reference: "AAI-XX-NNN". Item rows
+("Transport", "Accommodation", ...) with a "Currency" and "Amount" column.
+Footer "Approved by" line for finance; "Total USD <amount>".
+- doc_kind: expense_claim
+- direction_for_client (when client = Company-A): purchase
+- claimant_name: <Person-1>
+- tax_visible_on_document: false
+- per-line gst_amount: 0
+- currency: USD
+- direction_reason: claimant signed the form; client is the approver
+
+[Doc 2] Header "<Company-A>" letterhead. Body title: "TAX INVOICE".
+"Bill To: <Company-B>". Item rows with a "GST 9%" column and a numeric
+"GST" amount.
+- doc_kind: invoice
+- direction_for_client (when client = Company-A): sales
+- direction_for_client (when client = Company-B): purchase
+- tax_visible_on_document: true
+- per-line gst_amount: net × 9%
+- currency: SGD
+- direction_reason: client matches the issuer / Bill-To respectively
+
+[Doc 3] Header "<Company-A>" letterhead. Body title: "EXPENSE CLAIM".
+Columns: Category | Dates | Task Card # | Details | Currency | Amount.
+No "GST", no "Tax", no percentage anywhere. Footer: "Total USD <amount>".
+- doc_kind: expense_claim
+- direction_for_client (when client = Company-A): purchase
+- tax_visible_on_document: false
+- per-line gst_amount: 0
+- currency: USD
+- direction_reason: claimant signed the form; no tax column on document"""
 
     if client_name or client_uen:
         bits: list[str] = []
@@ -71,14 +146,11 @@ Rules:
         base += f"""
 
 Client context: {ctx}.
-Set direction_for_client as follows:
-- "purchase" if the client is the RECIPIENT (to_party matches the client)
-- "sales" if the client is the ISSUER (from_party matches the client)
-- "self_referential" if from_party and to_party are the same entity
-- "unknown" if the document's From/To is ambiguous or the client is not visible
-
-Match the client by name OR UEN. Visual layout (header block, "Bill To", "From",
-signature block) takes precedence over party-name string matching."""
+Match the client by name OR UEN against the document's From / To blocks and
+the letterhead / claimant. Visual layout (header block, "Bill To", "From",
+signature block) takes precedence over party-name string matching. Return
+"unknown" rather than guessing when the client does not appear on the
+document."""
 
     return base
 
@@ -110,9 +182,9 @@ class LedgerLine(BaseModel):
     description: str
     net_amount: float
     gst_amount: float = Field(default=0, description="GST component on this line if shown")
-    tax_hint: str = Field(
-        default="SR",
-        description="SR, ZR, ES, OS, or NT — document-level hint; client GST rules apply later",
+    tax_hint: Optional[str] = Field(
+        default=None,
+        description="SR, ZR, ES, OS, or NT — only when tax wording is visible on the document",
     )
 
 
@@ -121,17 +193,72 @@ class LedgerLine(BaseModel):
 DirectionForClient = Literal["purchase", "sales", "self_referential", "unknown"]
 
 
+#: Document kinds the Understand call can declare (per ADR-0015 eval gate).
+#: Used for eval rubrics and Slack UX surfacing only — Python never switches
+#: on this value. ``"expense_claim"`` is the route the previous case study
+#: (employee reimbursement) needs the model to surface.
+DocKind = Literal["invoice", "receipt", "expense_claim", "credit_note", "other"]
+
+
 class DocumentLedgerExtract(BaseModel):
     vendor_name: str
     customer_name: Optional[str] = None
     document_reference: str = Field(description="Invoice or bill number — not GST reg no")
     document_date: str = Field(description="ISO yyyy-mm-dd")
     due_date: Optional[str] = None
-    currency: str = Field(default="SGD")
+    currency: str = Field(
+        default="SGD",
+        description=(
+            "ISO 4217 currency code of the document — read it from the document, "
+            "not from the client. Primary source: the document's dedicated "
+            "Currency column when present (if all rows agree, use that code). "
+            "Secondary source: the total footer (e.g. 'TOTAL USD $1,195.11' "
+            "→ USD; 'Sub Total SGD 1,000' → SGD). Foreign codes embedded in "
+            "the Details / Description text (e.g. 'BHT 4466.68 x 0.0295' for "
+            "a per-line FX conversion note) are NOT the document currency when "
+            "a Currency column says otherwise. Never infer from the client "
+            "letterhead, the SG address, or the client's base_currency. When "
+            "every line and the footer agree on USD, currency must be USD even "
+            "if the client books in SGD."
+        ),
+    )
     document_total: float
     subtotal: Optional[float] = Field(None, description="Ex-GST total if shown separately")
     gst_total: Optional[float] = Field(None, description="GST grand total if shown")
     issuer_gst_regno: Optional[str] = None
+    doc_kind: DocKind = Field(
+        default="invoice",
+        description=(
+            "What kind of document this is. expense_claim = an employee or "
+            "contractor submitting receipts for reimbursement (look for "
+            '"Expense Claim", "Claim", "Reimbursement", a Claimant / Signature '
+            "block, or a task / job reference plus per-row receipts). "
+            "receipt = a supplier-issued sale receipt (no claimant). "
+            "invoice = standard trade invoice. "
+            "credit_note = refund / credit memo. other = none of the above."
+        ),
+    )
+    claimant_name: Optional[str] = Field(
+        default=None,
+        description=(
+            "The person submitting the claim when doc_kind == expense_claim. "
+            "The claimant is the supplier of the reimbursement (the company "
+            "letterhead is the approver, not the issuer). Leave null for "
+            "non-expense_claim documents."
+        ),
+    )
+    tax_visible_on_document: bool = Field(
+        default=False,
+        description=(
+            "True ONLY when the document explicitly shows a Tax / GST / VAT "
+            "row, column, or amount with a numeric value. A 'Total', "
+            "'Amount', 'Subtotal', 'Currency' or 'Grand Total' column is "
+            "NOT a tax column. If you cannot point to the literal word "
+            "'GST', 'Tax', 'VAT', or a percentage like '9%' / '0%' on the "
+            "document, this field is False. When false, ledger_lines must "
+            "use gst_amount=0 — the export layer will never invent tax."
+        ),
+    )
     # Drive-parity parties: one structured From/To pair replaces the legacy
     # ``issuer_name`` / ``bill_to_name`` split. ``from_party`` and ``to_party``
     # are the single source of truth for parties in the Understand path;
@@ -148,9 +275,24 @@ class DocumentLedgerExtract(BaseModel):
     direction_for_client: DirectionForClient = Field(
         default="unknown",
         description=(
-            "Resolved against the client identity passed into the prompt: "
-            "'purchase' if the client is the recipient, 'sales' if the client is "
-            "the issuer, 'self_referential' if from==to, 'unknown' otherwise."
+            "Direction in the client's books. Decide by money flow, not "
+            "letterhead. 'purchase' when the client is the party that PAYS "
+            "(recipient of goods, services, or a reimbursement claim). "
+            "'sales' when the client is the party that COLLECTS (issuer of "
+            "the bill to a separate counterparty). 'self_referential' when "
+            "the same legal entity is both issuer and recipient. 'unknown' "
+            "when the client identity does not appear on the document or the "
+            "parties are ambiguous — never guess."
+        ),
+    )
+    direction_reason: Optional[str] = Field(
+        default=None,
+        description=(
+            "Short grounded reason for direction_for_client — name the visible "
+            "signal (letterhead vs claimant, Bill-To block, From block, etc.) "
+            "that decided it. Example: 'claimant signed the form; client is "
+            "the approver'. Used by eval rubrics for debugging; never Python-"
+            "switched on."
         ),
     )
     summary_table: list[SummaryField] = Field(
@@ -167,14 +309,20 @@ class DocumentLedgerExtract(BaseModel):
 
 
 def use_understand_extract() -> bool:
-    """Feature flag: Drive-parity understand path (default on)."""
+    """Drive-parity single-call Understand path (default). Set LEDGR_UNDERSTAND_EXTRACT=0 to disable."""
     raw = os.environ.get("LEDGR_UNDERSTAND_EXTRACT", "1").strip().lower()
     return raw not in ("0", "false", "no", "off")
 
 
+def use_capture_book_pipeline() -> bool:
+    """Opt-in Capture → Book → Verify path (ADR-0014). Off by default."""
+    raw = os.environ.get("LEDGR_CAPTURE_BOOK", "0").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
 def should_use_legacy_extract(doc_type: str) -> bool:
-    """SOA packages and complex multi-doc splits stay on DocumentRecordBundle."""
-    if not use_understand_extract():
+    """SOA packages stay on DocumentRecordBundle + normalizer."""
+    if not use_understand_extract() and not use_capture_book_pipeline():
         return True
     return doc_type.strip().lower() in ("statement_of_account",)
 
@@ -230,6 +378,12 @@ def ledger_extract_to_extracted_invoice(extract: DocumentLedgerExtract) -> Extra
     ``customer_name`` strings (they carry the role + UEN). Falls back to the
     legacy fields for backward compatibility with older extracts that don't
     populate the new schema fields.
+
+    For ``expense_claim`` documents, the claimant (not the letterhead) is
+    the supplier / issuer of the claim; the mapper prefers ``claimant_name``
+    for the contact / issuer slot so the export layer's "Pay to" field lands
+    on the right person. This is data-shape plumbing, not a domain rule
+    (ADR-0015).
     """
     lines = [
         ExtractedLine(
@@ -252,6 +406,10 @@ def ledger_extract_to_extracted_invoice(extract: DocumentLedgerExtract) -> Extra
             issuer_gst_regno = extract.from_party.uen
     if extract.to_party and extract.to_party.name:
         bill_to_name = extract.to_party.name
+    # Expense-claim routing: the claimant (employee / contractor) is the
+    # supplier; the company letterhead is the approver.
+    if extract.doc_kind == "expense_claim" and extract.claimant_name:
+        issuer_name = extract.claimant_name
     return ExtractedInvoice(
         doc_type="invoice",
         invoice_number=extract.document_reference,
@@ -262,8 +420,8 @@ def ledger_extract_to_extracted_invoice(extract: DocumentLedgerExtract) -> Extra
         issuer_gst_regno=issuer_gst_regno,
         bill_to_name=bill_to_name,
         lines=lines,
-        subtotal=extract.subtotal if extract.subtotal is not None else net_sum,
-        gst_total=extract.gst_total if extract.gst_total is not None else gst_sum,
+        subtotal=extract.subtotal,
+        gst_total=extract.gst_total,
         total=extract.document_total,
     )
 
@@ -283,6 +441,9 @@ def ledger_extract_to_normalized(
     passing ``"auto"`` is the standard way for the invoice lane to use the
     call's verdict (the legacy ``direction`` kwarg is kept for backward
     compatibility with the legacy two-phase path and tests).
+
+    Propagates ``extract.tax_visible_on_document`` so the export layer honors
+    ADR-0014 (never invent tax when the document is silent).
     """
     effective_direction = direction
     if direction == "auto" and extract.direction_for_client != "unknown":
@@ -290,14 +451,15 @@ def ledger_extract_to_normalized(
     elif extract.direction_for_client not in ("unknown", "") and not direction:
         # No direction supplied at all (Understand call owns it now).
         effective_direction = extract.direction_for_client
-    ex = ledger_extract_to_extracted_invoice(extract)
-    return to_normalized(
-        ex,
+    inv = to_normalized(
+        ledger_extract_to_extracted_invoice(extract),
         direction=effective_direction,
         our_gst_registered=our_gst_registered,
         client_country=client_country,
         base_currency=base_currency,
     )
+    inv.tax_visible_on_document = extract.tax_visible_on_document
+    return inv
 
 
 def validate_ledger_extract(extract: DocumentLedgerExtract) -> tuple[bool, str]:
@@ -305,4 +467,4 @@ def validate_ledger_extract(extract: DocumentLedgerExtract) -> tuple[bool, str]:
     if not extract.ledger_lines:
         return False, "no ledger lines extracted"
     ex = ledger_extract_to_extracted_invoice(extract)
-    return reconcile(ex)
+    return reconcile(ex, tax_visible_on_document=extract.tax_visible_on_document)

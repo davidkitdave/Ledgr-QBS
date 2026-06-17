@@ -227,7 +227,7 @@ def test_profile_state_delta_includes_software_and_coa():
             assert channel_id == "C1"
             return ClientContext(
                 client_id="CL-1",
-                client_name="Acme Client Pte. Ltd.",
+                client_name="Company-A",
                 accounting_software="Xero",
                 fye_month=10,
                 coa=[CoaAccount(code="6010", description="Travel",
@@ -336,7 +336,7 @@ def test_process_file_event_defer_slack_delivery_writes_processing_log():
     # Custom payload so file_id matches the test's expectation
     custom_payload = _ledger_payload()
     custom_payload[nodes.LEDGER_ROWS_KEY]["file_id"] = "F-batch-1"
-    custom_payload["source_filename"] = "25-D15-Podaima Paid.pdf"
+    custom_payload["source_filename"] = "25-D15-Company-A.pdf"
     runner = _FakeRunner([], custom_payload)
 
     written: list[dict] = []
@@ -367,7 +367,7 @@ def test_process_file_event_defer_slack_delivery_writes_processing_log():
             file_id="F-batch-1",
             app_name="acc",
             download_fn=lambda c, f: b"%PDF-1.4 fake",
-            source_filename="25-D15-Podaima Paid.pdf",
+            source_filename="25-D15-Company-A.pdf",
             client_store=rec_store,
             defer_slack_delivery=True,
         )
@@ -376,7 +376,7 @@ def test_process_file_event_defer_slack_delivery_writes_processing_log():
     assert len(written) == 1, f"expected one processing_log write, got {written}"
     entry = written[0]["entry"]
     assert entry["file_id"] == "F-batch-1"
-    assert entry["filename"] == "25-D15-Podaima Paid.pdf"
+    assert entry["filename"] == "25-D15-Company-A.pdf"
     assert entry["fy"] == "2026"
     assert entry["row_count"] == 1
     # delivery_message_ts is absent because the per-doc thread_ts is None in
@@ -2421,7 +2421,7 @@ def test_persist_corrections_reads_nested_party_real_serialized_shape():
         nodes.NORMALIZED_KEY: [
             {"doc_type": "purchase",
              "supplier": {"name": "Vendor Alpha Pte Ltd"},
-             "customer": {"name": "Acme Client Pte. Ltd."},
+             "customer": {"name": "Company-A"},
              "lines": [{"description": "audit", "account_code": "6-3000"}]}
         ],
     }
@@ -2435,7 +2435,7 @@ def test_persist_corrections_reads_nested_party_real_serialized_shape():
         "client_id": "CL-1",
         nodes.NORMALIZED_KEY: [
             {"doc_type": "sales",
-             "supplier": {"name": "Acme Client Pte. Ltd."},
+             "supplier": {"name": "Company-A"},
              "customer": {"name": "PTTEP"},
              "lines": [{"description": "svc"}]}
         ],
@@ -3307,7 +3307,7 @@ def test_pick_chat_fy_prefers_question_processing_log_hint():
             {"fy": "2025", "row_count": 3, "has_data": True},
         ],
         processing_log=[
-            {"filename": "25-D12-Podaima Paid.pdf", "fy": "2025"},
+            {"filename": "25-D12-Company-A.pdf", "fy": "2025"},
         ],
         question="yes file name 25-D12",
         fye_month=10,
@@ -3329,10 +3329,10 @@ def test_resolve_thread_delivery_context_filters_by_ts():
     log = [
         {"file_id": "F-other", "filename": "old.pdf", "fy": "2024",
          "delivery_message_ts": "1700000000.000100", "channel_id": "C1"},
-        {"file_id": "F-D15", "filename": "25-D15-Podaima Paid.pdf", "fy": "2025",
+        {"file_id": "F-D15", "filename": "25-D15-Company-A.pdf", "fy": "2025",
          "delivery_message_ts": "1700000099.000200", "channel_id": "C1",
          "invoice_ids": ["25-D15"]},
-        {"file_id": "F-D12", "filename": "25-D12-Podaima Paid.pdf", "fy": "2025",
+        {"file_id": "F-D12", "filename": "25-D12-Company-A.pdf", "fy": "2025",
          "delivery_message_ts": "1700000099.000200", "channel_id": "C1",
          "invoice_ids": ["25-D12"]},
         {"file_id": "F-future", "filename": "26-X.pdf", "fy": "2026",
@@ -3346,7 +3346,7 @@ def test_resolve_thread_delivery_context_filters_by_ts():
     )
     assert ctx["thread_delivery_message_ts"] == "1700000099.000200"
     assert sorted(ctx["thread_delivery_filenames"]) == [
-        "25-D12-Podaima Paid.pdf", "25-D15-Podaima Paid.pdf",
+        "25-D12-Company-A.pdf", "25-D15-Company-A.pdf",
     ]
     assert sorted(ctx["thread_delivery_invoice_ids"]) == ["25-D12", "25-D15"]
     assert ctx["thread_delivery_fy"] == "2025"
@@ -3405,11 +3405,11 @@ def test_answer_question_injects_thread_delivery_context_into_state_delta():
             return []
 
     log = [
-        {"file_id": "F-D15", "filename": "25-D15-Podaima Paid.pdf",
+        {"file_id": "F-D15", "filename": "25-D15-Company-A.pdf",
          "fy": "2025", "channel_id": "C1",
          "delivery_message_ts": "1700000099.000200",
          "invoice_ids": ["25-D15"]},
-        {"file_id": "F-D12", "filename": "25-D12-Podaima Paid.pdf",
+        {"file_id": "F-D12", "filename": "25-D12-Company-A.pdf",
          "fy": "2025", "channel_id": "C1",
          "delivery_message_ts": "1700000099.000200",
          "invoice_ids": ["25-D12"]},
@@ -3434,8 +3434,8 @@ def test_answer_question_injects_thread_delivery_context_into_state_delta():
     delta = chat_runner.pre_run_state_deltas[0]
     # Thread-scoped keys present
     assert delta.get("thread_delivery_message_ts") == "1700000099.000200"
-    assert "25-D15-Podaima Paid.pdf" in delta.get("thread_delivery_filenames") or []
-    assert "25-D12-Podaima Paid.pdf" in delta.get("thread_delivery_filenames") or []
+    assert "25-D15-Company-A.pdf" in delta.get("thread_delivery_filenames") or []
+    assert "25-D12-Company-A.pdf" in delta.get("thread_delivery_filenames") or []
     assert "25-D15" in delta.get("thread_delivery_invoice_ids") or []
     # FY re-picked to match the thread (2025 has rows in this fixture)
     assert delta.get("fy_loaded") == "2025"
@@ -3547,18 +3547,18 @@ def test_resolve_thread_delivery_context_falls_back_to_replies():
                         "blocks": [
                             {"type": "section",
                              "text": {"type": "mrkdwn",
-                                      "text": "Delivered 2 files:\n• 25-D15-Podaima Paid.pdf\n• 25-D12-Podaima Paid.pdf"}},
+                                      "text": "Delivered 2 files:\n• 25-D15-Company-A.pdf\n• 25-D12-Company-A.pdf"}},
                             {"type": "data_table",
                              "rows": [[{"text": "Source Filename"}, {"text": "Account"}],
-                                      [{"text": "25-D15-Podaima Paid.pdf"}, {"text": "6-3000"}]]},
+                                      [{"text": "25-D15-Company-A.pdf"}, {"text": "6-3000"}]]},
                         ]
                     }
                 ]
             }
 
     log = [
-        {"file_id": "F-D15", "filename": "25-D15-Podaima Paid.pdf", "fy": "2025"},
-        {"file_id": "F-D12", "filename": "25-D12-Podaima Paid.pdf", "fy": "2025"},
+        {"file_id": "F-D15", "filename": "25-D15-Company-A.pdf", "fy": "2025"},
+        {"file_id": "F-D12", "filename": "25-D12-Company-A.pdf", "fy": "2025"},
     ]
     slack = _RepliesClient()
     ctx = _resolve_thread_delivery_context(
@@ -3568,8 +3568,8 @@ def test_resolve_thread_delivery_context_falls_back_to_replies():
         slack_client=slack,
     )
     assert slack.calls, "must call conversations_replies on fallback"
-    assert "25-D15-Podaima Paid.pdf" in ctx["thread_delivery_filenames"]
-    assert "25-D12-Podaima Paid.pdf" in ctx["thread_delivery_filenames"]
+    assert "25-D15-Company-A.pdf" in ctx["thread_delivery_filenames"]
+    assert "25-D12-Company-A.pdf" in ctx["thread_delivery_filenames"]
     assert ctx["thread_delivery_fy"] == "2025"
     assert "25-D15" in ctx["thread_delivery_invoice_ids"]
     assert ctx.get("thread_delivery_preview_rows"), "must parse delivery data_table"
@@ -3611,13 +3611,13 @@ def test_prefetch_thread_ledger_matches_finds_xero_invoice():
         "_sheet": "Purchase",
         "*InvoiceNumber": "25-D15",
         "*AccountCode": "902-A02",
-        "*ContactName": "Podaima",
+        "*ContactName": "Company-A",
         "*Description": "Professional fees",
     }]
     matches = _prefetch_thread_ledger_matches(
         ledger,
         invoice_ids=["25-D15"],
-        filenames=["25-D15-Podaima Paid.pdf"],
+        filenames=["25-D15-Company-A.pdf"],
     )
     assert len(matches) == 1
     assert matches[0]["account_code"] == "902-A02"
@@ -3634,7 +3634,7 @@ def test_try_direct_thread_account_code_answer_from_preview():
         "thread_delivery_preview_rows": [{
             "invoice_id": "25-D15",
             "account_code": "902-A02",
-            "vendor": "Darrell Podaima",
+            "vendor": "Person-1",
             "description": "PTTEP/UOA monitoring audit",
         }],
         "thread_delivery_invoice_ids": ["25-D15"],
@@ -3647,7 +3647,7 @@ def test_try_direct_thread_account_code_answer_from_preview():
     assert "902-A02" in text
     assert "25-D15" in text
     assert focus and focus.get("account_code") == "902-A02"
-    assert "vendor" not in text.lower() or "Darrell" in text
+    assert "vendor" not in text.lower() or "Person-1" in text
 
 
 def test_try_direct_thread_account_code_answer_clarifies_wrong_code():
@@ -3676,7 +3676,7 @@ def test_try_direct_thread_coa_description_followup_from_focus():
         THREAD_FOCUS_KEY: {
             "invoice_id": "25-D15",
             "account_code": "902-A02",
-            "vendor": "Darrell Podaima",
+            "vendor": "Person-1",
             "line_description": "Fees",
         },
         "coa": [
@@ -3712,7 +3712,7 @@ def test_answer_question_injects_thread_delivery_ledger_matches(monkeypatch):
         def list_processing_log(self, client_id, limit=20):
             return [{
                 "file_id": "F-D15",
-                "filename": "25-D15-Podaima Paid.pdf",
+                "filename": "25-D15-Company-A.pdf",
                 "fy": "2025",
                 "delivery_message_ts": "1700000099.000200",
                 "row_count": 0,
@@ -3777,7 +3777,7 @@ def test_chat_session_picks_fy_with_most_rows_not_latest():
     """P0-B: ``answer_question`` should call ``best_fy_for_chat`` and use the
     FY whose workbook has the most data — not just the highest FY label.
 
-    Regression for the Auditair client whose data lives in FY2025 while
+    Regression for the Company-A client whose data lives in FY2025 while
     ``latest_fy`` would pick FY2026 (empty) and report "ledger not loaded".
     """
     from accounting_agents.slack_runner import LEDGER_DATA_KEY, answer_question
@@ -7372,7 +7372,7 @@ def test_batch_processing_plan_blocks_expanded_section_when_opt_in(monkeypatch):
     assert not any(b.get("type") == "plan" for b in blocks)
     sections = [b for b in blocks if b.get("type") == "section"]
     assert len(sections) == 1
-    assert "Overall progress — 1/1 done" in sections[0]["text"]["text"]
+    assert "1 of 1 complete" in sections[0]["text"]["text"]
 
 
 def test_batch_processing_plan_blocks_falls_back_when_native_unsupported(monkeypatch):
@@ -7461,7 +7461,7 @@ def test_document_ledger_extract_schema_has_party_and_direction():
 
     extract = DocumentLedgerExtract(
         vendor_name="Contractor Beta",
-        customer_name="Acme Client Pte. Ltd.",
+        customer_name="Company-A",
         document_reference="INV-26-001",
         document_date="2026-06-01",
         document_total=1200.0,
@@ -7469,7 +7469,7 @@ def test_document_ledger_extract_schema_has_party_and_direction():
             name="Contractor Beta", uen=None, role="issuer",
         ),
         to_party=PartyField(
-            name="Acme Client Pte. Ltd.",
+            name="Company-A",
             uen="201700001A",
             role="recipient",
         ),
@@ -7487,10 +7487,10 @@ def test_understand_prompt_includes_client_context():
     from invoice_processing.extract.ledger_extract import _build_understand_prompt
 
     prompt = _build_understand_prompt(
-        client_name="Acme Client Pte. Ltd.",
+        client_name="Company-A",
         client_uen="201700001A",
     )
-    assert "Acme Client Pte. Ltd." in prompt
+    assert "Company-A" in prompt
     assert "201700001A" in prompt
     assert "direction_for_client" in prompt
     assert "purchase" in prompt
@@ -7519,13 +7519,13 @@ def test_ledger_extract_to_normalized_uses_direction_for_client_when_auto():
 
     extract = DocumentLedgerExtract(
         vendor_name="Vendor Pte Ltd",
-        customer_name="Acme Client Pte. Ltd.",
+        customer_name="Company-A",
         document_reference="INV-1",
         document_date="2026-06-01",
         document_total=100.0,
         from_party=PartyField(name="Vendor Pte Ltd", role="issuer"),
         to_party=PartyField(
-            name="Acme Client Pte. Ltd.",
+            name="Company-A",
             uen="201700001A",
             role="recipient",
         ),

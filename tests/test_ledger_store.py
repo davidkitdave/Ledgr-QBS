@@ -183,10 +183,10 @@ def test_filename_is_client_scoped_bank_and_invoice():
 
     inv = store.append_rows(
         client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
-        software="qbs", kind="invoice", client_name="Acme Client Pte. Ltd.",
+        software="qbs", kind="invoice", client_name="Company-A",
         batches=[{"sheet": "Purchase", "doc_key": "k1", "rows": [_row("first")]}],
     )
-    assert inv["filename"] == "Acme Client Pte. Ltd. - Ledger_FY2026.xlsx"
+    assert inv["filename"] == "Company-A - Ledger_FY2026.xlsx"
 
     bank = store.append_rows(
         client_id="c2", fy="2025", slack_client=slack, channel_id="C2",

@@ -2,7 +2,7 @@
   "fixtures": [
     {
       "label": "sample_test_group",
-      "client": "Acme Client Pte. Ltd.",
+      "client": "Company-A",
       "files": [
         {
           "file": "INV-2026-003-sample.pdf",

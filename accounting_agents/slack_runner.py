@@ -1887,79 +1887,121 @@ async def process_file_event(
         last_stage: Optional[str] = None
         last_node: Optional[str] = None
         understand_output: Optional[str] = None
-        async for event in runner.run_async(
-            user_id=channel_id,
-            session_id=session_id,
-            new_message=types.Content(
-                role="user", parts=[types.Part(text="process this document")]
-            ),
-            state_delta=state_delta,
-        ):
-            # Drive the live status off the real event stream: each node tags its
-            # events with node_info.path → friendly stage label. Edit on stage
-            # transitions and when a new node completes within the same stage.
-            node_name = event_node_name(event)
-            stage = event_stage_label(event)
-            stage_key = event_stage_key(event)
-            if node_name is not None and node_name != last_node:
-                last_node = node_name
-                run_state: dict = {}
-                try:
-                    session = await runner.session_service.get_session(
-                        app_name=app_name, user_id=channel_id, session_id=session_id
-                    )
-                    if session and getattr(session, "state", None):
-                        run_state = dict(session.state)
-                except Exception:  # noqa: BLE001 — cosmetic status only
-                    pass
-                node_output = _stage_output_for_completed_node(node_name, run_state)
-                output_stage = _output_stage_for_node(node_name)
-                if output_stage == "understand" and node_output:
-                    understand_output = node_output
-                if stage_key is not None:
-                    if stage_key != last_stage:
-                        last_stage = stage_key
-                        handoff_output = None
-                        if stage_key == "policy" and understand_output:
-                            handoff_output = understand_output
-                        elif stage_key != "understand" and node_output and output_stage != "understand":
-                            handoff_output = node_output
-                        _stage_state.advance(stage_key, output=handoff_output)
-                    if node_output and output_stage:
-                        _stage_state.set_output(output_stage, node_output)
-                if stage is not None:
-                    _update_status(
-                        slack_client,
-                        channel_id,
-                        status_ts,
-                        stage,
-                        blocks=_plan_status_blocks(
-                            _stage_state, source_filename, channel_id
-                        ),
-                    )
-                    if batch_mode and status_callback is not None:
-                        # Surface the live stage onto the shared batch plan block
-                        # so the user sees per-doc thinking in the placeholder.
-                        try:
-                            _snapshot = _stage_state.snapshot()
-                            current_stage = next(
-                                (s for s in _snapshot if s.get("status") == "in_progress"),
-                                None,
-                            )
-                            status_callback({
-                                "file_label": source_filename,
-                                "stage": (current_stage or {}).get("title") or stage,
-                                "detail": (current_stage or {}).get("output"),
-                                "status": "in_progress",
-                            })
-                        except Exception:  # noqa: BLE001 - cosmetic only
-                            logger.debug("batch status callback failed", exc_info=True)
-            iid = find_interrupt_id(event)
-            if iid is not None:
-                interrupt_id = iid
-            text = extract_final_text(event)
-            if text:
-                last_text = text
+        try:
+            async for event in runner.run_async(
+                user_id=channel_id,
+                session_id=session_id,
+                new_message=types.Content(
+                    role="user", parts=[types.Part(text="process this document")]
+                ),
+                state_delta=state_delta,
+            ):
+                # Drive the live status off the real event stream: each node tags its
+                # events with node_info.path → friendly stage label. Edit on stage
+                # transitions and when a new node completes within the same stage.
+                node_name = event_node_name(event)
+                stage = event_stage_label(event)
+                stage_key = event_stage_key(event)
+                if node_name is not None and node_name != last_node:
+                    last_node = node_name
+                    run_state: dict = {}
+                    try:
+                        session = await runner.session_service.get_session(
+                            app_name=app_name, user_id=channel_id, session_id=session_id
+                        )
+                        if session and getattr(session, "state", None):
+                            run_state = dict(session.state)
+                    except Exception:  # noqa: BLE001 — cosmetic status only
+                        pass
+                    node_output = _stage_output_for_completed_node(node_name, run_state)
+                    output_stage = _output_stage_for_node(node_name)
+                    if output_stage == "understand" and node_output:
+                        understand_output = node_output
+                    if stage_key is not None:
+                        if stage_key != last_stage:
+                            last_stage = stage_key
+                            handoff_output = None
+                            if stage_key == "policy" and understand_output:
+                                handoff_output = understand_output
+                            elif stage_key != "understand" and node_output and output_stage != "understand":
+                                handoff_output = node_output
+                            _stage_state.advance(stage_key, output=handoff_output)
+                        if node_output and output_stage:
+                            _stage_state.set_output(output_stage, node_output)
+                    if stage is not None:
+                        _update_status(
+                            slack_client,
+                            channel_id,
+                            status_ts,
+                            stage,
+                            blocks=_plan_status_blocks(
+                                _stage_state, source_filename, channel_id
+                            ),
+                        )
+                        if batch_mode and status_callback is not None:
+                            # Surface the live stage onto the shared batch plan block
+                            # so the user sees per-doc thinking in the placeholder.
+                            try:
+                                _snapshot = _stage_state.snapshot()
+                                current_stage = next(
+                                    (s for s in _snapshot if s.get("status") == "in_progress"),
+                                    None,
+                                )
+                                status_callback({
+                                    "file_label": source_filename,
+                                    "stage": (current_stage or {}).get("title") or stage,
+                                    "detail": (current_stage or {}).get("output"),
+                                    "status": "in_progress",
+                                })
+                            except Exception:  # noqa: BLE001 - cosmetic only
+                                logger.debug("batch status callback failed", exc_info=True)
+                iid = find_interrupt_id(event)
+                if iid is not None:
+                    interrupt_id = iid
+                text = extract_final_text(event)
+                if text:
+                    last_text = text
+
+        except Exception as exc:  # noqa: BLE001 — surface to Slack, don't kill batch
+            logger.exception(
+                "document processing failed: file=%s channel=%s",
+                file_id,
+                channel_id,
+            )
+            err_short = str(exc).split("\n", maxsplit=1)[0][:200]
+            if "503" in err_short or "UNAVAILABLE" in err_short:
+                user_msg = (
+                    f"Gemini is temporarily overloaded — couldn't finish reading "
+                    f"`{source_filename}`. Please try again in a minute."
+                )
+            else:
+                user_msg = (
+                    f"Sorry, processing failed for `{source_filename}`: {err_short}"
+                )
+            _stage_state.mark_failed("understand", err_short)
+            _update_status(
+                slack_client,
+                channel_id,
+                status_ts,
+                "❌ Processing failed",
+                blocks=_plan_status_blocks(_stage_state, source_filename, channel_id),
+            )
+            _post_message(slack_client, channel_id, user_msg, thread_ts=thread_ts)
+            _remove_reaction(slack_client, channel_id, upload_msg_ts, "eyes")
+            _add_reaction(slack_client, channel_id, upload_msg_ts, "x")
+            if batch_mode and status_callback is not None:
+                status_callback({
+                    "file_label": source_filename,
+                    "stage": "Processing failed",
+                    "detail": err_short,
+                    "status": "failed",
+                })
+            return {
+                "status": "processing_failed",
+                "channel_id": channel_id,
+                "file_id": file_id,
+                "error": err_short,
+            }
 
         outcome = await _finalize_run_outcome(
             events=[],  # events already drained into interrupt_id / last_text above
@@ -5802,6 +5844,7 @@ def build_async_app(
             posted = 0
             needs_review = 0
             rejected = 0
+            failed = 0
             duplicates = 0
             done = 0
             software_hint = ""
@@ -5836,6 +5879,7 @@ def build_async_app(
                     posted=posted,
                     needs_review=needs_review,
                     rejected=rejected,
+                    failed=failed,
                     duplicates=duplicates,
                 )
                 try:
@@ -5950,23 +5994,45 @@ def build_async_app(
                     _refresh_job_progress()
                     continue
 
-                result = await process_file_event(
-                    runner=runner,
-                    ledger_store=ledger_store,
-                    db=db,
-                    slack_client=sync_client,
-                    channel_id=channel_id,
-                    file_id=file_id,
-                    app_name=app_name,
-                    download_fn=download_pdf_bytes,
-                    thread_ts=summary_ts,
-                    source_filename=_resolve_file_name(sync_client, file_id, f),
-                    hint=user_hint,
-                    defer_slack_delivery=batch_defer,
-                    batch_mode=batch_defer,
-                    defer_ledger_persist=batch_defer,
-                    status_callback=_batch_status_cb if batch_defer else None,
-                )
+                fname = _resolve_file_name(sync_client, file_id, f)
+                for row in doc_rows:
+                    if row.get("file_label") == fname:
+                        row["stage"] = "Starting…"
+                        row["status"] = "in_progress"
+                        break
+                _refresh_job_progress()
+
+                try:
+                    result = await process_file_event(
+                        runner=runner,
+                        ledger_store=ledger_store,
+                        db=db,
+                        slack_client=sync_client,
+                        channel_id=channel_id,
+                        file_id=file_id,
+                        app_name=app_name,
+                        download_fn=download_pdf_bytes,
+                        thread_ts=summary_ts,
+                        source_filename=fname,
+                        hint=user_hint,
+                        defer_slack_delivery=batch_defer,
+                        batch_mode=batch_defer,
+                        defer_ledger_persist=batch_defer,
+                        status_callback=_batch_status_cb if batch_defer else None,
+                    )
+                except Exception as exc:  # noqa: BLE001 — belt over process_file_event
+                    logger.exception("batch file processing failed: file=%s", file_id)
+                    err_short = str(exc).split("\n", maxsplit=1)[0][:200]
+                    label = fname or f"doc {done + 1}"
+                    for row in doc_rows:
+                        if row.get("file_label") == label:
+                            row.update({
+                                "stage": "Processing failed",
+                                "detail": err_short,
+                                "status": "failed",
+                            })
+                            break
+                    result = {"status": "processing_failed", "error": err_short}
                 done += 1
                 # Aggregate per-doc outcomes for the final tally edit.
                 status = (result or {}).get("status")
@@ -5989,6 +6055,8 @@ def build_async_app(
                     needs_review += 1
                 elif status == "rejected_unreadable":
                     rejected += 1
+                elif status == "processing_failed":
+                    failed += 1
                 _refresh_job_progress()
 
             _refresh_job_progress(force=True)
@@ -6027,6 +6095,7 @@ def build_async_app(
                             posted=posted,
                             needs_review=needs_review,
                             rejected=rejected,
+                            failed=failed,
                             duplicates=duplicates,
                             software=software_hint,
                             fy=fy_hint,

@@ -15,7 +15,7 @@ Examples:
 
     uv run python scripts/debug_classify_direction.py path/to/invoice.pdf
     uv run python scripts/debug_classify_direction.py path/to/invoice.pdf \\
-        --client-name "Acme Client Pte. Ltd." --client-uen "201712345A"
+        --client-name "Company-A" --client-uen "201712345A"
     uv run python scripts/debug_classify_direction.py path/to/invoice.pdf --json
 """
 
@@ -51,7 +51,7 @@ def main() -> None:
     parser.add_argument("pdf", type=Path, help="Path to PDF (or PNG/JPG/WEBP/GIF)")
     parser.add_argument(
         "--client-name",
-        default="Acme Client Pte. Ltd.",
+        default="Company-A",
         help="Channel client name (from Firestore profile)",
     )
     parser.add_argument(
