@@ -73,3 +73,38 @@ def test_oauth_routes_return_503_when_handler_not_ready(monkeypatch):
 
     assert install.status_code == 503
     assert redirect.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# /readyz — readiness probe (ADR-0018)
+# ---------------------------------------------------------------------------
+
+
+def test_readyz_returns_200_when_handler_is_initialised(monkeypatch):
+    """GET /readyz is 200 when the Bolt handler global is set (lifespan done)."""
+    # Any non-None sentinel is sufficient — the endpoint only checks truthiness.
+    monkeypatch.setattr(fast_api_app, "_bolt_handler", object())
+
+    client = TestClient(fast_api_app.app)
+    resp = client.get("/readyz")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ready"}
+
+
+def test_readyz_returns_503_when_handler_not_initialised(monkeypatch):
+    """GET /readyz is 503 when the Bolt handler global is None (lifespan not run)."""
+    monkeypatch.setattr(fast_api_app, "_bolt_handler", None)
+
+    client = TestClient(fast_api_app.app)
+    resp = client.get("/readyz")
+
+    assert resp.status_code == 503
+    assert resp.json()["status"] == "not_ready"
+    assert "bolt_handler" in resp.json()["reason"]
+
+
+def test_readyz_is_registered_as_get_route():
+    """/readyz must appear in the GET route table alongside /healthz."""
+    paths = _registered_get_paths()
+    assert "/readyz" in paths

@@ -72,6 +72,27 @@ async def healthz() -> dict:
     return {"status": "ok"}
 
 
+@app.get("/readyz")
+async def readyz() -> Response:
+    """Readiness probe for Cloud Run smoke-test gate (ADR-0018).
+
+    Returns 200 when the lifespan has completed and the Bolt request handler is
+    initialised.  Returns 503 before initialisation is done.  No network calls
+    are made — this is a pure in-process state check.
+    """
+    if _bolt_handler is None:
+        return Response(
+            content='{"status":"not_ready","reason":"bolt_handler not initialised"}',
+            status_code=503,
+            media_type="application/json",
+        )
+    return Response(
+        content='{"status":"ready"}',
+        status_code=200,
+        media_type="application/json",
+    )
+
+
 @app.post("/slack/events")
 async def slack_events(request: Request) -> Response:
     """Forward all Slack event / action / command payloads to the Bolt app."""
