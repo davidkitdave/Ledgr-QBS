@@ -4989,11 +4989,20 @@ def build_async_app(
         local ``sync_client`` from THIS, so an event from firm A never posts with
         firm B's token (the previous single global client did).
         """
+        # Only accept a real string token. Bolt sets context['bot_token'] (and the
+        # injected client's .token) to the per-workspace token; guarding on str
+        # avoids building a live WebClient from a non-string (e.g. a test
+        # MagicMock's auto-attribute), which would otherwise make real network
+        # calls. Falls through to the build-time ``token``.
         tok = None
         if context is not None:
-            tok = context.get("bot_token")
+            ctx_tok = context.get("bot_token")
+            if isinstance(ctx_tok, str):
+                tok = ctx_tok
         if not tok and client is not None:
-            tok = getattr(client, "token", None)
+            client_tok = getattr(client, "token", None)
+            if isinstance(client_tok, str):
+                tok = client_tok
         return _SyncWebClient(token=tok or token)
 
     # Defensive default for any non-handler reference; every listener below

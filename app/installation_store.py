@@ -22,6 +22,7 @@ Firestore layout::
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import time
 import uuid
@@ -193,6 +194,35 @@ class FirestoreInstallationStore(InstallationStore):
         self.delete_installation(enterprise_id=enterprise_id, team_id=team_id)
         self.delete_bot(enterprise_id=enterprise_id, team_id=team_id)
 
+    # ---- async variants (AsyncApp / AsyncOAuthFlow + per-event authorize) ----
+    # bolt-python's AsyncApp calls the ``async_*`` methods: AsyncOAuthFlow uses
+    # ``async_save`` on the OAuth callback, and AsyncInstallationStoreAuthorize
+    # uses ``async_find_bot`` / ``async_find_installation`` on EVERY inbound event
+    # to resolve the per-workspace token. The sync slack_sdk base provides no async
+    # delegators, so we add them here and offload the blocking Firestore I/O to a
+    # worker thread to keep the event loop responsive.
+
+    async def async_save(self, installation: Installation) -> None:
+        await asyncio.to_thread(self.save, installation)
+
+    async def async_save_bot(self, bot: Bot) -> None:
+        await asyncio.to_thread(self.save_bot, bot)
+
+    async def async_find_installation(self, **kwargs) -> Optional[Installation]:
+        return await asyncio.to_thread(self.find_installation, **kwargs)
+
+    async def async_find_bot(self, **kwargs) -> Optional[Bot]:
+        return await asyncio.to_thread(self.find_bot, **kwargs)
+
+    async def async_delete_installation(self, **kwargs) -> None:
+        await asyncio.to_thread(self.delete_installation, **kwargs)
+
+    async def async_delete_bot(self, **kwargs) -> None:
+        await asyncio.to_thread(self.delete_bot, **kwargs)
+
+    async def async_delete_all(self, **kwargs) -> None:
+        await asyncio.to_thread(self.delete_all, **kwargs)
+
 
 # --------------------------------------------------------------------------- #
 # OAuth state store (oauth_states/{state})
@@ -247,3 +277,11 @@ class FirestoreOAuthStateStore(OAuthStateStore):
             return False
         doc.delete()
         return True
+
+    # ---- async variants (AsyncOAuthFlow issues/consumes state via async_*) ----
+
+    async def async_issue(self, *args, **kwargs) -> str:
+        return await asyncio.to_thread(self.issue, *args, **kwargs)
+
+    async def async_consume(self, state: str) -> bool:
+        return await asyncio.to_thread(self.consume, state)

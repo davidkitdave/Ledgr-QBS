@@ -12,6 +12,8 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
+
 from slack_sdk.oauth.installation_store import Bot, Installation
 
 from app.config import missing_slack_oauth
@@ -159,6 +161,35 @@ class TestFirestoreInstallationStore:
         # _db() returned the injected fake; the lazy real client stays None.
         assert store._client is None
 
+    # ---- async variants (used by AsyncApp / AsyncOAuthFlow + per-event authorize) ----
+    # These guard the production bug where the sync store was passed to the
+    # AsyncApp: AsyncOAuthFlow calls async_save (OAuth callback) and the per-event
+    # authorize calls async_find_bot — both 500'd because the async methods were
+    # missing on the sync base.
+
+    def test_async_save_then_async_find_bot(self):
+        store = self._store()
+        asyncio.run(store.async_save(_installation()))
+        bot = asyncio.run(store.async_find_bot(enterprise_id=None, team_id="T1"))
+        assert isinstance(bot, Bot)
+        assert bot.bot_token == "xoxb-1"
+
+    def test_async_find_installation_roundtrip(self):
+        store = self._store()
+        asyncio.run(store.async_save(_installation()))
+        found = asyncio.run(
+            store.async_find_installation(enterprise_id=None, team_id="T1")
+        )
+        assert isinstance(found, Installation)
+        assert found.bot_token == "xoxb-1"
+
+    def test_async_find_bot_missing_returns_none(self):
+        store = self._store()
+        asyncio.run(store.async_save(_installation()))
+        assert asyncio.run(
+            store.async_find_bot(enterprise_id=None, team_id="NOPE")
+        ) is None
+
 
 # --------------------------------------------------------------------------- #
 # FirestoreOAuthStateStore
@@ -203,6 +234,18 @@ class TestFirestoreOAuthStateStore:
         store = FirestoreOAuthStateStore()
         assert store._client is None
         assert store._injected_client is None
+
+    # ---- async variants (AsyncOAuthFlow issues/consumes state via async_*) ----
+
+    def test_async_issue_persists_and_async_consume_once(self):
+        fake = FakeFirestore()
+        store = FirestoreOAuthStateStore(client=fake)
+        state = asyncio.run(store.async_issue())
+        assert isinstance(state, str) and state
+        assert fake.collection("oauth_states").document(state).get().exists
+        assert asyncio.run(store.async_consume(state)) is True
+        # one-time use — second async_consume fails
+        assert asyncio.run(store.async_consume(state)) is False
 
 
 # --------------------------------------------------------------------------- #
