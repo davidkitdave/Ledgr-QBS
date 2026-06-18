@@ -61,11 +61,11 @@ def _document_record_from_ex(ex: ExtractedInvoice) -> DocumentRecord:
         labeled_fields=fields,
         line_items=[
             LineCapture(
-                description=l.description,
-                net_amount=l.net_amount,
-                tax_label=l.tax_label,
+                description=ln.description,
+                net_amount=ln.net_amount,
+                tax_label=ln.tax_label,
             )
-            for l in ex.lines
+            for ln in ex.lines
         ],
         totals=totals,
     )

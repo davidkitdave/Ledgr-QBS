@@ -25,7 +25,6 @@ from invoice_processing.extract.invoice_extractor import (
     ExtractedInvoiceBundle,
     ExtractedLine,
 )
-from tests.test_nodes import _doc_bundle_from_ex_bundle
 
 
 class FakeContext:
@@ -114,6 +113,9 @@ def test_no_signal_skips_reviewer_and_marks_ok():
 
 
 def test_unreconciled_invokes_reviewer():
+    """Reviewer IS invoked on a hard signal (unreconciled). After the fix (ADR-0017 §3
+    safety gap), the critic's OK cannot clear a remaining hard signal — detect_struggle
+    is re-checked deterministically after the loop and the doc escalates to CLARIFY."""
     calls = {"n": 0}
 
     def fake_reviewer(state, reasons, *, model):
@@ -127,7 +129,8 @@ def test_unreconciled_invokes_reviewer():
     asyncio.run(_drive(nodes.review_extraction_node._func(ctx)))
 
     assert calls["n"] == 1
-    assert ctx.state[nodes.REVIEW_VERDICT_KEY] == nodes.REVIEW_VERDICT_OK
+    # Hard signal still present after critic returned OK → must escalate, not proceed.
+    assert ctx.state[nodes.REVIEW_VERDICT_KEY] == nodes.REVIEW_VERDICT_CLARIFY
     assert any(r.startswith("unreconciled") for r in ctx.state[nodes.REVIEW_REASON_KEY])
 
 

@@ -295,7 +295,6 @@ def test_terminal_approve_decision_still_resolves_after_review():
 # scheduling instead of a hand-built single-node workflow.
 # =========================================================================== #
 
-from datetime import date as _date  # noqa: E402
 
 from accounting_agents.agent import document_workflow_driver  # noqa: E402
 from invoice_processing.classify.document_classifier import (  # noqa: E402

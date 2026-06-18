@@ -62,6 +62,54 @@ def _is_slack_host(host: str) -> bool:
     return host == "slack.com" or host.endswith(".slack.com")
 
 
+def _invoice_date_sort_key(row: dict) -> tuple:
+    """Return a sortable (year, month, day, invoice_number) key for an invoice row.
+
+    Reads the real exporter column names defensively:
+    - QBS:  ``"Invoice Date"``  /  ``"Invoice Number"``
+    - Xero: ``"*InvoiceDate"``  /  ``"*InvoiceNumber"``
+    - Fallback ``"Date"`` for test/legacy rows.
+
+    Dates are parsed from DD/MM/YYYY (the format ``_fmt_date`` produces) or
+    YYYY-MM-DD.  Blank / unparseable dates sort LAST via a (9999, 12, 31)
+    sentinel so malformed rows never crash and never displace real ones.
+    ``doc_key`` is intentionally excluded — it lives on the batch, not the row.
+    """
+    import re as _re
+
+    raw_date = (
+        row.get("Invoice Date")
+        or row.get("*InvoiceDate")
+        or row.get("Date")
+        or ""
+    )
+    inv = str(row.get("Invoice Number") or row.get("*InvoiceNumber") or "")
+
+    # Parse DD/MM/YYYY or YYYY-MM-DD; anything else → sentinel.
+    _LAST = (9999, 12, 31)
+    s = str(raw_date).strip()
+    if not s:
+        return (*_LAST, inv)
+    # DD/MM/YYYY or DD-MM-YYYY or DD/MM/YY
+    m = _re.fullmatch(r"(\d{1,2})[/\-](\d{1,2})[/\-](\d{2,4})", s)
+    if m:
+        d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if y < 100:
+            y += 2000
+        try:
+            # Validate ranges without importing datetime at module level.
+            if 1 <= mo <= 12 and 1 <= d <= 31:
+                return (y, mo, d, inv)
+        except Exception:  # noqa: BLE001
+            pass
+        return (*_LAST, inv)
+    # YYYY-MM-DD
+    m = _re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", s)
+    if m:
+        return (int(m.group(1)), int(m.group(2)), int(m.group(3)), inv)
+    return (*_LAST, inv)
+
+
 class SlackLedgerStore:
     """Fetch → append → re-upload the channel's FY ledger workbook.
 
@@ -485,10 +533,23 @@ class SlackLedgerStore:
 
         Dedupe is now handled by the Firestore ``seen_doc_keys`` set before this is
         called, so this method always appends. Returns the number of rows appended.
+
+        Incoming rows are sorted by (parsed_date, invoice_number) via
+        ``_invoice_date_sort_key`` before appending so the per-batch output is
+        deterministic regardless of which concurrent doc completes first (fan-out,
+        Step 5).  This is a sort of the *incoming* rows only — rows already in the
+        sheet are not touched.  The bank path achieves the same by rebuilding the
+        entire sheet via ``_merge_bank_statement``.
+
+        Column names handled (see ``_invoice_date_sort_key`` for details):
+        - QBS:  ``"Invoice Date"``  /  ``"Invoice Number"``
+        - Xero: ``"*InvoiceDate"``  /  ``"*InvoiceNumber"``
+        - Fallback ``"Date"`` for test / legacy rows.
         """
-        for row in rows:
+        sorted_rows = sorted(rows, key=_invoice_date_sort_key)
+        for row in sorted_rows:
             sheet.append([row.get(c, "") for c in cols])
-        return len(rows)
+        return len(sorted_rows)
 
     # Mapping from old 8-col header names to current BANK_COLS names.
     _LEGACY_COL_MAP: dict[str, str] = {

@@ -554,7 +554,7 @@ def test_assistant_instruction_seeds_profile():
     inside ``_BASE_INSTRUCTION`` instead of being prepended as a separate
     preamble block. ADK injects state into the base instruction at LLM
     call time — the rendered prompt is one string, not two concatenated."""
-    from accounting_agents.assistant import _BASE_INSTRUCTION, assistant_instruction
+    from accounting_agents.assistant import assistant_instruction
 
     ctx = _FakeToolContext({
         "client_name": "Acme Pte Ltd",
@@ -690,7 +690,7 @@ def test_amend_account_reclassifies_tax_to_nt_when_non_registered():
     from accounting_agents.assistant import amend_ledger_row
 
     ctx = _write_ctx(tax_registered=False)
-    out = amend_ledger_row(ctx, row_index="0", field="account", new_value="6010")
+    out = amend_ledger_row(ctx, row_index="0", field="account", new_value="6010")  # noqa: F841 — call needed for side-effects on ctx; return unused
     spec = ctx.requested["payload"]
     assert spec["updates"]["Account Code / COA"] == "6010"
     assert spec["tax_treatment"] == "NT"
@@ -879,7 +879,7 @@ def test_amend_allows_qbs_explicit_software():
 
     ctx = _write_ctx()
     ctx.state["software"] = "qbs"
-    out = amend_ledger_row(ctx, row_index="0", field="account", new_value="6010")
+    out = amend_ledger_row(ctx, row_index="0", field="account", new_value="6010")  # noqa: F841 — call needed for side-effects on ctx; return unused
     assert ctx.requested is not None  # confirmation was requested
 
 
@@ -889,7 +889,7 @@ def test_amend_allows_missing_software_key():
 
     ctx = _write_ctx()
     ctx.state.pop("software", None)
-    out = amend_ledger_row(ctx, row_index="0", field="account", new_value="6010")
+    out = amend_ledger_row(ctx, row_index="0", field="account", new_value="6010")  # noqa: F841 — call needed for side-effects on ctx; return unused
     assert ctx.requested is not None
 
 
@@ -902,7 +902,7 @@ def test_amend_turn1_includes_row_signature():
     from accounting_agents.assistant import amend_ledger_row
 
     ctx = _write_ctx()
-    out = amend_ledger_row(ctx, row_index="0", field="account", new_value="6010")
+    out = amend_ledger_row(ctx, row_index="0", field="account", new_value="6010")  # noqa: F841 — call needed for side-effects on ctx; return unused
     spec = ctx.requested["payload"]
     assert "row_signature" in spec
     assert isinstance(spec["row_signature"], str)
@@ -1834,7 +1834,6 @@ def test_explain_posted_line_combines_ledger_and_coa():
 
 def test_diagnostic_tools_registered_on_assistant_agent():
     """Introspection + COA tools must be wired up to ``assistant_agent``."""
-    from google.adk.tools import FunctionTool
 
     from accounting_agents.assistant import assistant_agent
 

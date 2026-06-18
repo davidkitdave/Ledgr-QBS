@@ -188,6 +188,49 @@ REVIEW_VERDICT_CLARIFY = "user_clarify"
 REVIEW_MAX_REVIEWS = 2
 REVIEW_MAX_REEXTRACTS = 1
 
+#: Lever 2 (ADR-0017 §3) — soft-signal prefixes.
+#: A reason whose string starts with one of these is classified as SOFT and may
+#: be cleared by the LLM-as-judge critic without human escalation.
+#:
+#: FAIL-SAFE: any reason string that does NOT start with a known soft prefix is
+#: treated as HARD and always escalates, regardless of what the critic says.
+#: This means a future signal that is genuinely soft but whose prefix is not
+#: listed here will conservatively escalate — which is the safe direction.
+#: Add new soft prefixes here only after deliberate review.
+SOFT_SIGNAL_PREFIXES: tuple[str, ...] = (
+    "doc_type_other",
+    "doc_type_unfamiliar",
+    "low_classify_confidence",
+    "direction_uncertain",
+)
+
+#: Lever 4 (ADR-0017 §6) — per-client familiarity gate.
+#: State key holding the familiarity map ``{key: {seen_count: n, ...}}``
+#: loaded by the profile callback (``make_load_client_by_channel_callback``).
+FAMILIARITY_KEY = "familiarity"
+
+#: Minimum seen_count at which a doc shape is considered familiar enough to
+#: suppress soft-only signals without a critic call.  Set to 2 so the Engine
+#: sees at least two clean approvals before trusting a shape unconditionally.
+FAMILIARITY_THRESHOLD = 2
+
+#: Lever 3 (ADR-0017 §2) — open-set / zero-shot classify state keys.
+#: ``CLASSIFY_FREE_TYPE_KEY`` carries the model's best free-text label for the
+#: document type when it does not match an ALLOWED_DOC_TYPES enum value (e.g.
+#: "delivery_order", "purchase_order").  Populated by ``classify_node``; used
+#: by ``compose_confident_note`` to produce a human-readable label on the
+#: confident path.  None when the model returned a recognised enum type.
+CLASSIFY_FREE_TYPE_KEY = "classify_free_type"
+
+#: ``CLASSIFY_PROCESSABLE_KEY`` carries the classifier's verdict on whether the
+#: document has any bookable financial content (True) or is genuinely unbookable
+#: (False — e.g. a blank page, marketing flyer, non-financial legal contract).
+#: When False, ``detect_struggle`` appends a ``"processable_false"`` HARD signal
+#: that always escalates to a human — it is not suppressible by the critic
+#: (Lever 2) or by familiarity (Lever 4).  Defaults to True (safe: absent key
+#: = processable).
+CLASSIFY_PROCESSABLE_KEY = "classify_processable"
+
 #: Fields on an invoice line that the HITL Edit flow may overwrite. These MUST
 #: match the canonical ``InvoiceLine`` model field names (``invoice_processing/
 #: export/models.py``) — the exporter reads ``line.tax_treatment`` /
@@ -328,12 +371,32 @@ async def classify_node(ctx) -> Event:
     ``"unknown"`` the document is parked at the HITL gate (not silently
     rewritten by a fuzzy Python pass).
     """
+    from invoice_processing.classify.document_classifier import ALLOWED_DOC_TYPES
+
     data, mime_type = await _load_pdf_bytes(ctx)
     cls: ClassificationResult = CLASSIFY_FN(data, mime_type, model=MODEL_LITE)
     doc_type = (cls.doc_type or "other").strip().lower()
+
+    # Lever 3 (ADR-0017 §2) — apply the off-enum clamp at the node level so it
+    # fires even when tests inject a fake CLASSIFY_FN that bypasses the real
+    # classify_document() function's own clamp.  The two clamps are idempotent.
+    if doc_type not in ALLOWED_DOC_TYPES:
+        if not cls.free_type:
+            cls.free_type = doc_type
+        doc_type = "other"
+        cls.doc_type = "other"
+
     # Persist the classifier's confidence so the extract reviewer's
     # ``low_classify_confidence`` signal (#5) can read it cheaply downstream.
     ctx.state[CLASSIFY_CONFIDENCE_KEY] = cls.confidence
+
+    # Lever 3 (ADR-0017 §2) — persist free_type and processable verdict.
+    # free_type carries the model's best raw label when the type is off-enum
+    # (e.g. "delivery_order"); None for recognised enum types.
+    ctx.state[CLASSIFY_FREE_TYPE_KEY] = cls.free_type or None
+    # processable=False means the document cannot be meaningfully booked at all
+    # (blank page, marketing flyer, non-financial contract).  Default is True.
+    ctx.state[CLASSIFY_PROCESSABLE_KEY] = cls.processable
 
     if doc_type == "bank_statement":
         ctx.state[DOC_TYPE_KEY] = "bank_statement"
@@ -461,7 +524,6 @@ async def extract_document_node(ctx) -> Event:
 
 async def normalize_document_node(ctx) -> Event:
     """Phase 2 — map DocumentRecord(s) to NormalizedInvoice(s)."""
-    from invoice_processing.extract.document_record import DocumentRecord
 
     raw = ctx.state.get(DOCUMENT_RECORDS_KEY) or []
     if not raw:
@@ -637,6 +699,25 @@ async def tax_node(ctx) -> Event:
 # --------------------------------------------------------------------------- #
 
 
+def _is_soft_only(reasons: list[str]) -> bool:
+    """Return True iff every reason in ``reasons`` is a known SOFT signal.
+
+    Empty → False (no trip → no critic call; the zero-signal happy path must
+    never be routed to the critic).
+
+    FAIL-SAFE: any reason string that does NOT start with a prefix in
+    ``SOFT_SIGNAL_PREFIXES`` is classified as HARD and causes this function to
+    return False, regardless of the other reasons present.  Unknown / future
+    signals escalate conservatively — the safe direction.
+    """
+    if not reasons:
+        return False
+    return all(
+        any(r.startswith(prefix) for prefix in SOFT_SIGNAL_PREFIXES)
+        for r in reasons
+    )
+
+
 def detect_struggle(state: dict) -> tuple[bool, list[str]]:
     """Pure, deterministic struggle detector — NO LLM, NO network.
 
@@ -649,7 +730,6 @@ def detect_struggle(state: dict) -> tuple[bool, list[str]]:
     is NORMAL for a non-registered client, not a struggle) — so a non-registered
     client's "missing tax" never trips the reviewer.
     """
-    from invoice_processing.extract.document_record import DocumentRecord
 
     invoices = _normalized_from_state(state)
 
@@ -691,10 +771,9 @@ def detect_struggle(state: dict) -> tuple[bool, list[str]]:
     if not invoices:
         reasons.append("bundle_empty")
 
-    # Signal #4: doc_type_other — classifier could not place the document.
+    # Read doc_type now; Signal #4 is evaluated AFTER the per-invoice loop so
+    # weak_extract can be computed from signals gathered in that loop.
     doc_type = (state.get(DOC_TYPE_KEY) or "").strip().lower()
-    if doc_type == "other":
-        reasons.append("doc_type_other")
 
     # Signal #5: low_classify_confidence — classifier hedged.
     conf = state.get(CLASSIFY_CONFIDENCE_KEY)
@@ -738,6 +817,70 @@ def detect_struggle(state: dict) -> tuple[bool, list[str]]:
             missing.append("doc_total")
         if missing:
             reasons.append(f"missing_required: {label} ({', '.join(missing)})")
+
+    # Signal #4: doc_type_other — quality-gated (ADR-0017 Lever 1).
+    # For 'other' and 'expense_claim' doc types, only escalate when the
+    # extraction is also weak (bundle_empty, lines_empty, unreconciled, or
+    # missing_required).  A clean, reconciled 'other'/'expense_claim' posts
+    # without a pause — the label alone is not sufficient reason to escalate.
+    if doc_type in ("other", "expense_claim"):
+        weak_extract = (
+            "bundle_empty" in reasons
+            or any(r.startswith("lines_empty") for r in reasons)
+            or any(r.startswith("unreconciled") for r in reasons)
+            or any(r.startswith("missing_required") for r in reasons)
+        )
+        if weak_extract:
+            reasons.append("doc_type_other")
+
+    # Lever 3 (ADR-0017 §2) — processable_false HARD signal.
+    # When the classifier determined the document has no bookable financial
+    # content at all, append this hard signal.  It is deliberately NOT in
+    # SOFT_SIGNAL_PREFIXES so _is_soft_only() returns False, which means:
+    #   • The Lever 2 critic (LLM-as-judge) cannot clear it.
+    #   • The Lever 4 familiarity gate (below) is bypassed entirely.
+    # Absence of the key is treated as processable=True (backwards-compatible
+    # with state dicts written before Lever 3 was deployed).
+    if state.get(CLASSIFY_PROCESSABLE_KEY) is False:
+        reasons.append("processable_false")
+
+    # Lever 4 (ADR-0017 §6) — familiarity gate: if ALL remaining signals are
+    # SOFT and the client has seen this doc shape >= FAMILIARITY_THRESHOLD
+    # times without correction, suppress the soft reasons so the run proceeds
+    # on the confident path with NO critic call and NO human pause.
+    #
+    # Most-specific-key gating (closes 4c reset defeat):
+    #   • Vendor identifiable → consult ONLY the compound ``doc_type:vendor``
+    #     key.  Suppressing on the bare key too would let the surviving bare
+    #     count mask a vendor-level correction (which only resets the compound).
+    #   • No vendor identifiable → fall back to the bare ``doc_type`` key.
+    # Hard signal present → _is_soft_only is False → bypassed entirely.
+    if reasons and _is_soft_only(reasons):
+        fam_map: dict = state.get(FAMILIARITY_KEY) or {}
+        if fam_map:
+            # Derive dominant vendor from first normalized invoice.
+            dominant_vendor: Optional[str] = None
+            if invoices:
+                first_inv = invoices[0]
+                doc_dir = (state.get(DIRECTION_KEY) or "purchase").strip().lower()
+                if doc_dir == "purchase":
+                    party = getattr(first_inv, "supplier", None)
+                else:
+                    party = getattr(first_inv, "customer", None)
+                if party is not None:
+                    dominant_vendor = getattr(party, "name", None)
+
+            if dominant_vendor:
+                # Vendor known: use compound key only — most specific.
+                dtv_key = f"{doc_type}:{dominant_vendor}"
+                dtv_count = (fam_map.get(dtv_key) or {}).get("seen_count", 0)
+                if dtv_count >= FAMILIARITY_THRESHOLD:
+                    return (False, [])
+            else:
+                # No vendor: fall back to bare doc_type key.
+                dt_count = (fam_map.get(doc_type) or {}).get("seen_count", 0)
+                if dt_count >= FAMILIARITY_THRESHOLD:
+                    return (False, [])
 
     return (bool(reasons), reasons)
 
@@ -796,11 +939,19 @@ def _reviewer_llm(state: dict, reasons: list[str], *, model: str) -> dict:
         + json.dumps(state.get(NORMALIZED_KEY) or [], default=str)
         + "\n\nDecide ONE verdict and ALWAYS return it explicitly — never end "
         "with only a tool call and never reply with empty text:\n"
-        f"- '{REVIEW_VERDICT_OK}': the extraction is acceptable as-is.\n"
+        f"- '{REVIEW_VERDICT_OK}': the extraction is acceptable as-is. "
+        "Use this when the flagged concerns are soft signals only (e.g. uncertain "
+        "doc-type label, low classifier confidence, ambiguous direction) AND the "
+        "extraction reconciles, required fields (invoice_number, invoice_date, "
+        "doc_total where applicable) are present, and the booking lines are "
+        "coherent. A novel or unfamiliar doc type alone is NOT a reason to "
+        "escalate — post from first principles if the numbers add up.\n"
         f"- '{REVIEW_VERDICT_HINTS}': a re-extraction with a specific hint would "
         "likely fix it; provide a short 'hint'.\n"
         f"- '{REVIEW_VERDICT_CLARIFY}': only a human can resolve it; provide a "
-        "short 'question' for the accountant.\n"
+        "short 'question' for the accountant. Reserve this for genuine problems: "
+        "amounts that do not reconcile, illegible key fields, or substantive "
+        "ambiguity that cannot be resolved from the document alone.\n"
         "Respond as JSON with keys: verdict, hint, question."
     )
 
@@ -958,21 +1109,57 @@ async def review_extraction_node(ctx):
         ctx.state[REVIEW_VERDICT_KEY] = REVIEW_VERDICT_OK
         return
 
-    # Tripped: the bounded loop may re-extract, so load the source PDF now.
-    pdf_bytes, mime_type = await _load_pdf_bytes(ctx)
-    verdict = _run_reviewer_loop(ctx, reasons, pdf_bytes, mime_type)
-    ctx.state[REVIEW_VERDICT_KEY] = verdict
-
-    if verdict != REVIEW_VERDICT_CLARIFY:
+    # Lever 2 (ADR-0017 §3): when EVERY tripped reason is soft, run the critic.
+    # On REVIEW_VERDICT_OK the doc falls through with no human pause.
+    # Any hard signal bypasses this branch entirely — the critic cannot clear
+    # hard signals regardless of what it would return.
+    if _is_soft_only(reasons):
+        pdf_bytes, mime_type = await _load_pdf_bytes(ctx)
+        verdict = _run_reviewer_loop(ctx, reasons, pdf_bytes, mime_type)
+        ctx.state[REVIEW_VERDICT_KEY] = verdict
+        if verdict == REVIEW_VERDICT_OK:
+            # Critic cleared the soft signals — fall through, no human pause.
+            return
+        # Critic returned CLARIFY or HINTS exhausted → escalate to human.
+        yield RequestInput(
+            interrupt_id=review_interrupt_id,
+            message=ctx.state.get("review_question") or _review_clarify_question(reasons),
+            response_schema=ReviewClarifyDecision,
+        )
         return
 
-    # Circuit-break to the human mid-flow (§9.5). Distinct ``:review`` interrupt
-    # id keeps this pause separate from the terminal ``approval_gate`` pause.
-    yield RequestInput(
-        interrupt_id=review_interrupt_id,
-        message=ctx.state.get("review_question") or _review_clarify_question(reasons),
-        response_schema=ReviewClarifyDecision,
-    )
+    # Hard signal(s) present — run the bounded reviewer loop solely to attempt
+    # a deterministic auto-fix via the HINTS re-extraction path.  After the loop
+    # returns, re-run detect_struggle on the (possibly updated) state.
+    #
+    # CRITICAL: the critic's OK verdict alone CANNOT clear a hard signal.
+    # We re-check detect_struggle deterministically:
+    #   • If hard signals still present  → escalate to human regardless of verdict.
+    #   • If state is now clean or soft-only AND verdict is OK → proceed (auto-fix
+    #     via HINTS re-extraction actually fixed the doc).
+    #   • If verdict is CLARIFY regardless of detect_struggle → escalate.
+    pdf_bytes, mime_type = await _load_pdf_bytes(ctx)
+    verdict = _run_reviewer_loop(ctx, reasons, pdf_bytes, mime_type)
+
+    # Re-check the extraction state deterministically after the loop.
+    recheck_tripped, recheck_reasons = detect_struggle(ctx.state)
+    hard_still_present = recheck_tripped and not _is_soft_only(recheck_reasons)
+
+    if hard_still_present or verdict == REVIEW_VERDICT_CLARIFY:
+        # Either a hard signal survives (LLM OK cannot override this) or the
+        # critic explicitly asked for human clarification.
+        ctx.state[REVIEW_VERDICT_KEY] = REVIEW_VERDICT_CLARIFY
+        ctx.state[REVIEW_REASON_KEY] = recheck_reasons  # update to post-fix state
+        yield RequestInput(
+            interrupt_id=review_interrupt_id,
+            message=ctx.state.get("review_question") or _review_clarify_question(recheck_reasons),
+            response_schema=ReviewClarifyDecision,
+        )
+        return
+
+    # State is now clean (or soft-only) and critic returned OK — auto-fix succeeded.
+    ctx.state[REVIEW_VERDICT_KEY] = verdict
+    ctx.state[REVIEW_REASON_KEY] = recheck_reasons
 
 
 async def _maybe_load_pdf(ctx, decision) -> tuple[bytes, str]:
@@ -1367,6 +1554,15 @@ async def consolidate_node(ctx) -> Event:
         "fy": fy,
         "kind": kind,
         "software": software,
+        "doc_type": doc_type,
+        # Lever 3 (ADR-0017 §2): carry the classifier's free-text label so the
+        # confident-path note can read "delivery order" instead of "document"
+        # when doc_type is the generic "other".  None for recognised enum types.
+        "free_type": state.get(CLASSIFY_FREE_TYPE_KEY),
+        # ``delivered`` is set True by deliver_node on the clean no-pause path.
+        # It is NOT present when the HITL-approve path calls persist_and_deliver
+        # directly (deliver_node never ran).  Used to gate the confident-path note.
+        "delivered": bool(state.get("delivered")),
         "batches": batches,
     }
     state[LEDGER_ROWS_KEY] = payload
@@ -1486,6 +1682,92 @@ def compose_delivery_summary(payload: dict) -> str:
         f"{len(batches)} document{'s' if len(batches) != 1 else ''} "
         f"to your {destination}."
     )
+
+
+def compose_confident_note(
+    payload: dict,
+    *,
+    doc_type: str,
+    free_type: Optional[str] = None,
+) -> str:
+    """Compose a concise plain-language note for confident (no-pause) deliveries.
+
+    Reads the same ``LEDGER_ROWS_KEY`` payload that ``compose_delivery_summary``
+    uses and returns a one-liner like:
+        "Posted this expense claim — 3 lines, reconciles to $240.00, coded to Travel."
+
+    Handles missing pieces gracefully:
+    - No batches / rows → short fallback note.
+    - No account code → omits the "coded to" clause.
+    - When ``doc_type`` is the generic ``"other"`` and ``free_type`` is provided,
+      the note uses the free_type label (e.g. "delivery_order" → "delivery order")
+      so the user sees "Posted this delivery order — …" instead of the opaque
+      "Posted this document — …".  For known enum types ``free_type`` is ignored.
+    """
+    batches = payload.get("batches") or []
+
+    # Human-readable label for the doc type.
+    # Lever 3: when doc_type is the generic "other" but free_type provides a
+    # more specific label, use it (underscores → spaces).  Empty string free_type
+    # is treated as absent (fall back to "document").
+    _doc_labels: dict[str, str] = {
+        "expense_claim": "expense claim",
+        "invoice": "invoice",
+        "receipt": "receipt",
+        "credit_note": "credit note",
+        "bank_statement": "bank statement",
+        "statement_of_account": "statement of account",
+        "other": "document",
+    }
+    if doc_type == "other" and free_type:
+        doc_label = free_type.replace("_", " ")
+    else:
+        doc_label = _doc_labels.get(doc_type, doc_type.replace("_", " "))
+
+    if not batches:
+        return f"Posted this {doc_label}."
+
+    # Count total non-structural rows across all invoice batches.
+    all_rows: list[dict] = []
+    for batch in batches:
+        all_rows.extend(batch.get("rows") or [])
+
+    n_lines = len(all_rows)
+
+    # Derive reconcile total from rows (sum of net amounts).
+    # Prefer the payload-level currency (set by consolidate_node from the statement)
+    # before falling back to individual row values, then "SGD" as last resort.
+    total: Optional[float] = None
+    currency = (payload.get("currency") or "").strip() or "SGD"
+    for row in all_rows:
+        amt = row.get("Net Amount")
+        if amt is not None:
+            try:
+                total = (total or 0.0) + float(amt)
+            except (TypeError, ValueError):
+                pass
+        row_currency = row.get("Currency")
+        if row_currency:
+            currency = row_currency
+
+    # Derive dominant account code (most frequent non-empty value).
+    from collections import Counter
+    codes = [row.get("Account Code") for row in all_rows if row.get("Account Code")]
+    dominant_code: Optional[str] = None
+    if codes:
+        dominant_code = Counter(codes).most_common(1)[0][0]
+
+    # Build the note.
+    line_str = f"{n_lines} line{'s' if n_lines != 1 else ''}"
+    total_str = (
+        f"reconciles to {currency} {total:,.2f}" if total is not None else ""
+    )
+    coded_str = f"coded to {dominant_code}" if dominant_code else ""
+
+    parts = [p for p in [total_str, coded_str] if p]
+    detail = " — " + ", ".join(parts) if parts else ""
+
+    return f"Posted this {doc_label} — {line_str}{detail}."
 
 
 @node

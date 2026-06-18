@@ -1480,6 +1480,22 @@ def delivery_card_blocks(summary: str, preview_blocks: list[dict]) -> list[dict]
     return blocks
 
 
+def confident_note_block(note: str) -> dict:
+    """Render a confident-path note as a Slack context block.
+
+    Used on the no-pause delivery path when ``compose_confident_note`` produces
+    a plain-language posting note (ADR-0017 Lever 1). Returns a single Slack
+    ``context`` block with the note as mrkdwn so it renders beneath the main
+    delivery card as a subtle annotation.
+    """
+    return {
+        "type": "context",
+        "elements": [
+            {"type": "mrkdwn", "text": note},
+        ],
+    }
+
+
 def compose_batch_delivery_summary(
     *,
     groups: list[dict],

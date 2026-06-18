@@ -3372,7 +3372,6 @@ def test_answer_question_injects_thread_delivery_context_into_state_delta():
     ``thread_delivery_*`` keys into the chat state_delta so the assistant
     preamble and tools can see the scope (Phase 3).
     """
-    from unittest.mock import MagicMock
     from accounting_agents.slack_runner import answer_question
 
     slack = FakeSlackClient()
@@ -3800,7 +3799,6 @@ def test_chat_session_picks_fy_with_most_rows_not_latest():
          "Withdrawal": None, "Deposit": 10.0, "Currency": "SGD"},
     ]
 
-    from unittest.mock import MagicMock
 
     slack = FakeSlackClient()
     sessions: dict = {}
@@ -3873,7 +3871,6 @@ def test_chat_session_picks_fy_with_most_rows_not_latest():
 
 def test_list_pending_interrupts_filters_by_channel_and_status():
     from accounting_agents.hitl import (
-        INTERRUPTS_COLLECTION,
         list_pending_interrupts,
         write_interrupt,
     )
@@ -3989,10 +3986,6 @@ def test_chat_session_injects_pending_reviews_and_doc_sessions(monkeypatch):
 
     # Stub a fake client_store that returns one processing log entry (so
     # file_ids = ["F-1"] is non-empty and _snapshot_doc_sessions runs).
-    from tests.test_slack_runner import FakeFirestore as _FF
-    from invoice_processing.export.client_context import (
-        FirestoreClientStore,
-    )
 
     class _StubClientStore:
         def list_processing_log(self, client_id, limit=20):
@@ -6740,11 +6733,11 @@ def test_file_shared_defer_does_not_poison_message_handler_dedup():
         ))
 
     # file_shared must not have marked the file id.
-    assert not fresh_seen.seen_before(f"file:FPOISON"), (
+    assert not fresh_seen.seen_before("file:FPOISON"), (
         "file_shared deferral must not poison the file-level dedup key"
     )
     # Reset the probe mark from the assertion above.
-    fresh_seen._seen.pop(f"file:FPOISON", None)
+    fresh_seen._seen.pop("file:FPOISON", None)
 
     mock_pfe.return_value = {"status": "delivered", "append": {"appended": 1, "fy": "2026"}}
     msg_event = {
@@ -6891,9 +6884,7 @@ def test_batch_mode_skips_per_doc_status_post():
     "Received" status + plan accordion posting is suppressed so only the
     job-summary message lives at channel root.
     """
-    from unittest.mock import MagicMock, patch
 
-    from accounting_agents import slack_runner
 
     # In batch_mode the per-doc status post is replaced by a no-op
     # (status_ts=None). We assert by inspecting the post list before
@@ -6956,13 +6947,11 @@ def test_batch_aggregate_one_table_same_fy(monkeypatch):
     deferred document into a single ``ledger_preview_data_table`` per
     ``(fy, sheet, workbook_name)`` group.
     """
-    from app.blocks import ledger_preview_data_table
     from accounting_agents.slack_runner import _build_batch_aggregate_blocks
 
     # Module-level LEDGR_NATIVE_BLOCKS=0 (set at import time) suppresses the
     # data_table native block; force it on for this assertion.
     monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
-    from unittest.mock import MagicMock, patch
     from app import native_blocks_compat as _nbc
     _nbc._PROBE_CACHE.pop("C-test", None)
 

@@ -74,10 +74,20 @@ def test_signal_unreconciled():
     assert "subtotal mismatch" in note
 
 
-def test_signal_doc_type_other():
-    tripped, reasons = detect_struggle(_state([_clean_invoice()], doc_type="other"))
+def test_signal_doc_type_other_with_weak_extract_trips():
+    # Lever 1: doc_type_other only trips when a weak-extract signal is also present.
+    # A clean, reconciled 'other' no longer escalates (see ADR-0017).
+    inv = _clean_invoice(lines=[])  # lines_empty is a weak-extract signal
+    tripped, reasons = detect_struggle(_state([inv], doc_type="other"))
     assert tripped is True
     assert "doc_type_other" in reasons
+
+
+def test_signal_doc_type_other_clean_no_trip():
+    # Lever 1: a clean, reconciled 'other' must NOT trip (core quality gate).
+    tripped, reasons = detect_struggle(_state([_clean_invoice()], doc_type="other"))
+    assert tripped is False
+    assert "doc_type_other" not in reasons
 
 
 def test_signal_low_classify_confidence():

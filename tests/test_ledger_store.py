@@ -2032,7 +2032,8 @@ def test_remove_rows_for_month_deletes_bottom_up():
     ws.append(["02/09/2025", "INV-B", "Beta",  20.0])
     ws.append(["03/09/2025", "INV-C", "Gamma", 30.0])
     ws.append(["03/10/2025", "INV-D", "Delta", 40.0])  # different month — must survive
-    buf = io.BytesIO(); wb.save(buf)
+    buf = io.BytesIO()
+    wb.save(buf)
     xlsx = buf.getvalue()
 
     slack, store = _store_with_workbook(xlsx)

@@ -90,6 +90,7 @@ from app.blocks import (
     review_card_blocks,
     review_hint_modal,
     review_outcome_blocks,
+    confident_note_block,
 )
 from app.slack_app import _SeenEvents
 from invoice_processing.export.client_context import FirestoreClientStore
@@ -117,11 +118,23 @@ def _profile_state_delta(client_store, channel_id: str) -> dict:
     profile into the document lane, so the runner seeds it directly at run start
     (alongside ``channel_id``). Empty dict means "no profile for this channel" —
     callers soft-gate on that. See ADR-0005 (2026-06-14 addendum).
+
+    Also injects the per-client familiarity map (Lever 4 / ADR-0017 §6) under
+    ``nodes.FAMILIARITY_KEY`` so ``detect_struggle`` can read it without
+    touching the store directly.
     """
     ctx = client_store.get_by_channel(channel_id)
     if ctx is None:
         return {}
-    return ctx.to_state()
+    delta = ctx.to_state()
+    # Inject familiarity map if the store supports it (InMemoryClientStore in
+    # tests, FirestoreClientStore in production — both expose get_familiarity_map).
+    try:
+        fam_map = client_store.get_familiarity_map(ctx.client_id or "")
+        delta[nodes.FAMILIARITY_KEY] = fam_map
+    except Exception:  # noqa: BLE001 — familiarity load must never abort a run
+        delta.setdefault(nodes.FAMILIARITY_KEY, {})
+    return delta
 
 logger = logging.getLogger(__name__)
 
@@ -1060,6 +1073,25 @@ def _post_delivery_card(
         if preview_blocks
         else [{"type": "section", "text": {"type": "mrkdwn", "text": summary}}]
     )
+    # Confident-path note (ADR-0017 Lever 1): only fires on the clean no-pause
+    # delivery path.  ``payload["delivered"]`` is True only when deliver_node ran
+    # (the clean path); the HITL-approve path bypasses deliver_node so the key is
+    # False/absent — ensuring a human-reviewed doc never shows "no pause needed".
+    # NOTE: this note is single-doc-scoped only.  The batch-aggregate path
+    # (_build_batch_aggregate_blocks) does not receive per-doc payloads in the same
+    # shape and is intentionally excluded here; per-doc notes in batch summaries are
+    # deferred to the Step 5 batch-delivery rework.
+    doc_type = str(payload.get("doc_type") or "").strip().lower()
+    if doc_type in ("expense_claim", "other") and payload.get("delivered"):
+        try:
+            free_type = payload.get("free_type") or None
+            note = nodes.compose_confident_note(
+                payload, doc_type=doc_type, free_type=free_type
+            )
+            if note:
+                blocks.append(confident_note_block(note))
+        except Exception:  # noqa: BLE001 — note is cosmetic
+            logger.warning("confident note build failed (non-fatal)", exc_info=True)
     kwargs: dict = {"channel": channel_id, "text": summary, "blocks": blocks}
     if thread_ts:
         kwargs["thread_ts"] = thread_ts
@@ -2578,6 +2610,55 @@ def _persist_corrections(client_store, state: dict, edits: dict) -> None:
                 account_code=acct if acct_changed else None,
                 tax_code=tax if tax_changed else None,
             )
+            # Lever 4 (ADR-0017 §6) — close the 4c vector: a corrected doc
+            # shape is no longer trusted.  Reset the doc_type:vendor key so
+            # the Engine must see clean approvals again before suppressing.
+            doc_type = (state.get(nodes.DOC_TYPE_KEY) or "invoice").strip().lower()
+            try:
+                client_store.reset_familiarity(
+                    client_id=client_id,
+                    doc_type=doc_type,
+                    vendor=vendor,
+                )
+            except Exception:  # noqa: BLE001 — reset is best-effort
+                logger.debug(
+                    "familiarity reset failed for client=%s doc_type=%s vendor=%s",
+                    client_id, doc_type, vendor,
+                )
+
+
+def _record_familiarity_from_state(client_store, state: dict) -> None:
+    """Record a familiarity increment for the doc described by ``state``.
+
+    Lever 4 (ADR-0017 §6): called on the confident path (clean no-pause run)
+    and on un-edited HITL approval.  Reads ``client_id``, ``doc_type``, and
+    the dominant vendor from the normalized invoice in ``state`` and calls
+    ``client_store.record_familiarity``.  No-ops cleanly when client_id or
+    doc_type is absent, or when the store does not support the method.
+    """
+    if not isinstance(state, dict):
+        return
+    client_id = state.get("client_id")
+    doc_type = (state.get(nodes.DOC_TYPE_KEY) or "").strip().lower()
+    if not client_id or not doc_type:
+        return
+    invs = state.get(nodes.NORMALIZED_KEY) or []
+    vendor: Optional[str] = None
+    if invs:
+        first = invs[0] if isinstance(invs[0], dict) else {}
+        vendor = _vendor_from_inv_dict(first)
+    direction = (state.get(nodes.DIRECTION_KEY) or "purchase").strip().lower()
+    try:
+        client_store.record_familiarity(
+            client_id=client_id,
+            doc_type=doc_type,
+            vendor=vendor or None,
+            direction=direction,
+        )
+    except Exception:  # noqa: BLE001 — familiarity record is best-effort
+        logger.debug(
+            "record_familiarity failed for client=%s doc_type=%s", client_id, doc_type
+        )
 
 
 def _edits_from_view_state(view: dict) -> dict:
@@ -2764,6 +2845,10 @@ async def _finalize_run_outcome(
             runner, app_name,
             {"user_id": user_id, "session_id": session_id},
         )
+        # Lever 4 (ADR-0017 §6): confident-path delivery → record familiarity
+        # so the Engine learns this doc shape is trusted for this client.
+        _record_familiarity_from_state(client_store or _DEFAULT_CLIENT_STORE, delivered_state)
+
         reasons = delivered_state.get(nodes.REVIEW_REASON_KEY) or []
         verdict = delivered_state.get(nodes.REVIEW_VERDICT_KEY)
         if reasons and verdict != nodes.REVIEW_VERDICT_CLARIFY:
@@ -2937,6 +3022,20 @@ async def handle_approval_action(
     else:
         update_interrupt_status(db, op_id, "rejected")
         _post_message(slack_client, channel_id, "Document rejected — nothing was added to the ledger.", thread_ts=thread_ts)
+
+    # Lever 4 (ADR-0017 §6): on an UN-EDITED approval, record familiarity so
+    # the Engine learns this doc shape is trusted for this client.  The edit
+    # modal emits decision=="edit" — do NOT record familiarity there (a shape
+    # that required edits is not yet trusted).
+    if decision == "approve":
+        try:
+            approved_state = await _read_session_state(
+                runner, app_name,
+                {"user_id": user_id, "session_id": session_id},
+            )
+            _record_familiarity_from_state(_DEFAULT_CLIENT_STORE, approved_state)
+        except Exception:  # noqa: BLE001 — familiarity record is best-effort
+            logger.debug("familiarity record failed after approval for op_id %s", op_id)
 
     _update_card(slack_client, interrupt, summary, decision)
 
@@ -5892,6 +5991,25 @@ def build_async_app(
             # summary in-place with the final tally once the loop finishes.
             from app.blocks import job_summary_text
 
+            # Step 5 — Pre-gather de-dup: deduplicate by file id BEFORE fan-out
+            # so two list entries sharing an id (file_share + message/file_share
+            # dual-fire, or an API test sending duplicates) are processed exactly
+            # once.  The _seen.seen_before("file:{id}") guard inside the loop
+            # body cannot protect against this under asyncio.gather because two
+            # coroutines can both pass the check before either marks the id seen.
+            _seen_ids: set[str] = set()
+            _deduped_files: list = []
+            for _f in files:
+                _fid = _f.get("id") if isinstance(_f, dict) else None
+                if _fid is None:
+                    _deduped_files.append(_f)
+                elif _fid not in _seen_ids:
+                    _seen_ids.add(_fid)
+                    _deduped_files.append(_f)
+                else:
+                    logger.debug("pre-gather dedup: skipping duplicate file id %s", _fid)
+            files = _deduped_files
+
             total = len(files)
             # Per-doc row tracker for the batch plan block. Each entry is a
             # dict {file_label, stage, detail, status} updated by the per-doc
@@ -6038,71 +6156,71 @@ def build_async_app(
             def _say_in_channel(**kwargs):
                 sync_client.chat_postMessage(channel=channel_id, **kwargs)
 
-            for f in files:
-                file_id = f.get("id") if isinstance(f, dict) else None
-                if not file_id:
-                    continue
-                # File-level dedup: file_shared + message/file_share both fire for
-                # one upload; guard on the file id so it's processed exactly once.
-                if _seen.seen_before(f"file:{file_id}"):
-                    logger.debug("dedup: file %s already being processed", file_id)
-                    # Await the Future from the file_shared handler so the batch
-                    # tally counts this file's outcome (legacy COA path only).
-                    fut = _file_futures.pop(file_id, None)
-                    if fut is not None:
-                        try:
-                            result = await fut
-                        except Exception:
-                            logger.debug("file_shared processing failed for %s", file_id)
-                            result = None
-                        status = (result or {}).get("status")
-                        if status == "delivered":
-                            posted += 1
-                            append = (result or {}).get("append") or {}
-                            if not software_hint and append.get("software"):
-                                software_hint = str(append["software"])
-                            if not fy_hint and append.get("fy"):
-                                fy_hint = str(append["fy"])
-                            if not kind_hint and append.get("kind"):
-                                kind_hint = str(append["kind"])
-                        elif status == "duplicate":
-                            duplicates += 1
-                        elif status == "paused":
-                            needs_review += 1
-                        elif status == "rejected_unreadable":
-                            rejected += 1
-                        done += 1
-                        _refresh_job_progress()
-                    continue
-                logger.info(
-                    "file upload received via message: file=%s channel=%s",
-                    file_id, channel_id,
-                )
+            # Step 5 — Fan-out: each doc runs concurrently via asyncio.gather.
+            # _run_one owns the per-doc pipeline and returns a result record; ALL
+            # shared-state mutations (counters, batch_deferred, hints) happen in the
+            # post-gather reduce below so parallel coroutines never race on shared
+            # mutable state.  No new semaphore is added: process_file_event already
+            # acquires _SEM internally, so gather self-bounds concurrency.
 
-                # Offer every spreadsheet (any channel state) as a COA candidate.
-                # The confirm card carries the active/replace copy; non-spreadsheet
-                # files (PDFs, images) fall through to the document pipeline.
-                if isinstance(f, dict) and _is_spreadsheet(f):
-                    await _offer_coa_confirmation(
-                        sync_client=sync_client,
-                        channel_id=channel_id,
-                        file_id=file_id,
-                        file_payload=f,
-                        channel_state=_channel_state_label(_resolved),
-                    )
-                    done += 1
-                    _refresh_job_progress()
-                    continue
+            async def _run_one(f: dict, idx: int) -> dict:
+                """Run one doc through the pipeline; return a result record.
 
-                fname = _resolve_file_name(sync_client, file_id, f)
-                for row in doc_rows:
-                    if row.get("file_label") == fname:
-                        row["stage"] = "Starting…"
-                        row["status"] = "in_progress"
-                        break
-                _refresh_job_progress()
-
+                Never raises — the entire body is wrapped so one bad doc (even a
+                crash in _offer_coa_confirmation or _resolve_file_name) never
+                cancels sibling coroutines.  The outer gather uses
+                return_exceptions=True as a belt-and-suspenders guard.
+                """
                 try:
+                    file_id = f.get("id") if isinstance(f, dict) else None
+                    if not file_id:
+                        return {"idx": idx, "status": "skipped", "file_id": None,
+                                "append": {}, "fname": ""}
+
+                    # File-level dedup: file_shared + message/file_share both fire
+                    # for one upload; guard on the file id so it's processed once.
+                    if _seen.seen_before(f"file:{file_id}"):
+                        logger.debug("dedup: file %s already being processed", file_id)
+                        # Await the Future from the file_shared handler so the batch
+                        # tally counts this file's outcome (legacy COA path only).
+                        fut = _file_futures.pop(file_id, None)
+                        fut_result = None
+                        if fut is not None:
+                            try:
+                                fut_result = await fut
+                            except Exception:  # noqa: BLE001
+                                logger.debug("file_shared processing failed for %s", file_id)
+                        return {"idx": idx, "status": "seen_before",
+                                "file_id": file_id, "append": {},
+                                "fut_result": fut_result, "fname": ""}
+
+                    logger.info(
+                        "file upload received via message: file=%s channel=%s",
+                        file_id, channel_id,
+                    )
+
+                    # Offer every spreadsheet (any channel state) as a COA candidate.
+                    # The confirm card carries the active/replace copy; non-spreadsheet
+                    # files (PDFs, images) fall through to the document pipeline.
+                    if isinstance(f, dict) and _is_spreadsheet(f):
+                        await _offer_coa_confirmation(
+                            sync_client=sync_client,
+                            channel_id=channel_id,
+                            file_id=file_id,
+                            file_payload=f,
+                            channel_state=_channel_state_label(_resolved),
+                        )
+                        return {"idx": idx, "status": "coa", "file_id": file_id,
+                                "append": {}, "fname": ""}
+
+                    fname = _resolve_file_name(sync_client, file_id, f)
+                    # Update the doc_row for this slot — keyed by idx so two docs
+                    # with identical filenames (e.g. "document.pdf") each update
+                    # their own row without colliding on fname.
+                    if 0 <= idx < len(doc_rows):
+                        doc_rows[idx].update({"stage": "Starting…", "status": "in_progress"})
+                    _refresh_job_progress()
+
                     result = await process_file_event(
                         runner=runner,
                         ledger_store=ledger_store,
@@ -6120,44 +6238,109 @@ def build_async_app(
                         defer_ledger_persist=batch_defer,
                         status_callback=_batch_status_cb if batch_defer else None,
                     )
-                except Exception as exc:  # noqa: BLE001 — belt over process_file_event
-                    logger.exception("batch file processing failed: file=%s", file_id)
+                    return {"idx": idx, "status": (result or {}).get("status", ""),
+                            "file_id": file_id,
+                            "append": (result or {}).get("append") or {},
+                            "fname": fname}
+
+                except Exception as exc:  # noqa: BLE001 — whole-coroutine safety net
+                    file_id_safe = (f.get("id") if isinstance(f, dict) else None) or ""
+                    logger.exception("batch file processing failed: file=%s", file_id_safe)
                     err_short = str(exc).split("\n", maxsplit=1)[0][:200]
-                    label = fname or f"doc {done + 1}"
-                    for row in doc_rows:
-                        if row.get("file_label") == label:
-                            row.update({
-                                "stage": "Processing failed",
-                                "detail": err_short,
-                                "status": "failed",
-                            })
-                            break
-                    result = {"status": "processing_failed", "error": err_short}
+                    if 0 <= idx < len(doc_rows):
+                        doc_rows[idx].update({
+                            "stage": "Processing failed",
+                            "detail": err_short,
+                            "status": "failed",
+                        })
+                    return {"idx": idx, "status": "processing_failed",
+                            "file_id": file_id_safe, "append": {}, "fname": "",
+                            "error": err_short}
+
+            # Fan-out: run all docs concurrently.  return_exceptions=True ensures
+            # that even if _run_one's outer try/except somehow misses a raise (e.g.
+            # a BaseException subclass that bypasses BLE001) the sibling coroutines
+            # still complete.  The reduce below converts any leftover Exception
+            # objects into processing_failed records.
+            _raw_results = await asyncio.gather(
+                *[_run_one(f, i) for i, f in enumerate(files)],
+                return_exceptions=True,
+            )
+            _one_results: list[dict] = []
+            for _i, _r in enumerate(_raw_results):
+                if isinstance(_r, BaseException):
+                    logger.error(
+                        "gather: unexpected exception from _run_one idx=%d: %s", _i, _r,
+                        exc_info=_r,
+                    )
+                    _one_results.append({
+                        "idx": _i, "status": "processing_failed",
+                        "file_id": "", "append": {}, "fname": "",
+                        "error": str(_r).split("\n", 1)[0][:200],
+                    })
+                else:
+                    _one_results.append(_r)
+
+            # Post-gather reduce: iterate results in ORIGINAL INPUT ORDER and
+            # mutate shared aggregates.  This is the only place shared state is
+            # written, so there are no races.
+            for _res in sorted(_one_results, key=lambda r: r["idx"]):
+                _status = _res.get("status") or ""
+                _file_id = _res.get("file_id")
+                _append = _res.get("append") or {}
+
+                if _status == "skipped":
+                    continue
+
+                if _status == "seen_before":
+                    # Legacy file_shared path: tally the awaited future's outcome.
+                    _fut_result = _res.get("fut_result") or {}
+                    _fstatus = _fut_result.get("status")
+                    if _fstatus == "delivered":
+                        posted += 1
+                        _fa = (_fut_result.get("append") or {})
+                        if not software_hint and _fa.get("software"):
+                            software_hint = str(_fa["software"])
+                        if not fy_hint and _fa.get("fy"):
+                            fy_hint = str(_fa["fy"])
+                        if not kind_hint and _fa.get("kind"):
+                            kind_hint = str(_fa["kind"])
+                    elif _fstatus == "duplicate":
+                        duplicates += 1
+                    elif _fstatus == "paused":
+                        needs_review += 1
+                    elif _fstatus == "rejected_unreadable":
+                        rejected += 1
+                    done += 1
+                    continue
+
+                if _status == "coa":
+                    done += 1
+                    continue
+
+                # Normal pipeline result.
                 done += 1
-                # Aggregate per-doc outcomes for the final tally edit.
-                status = (result or {}).get("status")
-                if status == "delivered":
+                if _status == "delivered":
                     posted += 1
-                    batch_file_ids.append(file_id)
-                    append = (result or {}).get("append") or {}
-                    deferred = append.get("deferred_delivery")
+                    if _file_id:
+                        batch_file_ids.append(_file_id)
+                    deferred = _append.get("deferred_delivery")
                     if deferred:
                         batch_deferred.append(deferred)
-                    if not software_hint and append.get("software"):
-                        software_hint = str(append["software"])
-                    if not fy_hint and append.get("fy"):
-                        fy_hint = str(append["fy"])
-                    if not kind_hint and append.get("kind"):
-                        kind_hint = str(append["kind"])
-                elif status == "duplicate":
+                    if not software_hint and _append.get("software"):
+                        software_hint = str(_append["software"])
+                    if not fy_hint and _append.get("fy"):
+                        fy_hint = str(_append["fy"])
+                    if not kind_hint and _append.get("kind"):
+                        kind_hint = str(_append["kind"])
+                elif _status == "duplicate":
                     duplicates += 1
-                elif status == "paused":
+                elif _status == "paused":
                     needs_review += 1
-                elif status == "rejected_unreadable":
+                elif _status == "rejected_unreadable":
                     rejected += 1
-                elif status == "processing_failed":
+                elif _status == "processing_failed":
                     failed += 1
-                _refresh_job_progress()
 
             _refresh_job_progress(force=True)
 
