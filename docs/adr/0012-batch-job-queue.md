@@ -4,6 +4,55 @@
 - **Date:** 2026-06-16
 - **Deciders:** Ledgr team
 
+## Amendment — Realized in-process concurrency design (2026-06-18)
+
+The Phase 1 (in-process) concurrency architecture is now fully specified and
+partially implemented. This note records it as the authoritative description of
+what is built at HEAD, distinct from the Phase 2 Pub/Sub proposal below.
+
+**Fan-out:** the sequential `for f in files: await process_file_event(...)` loop
+(`accounting_agents/slack_runner.py:6041-6106`) is replaced with
+`asyncio.gather(*[_run_one(f) for f in files])` where `_run_one` is an inner
+async function wrapping the per-doc processing. No additional semaphore is
+introduced: `process_file_event` already acquires `_SEM =
+asyncio.Semaphore(LEDGR_MAX_CONCURRENCY, default 5)` internally, so `gather`
+self-bounds to the configured concurrency limit.
+
+**Batch-reduce (fan-in):** `_flush_deferred_ledger_writes`
+(`accounting_agents/slack_runner.py:1252`) runs once after all gathered results
+are collected. It groups deferred payloads by `(client_id, fy, software, kind)`
+and writes once per group — one consolidated ledger write per batch, not one
+per document. Shared state (`batch_deferred`, `batch_file_ids`, hint fields) is
+mutated only in the post-gather reduce, not inside the concurrent `_run_one`
+bodies, to eliminate race conditions.
+
+**Serialized per-(channel, FY) lock:** `SlackLedgerStore` holds a
+`threading.Lock` keyed per `(channel_id, fy)` (`accounting_agents/ledger_store.py:237`)
+that serializes all concurrent append operations for the same ledger target,
+recomputes running balances, and enforces date-sorted bank statement merges.
+
+**Required deterministic invoice sort:** the invoice `_append_rows_to_sheet`
+path (`accounting_agents/ledger_store.py:483`) previously appended in arrival
+order with no sort (unlike the bank branch, which already sorts). Under
+`asyncio.gather`, arrival order is nondeterministic, so invoice row order would
+vary run-to-run. A deterministic sort by `(date, invoice_number, doc_key)` on
+the invoice append path is a **required** part of the fan-out change — not
+optional.
+
+**Pre-gather de-dup:** file IDs are de-duplicated before fan-out. The
+`_seen.seen_before("file:{id}")` check lives in the loop body; under `gather`
+two entries sharing an ID could both pass before either marks seen. De-duping the
+input list before `gather` closes this window.
+
+**HITL second write:** a paused document is not in `batch_deferred`; on approval
+`handle_approval_action` → `persist_and_deliver` calls `append_rows` through the
+same `SlackLedgerStore` lock, serialized against any concurrent batch flush by
+the per-`(channel, fy)` lock. No bypass of `append_rows` is permitted.
+
+This in-process design handles the 6–50-document case on a single Cloud Run
+instance (`min=1/max=1`). The Phase 2 Pub/Sub proposal below addresses the
+50–1000-document, multi-instance case.
+
 ## Context
 
 A 6-file Slack drop on 2026-06-16 produced six top-level `Processing [dev] 'file.pdf'`

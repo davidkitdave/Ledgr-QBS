@@ -67,13 +67,15 @@ rather than one message per document. "The job" is how a human refers to a drop
 and its outcome.
 
 ## Review (HITL)
-Human-in-the-loop check before a low-confidence extraction is committed to a
-Workbook. A document needs Review when the Engine flags it: not reconciled, tax
-confidence below threshold, or otherwise flagged. Review is realised with **ADK
-2.0's native `RequestInput`** node inside a *slim* approval Workflow
-(Engine node → approval node → deliver node — no per-step LLM). A human's
-approve/edit in Slack resumes the paused node via the Firestore interrupt bridge.
-An approve-with-edit becomes a [[Correction]] the Engine remembers.
+Human-in-the-loop check triggered by **material ambiguity** — a document that
+won't reconcile, is missing a required field, comes from a brand-new vendor with
+no known mapping, or is illegible. Review is **not** triggered merely because a
+document's type label is unfamiliar; a cleanly extracted `other` or `expense_claim`
+posts without a pause. Review is realised with **ADK 2.0's native `RequestInput`**
+node inside a *slim* approval Workflow (Engine node → approval node → deliver node
+— no per-step LLM). A human's approve/edit in Slack resumes the paused node via the
+Firestore interrupt bridge. An approve-with-edit becomes a [[Correction]] the Engine
+remembers. See ADR-0017 for the full signal taxonomy.
 
 ## Correction
 A human-supplied fix to how a Client's documents are handled — e.g.
@@ -167,3 +169,43 @@ in the ledger, are **not** billable.
 The act of adding credits to a Firm's balance. Payment for the credits is handled
 out-of-band (the firm pays the developer); the top-up is the resulting credit grant
 recorded against the firm.
+
+## Expense claim
+A recognized billable document kind: an employee or staff reimbursement with
+itemised expense lines, booked like a purchase (expense lines + tax treatment +
+COA categorisation). Expense claims are a **first-class doc type**, not `other`.
+The Engine understands and posts them without a [[Review (HITL)]] pause when the
+extraction reconciles cleanly. See ADR-0017.
+
+## other (doc type)
+The label assigned when a document does not match any named doc type. `other` means
+**processable-but-unclassified** — the Engine still runs the Understand layer and
+attempts a booking; it is **not** an error. An `other` document that reconciles
+cleanly posts without a [[Review (HITL)]] pause. The truly unbookable case —
+a document the Engine cannot meaningfully post — is signalled by `processable=False`
+(a hard escalation signal), **not** by the `other` label alone. See ADR-0017.
+
+## Familiarity
+A per-client learned signal meaning "stop asking about this document shape or vendor."
+Stored as a Firestore subcollection `clients/{client_id}/familiarity/{key}` (keyed
+by `doc_type` or `doc_type:vendor`) holding `{seen_count, last_seen_at,
+last_direction}`. When `seen_count` reaches the threshold, soft [[Review (HITL)]]
+signals for that key are suppressed — escalation decays per client as it learns.
+
+**Distinct from [[Correction]]:** a Familiarity record means *"seen this, trust it"*
+and lowers the escalation rate; a Correction means *"this mapping was wrong — fix
+it."* A Correction changes the output; Familiarity changes whether to pause.
+Both live per-client in Firestore; both extend the learning system (ADR-0004).
+
+**Not called "confirmation":** the codebase already uses `committed_confirmations`
+(`accounting_agents/slack_runner.py`) as the ADK Tool-Confirmation idempotency
+marker — an entirely unrelated mechanism. Using the same word would create
+ambiguity in search and review.
+
+## Delivery endpoint *(roadmap)*
+A per-destination projection of the [[Canonical Schema]] — one understanding of a
+document rendered into the format a specific target needs. Excel/Slack delivery is
+the current implementation. Future endpoints include ERP REST API push (Xero/QBO),
+legacy batch-import file generation (`.iif`/`.csv`), and optional RPA automation.
+The principle: **one understanding → many deliveries**. See ADR-0005 and
+ADR-0019 (target architecture).

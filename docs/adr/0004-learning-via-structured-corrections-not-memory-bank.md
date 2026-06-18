@@ -47,3 +47,23 @@ extracting** the next document. ADK **Memory Bank is not used** for this.
   Agent Engine; rejected as the learning mechanism.
 - **Both (structured rules + Memory Bank)** — most capable, most moving parts;
   deferred to a later phase if natural-language recall is needed.
+
+## Amendment — RAG suggestion layer as an optional input to Corrections (roadmap, 2026-06-18)
+
+Entity resolution remains **deterministic Corrections as the authoritative
+mapping**. This is an audit requirement: "vendor X = account Y" must be obeyed
+exactly, not recalled probabilistically.
+
+A future optional enhancement may add a **RAG / embedding suggestion layer** for
+fuzzy vendor matching: when a new vendor arrives with no existing Correction, an
+embedding similarity search over the client's prior Correction history (or COA
+keyword index) suggests the most likely account code. The human confirms or edits
+the suggestion. On confirmation, the confirmed mapping is written as a
+**Correction** — it enters the deterministic, auditable store and is applied on
+every subsequent document.
+
+This reconciles the RAG idea with ADR-0004 without reversing it: RAG is a
+**suggestion input**, not a replacement for the Correction store. The Correction
+is still the authoritative output. RAG that is never confirmed produces no lasting
+effect. See ADR-0019 (Universal Adapter, Phase 3) for the planned sequencing of
+this enhancement relative to other delivery work.

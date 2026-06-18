@@ -4,6 +4,30 @@
 - **Date:** 2026-06-17
 - **Deciders:** Ledgr team
 
+## Amendment — Credit deduction read point + multi-instance OCC note (2026-06-18)
+
+**Deduction read point:** credit deduction must read the `appended` count from
+the **flush result** returned by `_flush_deferred_ledger_writes`, not from the
+per-doc deferred payload. Per-doc deferred payloads carry `appended=0` at
+collection time (the write has not yet happened); the actual written row count
+is only known after the batch-reduce flush completes. Deducting from the per-doc
+result would charge 0 credits per document regardless of what was written.
+
+Concretely: in `persist_and_deliver()`, deduct after `append_rows()` returns
+using its `appended` field. In the batch path, deduct inside
+`_flush_deferred_ledger_writes` after each group write, using the `appended`
+count from that group's flush result.
+
+**Multi-instance future:** the current deployment is `min-instances=1,
+max-instances=1`, making the in-process credit counter and `threading.Lock`
+sufficient. If `max-instances` is ever raised above 1, the in-process lock
+and counter are insufficient — two Cloud Run instances can read the same
+balance concurrently and both deduct, producing a double-spend. For the
+multi-instance case, credit deduction must use a **Firestore transaction
+or etag-based optimistic concurrency control (OCC)** on the
+`firms/{firmId}/credits` document. This is not required at current scale
+but must be the first change made before raising `max-instances`.
+
 ## Context
 
 Ledgr needs to meter usage and charge firms for the work it does. The
