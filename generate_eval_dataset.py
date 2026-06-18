@@ -32,7 +32,7 @@ for i in range(20):
     # Generate PDF with a realistic-ish layout
     c = canvas.Canvas(filename)
     c.setFont("Helvetica-Bold", 16)
-    c.drawString(50, 800, f"INVOICE")
+    c.drawString(50, 800, "INVOICE")
     
     c.setFont("Helvetica", 12)
     c.drawString(50, 770, f"From: {vendor}")
@@ -65,7 +65,7 @@ for i in range(20):
     dataset.append({
         "turn_id": f"eval_inv_{i+1}",
         "turn_history": [],
-        "request": f"Please process this invoice and generate the excel export.",
+        "request": "Please process this invoice and generate the excel export.",
         "files": [filename]
     })
 

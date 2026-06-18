@@ -42,7 +42,6 @@ from .export.client_context import (
 )
 from .export.exporters import (
     BankStatementExporter,
-    _sheet_title,
     bank_sheet_title,
     get_bank_exporter,
     get_exporter,

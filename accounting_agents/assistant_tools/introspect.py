@@ -15,7 +15,6 @@ function tools with precise docstrings + ``status`` fields.
 from __future__ import annotations
 
 import json
-from datetime import date
 
 from google.adk.tools import ToolContext
 
@@ -26,7 +25,6 @@ from accounting_agents.assistant import (
     PENDING_REVIEWS_KEY,
     PROCESSING_LOG_KEY,
     _diagnostic_counts,
-    _empty_ledger_message,
     _get_rows,
     _parse_int_param,
 )

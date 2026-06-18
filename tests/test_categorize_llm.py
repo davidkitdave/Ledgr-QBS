@@ -18,7 +18,6 @@ import json
 from types import SimpleNamespace
 from typing import Optional
 
-import pytest
 
 from invoice_processing.export.categorizer import (
     _llm_match_lines,
@@ -193,7 +192,6 @@ def test_llm_low_confidence_sets_flagged(monkeypatch):
 
 def test_llm_low_confidence_resolution_flagged(monkeypatch):
     """Verify the AccountResolution is flagged when confidence < 0.6."""
-    from invoice_processing.export.categorizer import AccountResolution
 
     canned = _canned_result(0, "6001", 0.45)
     _stub_make_client(monkeypatch, canned)
@@ -444,7 +442,7 @@ def test_tax_registered_threaded_from_categorize_invoice(monkeypatch):
     """categorize_invoice threads tax_registered into _llm_match_lines."""
     captured_kwargs: list[dict] = []
 
-    orig_fn = __import__(
+    orig_fn = __import__(  # noqa: F841 — captured for reference; not called in this spy pattern
         "invoice_processing.export.categorizer", fromlist=["_llm_match_lines"]
     )._llm_match_lines
 

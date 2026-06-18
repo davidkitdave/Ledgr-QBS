@@ -14,7 +14,7 @@ from ..export.models import NormalizedInvoice
 from .book import BOOK_FROM_CAPTURE_FN, BookingProposal, booking_to_extracted_invoice, slim_booking_proposal_for_state
 from .document_extractor import extract_document_bundle
 from .document_normalizer import normalize_document_bundle
-from .document_record import DocumentRecord, DocumentRecordBundle
+from .document_record import DocumentRecordBundle
 from .invoice_extractor import to_normalized
 from .ledger_extract import (
     DocumentLedgerExtract,

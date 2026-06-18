@@ -6,10 +6,8 @@ No live Slack token, Firestore, or Gemini call is made.
 
 from __future__ import annotations
 
-import pytest
 
 from app.commands import (
-    LedgrCommand,
     ledgr_slash_command_name,
     parse_ledgr_command,
     settings_prefill,
@@ -444,7 +442,7 @@ class TestOnboardingSubmitEditPreservesClient:
         client = FakeClient()
         body = _submit_body(channel_id=channel_id, client_name=client_name)
         if id_factory is None:
-            id_factory = lambda: "should-not-be-used"
+            id_factory = lambda: "should-not-be-used"  # noqa: E731 — short sentinel; def would add noise
         handle_onboarding_submit(body, ack, client, store, id_factory)
         return store, ack, client
 

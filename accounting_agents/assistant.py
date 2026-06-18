@@ -1111,7 +1111,6 @@ def lookup_row(tool_context: ToolContext, query: str, limit: str = "5") -> str:
     Returns:
         JSON with ``matches`` (ledger hits) and optional ``processing_log_matches``.
     """
-    from accounting_agents.assistant_tools._helpers import filename_matches_query
 
     rows = _get_rows(tool_context)
     needle = (query or "").strip().lower()
@@ -2322,7 +2321,7 @@ def assistant_instruction(ctx) -> str:
     except Exception:  # noqa: BLE001 — never let prompt assembly crash
         return _BASE_INSTRUCTION
 
-    def _sub(match: "re.Match[str]") -> str:  # type: ignore[name-defined]
+    def _sub(match: "re.Match[str]") -> str:  # type: ignore[name-defined]  # noqa: F821
         raw = match.group(0).lstrip("{").rstrip("}").strip().lstrip("+").rstrip("+").strip()
         optional = raw.endswith("?")
         key = raw[:-1] if optional else raw

@@ -37,7 +37,6 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Optional
 
 # Repo root on sys.path so the harness can import the app modules
 # without `uv run`'s automatic resolution.

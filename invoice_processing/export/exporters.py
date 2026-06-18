@@ -99,7 +99,7 @@ class LedgerExporter:
 
     def _ensure_classified(self, invoices: list[NormalizedInvoice]) -> None:
         for inv in invoices:
-            if any(l.tax_treatment is None for l in inv.lines):
+            if any(ln.tax_treatment is None for ln in inv.lines):
                 classify_invoice(inv, self.clf)
 
     def rows(self, invoices: list[NormalizedInvoice], doc_type: str) -> list[dict]:

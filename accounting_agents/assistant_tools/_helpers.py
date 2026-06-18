@@ -56,7 +56,6 @@ def find_coa_by_code(state: dict, account_code: str) -> dict | None:
     if not isinstance(coa_list, list):
         return None
     needle_norm = _normalize_coa_code(needle)
-    exact: dict | None = None
     fuzzy: dict | None = None
     for entry in coa_list:
         if not isinstance(entry, dict):

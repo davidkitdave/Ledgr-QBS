@@ -21,7 +21,7 @@ import os as _os
 if "GOOGLE_GENAI_USE_VERTEXAI" not in _os.environ:
     _os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "FALSE"
 
-from invoice_processing.extract.document_extractor import extract_document_file, mime_for
+from invoice_processing.extract.document_extractor import extract_document_file
 from invoice_processing.extract.document_normalizer import normalize_document_bundle
 from invoice_processing.extract.record_merge import merge_document_records
 

@@ -344,8 +344,8 @@ def reconcile(
     alarms when the capture has no Sub Total row). When
     ``tax_visible_on_document`` is False, skip GST checks.
     """
-    net_sum = sum(l.net_amount or 0.0 for l in ex.lines)
-    gst_sum = sum(l.gst_amount or 0.0 for l in ex.lines)
+    net_sum = sum(ln.net_amount or 0.0 for ln in ex.lines)
+    gst_sum = sum(ln.gst_amount or 0.0 for ln in ex.lines)
     line_total = net_sum + gst_sum
 
     mismatches: list[str] = []
@@ -402,14 +402,14 @@ def to_normalized(
 
     lines = [
         InvoiceLine(
-            description=l.description,
-            quantity=l.quantity,
-            unit_amount=l.unit_amount,
-            net_amount=l.net_amount,
-            gst_amount=l.gst_amount,
-            tax_keyword=l.tax_label,
+            description=ln.description,
+            quantity=ln.quantity,
+            unit_amount=ln.unit_amount,
+            net_amount=ln.net_amount,
+            gst_amount=ln.gst_amount,
+            tax_keyword=ln.tax_label,
         )
-        for l in ex.lines
+        for ln in ex.lines
     ]
     ok, detail = reconcile(ex)
     mixed_currencies = currency_conflict or _has_currency_conflict(

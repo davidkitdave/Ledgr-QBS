@@ -7,10 +7,8 @@ The LLM seam (_llm_match_lines) is never called from the deterministic tests
 
 from __future__ import annotations
 
-import pytest
 
 from invoice_processing.export.categorizer import (
-    AccountResolution,
     _norm,
     _split_keywords,
     categorize_invoice,

@@ -11,7 +11,7 @@ import os
 import re
 from typing import Optional
 
-from ..export.models import InvoiceLine, NormalizedInvoice, PartyInfo
+from ..export.models import NormalizedInvoice
 from .document_record import DocumentRecord, DocumentRecordBundle, LabeledField
 from .record_merge import merge_document_records
 from .invoice_extractor import reconcile, to_normalized, _parse_date
@@ -286,7 +286,7 @@ def _apply_reimbursement_ledger(record: DocumentRecord, ex: ExtractedInvoice) ->
     ]
     if payout_items:
         lines = [_line_to_extracted(item) for item in payout_items]
-        subtotal = sum(l.net_amount or 0.0 for l in lines)
+        subtotal = sum(ln.net_amount or 0.0 for ln in lines)
         total = ex.total if ex.total is not None else subtotal
         updates.update({"lines": lines, "subtotal": subtotal, "total": total})
     elif ex.total is not None:
@@ -456,8 +456,8 @@ def _record_to_extracted(record: DocumentRecord, *, mapper_version: str = "basel
     telco_summary = _telco_ledger_lines(record) if enhanced and _is_telco_bill(record) else None
     if telco_summary:
         lines = telco_summary
-        subtotal = round(sum(l.net_amount or 0.0 for l in lines), 2)
-        gst_total = round(sum(l.gst_amount or 0.0 for l in lines), 2)
+        subtotal = round(sum(ln.net_amount or 0.0 for ln in lines), 2)
+        gst_total = round(sum(ln.gst_amount or 0.0 for ln in lines), 2)
         total = _telco_current_charges(record) or round(subtotal + gst_total, 2)
         reconcile(
             ExtractedInvoice(
@@ -489,10 +489,10 @@ def _record_to_extracted(record: DocumentRecord, *, mapper_version: str = "basel
                 )
             )
         if total is None and enhanced and lines and len(lines) <= _MAX_LINE_SUM_FALLBACK:
-            line_sum = sum(l.net_amount or 0.0 for l in lines)
+            line_sum = sum(ln.net_amount or 0.0 for ln in lines)
             if line_sum > 0:
                 total = round(line_sum + (gst_total or 0.0), 2)
-        if len(lines) == 1 and gst_total is not None and all(l.gst_amount is None for l in lines):
+        if len(lines) == 1 and gst_total is not None and all(ln.gst_amount is None for ln in lines):
             lines[0].gst_amount = gst_total
 
     fx_rate = None

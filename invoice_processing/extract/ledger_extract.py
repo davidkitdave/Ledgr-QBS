@@ -394,8 +394,6 @@ def ledger_extract_to_extracted_invoice(extract: DocumentLedgerExtract) -> Extra
         )
         for line in extract.ledger_lines
     ]
-    net_sum = sum(l.net_amount or 0.0 for l in lines)
-    gst_sum = sum(l.gst_amount or 0.0 for l in lines)
     # Prefer structured parties when present; they win over the legacy strings.
     issuer_name = extract.vendor_name
     issuer_gst_regno = extract.issuer_gst_regno

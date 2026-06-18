@@ -24,12 +24,9 @@ Why a fake model is feasible here:
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
 from typing import AsyncGenerator, Optional
 
-import pytest
 from google.adk.agents import LlmAgent
-from google.adk.apps import App
 from google.adk.models.base_llm import BaseLlm
 from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse

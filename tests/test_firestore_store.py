@@ -12,7 +12,6 @@ that supports exactly the call shapes the production code makes:
 
 from __future__ import annotations
 
-import pytest
 
 from invoice_processing.export.client_context import (
     ClientContext,

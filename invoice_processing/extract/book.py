@@ -165,8 +165,8 @@ def booking_to_extracted_invoice(
         )
         for line in proposal.ledger_lines
     ]
-    gst_total = sum(l.gst_amount or 0.0 for l in lines) if proposal.tax_visible_on_document else 0.0
-    net_sum = sum(l.net_amount or 0.0 for l in lines)
+    gst_total = sum(ln.gst_amount or 0.0 for ln in lines) if proposal.tax_visible_on_document else 0.0
+    net_sum = sum(ln.net_amount or 0.0 for ln in lines)
     return ExtractedInvoice(
         doc_type="invoice",
         invoice_number=proposal.invoice_number,

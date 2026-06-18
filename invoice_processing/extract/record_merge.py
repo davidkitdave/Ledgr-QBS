@@ -10,13 +10,9 @@ import re
 from typing import Optional
 
 from .document_record import (
-    AnnotationCapture,
     DocumentRecord,
     DocumentRecordBundle,
-    LabeledField,
-    LineCapture,
     PartyCapture,
-    TableCapture,
 )
 
 

@@ -11,7 +11,7 @@ import pytest
 
 from invoice_processing.export.exporters import XeroLedgerExporter
 from invoice_processing.export.models import InvoiceLine, NormalizedInvoice, PartyInfo
-from invoice_processing.export.tax_classifier import TaxClassifier, classify_invoice
+from invoice_processing.export.tax_classifier import classify_invoice
 from invoice_processing.extract.invoice_extractor import ExtractedInvoice, ExtractedLine, reconcile
 from accounting_agents.nodes import _needs_review
 

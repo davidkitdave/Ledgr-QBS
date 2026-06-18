@@ -85,11 +85,11 @@ def run_one(path: Path) -> dict:
                 "reconcile_note": inv.reconcile_note,
                 "lines": [
                     {
-                        "description": l.description[:60],
-                        "net_amount": l.net_amount,
-                        "tax_keyword": l.tax_keyword,
+                        "description": ln.description[:60],
+                        "net_amount": ln.net_amount,
+                        "tax_keyword": ln.tax_keyword,
                     }
-                    for l in inv.lines
+                    for ln in inv.lines
                 ],
             }
         )

@@ -13,7 +13,6 @@ from invoice_processing.export.tax_classifier import classify_invoice
 from invoice_processing.extract.document_record import DocumentRecord, LabeledField, LineCapture, PartyCapture
 from invoice_processing.extract.verify import tax_visible_on_capture, verify_extracted_invoice
 from invoice_processing.extract.book import BookingProposal, BookingLedgerLine, booking_to_extracted_invoice
-from datetime import date
 
 
 pytestmark = pytest.mark.eval

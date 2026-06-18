@@ -1185,7 +1185,7 @@ class TestDedupValue:
 # Commit 4 (updated): ledger_preview_data_table — per-software / per-sheet
 # --------------------------------------------------------------------------- #
 
-from app.blocks import PreviewColumn, preview_column_spec, software_label
+from app.blocks import preview_column_spec
 
 # QBS Purchase exporter row shape
 _QBS_PURCHASE_ROWS = [

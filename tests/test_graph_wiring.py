@@ -10,7 +10,6 @@ with a fake Context to prove a document pass reaches ``deliver_node``.
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
 
 from google.adk.apps import App
 from google.adk.workflow import Workflow

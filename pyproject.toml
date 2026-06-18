@@ -83,3 +83,10 @@ default = true
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]
+# tracked: scripts do dotenv/sys.path setup before imports — E402 is intentional
+"scripts/*.py" = ["E402"]
+# tracked: eval scripts call load_dotenv() before project imports — E402 is intentional
+"eval/*.py" = ["E402"]
+# tracked: test module imports a symbol that is only registered after a prior import block
+"tests/test_app_blocks.py" = ["E402"]
+"tests/test_assistant_agent.py" = ["E402"]
