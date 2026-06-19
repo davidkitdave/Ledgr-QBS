@@ -367,7 +367,7 @@ def _select_case_ids(
     evalset_path: pathlib.Path,
     case_id: str | None,
 ) -> list[str]:
-    from tests.eval.eval_routing import CHAT_CASE_IDS, is_chat_case
+    from tests.eval.eval_routing import is_chat_case
 
     raw = json.loads(evalset_path.read_text())
     all_ids = [c["eval_id"] for c in raw["eval_cases"]]
@@ -376,7 +376,7 @@ def _select_case_ids(
         return [case_id]
 
     if lane == "chat":
-        return list(CHAT_CASE_IDS)
+        return [cid for cid in all_ids if is_chat_case(cid)]
     if lane == "doc":
         raise ValueError(
             "Doc-lane generate is not supported here (no session/PDF wiring). "

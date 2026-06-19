@@ -10,16 +10,27 @@ a module with an ``agent`` member) that exposes ``root_agent``.
 
 from __future__ import annotations
 
+import json
+import pathlib
+
 CHAT_CASE_PREFIX = "B"
 DOC_AGENT_MODULE = "accounting_agents.agent"
 CHAT_AGENT_MODULE = "accounting_agents.chat_eval.agent"
 
-CHAT_CASE_IDS = (
-    "B3_chat_show_client_profile_trajectory",
-    "B4_chat_summarize_by_category_trajectory",
-    "B5_chat_multi_turn_fye_then_currency",
-    "B6_chat_invoice_account_code_trajectory",
-)
+_EVALSET_PATH = pathlib.Path(__file__).parent / "datasets" / "ledgr.evalset.json"
+
+
+def _load_chat_case_ids() -> tuple[str, ...]:
+    """Derive chat-lane case IDs from the evalset (B-prefix) at import time."""
+    raw = json.loads(_EVALSET_PATH.read_text())
+    return tuple(
+        c["eval_id"]
+        for c in raw["eval_cases"]
+        if c["eval_id"].startswith(CHAT_CASE_PREFIX)
+    )
+
+
+CHAT_CASE_IDS = _load_chat_case_ids()
 
 
 def is_chat_case(eval_case_id: str) -> bool:
