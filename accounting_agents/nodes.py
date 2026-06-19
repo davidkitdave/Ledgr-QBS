@@ -68,8 +68,6 @@ from .jurisdiction import (
     JURISDICTION_RATES_KEY,
     SUPPLIER_COUNTRY_KEY,
     TAX_JURISDICTION_KEY,
-    TAX_SYSTEM_HINT_KEY,
-    JurisdictionResolution,
     resolution_from_state as _resolution_from_state,
     resolve_jurisdiction as _resolve_jurisdiction_fn,
     write_to_state as _write_jurisdiction_to_state,
@@ -519,7 +517,7 @@ async def classify_node(ctx) -> Event:
     rewritten by a fuzzy Python pass).
     """
     from invoice_processing.classify.document_classifier import ALLOWED_DOC_TYPES
-    from .lane_config import ROUTE_BANK, ROUTE_COMMERCIAL_DOC, route_for_doc_type
+    from .lane_config import ROUTE_BANK, ROUTE_COMMERCIAL_DOC
 
     # Playground seed: inject synthetic ClientContext when running under adk web /
     # agents-cli and no real Slack profile is present.  This is the WS3a fix —
@@ -558,7 +556,6 @@ async def classify_node(ctx) -> Event:
     # ``state[DOC_TYPE_KEY]`` as the raw enum ("invoice" / "receipt" / ...) so
     # downstream nodes / traces show what the LLM classifier actually emitted;
     # the Event route is the canonical lane label.
-    route_label = route_for_doc_type(doc_type)
     if doc_type == "bank_statement":
         ctx.state[DOC_TYPE_KEY] = "bank_statement"
         ctx.state[DIRECTION_KEY] = None

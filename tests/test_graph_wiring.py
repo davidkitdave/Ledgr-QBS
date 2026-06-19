@@ -98,7 +98,6 @@ def test_root_agent_is_document_workflow():
 
 def test_document_app_is_resumable():
     """document_app (the sole document entry) must be resumable for HITL."""
-    from google.adk.apps import App
     from accounting_agents.agent import document_app
 
     assert isinstance(document_app, App)

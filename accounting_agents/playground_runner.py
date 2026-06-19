@@ -228,10 +228,10 @@ async def run_chat(client_state: dict, output_dir: str) -> None:
         state=chat_state,
     )
 
-    print(f"\n💬 Ledgr Chat Assistant (Playground)")
+    print("\n💬 Ledgr Chat Assistant (Playground)")
     print(f"   Client: {client_state['client_name']}")
     print(f"   Loaded: FY{latest_fy or 'none'} ({len(ledger_rows)} rows)")
-    print(f"   Type 'quit' to exit.\n")
+    print("   Type 'quit' to exit.\n")
 
     while True:
         try:

@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 from datetime import date, timedelta
 
+import pytest
+
 
 from accounting_agents.assistant import (
     LEDGER_DATA_KEY,
@@ -21,6 +23,24 @@ from accounting_agents.assistant import (
 )
 from invoice_processing.export.models import InvoiceLine, NormalizedInvoice, PartyInfo
 from invoice_processing.export.tax_classifier import TaxClassifier
+
+
+# ---------------------------------------------------------------------------
+# Hermetic fixture: force the LLM call OFF for every test in this module so
+# reason_one_invoice always uses the deterministic TaxClassifier fallback.
+# This makes the explain_tax_treatment assertions stable in any environment
+# (CI has no API key; local dev has a live key that produces natural-language
+# reasons that don't contain the bare code substring).
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _no_llm_call():
+    """Patch _call_llm to return None, routing reason_one_invoice to _fallback_classify."""
+    import unittest.mock as _mock
+
+    with _mock.patch("accounting_agents.tax_reasoning._call_llm", return_value=None):
+        yield
 
 
 class _FakeToolContext:

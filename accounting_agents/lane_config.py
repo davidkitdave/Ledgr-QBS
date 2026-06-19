@@ -25,7 +25,7 @@ Design:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, Optional
 
 # Lane labels (match ``nodes.ROUTE_*``; centralised here so the registry is

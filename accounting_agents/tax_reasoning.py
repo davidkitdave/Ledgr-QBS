@@ -31,12 +31,9 @@ ADK best practice alignment (from /adk-docs-mcp):
 
 from __future__ import annotations
 
-import json
 import logging
-import os
 from dataclasses import dataclass, field
-from datetime import date
-from typing import Any, Optional
+from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -261,11 +258,7 @@ def reason_one_invoice(
     """
     from .jurisdiction import (
         resolve_jurisdiction,
-        TAX_JURISDICTION_KEY,
-        TAX_SYSTEM_HINT_KEY,
         JURISDICTION_RATES_KEY,
-        SUPPLIER_COUNTRY_KEY,
-        CUSTOMER_COUNTRY_KEY,
     )
 
     if jurisdiction_resolution is None:

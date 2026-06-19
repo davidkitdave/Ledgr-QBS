@@ -337,6 +337,8 @@ def _driver_state(channel: str) -> dict:
         "software": "qbs",
         "fye_month": 3,
         "client_id": "drv-client",
+        "region": "SINGAPORE",
+        "base_currency": "SGD",
         nodes.ARTIFACT_NAME_KEY: nodes.ARTIFACT_NAME_FMT.format(file_id="F1"),
     }
 

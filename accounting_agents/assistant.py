@@ -55,7 +55,6 @@ from google.adk.agents import LlmAgent
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.models import LlmRequest, LlmResponse
 from google.adk.tools import FunctionTool, ToolContext
-from google.genai import types
 
 from invoice_processing.export.categorizer import resolve_account
 from invoice_processing.export.client_context import (
@@ -63,13 +62,10 @@ from invoice_processing.export.client_context import (
     coa_from_state,
     entity_memory_from_state,
 )
-from invoice_processing.export.models import InvoiceLine, NormalizedInvoice, PartyInfo
+from invoice_processing.export.models import InvoiceLine, NormalizedInvoice
 
 from . import config
 from .jurisdiction import (
-    JURISDICTION_RATES_KEY,
-    TAX_JURISDICTION_KEY,
-    TAX_SYSTEM_HINT_KEY,
     resolve_jurisdiction,
     write_to_state,
 )
@@ -199,7 +195,6 @@ def _tax_registration_threshold(state: dict) -> tuple[float, str, str]:
     3. SG / 1M SGD (legacy fallback — never silently for a non-SG client).
     """
     region = (state.get("client_region") or state.get("region") or "").strip().upper()
-    currency = (state.get("base_currency") or state.get("client_currency") or "").strip().upper()
     if region in ("SINGAPORE", "SG", "SGP"):
         threshold = float(os.environ.get("LEDGR_TAX_REGISTRATION_THRESHOLD_SG", GST_THRESHOLD_SGD))
         return threshold, "SGD", "SG GST registration (s.40B GST Act)"
@@ -1081,6 +1076,7 @@ def explain_tax_treatment(
         doc_type=dtype,
         invoice_date=inv_date,
         our_gst_registered=reg,
+        lines=[line],
     )
     # Resolve jurisdiction from state (NOT hardcoded SG) so the LLM tax
     # reasoner picks the right rate band. Returns SINGAPORE for SG clients,
@@ -2388,6 +2384,8 @@ Routing guidelines:
 3. Write tools (e.g. modify ledger) are gated: propose the change first, and wait for explicit user confirmation before calling the write tool.
 4. If the user asks for total purchases, total spend, or expense summaries, call `summarize_by_category`. Do NOT use `pnl_for_fy` unless they specifically ask for overall net profit, total revenue, or a full profit and loss summary.
 5. If the ledger is not loaded or has 0 rows, use `diagnose_assistant_context` to check.
+6. For processing diagnostics — why a document failed, what was extracted, what's pending review, or processing history — use `get_document_processing_detail`, `list_processing_history`, `list_pending_reviews`, or `diagnose_assistant_context`.
+7. To browse source documents in the loaded ledger (by filename, vendor, or date), use `list_recent_documents`. To find a specific ledger row by invoice ID, filename, or vendor name, use `lookup_row`.
 
 
 For every question, call the single most relevant tool first, then explain the

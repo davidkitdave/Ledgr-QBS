@@ -160,7 +160,6 @@ class _StubGenAIResponse:
 
 def _install_stub_llm(monkeypatch, payload: dict[str, Any]):
     """Stub ``genai_client.make_client`` so tax_reasoning returns ``payload``."""
-    from google import genai as _genai  # type: ignore[import-not-found]
     # The tax_reasoning module imports make_client lazily; we patch it where
     # it imports from.
     import invoice_processing.shared_libraries.genai_client as _gc
