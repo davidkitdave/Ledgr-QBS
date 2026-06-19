@@ -25,7 +25,7 @@ from .client_context import (
     coa_from_state,
     entity_memory_from_state,
 )
-from .models import NormalizedInvoice
+from .models import NormalizedInvoice, PartyInfo
 
 
 @dataclass
@@ -41,6 +41,43 @@ class AccountResolution:
 def _norm(s: Optional[str]) -> str:
     """Lowercase alphanumerics only — mirrors document_classifier._norm."""
     return "".join(ch for ch in (s or "").lower() if ch.isalnum())
+
+
+def canonical_party_name(
+    party: PartyInfo,
+    entity_memory: list[EntityMemoryEntry],
+) -> Optional[str]:
+    """Return the canonical ``EntityMemoryEntry.name`` when a confident match is found.
+
+    Match criteria (exact only — no fuzzy/substring):
+      1. reg_no exact match (both non-empty after _norm).
+      2. Exact normalized-name equality.
+
+    Returns None when:
+      - No entry matches.
+      - The matched entry has an empty name.
+      - The matched name already equals party.name (no-op).
+    """
+    n_party = _norm(party.name)
+    n_reg = _norm(getattr(party, "gst_regno", None))
+
+    for entry in entity_memory:
+        n_entry_name = _norm(entry.name)
+        if not n_entry_name:
+            continue
+
+        reg_hit = bool(n_reg) and bool(_norm(entry.reg_no)) and _norm(entry.reg_no) == n_reg
+        name_hit = bool(n_party) and n_entry_name == n_party
+
+        if reg_hit or name_hit:
+            canon = entry.name
+            if not canon:
+                return None
+            if canon == party.name:
+                return None  # already canonical
+            return canon
+
+    return None
 
 
 def _split_keywords(raw: Optional[str]) -> list[str]:
@@ -257,6 +294,13 @@ def categorize_invoice(
     party = inv.counterparty
     vendor_name = party.name
     reg_no = party.gst_regno
+
+    # Contact-master name normalization (WS4.5): replace extracted name with the
+    # canonical form from entity_memory so the ERP sees a single consistent ContactName.
+    canon = canonical_party_name(party, entity_memory)
+    if canon:
+        party.name = canon
+        vendor_name = canon
 
     # COA lookup by key -> description, for mapping LLM keys back to names.
     by_key = {a.key: a for a in coa if a.key}

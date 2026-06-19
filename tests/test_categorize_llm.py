@@ -466,3 +466,131 @@ def test_tax_registered_threaded_from_categorize_invoice(monkeypatch):
 
     assert captured_kwargs, "_llm_match_lines was never called"
     assert captured_kwargs[0]["tax_registered"] is False
+
+
+# --------------------------------------------------------------------------- #
+# WS4.5 — contact-master name canonicalization
+# --------------------------------------------------------------------------- #
+from invoice_processing.export.categorizer import canonical_party_name  # noqa: E402
+
+
+def _make_party(name: str, reg_no: str | None = None):
+    return PartyInfo(name=name, gst_regno=reg_no)
+
+
+def _em(name: str, reg_no: str | None = None) -> EntityMemoryEntry:
+    return EntityMemoryEntry(name=name, reg_no=reg_no)
+
+
+class TestCanonicalPartyName:
+    """Unit tests for canonical_party_name helper."""
+
+    def test_exact_normalized_name_returns_canonical(self):
+        """Lowercase variant 'acme pte ltd' matches entry 'Acme Pte Ltd'."""
+        party = _make_party("acme pte ltd")
+        result = canonical_party_name(party, [_em("Acme Pte Ltd")])
+        assert result == "Acme Pte Ltd"
+
+    def test_uppercase_dotted_variant_matches_via_reg_no(self):
+        """'ACME PTE. LTD.' has a different normalized form but same reg_no → canonical."""
+        party = _make_party("ACME PTE. LTD.", reg_no="200012345A")
+        result = canonical_party_name(party, [_em("Acme Pte Ltd", reg_no="200012345A")])
+        assert result == "Acme Pte Ltd"
+
+    def test_partial_overlap_not_merged(self):
+        """'Acme Industries' partially overlaps 'Acme Pte Ltd' but must NOT match."""
+        party = _make_party("Acme Industries")
+        result = canonical_party_name(party, [_em("Acme Pte Ltd")])
+        assert result is None
+
+    def test_no_match_returns_none(self):
+        """Unknown vendor → None (name left unchanged downstream)."""
+        party = _make_party("Totally Unknown Vendor")
+        result = canonical_party_name(party, [_em("Acme Pte Ltd")])
+        assert result is None
+
+    def test_empty_entity_memory_returns_none(self):
+        party = _make_party("Acme Pte Ltd")
+        result = canonical_party_name(party, [])
+        assert result is None
+
+    def test_already_canonical_returns_none(self):
+        """No-op when party.name already matches entry.name exactly."""
+        party = _make_party("Acme Pte Ltd")
+        result = canonical_party_name(party, [_em("Acme Pte Ltd")])
+        assert result is None  # no overwrite needed
+
+    def test_empty_entry_name_skipped(self):
+        """Entry with empty name is skipped; no false positive."""
+        party = _make_party("acmeptelTD")
+        result = canonical_party_name(party, [_em("")])
+        assert result is None
+
+    def test_reg_no_match_different_printed_name(self):
+        """Same reg_no but completely different printed name → canonical applied."""
+        party = _make_party("Acme (S) Pte Ltd", reg_no="199900001Z")
+        result = canonical_party_name(party, [_em("Acme Pte Ltd", reg_no="199900001Z")])
+        assert result == "Acme Pte Ltd"
+
+    def test_reg_no_empty_on_party_no_false_positive(self):
+        """party.gst_regno is None → reg_no path never fires."""
+        party = _make_party("Acme Pte Ltd", reg_no=None)
+        result = canonical_party_name(party, [_em("Different Name", reg_no="200012345A")])
+        assert result is None
+
+
+class TestCategorizeInvoiceCanonical:
+    """Integration tests: canonical name written into inv.supplier / inv.customer."""
+
+    _EM = [EntityMemoryEntry(name="Acme Pte Ltd", reg_no="200012345A")]
+
+    def _purchase(self, name: str, reg_no: str | None = None) -> NormalizedInvoice:
+        return NormalizedInvoice(
+            doc_type="purchase",
+            supplier=PartyInfo(name=name, gst_regno=reg_no),
+            lines=[InvoiceLine(description="Service Fee")],
+        )
+
+    def _sales(self, name: str) -> NormalizedInvoice:
+        return NormalizedInvoice(
+            doc_type="sales",
+            customer=PartyInfo(name=name),
+            lines=[InvoiceLine(description="Consulting")],
+        )
+
+    def test_variant_name_normalized_on_purchase(self):
+        """Uppercase dotted variant resolved via reg_no → canonical in inv.supplier.name."""
+        inv = self._purchase("ACME PTE. LTD.", reg_no="200012345A")
+        categorize_invoice(inv, coa=[], category_mapping={}, entity_memory=self._EM, use_llm=False)
+        assert inv.supplier.name == "Acme Pte Ltd"
+
+    def test_lowercase_variant_normalized_on_purchase(self):
+        """Lowercase 'acme pte ltd' → canonical 'Acme Pte Ltd' via name match."""
+        inv = self._purchase("acme pte ltd")
+        categorize_invoice(inv, coa=[], category_mapping={}, entity_memory=self._EM, use_llm=False)
+        assert inv.supplier.name == "Acme Pte Ltd"
+
+    def test_unknown_vendor_name_unchanged(self):
+        """No match → supplier.name left untouched."""
+        inv = self._purchase("Unknown Vendor Co")
+        categorize_invoice(inv, coa=[], category_mapping={}, entity_memory=self._EM, use_llm=False)
+        assert inv.supplier.name == "Unknown Vendor Co"
+
+    def test_empty_entity_memory_name_unchanged(self):
+        """Empty entity_memory → name left untouched."""
+        inv = self._purchase("ACME PTE. LTD.", reg_no="200012345A")
+        categorize_invoice(inv, coa=[], category_mapping={}, entity_memory=[], use_llm=False)
+        assert inv.supplier.name == "ACME PTE. LTD."
+
+    def test_partial_overlap_not_merged_in_categorize(self):
+        """'Acme Industries' shares only a partial token with 'Acme Pte Ltd' — must NOT merge."""
+        inv = self._purchase("Acme Industries")
+        categorize_invoice(inv, coa=[], category_mapping={}, entity_memory=self._EM, use_llm=False)
+        assert inv.supplier.name == "Acme Industries"
+
+    def test_sales_customer_canonicalized(self):
+        """For doc_type='sales', inv.customer.name is canonicalized."""
+        em = [EntityMemoryEntry(name="Global Corp Pte Ltd")]
+        inv = self._sales("global corp pte ltd")
+        categorize_invoice(inv, coa=[], category_mapping={}, entity_memory=em, use_llm=False)
+        assert inv.customer.name == "Global Corp Pte Ltd"
