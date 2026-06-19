@@ -22,7 +22,14 @@ and once as a Singapore client.
 - **Graceful no-PDF failure** — sending a message with no file yields a clear, actionable
   `ValueError` ("upload a PDF or image file with your message") instead of a crash.
 
-## Finding 1 — cross-border purchases have no rule and ALWAYS escalate (real edge)
+## Finding 1 — cross-border purchases have no rule and ALWAYS escalate (real edge) — ✅ RESOLVED (ADR-0024, commit 59b85d3)
+
+> **Resolved 2026-06-19.** Cross-border purchases now auto-book as out-of-scope (foreign tax
+> recorded as shown, not claimable), escalating only genuine ambiguity (partially-exempt SG
+> client, AMBIGUOUS jurisdiction). Live re-verified: the same MY-client StarHub bill went from
+> a HITL stop (2 flagged lines) to `CROSS_BORDER/OS`, `flagged_lines=0`, `auto_approved`,
+> delivered. See ADR-0024. Original finding below for the record.
+
 
 Same StarHub bill, **Malaysian** client: `tax_jurisdiction=CROSS_BORDER`,
 `tax_system=OS` (out of scope), **both lines flagged**, HITL stop with reason
