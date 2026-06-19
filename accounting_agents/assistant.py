@@ -124,10 +124,16 @@ THREAD_FOCUS_KEY = "thread_focus"
 #: would desync the chain — the tools refuse with a clear message instead.
 _INVOICE_SHEETS: frozenset[str] = frozenset({"Purchase", "Sales"})
 
-#: The accounting software value that the write tools support.  Xero workbooks
-#: use different column headers (``*AccountCode``, ``TaxAmount`` no-space, etc.)
-#: so editing them from chat would silently write wrong data or raise "unknown
-#: column" errors. Gate the tools to QBS now; Xero support is a follow-on.
+#: The accounting software whose workbooks the chat AMEND/edit tools may write to.
+#: This gates ONLY in-chat editing of an existing workbook — NOT export. Xero is
+#: fully supported for EXPORT (see ``XeroLedgerExporter`` / ``EXPORTERS``): we
+#: generate correct Xero import rows from scratch. But the amend tools edit existing
+#: rows by QBS column header (``_EDITABLE_FIELD_HEADERS``); Xero uses different
+#: headers (``*AccountCode``, ``TaxAmount`` no-space), so amending a Xero workbook
+#: through the QBS-shaped edit path would silently write wrong tax dollars or raise
+#: "unknown column" errors. Keep the amend gate until the amend tools are made
+#: column-aware per software (deliberate safety guard, not rigid over-control —
+#: WS4.3 decision 2026-06-19).
 _SUPPORTED_WRITE_SOFTWARE: frozenset[str] = frozenset({"QBS Ledger", "qbs"})
 
 #: User-facing amend field → the canonical workbook column header (QBS Ledger).

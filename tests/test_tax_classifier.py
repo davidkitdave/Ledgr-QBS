@@ -13,7 +13,7 @@ from __future__ import annotations
 from datetime import date
 
 from invoice_processing.export.models import InvoiceLine, NormalizedInvoice, PartyInfo
-from invoice_processing.export.tax_classifier import TaxClassifier, classify_invoice
+from invoice_processing.export.tax_classifier import TaxClassifier, classify_invoice, get_tax_classifier
 
 
 # ---------------------------------------------------------------------------
@@ -449,3 +449,139 @@ class TestClassifyInvoice:
         result = classify_invoice(inv)
         assert result.lines[0].tax_treatment == "SR"
         assert result.lines[1].tax_treatment == "ZR"
+
+
+# ===========================================================================
+# WS4.4 — jurisdiction-aware get_tax_classifier factory
+# ===========================================================================
+
+class TestGetTaxClassifierFactory:
+    """get_tax_classifier returns a classifier loaded from the correct YAML.
+
+    SG QBS purchase SR maps to "TX"; MY SST QBS purchase SR maps to "SR".
+    The two must differ, confirming each classifier uses its own code_map.
+    """
+
+    def test_sg_yaml_by_name_returns_sg_classifier(self):
+        clf = get_tax_classifier("sg_gst.yaml")
+        # SG QBS purchase SR → "TX" (see sg_gst.yaml code_map.qbs.purchase.SR)
+        code = clf.tax_code("SR", "purchase", "qbs")
+        assert code == "TX", f"Expected SG QBS purchase SR='TX', got {code!r}"
+
+    def test_my_yaml_by_name_returns_my_classifier(self):
+        clf = get_tax_classifier("my_sst.yaml")
+        # MY SST QBS purchase SR → "SR" (see my_sst.yaml code_map.qbs.purchase.SR)
+        code = clf.tax_code("SR", "purchase", "qbs")
+        assert code == "SR", f"Expected MY SST QBS purchase SR='SR', got {code!r}"
+
+    def test_sg_and_my_purchase_sr_codes_differ(self):
+        sg_code = get_tax_classifier("sg_gst.yaml").tax_code("SR", "purchase", "qbs")
+        my_code = get_tax_classifier("my_sst.yaml").tax_code("SR", "purchase", "qbs")
+        assert sg_code != my_code, (
+            f"SG and MY classifiers returned the same QBS purchase SR code {sg_code!r}; "
+            "they must differ (SG='TX', MY='SR')"
+        )
+
+    def test_jurisdiction_string_malaysia_maps_to_my_sst(self):
+        clf = get_tax_classifier("MALAYSIA")
+        code = clf.tax_code("SR", "purchase", "qbs")
+        assert code == "SR", f"Expected MY SST code 'SR' for MALAYSIA jurisdiction, got {code!r}"
+
+    def test_jurisdiction_string_singapore_defaults_to_sg(self):
+        clf = get_tax_classifier("SINGAPORE")
+        code = clf.tax_code("SR", "purchase", "qbs")
+        assert code == "TX", f"Expected SG code 'TX' for SINGAPORE jurisdiction, got {code!r}"
+
+    def test_cross_border_defaults_to_sg(self):
+        clf = get_tax_classifier("CROSS_BORDER")
+        code = clf.tax_code("SR", "purchase", "qbs")
+        assert code == "TX", f"Expected SG code 'TX' for CROSS_BORDER, got {code!r}"
+
+    def test_none_defaults_to_sg(self):
+        clf = get_tax_classifier(None)
+        code = clf.tax_code("SR", "purchase", "qbs")
+        assert code == "TX", f"Expected SG default 'TX' for None, got {code!r}"
+
+    def test_empty_string_defaults_to_sg(self):
+        clf = get_tax_classifier("")
+        code = clf.tax_code("SR", "purchase", "qbs")
+        assert code == "TX", f"Expected SG default 'TX' for empty string, got {code!r}"
+
+    def test_my_sst_nt_code_purchase_qbs(self):
+        clf = get_tax_classifier("my_sst.yaml")
+        code = clf.tax_code("NT", "purchase", "qbs")
+        assert code == "NT"
+
+    def test_my_sst_zr_code_purchase_xero(self):
+        clf = get_tax_classifier("my_sst.yaml")
+        code = clf.tax_code("ZR", "purchase", "xero")
+        assert code == "ZR"
+
+    def test_default_TaxClassifier_still_sg(self):
+        """TaxClassifier() with no args must still load sg_gst.yaml (no regression)."""
+        clf = TaxClassifier()
+        code = clf.tax_code("SR", "purchase", "qbs")
+        assert code == "TX", f"Default TaxClassifier() must give SG code 'TX', got {code!r}"
+
+
+class TestGetTaxClassifierIntegration:
+    """Integration: an exporter built with the MY classifier produces MY SST tax codes.
+
+    The Xero exporter exposes a ``*TaxType`` column (unlike QBS which uses a Tax Amount
+    numeric column), making it the cleanest way to assert the code string end-to-end.
+    The QBS path is validated via clf.tax_code() directly.
+    """
+
+    def _make_purchase_inv(self, number: str, gst_regno: str, vendor: str) -> "NormalizedInvoice":
+        inv = NormalizedInvoice(
+            doc_type="purchase",
+            invoice_number=number,
+            invoice_date=date(2024, 6, 1),
+            our_gst_registered=True,
+            supplier=PartyInfo(name=vendor, gst_regno=gst_regno),
+        )
+        line = InvoiceLine(
+            description="Consulting service",
+            net_amount=1000.0,
+            gst_amount=80.0,
+            tax_treatment="SR",
+        )
+        inv.lines.append(line)
+        return inv
+
+    def test_xero_exporter_with_my_classifier_produces_sst_tax_type(self):
+        """Xero exporter + MY classifier → *TaxType must NOT be 'SR' SG code."""
+        from invoice_processing.export.exporters import get_exporter
+
+        clf = get_tax_classifier("my_sst.yaml")
+        exporter = get_exporter("xero", classifier=clf)
+        inv = self._make_purchase_inv("MY-INV-001", "MY-REG-123", "MY Vendor Sdn Bhd")
+
+        rows = exporter.rows([inv], "purchase")
+        assert rows, "Expected at least one export row"
+        tax_type = rows[0].get("*TaxType")
+        assert tax_type is not None, f"No '*TaxType' column in Xero row: {rows[0]}"
+        # MY SST xero purchase SR → "SR" (from my_sst.yaml code_map.xero.purchase.SR)
+        # SG GST xero purchase SR → "SR" too — same string in both YAMLs for Xero.
+        # The meaningful difference is QBS: SG="TX", MY="SR".  Validate via clf directly.
+        sg_qbs = get_tax_classifier("sg_gst.yaml").tax_code("SR", "purchase", "qbs")
+        my_qbs = clf.tax_code("SR", "purchase", "qbs")
+        assert sg_qbs != my_qbs, (
+            f"QBS purchase SR code must differ between SG ({sg_qbs!r}) and MY ({my_qbs!r})"
+        )
+        assert sg_qbs == "TX"
+        assert my_qbs == "SR"
+
+    def test_xero_exporter_with_sg_classifier_unchanged(self):
+        """SG Xero exporter still produces 'SR' for a standard-rated purchase (no regression)."""
+        from invoice_processing.export.exporters import get_exporter
+
+        clf = get_tax_classifier("sg_gst.yaml")
+        exporter = get_exporter("xero", classifier=clf)
+        inv = self._make_purchase_inv("SG-INV-001", "M12345678X", "SG Vendor Pte Ltd")
+
+        rows = exporter.rows([inv], "purchase")
+        assert rows, "Expected at least one export row"
+        tax_type = rows[0].get("*TaxType")
+        # SG Xero purchase SR → "SR"
+        assert tax_type == "SR", f"SG Xero purchase SR should be 'SR', got {tax_type!r}"

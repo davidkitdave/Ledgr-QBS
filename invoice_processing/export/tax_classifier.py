@@ -11,6 +11,7 @@ that Xero / QBS code strings stay outside the classification logic.
 
 from __future__ import annotations
 
+import logging
 from datetime import date
 from pathlib import Path
 from typing import Optional
@@ -19,19 +20,73 @@ import yaml
 
 from .models import InvoiceLine, NormalizedInvoice
 
-_GST_YAML = Path(__file__).resolve().parent.parent / "shared_libraries" / "sg_gst.yaml"
+_SHARED_LIBS = Path(__file__).resolve().parent.parent / "shared_libraries"
+_DEFAULT_YAML = "sg_gst.yaml"
+
+# Per-name cache so repeated TaxClassifier construction in a single process
+# (e.g. batch fan-out of 20 docs) doesn't re-read the same YAML from disk.
+_TAXONOMY_CACHE: dict[str, dict] = {}
+
+logger = logging.getLogger(__name__)
+
+# Jurisdiction-string → yaml filename mapping (case-insensitive).
+_JURISDICTION_TO_YAML: dict[str, str] = {
+    "malaysia": "my_sst.yaml",
+    "MY": "my_sst.yaml",
+}
+_JURISDICTION_UPPER_TO_YAML: dict[str, str] = {
+    "MALAYSIA": "my_sst.yaml",
+}
 
 
-def _load_taxonomy() -> dict:
-    with open(_GST_YAML, encoding="utf-8") as f:
-        return yaml.safe_load(f)
+def _load_taxonomy(yaml_name: str = _DEFAULT_YAML) -> dict:
+    """Load and cache a taxonomy YAML from shared_libraries by filename."""
+    if yaml_name not in _TAXONOMY_CACHE:
+        yaml_path = _SHARED_LIBS / yaml_name
+        with open(yaml_path, encoding="utf-8") as f:
+            _TAXONOMY_CACHE[yaml_name] = yaml.safe_load(f)
+    return _TAXONOMY_CACHE[yaml_name]
+
+
+def get_tax_classifier(reference_yaml: Optional[str] = None) -> "TaxClassifier":
+    """Build a :class:`TaxClassifier` for the given taxonomy reference.
+
+    Accepts:
+    - A bare YAML filename  ("my_sst.yaml", "sg_gst.yaml")
+    - A jurisdiction string ("MALAYSIA", "SINGAPORE", "CROSS_BORDER")
+    - ``None`` / empty / unrecognised → falls back to ``sg_gst.yaml``
+
+    Validates the resolved file exists; falls back to ``sg_gst.yaml`` with a
+    logged warning if it does not (defensive for unexpected reference_yaml values).
+    """
+    ref = (reference_yaml or "").strip()
+
+    # Resolve jurisdiction code → yaml filename.
+    if ref and not ref.endswith(".yaml"):
+        ref = _JURISDICTION_UPPER_TO_YAML.get(ref.upper(), _DEFAULT_YAML)
+
+    # Empty or unrecognised → default.
+    yaml_name = ref or _DEFAULT_YAML
+
+    # Validate the file exists; fall back with warning if not.
+    yaml_path = _SHARED_LIBS / yaml_name
+    if not yaml_path.exists():
+        logger.warning(
+            "get_tax_classifier: '%s' not found in shared_libraries; "
+            "falling back to %s",
+            yaml_name,
+            _DEFAULT_YAML,
+        )
+        yaml_name = _DEFAULT_YAML
+
+    return TaxClassifier(taxonomy=_load_taxonomy(yaml_name))
 
 
 class TaxClassifier:
     """Classifies invoice lines to canonical SG GST treatments and maps to a target system."""
 
     def __init__(self, taxonomy: Optional[dict] = None):
-        self.tax = taxonomy or _load_taxonomy()
+        self.tax = taxonomy if taxonomy is not None else _load_taxonomy()
         self._signals = {k: [s.lower() for s in v] for k, v in self.tax["signals"].items()}
         self._threshold = self.tax["review"]["confidence_threshold"]
         self._rate_tol = self.tax["review"]["rate_tolerance"]

@@ -57,6 +57,7 @@ from invoice_processing.export.exporters import (
     get_bank_exporter,
     get_exporter,
 )
+from invoice_processing.export.tax_classifier import get_tax_classifier
 from invoice_processing.export.models import BankStatement, NormalizedInvoice
 from invoice_processing.export.routing import DocRoute, route_document
 # Jurisdiction + LLM tax reasoning (multi-country support, replaces the
@@ -1886,7 +1887,14 @@ async def consolidate_node(ctx) -> Event:
                     software,
                 )
             software = "qbs"
-        exporter = get_exporter(software)
+        # Derive jurisdiction-aware tax classifier from state so MY invoices get
+        # SST codes instead of SG GST codes. JURISDICTION_RATES_KEY["reference_yaml"]
+        # is the canonical source; fall back to TAX_JURISDICTION_KEY string, then
+        # to the default (sg_gst.yaml) when neither is present.
+        _rates = state.get(JURISDICTION_RATES_KEY) or {}
+        _ref_yaml = _rates.get("reference_yaml") or state.get(TAX_JURISDICTION_KEY) or None
+        classifier = get_tax_classifier(_ref_yaml)
+        exporter = get_exporter(software, classifier=classifier)
         invoices = _normalized_from_state(state)
         for idx, (inv, route) in enumerate(zip(invoices, routes)):
             sheet = route.get("sheet") or "Purchase"
