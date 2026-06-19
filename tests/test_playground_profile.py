@@ -234,6 +234,67 @@ class TestPlaygroundProfileSeed:
 
 
 # --------------------------------------------------------------------------- #
+# Task 1b — seed_playground_profile_if_needed helper (classify_node path)
+#
+# Tests the public helper that classify_node calls so the playground seed
+# fires even when the coordinator/before_agent_callback is absent (WS3a fix).
+# --------------------------------------------------------------------------- #
+
+class TestSeedPlaygroundProfileIfNeeded:
+    """Direct tests for seed_playground_profile_if_needed(state)."""
+
+    def test_dev_empty_state_seeds_profile(self, monkeypatch, tmp_path):
+        """Dev env + empty state → seeds region / base_currency / client_id."""
+        monkeypatch.delenv("LEDGR_ENV", raising=False)
+        monkeypatch.delenv("LEDGR_PLAYGROUND_SEED", raising=False)
+        # Point at non-existent file so hardcoded defaults are used.
+        monkeypatch.setenv(
+            "LEDGR_PLAYGROUND_PROFILE_PATH", str(tmp_path / "no-profile.json")
+        )
+
+        from accounting_agents.agent import seed_playground_profile_if_needed
+
+        state: dict = {}
+        result = seed_playground_profile_if_needed(state)
+
+        assert result is True
+        assert state.get("client_id") == "playground"
+        assert state.get("region") == "SINGAPORE"
+        assert state.get("base_currency") == "SGD"
+
+    def test_prod_env_does_not_seed(self, monkeypatch):
+        """LEDGR_ENV=prod → helper returns False and state is unchanged."""
+        monkeypatch.setenv("LEDGR_ENV", "prod")
+        monkeypatch.delenv("LEDGR_PLAYGROUND_SEED", raising=False)
+
+        from accounting_agents.agent import seed_playground_profile_if_needed
+
+        state: dict = {}
+        result = seed_playground_profile_if_needed(state)
+
+        assert result is False
+        assert state.get("client_id") is None
+        assert state.get("region") is None
+
+    def test_state_with_existing_client_id_is_not_overwritten(self, monkeypatch, tmp_path):
+        """client_id already present → seed is skipped (idempotent / no clobber)."""
+        monkeypatch.delenv("LEDGR_ENV", raising=False)
+        monkeypatch.delenv("LEDGR_PLAYGROUND_SEED", raising=False)
+        monkeypatch.setenv(
+            "LEDGR_PLAYGROUND_PROFILE_PATH", str(tmp_path / "no-profile.json")
+        )
+
+        from accounting_agents.agent import seed_playground_profile_if_needed
+
+        state: dict = {"client_id": "already-set", "client_name": "Existing Corp"}
+        result = seed_playground_profile_if_needed(state)
+
+        assert result is False
+        assert state.get("client_id") == "already-set"
+        assert state.get("client_name") == "Existing Corp"
+
+
+# --------------------------------------------------------------------------- #
 # Task 2 — consolidate_node graceful guard when software is missing
 # --------------------------------------------------------------------------- #
 

@@ -520,6 +520,14 @@ async def classify_node(ctx) -> Event:
     from invoice_processing.classify.document_classifier import ALLOWED_DOC_TYPES
     from .lane_config import ROUTE_BANK, ROUTE_COMMERCIAL_DOC, route_for_doc_type
 
+    # Playground seed: inject synthetic ClientContext when running under adk web /
+    # agents-cli and no real Slack profile is present.  This is the WS3a fix —
+    # the coordinator (which had the before_agent_callback) was removed in ADR-0021,
+    # so the seed must happen at the first node instead.  Function-local import
+    # avoids the circular import (agent.py imports nodes at module level).
+    from accounting_agents.agent import seed_playground_profile_if_needed  # noqa: PLC0415
+    seed_playground_profile_if_needed(ctx.state)
+
     data, mime_type = await _load_pdf_bytes(ctx)
     cls: ClassificationResult = CLASSIFY_FN(data, mime_type, model=MODEL_LITE)
     doc_type = (cls.doc_type or "other").strip().lower()

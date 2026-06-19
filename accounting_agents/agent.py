@@ -279,38 +279,62 @@ def load_client_profile(callback_context: CallbackContext):
         return None
 
     # No profile resolved.  Seed a synthetic one in non-prod only.
-    if config.is_playground_seed_enabled():
-        import logging as _logging
-        default_ctx = _playground_default_context()
-        _logging.getLogger(__name__).info(
-            "playground seed: no client profile found; injecting ClientContext "
-            "(client_id=%s, client_name=%s, software=%s)",
-            default_ctx.client_id, default_ctx.client_name, default_ctx.accounting_software,
-        )
-        for k, v in default_ctx.to_state().items():
-            state[k] = v
-
-        # Seed ledger data from local store
-        from accounting_agents.local_ledger_store import LocalLedgerStore
-        local_store = LocalLedgerStore()
-        client_id = state["client_id"]
-        latest_fy = local_store.latest_fy(client_id)
-        if latest_fy:
-            rows = local_store.read_rows(client_id, latest_fy)
-            state["ledger_data"] = rows
-            state["ledger_row_count"] = len(rows)
-            state["fy_loaded"] = latest_fy
-            state["fy_pointers"] = local_store.fy_pointers(client_id)
-        else:
-            state["ledger_data"] = []
-            state["ledger_row_count"] = 0
-            state["fy_loaded"] = "none"
-            state["fy_pointers"] = []
-
-        state["processing_log"] = []
-        state["pending_reviews"] = []
+    seed_playground_profile_if_needed(state)
 
     return None
+
+
+def seed_playground_profile_if_needed(state: dict) -> bool:
+    """Inject a synthetic playground ClientContext into *state* when all guards pass.
+
+    Guards (ALL must hold to seed):
+    1. ``state`` is not None and is a dict-like mapping.
+    2. No existing profile in state (no ``client_id`` and no ``client_name``).
+    3. ``config.is_playground_seed_enabled()`` is True (i.e. not prod).
+
+    Returns True if the seed was applied, False otherwise (so callers can log).
+    This helper is callable from any node without going through the ADK callback
+    layer — it operates on a plain state dict, making it safe to call from
+    ``classify_node`` with a function-local import to avoid circular imports
+    (``agent.py`` imports ``nodes`` at module level).
+    """
+    if state is None:
+        return False
+    if state.get("client_id") is not None or state.get("client_name") is not None:
+        return False
+    if not config.is_playground_seed_enabled():
+        return False
+
+    import logging as _logging
+    default_ctx = _playground_default_context()
+    _logging.getLogger(__name__).info(
+        "playground seed: no client profile found; injecting ClientContext "
+        "(client_id=%s, client_name=%s, software=%s)",
+        default_ctx.client_id, default_ctx.client_name, default_ctx.accounting_software,
+    )
+    for k, v in default_ctx.to_state().items():
+        state[k] = v
+
+    # Seed ledger data from local store
+    from accounting_agents.local_ledger_store import LocalLedgerStore
+    local_store = LocalLedgerStore()
+    client_id = state["client_id"]
+    latest_fy = local_store.latest_fy(client_id)
+    if latest_fy:
+        rows = local_store.read_rows(client_id, latest_fy)
+        state["ledger_data"] = rows
+        state["ledger_row_count"] = len(rows)
+        state["fy_loaded"] = latest_fy
+        state["fy_pointers"] = local_store.fy_pointers(client_id)
+    else:
+        state["ledger_data"] = []
+        state["ledger_row_count"] = 0
+        state["fy_loaded"] = "none"
+        state["fy_pointers"] = []
+
+    state["processing_log"] = []
+    state["pending_reviews"] = []
+    return True
 
 
 # --------------------------------------------------------------------------- #
