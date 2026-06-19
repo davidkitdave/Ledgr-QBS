@@ -39,16 +39,28 @@ def _num(x: Optional[float]) -> Optional[float]:
     return None if x is None else round(float(x), 2)
 
 
+def _doc_sign(inv: NormalizedInvoice) -> int:
+    """Return -1 for credit notes (amounts must be negative on export), +1 for all others.
+
+    Keyed on ``inv.document_kind`` (the classify doc type: "credit_note", "invoice",
+    "receipt", ...) — NOT ``inv.doc_type``, which is the direction ("purchase"/"sales").
+    """
+    return -1 if (inv.document_kind or "").strip().lower() == "credit_note" else 1
+
+
 def _line_net_amount(line: InvoiceLine, inv: NormalizedInvoice) -> float:
-    """Exportable line subtotal.
+    """Exportable line subtotal (sign-adjusted for credit notes).
 
     GST-registered clients: ex-GST net. Non-registered clients absorb irrecoverable
     input GST into the line cost (no separate tax column on export).
+    Credit notes: result is negated so amounts reduce the books rather than add to them.
     """
     net = float(line.net_amount or 0.0)
     if not inv.our_gst_registered:
-        return round(net + float(line.gst_amount or 0.0), 2)
-    return round(net, 2)
+        raw = round(net + float(line.gst_amount or 0.0), 2)
+    else:
+        raw = round(net, 2)
+    return round(raw * _doc_sign(inv), 2)
 
 
 def _tax_amount(line: InvoiceLine, inv: NormalizedInvoice, clf: TaxClassifier) -> float:
@@ -59,18 +71,24 @@ def _tax_amount(line: InvoiceLine, inv: NormalizedInvoice, clf: TaxClassifier) -
     if line.tax_treatment != "SR":
         return 0.0
     if line.gst_amount:
-        return round(float(line.gst_amount), 2)
+        return round(float(line.gst_amount) * _doc_sign(inv), 2)
     return 0.0
 
 
 def _invoice_total(inv: NormalizedInvoice, clf: TaxClassifier) -> float:
-    """Invoice-level grand total. Prefer the authoritative doc total carried from
-    extraction; otherwise fall back to Σ line net + Σ line tax."""
+    """Invoice-level grand total (sign-adjusted for credit notes).
+
+    Prefer the authoritative doc total carried from extraction; otherwise fall back
+    to Σ line net + Σ line tax. Credit notes: result is negated.
+    """
+    sign = _doc_sign(inv)
     if inv.doc_total is not None:
-        return round(float(inv.doc_total), 2)
+        return round(float(inv.doc_total) * sign, 2)
     net = sum((line.net_amount or 0.0) for line in inv.lines)
     tax = sum(_tax_amount(line, inv, clf) for line in inv.lines)
-    return round(net + tax, 2)
+    # tax already carries the sign via _tax_amount; net needs sign applied here
+    # (we sum raw net_amount values, so multiply by sign separately)
+    return round(net * sign + tax, 2)
 
 
 class LedgerExporter:
@@ -243,7 +261,9 @@ class XeroLedgerExporter(LedgerExporter):
         if line.net_amount is not None or (not inv.our_gst_registered and line.gst_amount):
             unit = line_net / qty if qty else line_net
         else:
-            unit = line.unit_amount
+            # Fallback: no net_amount; use the raw unit_amount but still apply the
+            # credit-note sign so *UnitAmount is negative on a credit note.
+            unit = (line.unit_amount * _doc_sign(inv)) if line.unit_amount is not None else line.unit_amount
         return {
             "*ContactName": party.name or "",
             "POCountry": party.country or "",

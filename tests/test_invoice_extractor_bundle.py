@@ -443,3 +443,173 @@ class TestNormalizedInvoiceFxFields:
         assert inv.original_total is None
         assert inv.original_currency is None
         assert inv.needs_fx_review is False
+
+
+# =========================================================================== #
+# H — Credit-note sign-flip (WS4.2)
+# =========================================================================== #
+
+class TestCreditNoteSignFlip:
+    """Credit-note exported amounts must be NEGATIVE; normal invoices stay positive."""
+
+    def _purchase_credit_note(self):
+        """NormalizedInvoice representing a purchase credit note (net 100, GST 9)."""
+        from invoice_processing.export.models import InvoiceLine, NormalizedInvoice, PartyInfo
+        return NormalizedInvoice(
+            doc_type="purchase",
+            document_kind="credit_note",
+            invoice_number="CN-001",
+            currency="SGD",
+            our_gst_registered=True,
+            tax_visible_on_document=True,
+            supplier=PartyInfo(name="Acme Supplier"),
+            lines=[InvoiceLine(
+                description="Returned goods",
+                net_amount=100.0,
+                gst_amount=9.0,
+                tax_treatment="SR",
+            )],
+            doc_subtotal=100.0,
+            doc_gst_total=9.0,
+            doc_total=109.0,
+        )
+
+    def _sales_credit_note(self):
+        """NormalizedInvoice representing a sales credit note (net 200, GST 18)."""
+        from invoice_processing.export.models import InvoiceLine, NormalizedInvoice, PartyInfo
+        return NormalizedInvoice(
+            doc_type="sales",
+            document_kind="credit_note",
+            invoice_number="CN-002",
+            currency="SGD",
+            our_gst_registered=True,
+            tax_visible_on_document=True,
+            customer=PartyInfo(name="Beta Customer"),
+            lines=[InvoiceLine(
+                description="Refund for service",
+                net_amount=200.0,
+                gst_amount=18.0,
+                tax_treatment="SR",
+            )],
+            doc_subtotal=200.0,
+            doc_gst_total=18.0,
+            doc_total=218.0,
+        )
+
+    # ------------------------------------------------------------------ #
+    # QBS purchase credit note
+    # ------------------------------------------------------------------ #
+
+    def test_qbs_purchase_credit_note_amounts_negative(self):
+        """QBS purchase credit_note: Sub Total, Source Amount, Tax Amount, Total Amount all negative."""
+        from invoice_processing.export.exporters import QbsLedgerExporter
+        exporter = QbsLedgerExporter()
+        rows = exporter.rows([self._purchase_credit_note()], "purchase")
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["Sub Total"] == pytest.approx(-100.0), f"Sub Total should be -100, got {row['Sub Total']}"
+        assert row["Source Amount"] == pytest.approx(-100.0), f"Source Amount should be -100, got {row['Source Amount']}"
+        assert row["Tax Amount"] == pytest.approx(-9.0), f"Tax Amount should be -9, got {row['Tax Amount']}"
+        assert row["Total Amount"] == pytest.approx(-109.0), f"Total Amount should be -109, got {row['Total Amount']}"
+
+    # ------------------------------------------------------------------ #
+    # QBS sales credit note
+    # ------------------------------------------------------------------ #
+
+    def test_qbs_sales_credit_note_amounts_negative(self):
+        """QBS sales credit_note: Amount, Source Amount, Tax Amount, Total all negative."""
+        from invoice_processing.export.exporters import QbsLedgerExporter
+        exporter = QbsLedgerExporter()
+        rows = exporter.rows([self._sales_credit_note()], "sales")
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["Amount"] == pytest.approx(-200.0), f"Amount should be -200, got {row['Amount']}"
+        assert row["Source Amount"] == pytest.approx(-200.0), f"Source Amount should be -200, got {row['Source Amount']}"
+        assert row["Tax Amount"] == pytest.approx(-18.0), f"Tax Amount should be -18, got {row['Tax Amount']}"
+        assert row["Total"] == pytest.approx(-218.0), f"Total should be -218, got {row['Total']}"
+
+    # ------------------------------------------------------------------ #
+    # Xero credit note
+    # ------------------------------------------------------------------ #
+
+    def test_xero_purchase_credit_note_amounts_negative(self):
+        """Xero purchase credit_note: *UnitAmount and TaxAmount negative, Total negative."""
+        from invoice_processing.export.exporters import XeroLedgerExporter
+        exporter = XeroLedgerExporter()
+        rows = exporter.rows([self._purchase_credit_note()], "purchase")
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["*UnitAmount"] == pytest.approx(-100.0), f"*UnitAmount should be -100, got {row['*UnitAmount']}"
+        assert row["TaxAmount"] == pytest.approx(-9.0), f"TaxAmount should be -9, got {row['TaxAmount']}"
+        assert row["Total"] == pytest.approx(-109.0), f"Total should be -109, got {row['Total']}"
+
+    # ------------------------------------------------------------------ #
+    # Regression: normal invoice stays positive
+    # ------------------------------------------------------------------ #
+
+    def test_qbs_invoice_amounts_positive(self):
+        """Regression: document_kind='invoice' (or None) keeps amounts positive."""
+        from invoice_processing.export.exporters import QbsLedgerExporter
+        from invoice_processing.export.models import InvoiceLine, NormalizedInvoice, PartyInfo
+        inv = NormalizedInvoice(
+            doc_type="purchase",
+            document_kind="invoice",
+            invoice_number="INV-001",
+            currency="SGD",
+            our_gst_registered=True,
+            tax_visible_on_document=True,
+            supplier=PartyInfo(name="Vendor Co"),
+            lines=[InvoiceLine(
+                description="Consulting",
+                net_amount=100.0,
+                gst_amount=9.0,
+                tax_treatment="SR",
+            )],
+            doc_total=109.0,
+        )
+        exporter = QbsLedgerExporter()
+        rows = exporter.rows([inv], "purchase")
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["Sub Total"] == pytest.approx(100.0), "Normal invoice Sub Total must be positive"
+        assert row["Tax Amount"] == pytest.approx(9.0), "Normal invoice Tax Amount must be positive"
+        assert row["Total Amount"] == pytest.approx(109.0), "Normal invoice Total Amount must be positive"
+
+    def test_qbs_document_kind_none_amounts_positive(self):
+        """Regression: document_kind=None (unset) keeps amounts positive (sign=+1)."""
+        from invoice_processing.export.exporters import QbsLedgerExporter
+        from invoice_processing.export.models import InvoiceLine, NormalizedInvoice, PartyInfo
+        inv = NormalizedInvoice(
+            doc_type="purchase",
+            document_kind=None,
+            invoice_number="INV-002",
+            currency="SGD",
+            our_gst_registered=True,
+            tax_visible_on_document=True,
+            supplier=PartyInfo(name="Vendor Co"),
+            lines=[InvoiceLine(
+                description="Services",
+                net_amount=50.0,
+                gst_amount=4.5,
+                tax_treatment="SR",
+            )],
+            doc_total=54.5,
+        )
+        exporter = QbsLedgerExporter()
+        rows = exporter.rows([inv], "purchase")
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["Sub Total"] == pytest.approx(50.0), "document_kind=None Sub Total must be positive"
+        assert row["Tax Amount"] == pytest.approx(4.5), "document_kind=None Tax Amount must be positive"
+        assert row["Total Amount"] == pytest.approx(54.5), "document_kind=None Total Amount must be positive"
+
+    # ------------------------------------------------------------------ #
+    # document_kind field on the model
+    # ------------------------------------------------------------------ #
+
+    def test_document_kind_field_exists_on_model(self):
+        """NormalizedInvoice.document_kind field exists and defaults to None."""
+        from invoice_processing.export.models import NormalizedInvoice
+        inv = NormalizedInvoice()
+        assert hasattr(inv, "document_kind")
+        assert inv.document_kind is None

@@ -840,6 +840,10 @@ def _normalize_bundle(ctx, bundle: ExtractedInvoiceBundle) -> list[NormalizedInv
             base_currency=base_currency,
             fx_rate=ex.fx_rate,
         )
+        # Carry the classify document kind (e.g. "credit_note", "invoice", "receipt")
+        # from state so exporters can apply the credit-note sign-flip at row-build time.
+        # This is distinct from inv.doc_type which is the DIRECTION ("purchase"/"sales").
+        inv.document_kind = ctx.state.get(DOC_TYPE_KEY)
         # to_normalized already sets reconciled=False when needs_fx_review is True;
         # only overwrite with the totals-reconcile result when FX has not already
         # forced reconciled=False, so we don't accidentally clear the FX flag.

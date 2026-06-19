@@ -98,6 +98,13 @@ class NormalizedInvoice:
     tax_visible_on_document: Optional[bool] = None
     direction_reason: Optional[str] = None
 
+    # The classify document kind — e.g. "credit_note", "invoice", "receipt",
+    # "statement_of_account", "expense_claim", ...
+    # Distinct from `doc_type` above, which is the DIRECTION ("purchase"/"sales").
+    # Populated from state[DOC_TYPE_KEY] after extraction and used by exporters
+    # to apply the credit-note sign-flip (negative amounts on export).
+    document_kind: Optional[str] = None  # classify doc_type: invoice/credit_note/receipt/... (NOT direction)
+
     @property
     def counterparty(self) -> PartyInfo:
         """The other party: supplier for purchases, customer for sales."""
