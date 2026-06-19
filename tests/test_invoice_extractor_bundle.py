@@ -166,88 +166,128 @@ class TestSoaSkipping:
 
 
 # =========================================================================== #
-# C — FX: non-base currency with a stated rate converts correctly
+# C — Currency: record as shown, no conversion
 # =========================================================================== #
 
 class TestFxConversion:
-    """Non-base-currency doc with a stated rate converts and stores original + rate."""
+    """Ledgr records invoice amounts in the document's currency exactly as printed.
+    No FX conversion is ever applied.  The accountant converts in their ERP."""
 
     def test_sgd_base_currency_no_fx_needed(self):
-        """SGD doc with SGD base → fx_rate=1.0, original_currency=None (no FX applied)."""
+        """SGD doc with SGD base → fx_rate=None (no rate printed), amounts unchanged,
+        not flagged for review."""
         r = _make_receipt(invoice_number="R-SGD", currency="SGD", total=100.0, subtotal=100.0)
         inv = to_normalized(r, direction="purchase", base_currency="SGD")
-        assert inv.fx_rate == 1.0
+        # No rate printed → None, not 1.0
+        assert inv.fx_rate is None
         assert inv.original_currency is None
+        assert inv.original_total is None
         assert not inv.needs_fx_review
+        # Currency stays as the document currency
+        assert inv.currency == "SGD"
+        # Amounts unchanged
+        assert inv.doc_total == pytest.approx(100.0)
 
-    def test_usd_doc_with_rate_converts_correctly(self):
-        """USD doc with fx_rate=1.35 → converted SGD amounts; original preserved."""
+    def test_usd_doc_with_rate_records_as_shown(self):
+        """USD doc with fx_rate=1.35 → currency=USD, amounts UNCHANGED (not multiplied),
+        fx_rate=1.35 (the printed rate stored faithfully), not flagged."""
         r = _make_receipt(invoice_number="R-USD", currency="USD", total=1000.0, subtotal=1000.0, net_amount=1000.0)
         inv = to_normalized(r, direction="purchase", base_currency="SGD", fx_rate=1.35)
-        # original stored
-        assert inv.original_currency == "USD"
-        assert inv.original_total == 1000.0
-        assert inv.fx_rate == 1.35
-        # converted: 1000 * 1.35 = 1350 SGD
-        assert inv.doc_total == pytest.approx(1350.0, abs=0.01)
-        assert inv.currency == "SGD"
+        # Document currency is recorded, never converted to SGD
+        assert inv.currency == "USD"
+        # Amounts are the USD values — NOT multiplied by 1.35
+        assert inv.doc_total == pytest.approx(1000.0, abs=0.01)
+        assert inv.doc_subtotal == pytest.approx(1000.0, abs=0.01)
+        # Printed rate stored faithfully
+        assert inv.fx_rate == pytest.approx(1.35)
+        # No "original" fields — there is no conversion, so there is no before/after
+        assert inv.original_currency is None
+        assert inv.original_total is None
+        # Single foreign currency → not flagged
         assert not inv.needs_fx_review
 
-    def test_idr_doc_with_rate_converts_correctly(self):
-        """IDR doc with fx_rate=0.000085 → sub-cent SGD, stored at full precision."""
+    def test_idr_doc_with_rate_records_as_shown(self):
+        """IDR doc with fx_rate=0.000085 → currency=IDR, amounts UNCHANGED,
+        fx_rate=0.000085 (printed rate recorded at full precision), not flagged."""
         r = _make_receipt(invoice_number="R-IDR", currency="IDR", total=974470.0, subtotal=974470.0, net_amount=974470.0)
         inv = to_normalized(r, direction="purchase", base_currency="SGD", fx_rate=0.000085)
-        assert inv.original_currency == "IDR"
-        assert inv.original_total == pytest.approx(974470.0, abs=0.01)
+        # Document currency recorded as-is
+        assert inv.currency == "IDR"
+        # Amounts are the IDR values — NOT converted to SGD
+        assert inv.doc_total == pytest.approx(974470.0, abs=0.01)
+        assert inv.doc_subtotal == pytest.approx(974470.0, abs=0.01)
+        # Printed rate stored faithfully
         assert inv.fx_rate == pytest.approx(0.000085)
-        # 974470 * 0.000085 ≈ 82.83 SGD
-        assert inv.doc_total == pytest.approx(974470.0 * 0.000085, abs=0.01)
-        assert inv.currency == "SGD"
+        assert inv.original_currency is None
+        assert inv.original_total is None
         assert not inv.needs_fx_review
 
     def test_fx_rate_stored_in_export_row(self):
-        """QbsLedgerExporter uses the real fx_rate (not hardcoded 1.0) in Currency Rate column."""
+        """QbsLedgerExporter: Currency Rate column carries the printed rate (1.35) when
+        present; Currency column is the document currency (USD, not SGD)."""
         from invoice_processing.export.exporters import QbsLedgerExporter
         from invoice_processing.export.models import InvoiceLine, PartyInfo
 
         inv = NormalizedInvoice(
             doc_type="purchase",
             invoice_number="R-USD",
-            currency="SGD",
-            original_currency="USD",
-            original_total=1000.0,
+            currency="USD",
             fx_rate=1.35,
             needs_fx_review=False,
             supplier=PartyInfo(name="Overseas Vendor"),
-            lines=[InvoiceLine(description="Consulting", net_amount=1350.0, gst_amount=0.0, tax_treatment="NT")],
-            doc_total=1350.0,
+            lines=[InvoiceLine(description="Consulting", net_amount=1000.0, gst_amount=0.0, tax_treatment="NT")],
+            doc_total=1000.0,
         )
         exporter = QbsLedgerExporter()
         rows = exporter.rows([inv], "purchase")
         assert len(rows) == 1
+        # Printed rate recorded faithfully
         assert rows[0]["Currency Rate"] == pytest.approx(1.35)
+        # Document currency, not base currency
+        assert rows[0]["Currency"] == "USD"
+
+    def test_fx_rate_blank_in_export_row_when_none(self):
+        """QbsLedgerExporter: Currency Rate is blank ("") when no rate was printed —
+        never a silent 1.0."""
+        from invoice_processing.export.exporters import QbsLedgerExporter
+        from invoice_processing.export.models import InvoiceLine, PartyInfo
+
+        inv = NormalizedInvoice(
+            doc_type="purchase",
+            invoice_number="R-USD-NORATE",
+            currency="USD",
+            fx_rate=None,
+            needs_fx_review=False,
+            supplier=PartyInfo(name="Overseas Vendor"),
+            lines=[InvoiceLine(description="Consulting", net_amount=500.0, gst_amount=0.0, tax_treatment="NT")],
+            doc_total=500.0,
+        )
+        exporter = QbsLedgerExporter()
+        rows = exporter.rows([inv], "purchase")
+        assert len(rows) == 1
+        assert rows[0]["Currency Rate"] == ""
+        assert rows[0]["Currency"] == "USD"
 
     def test_fx_rate_in_sales_row(self):
-        """QbsLedgerExporter sales row also uses the real fx_rate."""
+        """QbsLedgerExporter sales row: printed rate stored, document currency used."""
         from invoice_processing.export.exporters import QbsLedgerExporter
         from invoice_processing.export.models import InvoiceLine, PartyInfo
 
         inv = NormalizedInvoice(
             doc_type="sales",
             invoice_number="S-USD",
-            currency="SGD",
-            original_currency="USD",
-            original_total=500.0,
+            currency="USD",
             fx_rate=1.35,
             needs_fx_review=False,
             customer=PartyInfo(name="Overseas Customer"),
-            lines=[InvoiceLine(description="Services", net_amount=675.0, gst_amount=0.0, tax_treatment="NT")],
-            doc_total=675.0,
+            lines=[InvoiceLine(description="Services", net_amount=500.0, gst_amount=0.0, tax_treatment="NT")],
+            doc_total=500.0,
         )
         exporter = QbsLedgerExporter()
         rows = exporter.rows([inv], "sales")
         assert len(rows) == 1
         assert rows[0]["Currency Rate"] == pytest.approx(1.35)
+        assert rows[0]["Currency"] == "USD"
 
 
 # =========================================================================== #
@@ -398,8 +438,8 @@ class TestNormalizedInvoiceFxFields:
     def test_fx_fields_default_values(self):
         from invoice_processing.export.models import NormalizedInvoice
         inv = NormalizedInvoice()
-        # Defaults: no FX applied, no review needed
-        assert inv.fx_rate == 1.0
+        # Defaults: no rate printed (None, never 1.0), no review needed
+        assert inv.fx_rate is None
         assert inv.original_total is None
         assert inv.original_currency is None
         assert inv.needs_fx_review is False

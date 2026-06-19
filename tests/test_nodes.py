@@ -1075,9 +1075,10 @@ def test_extract_node_usd_doc_sgd_client_books_in_usd():
     assert inv.get("currency") == "USD"
 
 
-def test_extract_node_usd_doc_with_fx_rate_converts_amounts():
-    """A USD doc that carries its own fx_rate must be converted to SGD amounts.
-    original_total and original_currency must be stored; needs_fx_review must be False."""
+def test_extract_node_usd_doc_with_fx_rate_records_as_shown():
+    """A USD doc that carries its own fx_rate must be recorded as-is — currency=USD,
+    amounts UNCHANGED (not multiplied by the rate), fx_rate=printed rate,
+    original_currency/original_total=None, needs_fx_review=False."""
     usd_inv = ExtractedInvoice(
         doc_type="invoice",
         invoice_number="USD-RATE-INV",
@@ -1089,7 +1090,7 @@ def test_extract_node_usd_doc_with_fx_rate_converts_amounts():
         subtotal=100.0,
         gst_total=0.0,
         total=100.0,
-        fx_rate=1.35,  # document states its own exchange rate
+        fx_rate=1.35,  # document states its own exchange rate — stored, not applied
     )
     bundle = ExtractedInvoiceBundle(invoices=[usd_inv])
     _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(bundle))
@@ -1102,13 +1103,17 @@ def test_extract_node_usd_doc_with_fx_rate_converts_amounts():
     assert inv.get("needs_fx_review") is False, (
         f"Expected needs_fx_review=False when fx_rate supplied, got {inv.get('needs_fx_review')!r}"
     )
-    assert inv.get("original_currency") == "USD"
-    assert inv.get("original_total") == 100.0
-    # doc_total should be converted: 100.0 * 1.35 = 135.0
-    assert inv.get("doc_total") == pytest.approx(135.0), (
-        f"Expected doc_total=135.0, got {inv.get('doc_total')!r}"
+    # Document currency recorded as-is — never converted to SGD
+    assert inv.get("currency") == "USD"
+    # Amounts UNCHANGED — not multiplied by 1.35
+    assert inv.get("doc_total") == pytest.approx(100.0), (
+        f"Expected doc_total=100.0 (record as shown, not 135.0), got {inv.get('doc_total')!r}"
     )
+    # Printed rate stored faithfully
     assert inv.get("fx_rate") == pytest.approx(1.35)
+    # No conversion → no original_currency / original_total
+    assert inv.get("original_currency") is None
+    assert inv.get("original_total") is None
 
 
 def test_extract_node_myr_client_myr_doc_not_flagged():
@@ -1132,11 +1137,13 @@ def test_extract_node_myr_client_myr_doc_not_flagged():
 
 
 def test_extract_node_needs_fx_review_routes_to_human_review():
-    """A needs_fx_review doc (reconciled=False) must trigger _needs_review so
-    approval_gate pauses for human review rather than auto-approving."""
+    """A needs_fx_review doc (reconciled=False, mixed currencies) must trigger
+    _needs_review so approval_gate pauses for human review rather than auto-approving."""
     from accounting_agents.nodes import _needs_review
 
-    # Simulate what extract_invoice_document_node writes for a USD doc with no rate.
+    # Simulate what extract_invoice_document_node writes for a mixed-currency doc.
+    # Under record-as-shown, original_currency/original_total are always None;
+    # needs_fx_review=True only arises from mixed currencies on one document.
     state = _base_state()
     state[nodes.NORMALIZED_KEY] = [
         {
@@ -1158,11 +1165,11 @@ def test_extract_node_needs_fx_review_routes_to_human_review():
             "doc_total": 100.0,
             "our_gst_registered": True,
             "fx_rate": None,
-            "original_total": 100.0,
-            "original_currency": "USD",
+            "original_total": None,
+            "original_currency": None,
             "needs_fx_review": True,
             "reconciled": False,
-            "reconcile_note": "needs fx review: document currency USD differs from base currency SGD; no exchange rate available",
+            "reconcile_note": "needs fx review: multiple currencies on the same document; confirm which currency and amounts to book",
         }
     ]
 

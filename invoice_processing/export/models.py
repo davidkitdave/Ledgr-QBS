@@ -79,14 +79,13 @@ class NormalizedInvoice:
     # The CLIENT's own GST registration status (from Client Setup TAX_REGISTERED).
     our_gst_registered: bool = True
 
-    # FX / multi-currency fields (set by to_normalized when currency != base_currency).
-    # fx_rate: exchange rate applied to convert doc amounts to base currency.
-    #   - 1.0 when doc currency == base currency (no conversion needed).
-    #   - None when currency != base currency and no rate was derivable — see needs_fx_review.
-    # original_currency / original_total: the raw doc currency + total BEFORE conversion.
-    # needs_fx_review: True when the same document mixes currencies and amounts
-    #   cannot be booked without human confirmation.
-    fx_rate: Optional[float] = 1.0
+    # FX / multi-currency fields (set by to_normalized).
+    # fx_rate: the exchange rate PRINTED on the document, recorded as-is.
+    #   - None when the document prints no rate (booked in document currency as-is).
+    #   - Never silently set to 1.0 — the accountant converts in their ERP.
+    # original_currency / original_total: always None (no conversion is performed).
+    # needs_fx_review: True only when a single document mixes multiple currencies.
+    fx_rate: Optional[float] = None
     original_total: Optional[float] = None
     original_currency: Optional[str] = None
     needs_fx_review: bool = False
