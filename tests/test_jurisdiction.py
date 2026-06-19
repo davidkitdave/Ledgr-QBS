@@ -24,6 +24,8 @@ import pytest
 
 from accounting_agents import nodes
 from accounting_agents.jurisdiction import (
+    CROSS_BORDER_KEY,
+    FLAG_FOR_HUMAN_KEY,
     JURISDICTION_AMBIGUOUS,
     JURISDICTION_CROSS_BORDER,
     REGION_MALAYSIA,
@@ -31,8 +33,11 @@ from accounting_agents.jurisdiction import (
     TAX_JURISDICTION_KEY,
     TAX_SYSTEM_GST,
     TAX_SYSTEM_HINT_KEY,
+    TAX_SYSTEM_OUT_OF_SCOPE,
     TAX_SYSTEM_SST,
     resolve_jurisdiction,
+    resolution_from_state,
+    write_to_state,
 )
 from invoice_processing.export.models import InvoiceLine, NormalizedInvoice, PartyInfo
 
@@ -61,20 +66,62 @@ class TestResolveJurisdiction:
         assert res.jurisdiction.rate_band_label == "8% SST"
         assert res.jurisdiction.flag_for_human is False
 
-    def test_cross_border_sg_client_my_supplier(self):
+    def test_cross_border_sg_client_my_supplier_auto_books(self):
+        """SG client + MY supplier → CROSS_BORDER, auto-book (flag_for_human=False)."""
         res = resolve_jurisdiction(
             {"region": "SINGAPORE", "base_currency": "SGD", "supplier_country": "MY"}
         )
         assert res.jurisdiction.code == JURISDICTION_CROSS_BORDER
-        assert res.jurisdiction.flag_for_human is True
         assert res.jurisdiction.cross_border is True
+        assert res.jurisdiction.flag_for_human is False
+        assert res.jurisdiction.tax_system == TAX_SYSTEM_OUT_OF_SCOPE
+        assert "GST" in res.jurisdiction.notes
+        assert "not claimable" in res.jurisdiction.notes
 
-    def test_cross_border_my_client_sg_supplier(self):
+    def test_cross_border_my_client_sg_supplier_auto_books(self):
+        """MY client + SG supplier → CROSS_BORDER, auto-book (flag_for_human=False)."""
         res = resolve_jurisdiction(
             {"region": "MALAYSIA", "base_currency": "MYR", "supplier_country": "SG"}
         )
         assert res.jurisdiction.code == JURISDICTION_CROSS_BORDER
+        assert res.jurisdiction.cross_border is True
+        assert res.jurisdiction.flag_for_human is False
+        assert res.jurisdiction.tax_system == TAX_SYSTEM_OUT_OF_SCOPE
+        assert "SST" in res.jurisdiction.notes
+        assert "not claimable" in res.jurisdiction.notes
+
+    def test_cross_border_sg_partial_exempt_flags(self):
+        """SG partially-exempt client + foreign supplier → flag_for_human=True (RC review)."""
+        res = resolve_jurisdiction(
+            {
+                "region": "SINGAPORE",
+                "base_currency": "SGD",
+                "supplier_country": "MY",
+                "partial_exempt": True,
+            }
+        )
+        assert res.jurisdiction.code == JURISDICTION_CROSS_BORDER
+        assert res.jurisdiction.cross_border is True
         assert res.jurisdiction.flag_for_human is True
+        assert "reverse-charge" in res.jurisdiction.notes.lower()
+
+    def test_cross_border_write_read_roundtrip_flag_preserved(self):
+        """write_to_state + resolution_from_state preserves flag_for_human=False."""
+        state: dict = {
+            "region": "MALAYSIA",
+            "base_currency": "MYR",
+            "supplier_country": "SG",
+        }
+        res = resolve_jurisdiction(state)
+        assert res.jurisdiction.flag_for_human is False
+        write_to_state(state, res)
+        # The persisted keys must be present.
+        assert state[FLAG_FOR_HUMAN_KEY] is False
+        assert state[CROSS_BORDER_KEY] is True
+        # Round-trip must NOT re-derive True from the code.
+        rebuilt = resolution_from_state(state)
+        assert rebuilt.jurisdiction.flag_for_human is False
+        assert rebuilt.jurisdiction.cross_border is True
 
     def test_ambiguous_no_region(self):
         res = resolve_jurisdiction({})
@@ -202,8 +249,8 @@ class TestTaxReasoningLLMPath:
         assert outcome.used_llm is True
         assert outcome.flagged_count == 0
 
-    def test_cross_border_forces_os_with_low_confidence(self, monkeypatch):
-        """SG client, MY supplier → CROSS_BORDER → OS, flagged, no LLM call."""
+    def test_cross_border_auto_books_os_no_flag(self):
+        """SG client, MY supplier, no partial_exempt → CROSS_BORDER → OS, NOT flagged, no LLM."""
         from accounting_agents.tax_reasoning import reason_one_invoice
 
         state = {
@@ -212,6 +259,37 @@ class TestTaxReasoningLLMPath:
             "supplier_country": "MY",
             TAX_JURISDICTION_KEY: "CROSS_BORDER",
             TAX_SYSTEM_HINT_KEY: "OS",
+            FLAG_FOR_HUMAN_KEY: False,
+            CROSS_BORDER_KEY: True,
+            "jurisdiction_rates": {
+                "standard_rate": None,
+                "rate_tolerance": 0.01,
+                "rate_band_label": "cross-border",
+                "reference_yaml": "sg_gst.yaml",
+            },
+        }
+        inv = _inv_with_one_line(supplier_country="MY")
+        outcome = reason_one_invoice(inv, state=state)
+        line = inv.lines[0]
+        assert line.tax_treatment == "OS"
+        assert line.tax_flagged is False
+        assert line.tax_confidence == pytest.approx(0.9)
+        assert outcome.used_llm is False
+        assert outcome.flagged_count == 0
+
+    def test_cross_border_partial_exempt_flags(self):
+        """SG partially-exempt client + foreign supplier → CROSS_BORDER, flagged (RC review)."""
+        from accounting_agents.tax_reasoning import reason_one_invoice
+
+        state = {
+            "region": "SINGAPORE",
+            "base_currency": "SGD",
+            "supplier_country": "MY",
+            "partial_exempt": True,
+            TAX_JURISDICTION_KEY: "CROSS_BORDER",
+            TAX_SYSTEM_HINT_KEY: "OS",
+            FLAG_FOR_HUMAN_KEY: True,
+            CROSS_BORDER_KEY: True,
             "jurisdiction_rates": {
                 "standard_rate": None,
                 "rate_tolerance": 0.01,
@@ -351,3 +429,95 @@ class TestTaxNodeWritesJurisdiction:
         assert line["tax_flagged"] is False, f"flagged: {line.get('tax_reason')}"
         assert state.get("tax_jurisdiction") == "MALAYSIA"
         assert state.get("tax_system_hint") == "SST"
+
+
+# --------------------------------------------------------------------------- #
+# Cross-border auto-book: MY client + SG supplier, 2-line probe
+# --------------------------------------------------------------------------- #
+class TestCrossBorderAutoBook:
+    """Probes the new intelligent cross-border routing end-to-end."""
+
+    def _my_cross_border_state(self) -> dict:
+        return {
+            "region": "MALAYSIA",
+            "base_currency": "MYR",
+            "supplier_country": "SG",
+            TAX_JURISDICTION_KEY: JURISDICTION_CROSS_BORDER,
+            TAX_SYSTEM_HINT_KEY: TAX_SYSTEM_OUT_OF_SCOPE,
+            FLAG_FOR_HUMAN_KEY: False,
+            CROSS_BORDER_KEY: True,
+            "jurisdiction_rates": {
+                "standard_rate": None,
+                "rate_tolerance": 0.01,
+                "rate_band_label": None,
+                "reference_yaml": "my_sst.yaml",
+            },
+        }
+
+    def test_resolve_my_cross_border_auto_book(self):
+        """MY client (MYR) + SG supplier → code=CROSS_BORDER, flag=False, system=OS."""
+        res = resolve_jurisdiction({
+            "region": "MALAYSIA",
+            "base_currency": "MYR",
+            "supplier_country": "SG",
+        })
+        assert res.jurisdiction.code == JURISDICTION_CROSS_BORDER
+        assert res.jurisdiction.cross_border is True
+        assert res.jurisdiction.flag_for_human is False
+        assert res.jurisdiction.tax_system == TAX_SYSTEM_OUT_OF_SCOPE
+
+    def test_roundtrip_flag_preserved_false(self):
+        """write_to_state → resolution_from_state: flag_for_human stays False."""
+        state: dict = {
+            "region": "MALAYSIA",
+            "base_currency": "MYR",
+            "supplier_country": "SG",
+        }
+        res = resolve_jurisdiction(state)
+        write_to_state(state, res)
+        assert state[FLAG_FOR_HUMAN_KEY] is False
+        assert state[CROSS_BORDER_KEY] is True
+        rebuilt = resolution_from_state(state)
+        assert rebuilt.jurisdiction.flag_for_human is False
+        assert rebuilt.jurisdiction.cross_border is True
+
+    def test_two_line_invoice_all_os_not_flagged(self):
+        """MY client + SG supplier → both lines OS, tax_flagged=False, flagged_count=0."""
+        from accounting_agents.tax_reasoning import reason_one_invoice
+
+        state = self._my_cross_border_state()
+        inv = NormalizedInvoice(
+            doc_type="purchase",
+            invoice_date=date(2024, 9, 1),
+            our_gst_registered=True,
+            supplier=PartyInfo(name="SG Vendor Pte Ltd", country="SG"),
+        )
+        inv.lines.append(InvoiceLine(description="Consulting fee", net_amount=500.0, gst_amount=45.0))
+        inv.lines.append(InvoiceLine(description="Software licence", net_amount=200.0, gst_amount=18.0))
+
+        outcome = reason_one_invoice(inv, state=state)
+
+        assert outcome.flagged_count == 0
+        assert outcome.used_llm is False
+        assert outcome.used_fallback is False
+        for line in inv.lines:
+            assert line.tax_treatment == "OS", f"expected OS, got {line.tax_treatment}"
+            assert line.tax_flagged is False, f"line flagged: {line.tax_reason}"
+            assert line.tax_confidence == pytest.approx(0.9)
+
+    def test_sg_domestic_unchanged(self):
+        """SG domestic (region=SINGAPORE, SGD, supplier=SG) → SINGAPORE, GST, flag=False."""
+        res = resolve_jurisdiction({
+            "region": "SINGAPORE",
+            "base_currency": "SGD",
+            "supplier_country": "SG",
+        })
+        assert res.jurisdiction.code == REGION_SINGAPORE
+        assert res.jurisdiction.tax_system == TAX_SYSTEM_GST
+        assert res.jurisdiction.flag_for_human is False
+
+    def test_ambiguous_no_region_still_flags(self):
+        """AMBIGUOUS (no region) → flag_for_human=True unchanged."""
+        res = resolve_jurisdiction({})
+        assert res.jurisdiction.code == JURISDICTION_AMBIGUOUS
+        assert res.jurisdiction.flag_for_human is True

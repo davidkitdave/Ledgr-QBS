@@ -143,6 +143,7 @@ def _playground_default_context() -> ClientContext:
         "software": "qbs",
         "base_currency": "SGD",
         "tax_registered": True,
+        "partial_exempt": False,
         "fye_month": 12,
     }
 
@@ -172,6 +173,10 @@ def _playground_default_context() -> ClientContext:
     tax_raw = _os.environ.get("LEDGR_PLAYGROUND_TAX_REGISTERED")
     if tax_raw is not None and tax_raw != "":
         defaults["tax_registered"] = tax_raw.strip().lower() in ("true", "1", "yes", "y")
+
+    partial_exempt_raw = _os.environ.get("LEDGR_PLAYGROUND_PARTIAL_EXEMPT")
+    if partial_exempt_raw is not None and partial_exempt_raw != "":
+        defaults["partial_exempt"] = partial_exempt_raw.strip().lower() in ("true", "1", "yes", "y")
 
     # JSON-file override (higher precedence than env vars).
     config_path = _Path(_os.environ.get("LEDGR_PLAYGROUND_PROFILE_PATH", "playground_profile.json"))
@@ -238,6 +243,7 @@ def _playground_default_context() -> ClientContext:
         accounting_software=defaults["software"],
         base_currency=defaults["base_currency"],
         tax_registered=bool(defaults["tax_registered"]),
+        partial_exempt=bool(defaults["partial_exempt"]),
         fye_month=defaults["fye_month"],
         coa=coa_objects,
         category_mapping=category_mapping,

@@ -77,6 +77,7 @@ class ClientContext:
     accounting_software: str = "QBS Ledger"
     base_currency: str = "SGD"
     tax_registered: bool = True
+    partial_exempt: bool = False
     fye_month: Optional[int] = None
     coa: list[CoaAccount] = field(default_factory=list)
     category_mapping: dict[str, Optional[str]] = field(default_factory=dict)  # category -> account_code | null
@@ -91,6 +92,7 @@ class ClientContext:
             "client_uen": self.client_uen,
             "region": self.region,
             "tax_registered": self.tax_registered,
+            "partial_exempt": self.partial_exempt,
             "software": self.accounting_software,
             "base_currency": self.base_currency,
             "fye_month": self.fye_month,
@@ -302,6 +304,7 @@ def client_context_from_state(state: dict) -> ClientContext:
         accounting_software=state.get("software") or "QBS Ledger",
         base_currency=state.get("base_currency") or "SGD",
         tax_registered=bool(state.get("tax_registered", True)),
+        partial_exempt=bool(state.get("partial_exempt", False)),
         fye_month=state.get("fye_month"),
         coa=coa_from_state(state),
         category_mapping=category_mapping_from_state(state),
@@ -383,6 +386,7 @@ class InMemoryClientStore:
             accounting_software=profile.get("accounting_software") or "QBS Ledger",
             base_currency=profile.get("base_currency") or "SGD",
             tax_registered=tax_registered,
+            partial_exempt=bool(profile.get("partial_exempt", False)),
             status=profile.get("status"),
             category_mapping=dict(profile.get("category_mapping") or {}),
         )
@@ -693,6 +697,7 @@ class FirestoreClientStore:
             accounting_software=data.get("accounting_software") or "QBS Ledger",
             base_currency=data.get("base_currency") or "SGD",
             tax_registered=tax_registered,
+            partial_exempt=bool(data.get("partial_exempt", False)),
             status=data.get("status"),
             # category_mapping is a map field on the client doc (spec §1), not a subcollection.
             category_mapping=dict(data.get("category_mapping") or {}),

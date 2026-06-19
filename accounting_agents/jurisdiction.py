@@ -48,6 +48,8 @@ SUPPLIER_COUNTRY_KEY = "supplier_country"
 CUSTOMER_COUNTRY_KEY = "customer_country"
 TAX_SYSTEM_HINT_KEY = "tax_system_hint"
 JURISDICTION_RATES_KEY = "jurisdiction_rates"
+FLAG_FOR_HUMAN_KEY = "flag_for_human"
+CROSS_BORDER_KEY = "cross_border"
 
 # --------------------------------------------------------------------------- #
 # Canonical region codes (mirror ClientContext.region values)
@@ -130,6 +132,8 @@ class JurisdictionResolution:
             },
             SUPPLIER_COUNTRY_KEY: self.supplier_country,
             CUSTOMER_COUNTRY_KEY: self.customer_country,
+            FLAG_FOR_HUMAN_KEY: self.jurisdiction.flag_for_human,
+            CROSS_BORDER_KEY: self.jurisdiction.cross_border,
         }
 
 
@@ -257,6 +261,9 @@ def resolve_jurisdiction(state: dict) -> JurisdictionResolution:
     supplier_country = _norm_country(state.get(SUPPLIER_COUNTRY_KEY))
     customer_country = _norm_country(state.get(CUSTOMER_COUNTRY_KEY))
 
+    # Partially-exempt flag: SG clients with imported-service reverse-charge exposure.
+    partial_exempt = bool(state.get("partial_exempt"))
+
     # Counterparty = supplier for purchases, customer for sales. The state key
     # the extract node sets depends on direction; the router node downstream of
     # extract (categorize / tax) normalizes this. For jurisdiction routing we
@@ -281,7 +288,18 @@ def resolve_jurisdiction(state: dict) -> JurisdictionResolution:
         )
 
     # Cross-border: client + counterparty in different countries.
+    # Routine case: foreign-supplier purchase → out of scope for local GST/SST
+    # (foreign tax is a cost, not claimable as input tax). Auto-book; no HITL.
+    # Exception: SG partially-exempt client + imported service needs RC review.
     if counterparty_country and client_region == REGION_SINGAPORE and counterparty_country != "SG":
+        sg_flag = partial_exempt  # True only when RC review is warranted
+        if sg_flag:
+            sg_notes = "Partially-exempt Singapore client + imported service; reverse-charge (RC) treatment needs review."
+        else:
+            sg_notes = (
+                f"Foreign counterparty (country={counterparty_country}); out of scope for local GST"
+                " — foreign tax recorded as shown, not claimable as input tax."
+            )
         return JurisdictionResolution(
             jurisdiction=JurisdictionRule(
                 code=JURISDICTION_CROSS_BORDER,
@@ -289,12 +307,9 @@ def resolve_jurisdiction(state: dict) -> JurisdictionResolution:
                 tax_system=TAX_SYSTEM_OUT_OF_SCOPE,
                 reference_yaml="sg_gst.yaml",
                 standard_rate=None,
-                flag_for_human=True,
+                flag_for_human=sg_flag,
                 cross_border=True,
-                notes=(
-                    f"Singapore client, counterparty country={counterparty_country}; "
-                    "import / reverse-charge review"
-                ),
+                notes=sg_notes,
             ),
             client_region=client_region,
             client_currency=client_currency,
@@ -309,11 +324,11 @@ def resolve_jurisdiction(state: dict) -> JurisdictionResolution:
                 tax_system=TAX_SYSTEM_OUT_OF_SCOPE,
                 reference_yaml="my_sst.yaml",
                 standard_rate=None,
-                flag_for_human=True,
+                flag_for_human=False,  # MY cross-border: always auto-book
                 cross_border=True,
                 notes=(
-                    f"Malaysia client, counterparty country={counterparty_country}; "
-                    "import / reverse-charge review"
+                    f"Foreign counterparty (country={counterparty_country}); out of scope for local SST"
+                    " — foreign tax recorded as shown, not claimable as input tax."
                 ),
             ),
             client_region=client_region,
@@ -412,9 +427,16 @@ def resolution_from_state(state: dict) -> JurisdictionResolution:
     tax_system = state.get(TAX_SYSTEM_HINT_KEY, "")
     rates: dict = state.get(JURISDICTION_RATES_KEY) or {}
 
-    # Derive cross_border / flag_for_human from the stored code.
-    cross_border = jurisdiction_code == JURISDICTION_CROSS_BORDER
-    flag_for_human = jurisdiction_code in (JURISDICTION_CROSS_BORDER, JURISDICTION_AMBIGUOUS)
+    # Read persisted flags; fall back to code-derived values for backward compat
+    # (old state written before FLAG_FOR_HUMAN_KEY / CROSS_BORDER_KEY were added).
+    cross_border = (
+        bool(state[CROSS_BORDER_KEY]) if CROSS_BORDER_KEY in state
+        else (jurisdiction_code == JURISDICTION_CROSS_BORDER)
+    )
+    flag_for_human = (
+        bool(state[FLAG_FOR_HUMAN_KEY]) if FLAG_FOR_HUMAN_KEY in state
+        else (jurisdiction_code in (JURISDICTION_CROSS_BORDER, JURISDICTION_AMBIGUOUS))
+    )
 
     rule = JurisdictionRule(
         code=jurisdiction_code,

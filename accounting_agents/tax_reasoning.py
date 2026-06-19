@@ -273,18 +273,35 @@ def reason_one_invoice(
 
     rule = jurisdiction_resolution.jurisdiction
 
-    # Short-circuit: cross-border / ambiguous → forced OS or NT, LLM off,
-    # confidence 0.5, flag for human review. We do NOT call the LLM because
-    # the rule set is "unknown"; asking the LLM to reason with no anchor
-    # produces more confident nonsense.
+    # Routine cross-border purchase: foreign tax is a cost; book out of scope
+    # for the local GST/SST return (not claimable). Deterministic — no LLM, no flag.
+    if rule.cross_border and not rule.flag_for_human:
+        for line in inv.lines:
+            line.tax_treatment = "OS"
+            line.tax_confidence = 0.9
+            line.tax_flagged = False
+            line.tax_reason = (
+                rule.notes
+                or "Foreign-counterparty purchase; out of scope for local GST/SST; "
+                "foreign tax recorded as shown, not claimable as input tax."
+            )
+        return TaxReasoningOutcome(
+            invoice=inv,
+            used_llm=False,
+            used_fallback=False,
+            flagged_count=0,
+            decisions=[],
+        )
+
+    # Cross-border with flag (e.g. SG partially-exempt) or AMBIGUOUS:
+    # forced OS/NT, no LLM, escalate to HITL.
     if rule.flag_for_human:
-        for i, line in enumerate(inv.lines):
+        for line in inv.lines:
             line.tax_treatment = "OS" if rule.tax_system == "OS" else "NT"
             line.tax_confidence = 0.5
             line.tax_flagged = True
             line.tax_reason = (
-                f"{rule.code}: jurisdiction={rule.code} ({rule.notes or 'no jurisdiction rule'}); "
-                "HITL review required"
+                f"{rule.code}: {rule.notes or 'requires review'}; HITL review required"
             )
         return TaxReasoningOutcome(
             invoice=inv,
