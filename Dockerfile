@@ -3,4 +3,4 @@ WORKDIR /app
 COPY . /app
 RUN pip install --no-cache-dir .
 ENV PORT=8080
-CMD ["sh", "-c", "uvicorn accounting_agents.fast_api_app:app --host 0.0.0.0 --port ${PORT}"]
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT}"]
