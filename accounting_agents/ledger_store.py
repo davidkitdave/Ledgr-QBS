@@ -123,7 +123,7 @@ class SlackLedgerStore:
     def __init__(self, db: Any, *, opener: Optional[Any] = None) -> None:
         self._db = db
         self._opener = opener or urllib.request.build_opener()
-        # Per-(channel, fy) locks serialize racing drops on the same workbook.
+        # Per-(client_id, fy) locks serialize concurrent writes to the same workbook.
         self._locks: dict[tuple[str, str], threading.Lock] = {}
         self._locks_guard = threading.Lock()
 
@@ -279,14 +279,16 @@ class SlackLedgerStore:
         return set(pointer.get("seen_doc_keys") or [])
 
     # ------------------------------------------------------------------ #
-    # Per-channel serialization
+    # Per-client serialization
     # ------------------------------------------------------------------ #
 
-    def _lock_for(self, channel_id: str, fy: str) -> threading.Lock:
+    def _lock_for(self, client_id: str, fy: str) -> threading.Lock:
         # TODO(concurrency): cross-instance via Firestore txn. This in-process lock
-        # only serializes drops within a single process; a multi-instance Cloud Run
+        # only serializes writes within a single process; a multi-instance Cloud Run
         # deployment needs a Firestore transaction on the pointer doc.
-        key = (channel_id, str(fy))
+        # Keys on (client_id, fy) to match the workbook identity — two different
+        # Slack channels mapping to the same client share ONE lock and cannot race.
+        key = (client_id, str(fy))
         with self._locks_guard:
             lock = self._locks.get(key)
             if lock is None:
@@ -788,7 +790,7 @@ class SlackLedgerStore:
             ``"batch_replace_counts": [{sheet, doc_key, replaced, appended}, ...]``
             so callers can warn when no old rows were matched (identity changed).
         """
-        lock = self._lock_for(channel_id, fy)
+        lock = self._lock_for(client_id, fy)
         with lock:
             return self._append_rows_locked(
                 client_id=client_id,
@@ -1263,7 +1265,7 @@ class SlackLedgerStore:
                 sheet name is not found; ``row`` is out of range; or an
                 ``updates`` key is not a column header in that sheet.
         """
-        lock = self._lock_for(channel_id, fy)
+        lock = self._lock_for(client_id, fy)
         with lock:
             pointer, data = self._download_current_workbook(slack_client, client_id, fy)
             wb = self._load_workbook(data)
@@ -1338,7 +1340,7 @@ class SlackLedgerStore:
             ValueError: if no pointer exists; the sheet is a bank sheet; the
                 sheet name is not found; or ``row`` is out of range.
         """
-        lock = self._lock_for(channel_id, fy)
+        lock = self._lock_for(client_id, fy)
         with lock:
             pointer, data = self._download_current_workbook(slack_client, client_id, fy)
             wb = self._load_workbook(data)
@@ -1449,7 +1451,7 @@ class SlackLedgerStore:
                     f"only Purchase / Sales sheets can be cleared (sheet={sheet_name!r})."
                 )
 
-        lock = self._lock_for(channel_id, fy)
+        lock = self._lock_for(client_id, fy)
         with lock:
             pointer, data = self._download_current_workbook(slack_client, client_id, fy)
             wb = self._load_workbook(data)

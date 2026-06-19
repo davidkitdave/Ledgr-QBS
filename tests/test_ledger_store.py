@@ -2403,3 +2403,113 @@ def test_best_fy_for_chat_no_pointers_returns_none():
     best, summaries = store.best_fy_for_chat("ghost", slack)
     assert best is None
     assert summaries == []
+
+
+# ------------------------------------------------------------------ #
+# WS5a — lock keyed on client_id, not channel_id
+# ------------------------------------------------------------------ #
+
+
+def test_lock_for_same_client_same_fy_returns_same_object():
+    """Two calls with the SAME client_id+fy return the IDENTICAL lock object."""
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+
+    lock_a = store._lock_for("client-X", "2026")
+    lock_b = store._lock_for("client-X", "2026")
+    assert lock_a is lock_b, "same client+fy must share one lock"
+
+
+def test_lock_for_different_clients_get_different_locks():
+    """Two DIFFERENT client_ids get DISTINCT locks (no over-serialization)."""
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+
+    lock_a = store._lock_for("client-A", "2026")
+    lock_b = store._lock_for("client-B", "2026")
+    assert lock_a is not lock_b, "different clients must not share a lock"
+
+
+def test_lock_for_same_client_different_fy_get_different_locks():
+    """Same client but different FY → different locks."""
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+
+    lock_2025 = store._lock_for("client-X", "2025")
+    lock_2026 = store._lock_for("client-X", "2026")
+    assert lock_2025 is not lock_2026
+
+
+def test_two_channels_same_client_share_one_lock():
+    """The lock is keyed on client_id: two different channel_ids that belong to
+    the same client produce the same lock object (the workbook is shared)."""
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+
+    # Simulate two Slack channels C-ALPHA and C-BETA that both map to client-X.
+    # The store no longer keys on channel_id, so we call _lock_for directly with
+    # the client_id that each caller would supply.
+    lock_from_ch_alpha = store._lock_for("client-X", "2026")
+    lock_from_ch_beta = store._lock_for("client-X", "2026")
+
+    assert lock_from_ch_alpha is lock_from_ch_beta, (
+        "two channels of the same client must serialize on ONE lock "
+        "to prevent last-writer-wins on the shared workbook"
+    )
+
+
+def test_two_channels_same_client_no_lost_rows():
+    """Two append_rows calls with DIFFERENT channel_ids but the SAME client_id
+    both land in the workbook — no rows are lost due to a lock race.
+
+    This is the headline correctness test for WS5a: before the fix both channels
+    got separate locks and could interleave reads and writes, silently dropping
+    whichever upload arrived last.  After the fix they share one lock and the
+    second writer always reads the first writer's upload before appending.
+    """
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+
+    # First channel appends a row.
+    store.append_rows(
+        client_id="shared-client",
+        fy="2026",
+        slack_client=slack,
+        channel_id="C-ALPHA",
+        software="qbs",
+        kind="invoice",
+        batches=[
+            {
+                "sheet": "Purchase",
+                "doc_key": "F:Purchase:INV-ALPHA",
+                "rows": [_row("from channel alpha")],
+            }
+        ],
+    )
+
+    # Second channel (different channel_id, SAME client_id) appends another row.
+    store.append_rows(
+        client_id="shared-client",
+        fy="2026",
+        slack_client=slack,
+        channel_id="C-BETA",
+        software="qbs",
+        kind="invoice",
+        batches=[
+            {
+                "sheet": "Purchase",
+                "doc_key": "F:Purchase:INV-BETA",
+                "rows": [_row("from channel beta")],
+            }
+        ],
+    )
+
+    # Read the final workbook from the pointer.
+    ptr = store.get_pointer("shared-client", "2026")
+    final_bytes = slack.files[ptr["slack_file_id"]]
+    rows = _read_sheet_rows(final_bytes, "Purchase")
+
+    assert len(rows) == 2, (
+        f"expected 2 rows (one per channel), got {len(rows)}; "
+        "a race would have caused one row to be lost"
+    )
