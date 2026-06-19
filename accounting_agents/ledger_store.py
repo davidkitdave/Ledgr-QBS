@@ -33,12 +33,15 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 import threading
 import urllib.parse
 import urllib.request
 from typing import Any, Optional
 
 from openpyxl import Workbook, load_workbook
+
+from accounting_agents.lease_lock import FirestoreLeaseLock
 
 from invoice_processing.export.exporters import (
     BankStatementExporter,
@@ -120,12 +123,23 @@ class SlackLedgerStore:
             because the fake Slack client returns bytes directly (see below).
     """
 
-    def __init__(self, db: Any, *, opener: Optional[Any] = None) -> None:
+    def __init__(
+        self, db: Any, *, opener: Optional[Any] = None, lease: Optional[Any] = None
+    ) -> None:
         self._db = db
         self._opener = opener or urllib.request.build_opener()
-        # Per-(client_id, fy) locks serialize concurrent writes to the same workbook.
+        # Per-(client_id, fy) locks serialize concurrent writes to the same workbook
+        # WITHIN a single process. Cross-instance serialization is layered on top by
+        # the Firestore lease lock (WS5b), taken inside this in-process lock.
         self._locks: dict[tuple[str, str], threading.Lock] = {}
         self._locks_guard = threading.Lock()
+        self._lease = lease or FirestoreLeaseLock(
+            db,
+            instance_id=os.environ.get("K_REVISION", "local"),
+            # A fake db (tests) may carry its own firestore namespace so the lease
+            # stays hermetic; production db has no such attr → real lazy import.
+            firestore_ns=getattr(db, "firestore_ns", None),
+        )
 
     # ------------------------------------------------------------------ #
     # Firestore pointer
@@ -283,9 +297,8 @@ class SlackLedgerStore:
     # ------------------------------------------------------------------ #
 
     def _lock_for(self, client_id: str, fy: str) -> threading.Lock:
-        # TODO(concurrency): cross-instance via Firestore txn. This in-process lock
-        # only serializes writes within a single process; a multi-instance Cloud Run
-        # deployment needs a Firestore transaction on the pointer doc.
+        # In-process serialization only; cross-instance serialization is handled by
+        # the wrapping Firestore lease lock (WS5b) at each write call site.
         # Keys on (client_id, fy) to match the workbook identity — two different
         # Slack channels mapping to the same client share ONE lock and cannot race.
         key = (client_id, str(fy))
@@ -791,18 +804,22 @@ class SlackLedgerStore:
             so callers can warn when no old rows were matched (identity changed).
         """
         lock = self._lock_for(client_id, fy)
-        with lock:
-            return self._append_rows_locked(
-                client_id=client_id,
-                fy=fy,
-                slack_client=slack_client,
-                channel_id=channel_id,
-                batches=batches,
-                software=software,
-                kind=kind,
-                client_name=client_name,
-                replace=replace,
-            )
+        with lock:  # fast same-process serialize
+            token = self._lease.acquire(client_id, fy)  # cross-instance serialize
+            try:
+                return self._append_rows_locked(
+                    client_id=client_id,
+                    fy=fy,
+                    slack_client=slack_client,
+                    channel_id=channel_id,
+                    batches=batches,
+                    software=software,
+                    kind=kind,
+                    client_name=client_name,
+                    replace=replace,
+                )
+            finally:
+                self._lease.release(client_id, fy, token)
 
     def _append_rows_locked(
         self,
@@ -1266,45 +1283,49 @@ class SlackLedgerStore:
                 ``updates`` key is not a column header in that sheet.
         """
         lock = self._lock_for(client_id, fy)
-        with lock:
-            pointer, data = self._download_current_workbook(slack_client, client_id, fy)
-            wb = self._load_workbook(data)
+        with lock:  # fast same-process serialize
+            token = self._lease.acquire(client_id, fy)  # cross-instance serialize
+            try:
+                pointer, data = self._download_current_workbook(slack_client, client_id, fy)
+                wb = self._load_workbook(data)
 
-            # Sheet-existence check before bank guard: gives a clear "not found"
-            # error for misspelled names rather than a misleading "bank" error.
-            if sheet not in wb.sheetnames:
-                raise ValueError(
-                    f"sheet not found: {sheet!r}; available sheets are {wb.sheetnames}"
-                )
-
-            if self._is_bank_sheet(sheet):
-                raise ValueError(
-                    f"bank-statement rows are read-only from chat; "
-                    f"balances are derived (sheet={sheet!r}). "
-                    "Amend invoice ledger rows (Purchase / Sales) only."
-                )
-
-            ws = self._validate_mutation_args(wb, sheet, row)
-            col_map = self._header_col_map(ws)
-
-            # Validate all update keys before touching any cell.
-            for col_name in updates:
-                if col_name not in col_map:
+                # Sheet-existence check before bank guard: gives a clear "not found"
+                # error for misspelled names rather than a misleading "bank" error.
+                if sheet not in wb.sheetnames:
                     raise ValueError(
-                        f"unknown column {col_name!r} in sheet {sheet!r}; "
-                        f"known headers: {sorted(col_map)}"
+                        f"sheet not found: {sheet!r}; available sheets are {wb.sheetnames}"
                     )
 
-            before: dict = {}
-            after: dict = {}
-            for col_name, new_value in updates.items():
-                col_idx = col_map[col_name]
-                cell = ws.cell(row=row, column=col_idx)
-                before[col_name] = cell.value
-                cell.value = new_value
-                after[col_name] = new_value
+                if self._is_bank_sheet(sheet):
+                    raise ValueError(
+                        f"bank-statement rows are read-only from chat; "
+                        f"balances are derived (sheet={sheet!r}). "
+                        "Amend invoice ledger rows (Purchase / Sales) only."
+                    )
 
-            self._upload_and_reroute(slack_client, wb, pointer, client_id, fy, channel_id)
+                ws = self._validate_mutation_args(wb, sheet, row)
+                col_map = self._header_col_map(ws)
+
+                # Validate all update keys before touching any cell.
+                for col_name in updates:
+                    if col_name not in col_map:
+                        raise ValueError(
+                            f"unknown column {col_name!r} in sheet {sheet!r}; "
+                            f"known headers: {sorted(col_map)}"
+                        )
+
+                before: dict = {}
+                after: dict = {}
+                for col_name, new_value in updates.items():
+                    col_idx = col_map[col_name]
+                    cell = ws.cell(row=row, column=col_idx)
+                    before[col_name] = cell.value
+                    cell.value = new_value
+                    after[col_name] = new_value
+
+                self._upload_and_reroute(slack_client, wb, pointer, client_id, fy, channel_id)
+            finally:
+                self._lease.release(client_id, fy, token)
 
         return {"sheet": sheet, "row": row, "before": before, "after": after}
 
@@ -1341,35 +1362,39 @@ class SlackLedgerStore:
                 sheet name is not found; or ``row`` is out of range.
         """
         lock = self._lock_for(client_id, fy)
-        with lock:
-            pointer, data = self._download_current_workbook(slack_client, client_id, fy)
-            wb = self._load_workbook(data)
+        with lock:  # fast same-process serialize
+            token = self._lease.acquire(client_id, fy)  # cross-instance serialize
+            try:
+                pointer, data = self._download_current_workbook(slack_client, client_id, fy)
+                wb = self._load_workbook(data)
 
-            # Sheet-existence check before bank guard (same ordering as amend_row).
-            if sheet not in wb.sheetnames:
-                raise ValueError(
-                    f"sheet not found: {sheet!r}; available sheets are {wb.sheetnames}"
-                )
+                # Sheet-existence check before bank guard (same ordering as amend_row).
+                if sheet not in wb.sheetnames:
+                    raise ValueError(
+                        f"sheet not found: {sheet!r}; available sheets are {wb.sheetnames}"
+                    )
 
-            if self._is_bank_sheet(sheet):
-                raise ValueError(
-                    f"bank-statement rows are read-only from chat; "
-                    f"balances are derived (sheet={sheet!r}). "
-                    "Remove invoice ledger rows (Purchase / Sales) only."
-                )
+                if self._is_bank_sheet(sheet):
+                    raise ValueError(
+                        f"bank-statement rows are read-only from chat; "
+                        f"balances are derived (sheet={sheet!r}). "
+                        "Remove invoice ledger rows (Purchase / Sales) only."
+                    )
 
-            ws = self._validate_mutation_args(wb, sheet, row)
-            col_map = self._header_col_map(ws)
+                ws = self._validate_mutation_args(wb, sheet, row)
+                col_map = self._header_col_map(ws)
 
-            # Capture the row's values before deletion for the return dict.
-            removed: dict = {
-                col_name: ws.cell(row=row, column=col_idx).value
-                for col_name, col_idx in col_map.items()
-            }
+                # Capture the row's values before deletion for the return dict.
+                removed: dict = {
+                    col_name: ws.cell(row=row, column=col_idx).value
+                    for col_name, col_idx in col_map.items()
+                }
 
-            ws.delete_rows(row, 1)
+                ws.delete_rows(row, 1)
 
-            self._upload_and_reroute(slack_client, wb, pointer, client_id, fy, channel_id)
+                self._upload_and_reroute(slack_client, wb, pointer, client_id, fy, channel_id)
+            finally:
+                self._lease.release(client_id, fy, token)
 
         return {"sheet": sheet, "row": row, "removed": removed}
 
@@ -1452,70 +1477,74 @@ class SlackLedgerStore:
                 )
 
         lock = self._lock_for(client_id, fy)
-        with lock:
-            pointer, data = self._download_current_workbook(slack_client, client_id, fy)
-            wb = self._load_workbook(data)
+        with lock:  # fast same-process serialize
+            token = self._lease.acquire(client_id, fy)  # cross-instance serialize
+            try:
+                pointer, data = self._download_current_workbook(slack_client, client_id, fy)
+                wb = self._load_workbook(data)
 
-            existing_keys: set = self._get_seen_doc_keys(pointer)
-            purged_keys: list[str] = []
-            removed_descs: list[str] = []
-            sheet_counts: dict[str, int] = {}
+                existing_keys: set = self._get_seen_doc_keys(pointer)
+                purged_keys: list[str] = []
+                removed_descs: list[str] = []
+                sheet_counts: dict[str, int] = {}
 
-            for sheet_name in sheets:
-                if sheet_name not in wb.sheetnames:
-                    sheet_counts[sheet_name] = 0
-                    continue
+                for sheet_name in sheets:
+                    if sheet_name not in wb.sheetnames:
+                        sheet_counts[sheet_name] = 0
+                        continue
 
-                ws = wb[sheet_name]
-                if ws.max_row < 2:
-                    sheet_counts[sheet_name] = 0
-                    continue
+                    ws = wb[sheet_name]
+                    if ws.max_row < 2:
+                        sheet_counts[sheet_name] = 0
+                        continue
 
-                col_map = self._header_col_map(ws)
-                date_col = col_map.get("Date")
-                inv_col = col_map.get("Invoice Number")
+                    col_map = self._header_col_map(ws)
+                    date_col = col_map.get("Date")
+                    inv_col = col_map.get("Invoice Number")
 
-                # Collect matching row numbers in ascending order, then delete bottom-up.
-                matching_rows: list[int] = []
-                for row_num in range(2, ws.max_row + 1):
-                    date_val = (
-                        ws.cell(row=row_num, column=date_col).value
-                        if date_col else None
-                    )
-                    parsed = self._parse_row_date(date_val)
-                    if parsed is not None and parsed == (year, month):
-                        matching_rows.append(row_num)
+                    # Collect matching row numbers in ascending order, then delete bottom-up.
+                    matching_rows: list[int] = []
+                    for row_num in range(2, ws.max_row + 1):
+                        date_val = (
+                            ws.cell(row=row_num, column=date_col).value
+                            if date_col else None
+                        )
+                        parsed = self._parse_row_date(date_val)
+                        if parsed is not None and parsed == (year, month):
+                            matching_rows.append(row_num)
 
-                count = len(matching_rows)
-                sheet_counts[sheet_name] = count
+                    count = len(matching_rows)
+                    sheet_counts[sheet_name] = count
 
-                # Reconstruct doc_keys for the matching rows BEFORE deletion.
-                for row_num in matching_rows:
-                    inv_num = (
-                        ws.cell(row=row_num, column=inv_col).value
-                        if inv_col else None
-                    )
-                    # Mirror the nodes._doc_key format: f"{sheet}:{invoice_number}"
-                    # (no index suffix for a single-row-per-doc batch).
-                    if inv_num is not None:
-                        key = f"{sheet_name}:{str(inv_num).strip()}"
-                        if key in existing_keys:
-                            purged_keys.append(key)
-                    removed_descs.append(
-                        f"{sheet_name} row {row_num}"
-                    )
+                    # Reconstruct doc_keys for the matching rows BEFORE deletion.
+                    for row_num in matching_rows:
+                        inv_num = (
+                            ws.cell(row=row_num, column=inv_col).value
+                            if inv_col else None
+                        )
+                        # Mirror the nodes._doc_key format: f"{sheet}:{invoice_number}"
+                        # (no index suffix for a single-row-per-doc batch).
+                        if inv_num is not None:
+                            key = f"{sheet_name}:{str(inv_num).strip()}"
+                            if key in existing_keys:
+                                purged_keys.append(key)
+                        removed_descs.append(
+                            f"{sheet_name} row {row_num}"
+                        )
 
-                # Delete bottom-up so row shifts don't corrupt earlier indices.
-                for row_num in sorted(matching_rows, reverse=True):
-                    ws.delete_rows(row_num, 1)
+                    # Delete bottom-up so row shifts don't corrupt earlier indices.
+                    for row_num in sorted(matching_rows, reverse=True):
+                        ws.delete_rows(row_num, 1)
 
-            # Rebuild the surviving seen_doc_keys (purge the cleared month's keys).
-            surviving_keys = list(existing_keys - set(purged_keys))
+                # Rebuild the surviving seen_doc_keys (purge the cleared month's keys).
+                surviving_keys = list(existing_keys - set(purged_keys))
 
-            self._upload_and_reroute(
-                slack_client, wb, pointer, client_id, fy, channel_id,
-                seen_doc_keys_override=surviving_keys,
-            )
+                self._upload_and_reroute(
+                    slack_client, wb, pointer, client_id, fy, channel_id,
+                    seen_doc_keys_override=surviving_keys,
+                )
+            finally:
+                self._lease.release(client_id, fy, token)
 
         return {
             "removed": removed_descs,
