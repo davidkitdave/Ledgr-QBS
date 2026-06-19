@@ -1671,3 +1671,215 @@ def test_retry_resolve_direction_llm_success():
         prompt_list = kwargs.get("contents") or args
         assert "Sanesea International" in prompt_list[0]
 
+
+# =========================================================================== #
+# normalize_software_key — unit tests for the mapping
+# =========================================================================== #
+
+
+def test_normalize_software_key_qbs_forms():
+    """All QBS display/alias forms map to the canonical key 'qbs'."""
+    from invoice_processing.export.exporters import normalize_software_key
+
+    assert normalize_software_key("QBS Ledger") == "qbs"
+    assert normalize_software_key("qbs ledger") == "qbs"
+    assert normalize_software_key("qbs") == "qbs"
+    assert normalize_software_key("QBS") == "qbs"
+    assert normalize_software_key("qbsledger") == "qbs"
+    assert normalize_software_key("  QBS Ledger  ") == "qbs"
+
+
+def test_normalize_software_key_xero_forms():
+    """All Xero display/alias forms map to the canonical key 'xero'."""
+    from invoice_processing.export.exporters import normalize_software_key
+
+    assert normalize_software_key("Xero Ledger") == "xero"
+    assert normalize_software_key("xero ledger") == "xero"
+    assert normalize_software_key("xero") == "xero"
+    assert normalize_software_key("XERO") == "xero"
+    assert normalize_software_key("xeroledger") == "xero"
+    assert normalize_software_key("  Xero Ledger  ") == "xero"
+
+
+def test_normalize_software_key_unknown_returns_none():
+    """Unrecognised values return None — caller decides the fallback."""
+    from invoice_processing.export.exporters import normalize_software_key
+
+    assert normalize_software_key("Wave") is None
+    assert normalize_software_key("MYOB") is None
+    assert normalize_software_key("") is None
+    assert normalize_software_key(None) is None
+
+
+def test_get_exporter_display_values_pick_correct_class():
+    """get_exporter must accept display values and route to the right class."""
+    from invoice_processing.export.exporters import (
+        QbsLedgerExporter,
+        XeroLedgerExporter,
+        get_exporter,
+    )
+
+    assert isinstance(get_exporter("QBS Ledger"), QbsLedgerExporter)
+    assert isinstance(get_exporter("Xero Ledger"), XeroLedgerExporter)
+    # Already-lowercase aliases must still work.
+    assert isinstance(get_exporter("qbs"), QbsLedgerExporter)
+    assert isinstance(get_exporter("xero"), XeroLedgerExporter)
+
+
+# =========================================================================== #
+# consolidate_node — software normalisation (display values, no-warning, fallback)
+# =========================================================================== #
+
+
+def _minimal_invoice_state(**overrides) -> dict:
+    """Minimal state that consolidate_node needs for the invoice branch."""
+    from invoice_processing.export.models import InvoiceLine, NormalizedInvoice
+
+    inv = NormalizedInvoice(
+        invoice_number="INV-NORM-001",
+        lines=[InvoiceLine(description="Service fee", net_amount=100.0)],
+    )
+    state = _base_state(
+        **{
+            nodes.DIRECTION_KEY: "purchase",
+            nodes.NORMALIZED_KEY: [nodes._inv_to_dict(inv)],
+            nodes.ROUTES_KEY: [{"fy": 2025, "workbook": "Ledger_FY2025.xlsx", "sheet": "Purchase"}],
+        }
+    )
+    state.update(overrides)
+    return state
+
+
+def test_consolidate_node_qbs_ledger_display_no_warning(caplog):
+    """'QBS Ledger' display value must NOT log an 'unknown software' warning."""
+    import logging
+
+    from invoice_processing.export.exporters import QbsLedgerExporter
+    from unittest.mock import patch
+
+    captured_exporter: list = []
+
+    def _spy_get_exporter(system, classifier=None):
+        from invoice_processing.export.exporters import get_exporter as _real
+        exp = _real(system, classifier)
+        captured_exporter.append(exp)
+        return exp
+
+    state = _minimal_invoice_state(software="QBS Ledger")
+    ctx = FakeContext(state)
+
+    with caplog.at_level(logging.WARNING, logger="accounting_agents.nodes"):
+        with patch("accounting_agents.nodes.get_exporter", side_effect=_spy_get_exporter):
+            asyncio.run(nodes.consolidate_node._func(ctx))
+
+    # No unknown-software warning must have been emitted.
+    warn_msgs = [r.message for r in caplog.records if "unknown software" in r.message]
+    assert warn_msgs == [], f"Unexpected warning(s): {warn_msgs}"
+
+    # The exporter selected must be the QBS one.
+    assert len(captured_exporter) == 1
+    assert isinstance(captured_exporter[0], QbsLedgerExporter), (
+        f"Expected QbsLedgerExporter, got {type(captured_exporter[0]).__name__}"
+    )
+
+
+def test_consolidate_node_xero_ledger_display_no_warning(caplog):
+    """'Xero Ledger' display value must NOT log a warning AND must select XeroLedgerExporter."""
+    import logging
+
+    from invoice_processing.export.exporters import XeroLedgerExporter
+    from unittest.mock import patch
+
+    captured_exporter: list = []
+
+    def _spy_get_exporter(system, classifier=None):
+        from invoice_processing.export.exporters import get_exporter as _real
+        exp = _real(system, classifier)
+        captured_exporter.append(exp)
+        return exp
+
+    state = _minimal_invoice_state(software="Xero Ledger")
+    ctx = FakeContext(state)
+
+    with caplog.at_level(logging.WARNING, logger="accounting_agents.nodes"):
+        with patch("accounting_agents.nodes.get_exporter", side_effect=_spy_get_exporter):
+            asyncio.run(nodes.consolidate_node._func(ctx))
+
+    warn_msgs = [r.message for r in caplog.records if "unknown software" in r.message]
+    assert warn_msgs == [], f"Unexpected warning(s): {warn_msgs}"
+
+    assert len(captured_exporter) == 1
+    assert isinstance(captured_exporter[0], XeroLedgerExporter), (
+        f"Expected XeroLedgerExporter, got {type(captured_exporter[0]).__name__}"
+    )
+
+
+def test_consolidate_node_lowercase_keys_unchanged(caplog):
+    """Already-lowercase 'qbs'/'xero' must continue to work without warnings."""
+    import logging
+
+    from invoice_processing.export.exporters import QbsLedgerExporter, XeroLedgerExporter
+    from unittest.mock import patch
+
+    for software_val, expected_cls in [
+        ("qbs", QbsLedgerExporter),
+        ("xero", XeroLedgerExporter),
+    ]:
+        captured: list = []
+
+        def _make_spy(store):
+            def _inner(system, classifier=None):
+                from invoice_processing.export.exporters import get_exporter as _real
+                exp = _real(system, classifier)
+                store.append(exp)
+                return exp
+            return _inner
+
+        caplog.clear()
+        state = _minimal_invoice_state(software=software_val)
+        ctx = FakeContext(state)
+
+        with caplog.at_level(logging.WARNING, logger="accounting_agents.nodes"):
+            with patch("accounting_agents.nodes.get_exporter", side_effect=_make_spy(captured)):
+                asyncio.run(nodes.consolidate_node._func(ctx))
+
+        warn_msgs = [r.message for r in caplog.records if "unknown software" in r.message]
+        assert warn_msgs == [], f"software={software_val!r} produced unexpected warnings: {warn_msgs}"
+        assert len(captured) == 1
+        assert isinstance(captured[0], expected_cls), (
+            f"software={software_val!r}: expected {expected_cls.__name__}, got {type(captured[0]).__name__}"
+        )
+
+
+def test_consolidate_node_unknown_software_warns_and_falls_back_to_qbs(caplog):
+    """A genuinely unknown software value must warn and fall back to the QBS exporter."""
+    import logging
+
+    from invoice_processing.export.exporters import QbsLedgerExporter
+    from unittest.mock import patch
+
+    captured_exporter: list = []
+
+    def _spy_get_exporter(system, classifier=None):
+        from invoice_processing.export.exporters import get_exporter as _real
+        exp = _real(system, classifier)
+        captured_exporter.append(exp)
+        return exp
+
+    state = _minimal_invoice_state(software="Wave")
+    ctx = FakeContext(state)
+
+    with caplog.at_level(logging.WARNING, logger="accounting_agents.nodes"):
+        with patch("accounting_agents.nodes.get_exporter", side_effect=_spy_get_exporter):
+            asyncio.run(nodes.consolidate_node._func(ctx))
+
+    warn_msgs = [r.message for r in caplog.records if "unknown software" in r.message]
+    assert warn_msgs, "Expected an 'unknown software' warning for 'Wave'"
+    assert "'Wave'" in warn_msgs[0]
+
+    # Fallback must be QBS.
+    assert len(captured_exporter) == 1
+    assert isinstance(captured_exporter[0], QbsLedgerExporter), (
+        f"Expected QBS fallback, got {type(captured_exporter[0]).__name__}"
+    )
+

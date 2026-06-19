@@ -56,6 +56,7 @@ from invoice_processing.export.exporters import (
     bank_sheet_title,
     get_bank_exporter,
     get_exporter,
+    normalize_software_key,
 )
 from invoice_processing.export.tax_classifier import get_tax_classifier
 from invoice_processing.export.models import BankStatement, NormalizedInvoice
@@ -1887,14 +1888,17 @@ async def consolidate_node(ctx) -> Event:
         # Guard: get_exporter raises ValueError for None/unknown; default to "qbs"
         # so the pipeline completes in the playground (no client profile seeded yet
         # at consolidate time) and in any other no-software scenario.
-        _software_key = (software or "").strip().lower()
-        if not _software_key or _software_key not in ("qbs", "xero"):
+        # normalize_software_key accepts display values ("QBS Ledger", "Xero Ledger")
+        # and their lowercase aliases, returning the canonical key or None.
+        _software_key = normalize_software_key(software)
+        if _software_key is None:
             if software is not None and software != "":
                 logger.warning(
                     "consolidate_node: unknown software %r; falling back to 'qbs'",
                     software,
                 )
-            software = "qbs"
+            _software_key = "qbs"
+        software = _software_key
         # Derive jurisdiction-aware tax classifier from state so MY invoices get
         # SST codes instead of SG GST codes. JURISDICTION_RATES_KEY["reference_yaml"]
         # is the canonical source; fall back to TAX_JURISDICTION_KEY string, then

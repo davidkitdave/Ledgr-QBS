@@ -292,12 +292,31 @@ class XeroLedgerExporter(LedgerExporter):
 
 EXPORTERS = {"qbs": QbsLedgerExporter, "xero": XeroLedgerExporter}
 
+# Maps every known display/alias form (lowercased, stripped) to the canonical exporter key.
+_SOFTWARE_ALIASES: dict[str, str] = {
+    "qbs": "qbs",
+    "qbs ledger": "qbs",
+    "qbsledger": "qbs",
+    "xero": "xero",
+    "xero ledger": "xero",
+    "xeroledger": "xero",
+}
+
+
+def normalize_software_key(value: Optional[str]) -> Optional[str]:
+    """Return the canonical exporter key ("qbs" or "xero") for *value*, or None.
+
+    Accepts any casing and surrounding whitespace.  Callers decide the fallback
+    when None is returned (genuinely unrecognised software name).
+    """
+    return _SOFTWARE_ALIASES.get((value or "").strip().lower())
+
 
 def get_exporter(system: str, classifier: Optional[TaxClassifier] = None) -> LedgerExporter:
-    key = (system or "").strip().lower()
-    if "xero" in key:
+    key = normalize_software_key(system)
+    if key == "xero":
         return XeroLedgerExporter(classifier)
-    if "qbs" in key:
+    if key == "qbs":
         return QbsLedgerExporter(classifier)
     raise ValueError(f"unknown export system '{system}'; have {list(EXPORTERS)}")
 
