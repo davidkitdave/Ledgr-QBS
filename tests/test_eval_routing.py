@@ -44,7 +44,7 @@ def test_chat_eval_module_exposes_root_agent() -> None:
 def test_doc_eval_module_exposes_root_agent() -> None:
     mod = importlib.import_module(DOC_AGENT_MODULE)
     assert hasattr(mod, "root_agent")
-    assert mod.root_agent.name == "coordinator_graph"
+    assert mod.root_agent.name == "document_workflow"
 
 
 def test_chat_agent_directory() -> None:

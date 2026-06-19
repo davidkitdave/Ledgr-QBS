@@ -1,15 +1,15 @@
 """ADK 2.0 graph for the Ledgr accounting agent system.
 
-Top-level shape (verified against google-adk 2.2.0)::
+Top-level shape (ADR-0021 — deterministic document entry)::
 
     START
-      -> coordinator        (LlmAgent, output_schema=RouteDecision,
-                             before_agent_callback loads the channel's profile)
-      -> dynamic_router     (@node -> Event(route=...))
-      -> { "document": DocumentWorkflow,
-           "question": help_node,   # defensive fallback — text now bypasses
-                                    # the graph and runs on assistant_app (ADR-0008)
-           "unknown":  help_node }
+      -> classify_node
+      -> { "commercial_doc": pipeline_commercial,
+           "bank_statement": pipeline_bank }
+
+Routing between document and chat is deterministic and lives in the Slack
+layer (file event → document_app; text event → assistant_app). No LLM
+decides "is this a document?". See ``docs/adr/0021-*``.
 
 The chat lane runs OUTSIDE this graph on ``assistant_app`` — a standalone root
 ``LlmAgent`` (multi-turn, sees per-thread session history). See
@@ -74,14 +74,9 @@ scope). The profile callback reads ``state["channel_id"]`` to resolve the client
 
 from __future__ import annotations
 
-from typing import Literal
-
-from google.adk.agents import LlmAgent
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.apps import App, ResumabilityConfig
-from google.adk.events.event import Event
-from google.adk.workflow import START, Edge, Workflow, node
-from pydantic import BaseModel, Field
+from google.adk.workflow import START, Workflow, node
 
 from invoice_processing.export.client_context import (
     ClientContext,
@@ -93,27 +88,6 @@ from . import config  # ensures AI Studio env is set before any ADK model init
 from . import nodes
 from .assistant import assistant_agent  # noqa: F401 — re-exported via __all__
 from .plugins.ledgr_reflect_retry import LedgrReflectRetryPlugin
-
-# --------------------------------------------------------------------------- #
-# Route labels (top-level coordinator router)
-# --------------------------------------------------------------------------- #
-
-ROUTE_DOCUMENT = "document"
-ROUTE_QUESTION = "question"
-ROUTE_UNKNOWN = "unknown"
-
-
-class RouteDecision(BaseModel):
-    """Structured classification of a single inbound Slack turn."""
-
-    intent: Literal["document", "question", "unknown"] = Field(
-        description=(
-            "Classify the user's turn: 'document' when a file (invoice, receipt, "
-            "or bank statement) was uploaded to be processed; 'question' when the "
-            "user is asking about their ledger or accounting data; 'unknown' when "
-            "the intent is unclear."
-        )
-    )
 
 
 # --------------------------------------------------------------------------- #
@@ -340,74 +314,6 @@ def load_client_profile(callback_context: CallbackContext):
 
 
 # --------------------------------------------------------------------------- #
-# Coordinator (front-desk router LlmAgent) — schema-only, no tools
-# --------------------------------------------------------------------------- #
-
-coordinator = LlmAgent(
-    name="coordinator",
-    model=config.MODEL_LITE,
-    mode="single_turn",
-    instruction=(
-        "You are the front desk of an accounting firm's document assistant. "
-        "Read the user's turn and classify its intent. If a file was uploaded "
-        "(an invoice, a receipt, or a bank statement), the intent is 'document'. "
-        "If the user is asking a question about their ledger or bookkeeping, the "
-        "intent is 'question'. Otherwise the intent is 'unknown'. Respond ONLY "
-        "with the structured RouteDecision."
-    ),
-    output_schema=RouteDecision,
-    before_agent_callback=load_client_profile,
-)
-
-
-# --------------------------------------------------------------------------- #
-# dynamic_router — turn the coordinator's RouteDecision into a graph route
-# --------------------------------------------------------------------------- #
-
-
-@node
-def dynamic_router(ctx, node_input) -> Event:
-    """Route the coordinator's structured decision to one of three lanes.
-
-    The coordinator LlmAgent (output_schema=RouteDecision) emits its decision as
-    this node's ``node_input``. It may arrive as a ``RouteDecision`` model or a
-    plain dict depending on the runner path; handle both defensively.
-    """
-    intent = _extract_intent(node_input)
-    if intent == ROUTE_DOCUMENT:
-        return Event(route=ROUTE_DOCUMENT, output={"intent": ROUTE_DOCUMENT})
-    if intent == ROUTE_QUESTION:
-        return Event(route=ROUTE_QUESTION, output={"intent": ROUTE_QUESTION})
-    return Event(route=ROUTE_UNKNOWN, output={"intent": ROUTE_UNKNOWN})
-
-
-def _extract_intent(node_input) -> str:
-    """Pull the ``intent`` string out of a RouteDecision / dict / raw value."""
-    if isinstance(node_input, RouteDecision):
-        return node_input.intent
-    if isinstance(node_input, dict):
-        return str(node_input.get("intent", ROUTE_UNKNOWN))
-    intent = getattr(node_input, "intent", None)
-    return intent if isinstance(intent, str) else ROUTE_UNKNOWN
-
-
-# --------------------------------------------------------------------------- #
-# help_node — short help message for the 'unknown' lane
-# --------------------------------------------------------------------------- #
-
-
-@node
-async def help_node(ctx) -> Event:
-    """Defensive fallback when text misroutes through the coordinator graph."""
-    message = (
-        "I'm forwarding you to the accounting assistant — ask me about your "
-        "ledger, extraction pipeline, or drop PDFs in this channel to process them."
-    )
-    ctx.state["help_message"] = message
-    return Event(output={"message": message})
-
-
-# --------------------------------------------------------------------------- #
 # DocumentWorkflow — declarative sequential spine (Track A, Phase 6)
 #
 # ADK web's "Graph" tab displays a static ``Workflow(edges=...)`` as a proper
@@ -552,81 +458,16 @@ document_workflow = Workflow(
 
 
 # --------------------------------------------------------------------------- #
-# Top-level coordinator graph (Track B: single-root, inlined document spine)
-#
-# The top-level graph is FLAT — no nested ``document_workflow`` gray box. ADK
-# web renders one connected graph::
-#
-#     START → coordinator → dynamic_router
-#       → { document: classify_node → {commercial_doc: pipeline_commercial,
-#                                       bank_statement: pipeline_bank},
-#           question / unknown: help_node }
-#
-# This satisfies the "one top-level graph" Track B goal: the user sees the
-# whole pipeline in the Graph tab, drilling into ``pipeline_commercial`` only
-# if they want to inspect the per-lane chain.
-#
-# ``document_workflow`` (and therefore ``document_app``) retains the nested
-# shape — Slack prod uploads bypass the coordinator LLM noise and route
-# straight into the document workflow. Per ADR-0008 / plan, two Apps is OK
-# (one for full QA graph, one for prod uploads).
-# --------------------------------------------------------------------------- #
-
-coordinator_graph = Workflow(
-    name="coordinator_graph",
-    description=(
-        "Front-desk router dispatching to document lane (classify → extract → "
-        "tax → approval → deliver) or help lane."
-    ),
-    edges=[
-        # START → coordinator → dynamic_router (unconditional chain).
-        (START, coordinator, dynamic_router),
-        # ROUTE_DOCUMENT: dispatch into the inlined document spine via an
-        # Edge with the ROUTE_DOCUMENT route label. The document_workflow
-        # edges (classify → lane pipelines) are inlined here so the
-        # top-level graph shows ONE pipeline.
-        Edge(
-            from_node=dynamic_router,
-            to_node=nodes.classify_node,
-            route=ROUTE_DOCUMENT,
-        ),
-        # classify_node fans out to the lane pipeline via the Event.route
-        # label written by classify_node. Both lanes (commercial_doc,
-        # bank_statement) come from the lane registry. Dict-style
-        # conditional dispatch is only supported as a tuple element — wrap
-        # in a 2-tuple ``(classify_node, {label: pipeline})``.
-        (nodes.classify_node, {route_label: pipeline for route_label, pipeline in _LANE_PIPELINES.items()}),
-        # Text/question traffic is handled by the standalone ``assistant_app``
-        # (ADR-0008); the chat lane no longer runs through this graph. Keep
-        # the ``ROUTE_QUESTION`` label wired to ``help_node`` (shared with
-        # ``ROUTE_UNKNOWN``) as a defensive fallback in case a file_shared
-        # path ever misroutes here. ADK rejects two (from, to) edges with the
-        # same endpoints, so the two route labels live on a single ``Edge``
-        # with ``route=[...]`` instead of separate dict entries.
-        Edge(
-            from_node=dynamic_router,
-            to_node=help_node,
-            route=[ROUTE_QUESTION, ROUTE_UNKNOWN],
-        ),
-    ],
-)
-
-
-# --------------------------------------------------------------------------- #
-# Apps — document coordinator + standalone chat assistant
+# Apps — document workflow + standalone chat assistant (ADR-0021)
 # --------------------------------------------------------------------------- #
 
 # ADK AgentEvaluator / ``adk eval`` convention — document-lane golden cases load
 # this module and read ``root_agent`` directly (not ``app.root_agent``).
-root_agent = coordinator_graph
+# adk web discovers this module-level name and renders the real document pipeline
+# (ADR-0021: retire the LLM RouteDecision coordinator).
+root_agent = document_workflow
 
-app = App(
-    name="accounting_agents",
-    root_agent=coordinator_graph,
-    resumability_config=ResumabilityConfig(is_resumable=True),
-)
-
-#: Direct document workflow App — skips coordinator LLM on file uploads (P2-2).
+#: Direct document workflow App — the single document entry point (ADR-0021).
 document_app = App(
     name="accounting_agents_document",
     root_agent=document_workflow,
@@ -645,12 +486,9 @@ assistant_app = App(
 )
 
 __all__ = [
-    "app",
     "document_app",
     "assistant_app",
     "assistant_agent",
-    "coordinator",
-    "coordinator_graph",
     "document_workflow",
-    "RouteDecision",
+    "root_agent",
 ]

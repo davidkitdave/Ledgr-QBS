@@ -41,14 +41,13 @@ def test_render_checklist_includes_all_four_tabs(tmp_path: Path):
         report={
             "pdf": "scratch/yau_lee_motor_receipt.pdf",
             "graph_tab": {
+                # ADR-0021: document_workflow is now root_agent; no coordinator/
+                # dynamic_router/help_node — just classify_node + lane pipelines.
                 "coordinator_nodes": [
                     "__START__",
-                    "coordinator",
-                    "dynamic_router",
                     "classify_node",
                     "pipeline_commercial",
                     "pipeline_bank",
-                    "help_node",
                 ],
                 "coordinator_edges": [],
                 "pipeline_subworkflows": [
@@ -124,7 +123,8 @@ def test_render_checklist_fails_when_no_normalized_lines(tmp_path: Path):
         report={
             "pdf": "missing.pdf",
             "graph_tab": {
-                "coordinator_nodes": ["__START__", "coordinator", "dynamic_router"],
+                # Minimal set (no lane pipelines) to exercise the FAIL path.
+                "coordinator_nodes": ["__START__", "classify_node"],
                 "coordinator_edges": [],
                 "pipeline_subworkflows": [],
             },

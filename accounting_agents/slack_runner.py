@@ -4876,34 +4876,23 @@ def download_pdf_bytes(slack_client: Any, file_id: str) -> bytes:
 
 
 def build_runner(*, session_service=None, artifact_service=None, direct_document: bool = True):
-    """Construct the ADK ``Runner`` bound to the accounting App + Firestore sessions.
+    """Construct the ADK ``Runner`` bound to ``document_app`` + Firestore sessions.
 
-    When ``direct_document`` is True (default), file uploads use ``document_app``
-    and skip the coordinator LLM (P2-2). Set ``LEDGR_USE_COORDINATOR=1`` to
-    route uploads through the full coordinator graph instead.
+    File uploads always use ``document_app`` (root_agent=document_workflow).
+    The LLM RouteDecision coordinator has been retired (ADR-0021) — routing is
+    deterministic and lives in the Slack layer.
 
     Imports are deferred so importing this module never touches the network.
     """
     from google.adk.artifacts.in_memory_artifact_service import InMemoryArtifactService
     from google.adk.runners import Runner
 
-    import os
-
-    from accounting_agents.agent import app as adk_app
     from accounting_agents.agent import document_app
     from accounting_agents.sessions import FirestoreSessionService
 
-    use_coordinator = os.environ.get("LEDGR_USE_COORDINATOR", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-    )
-    bound = adk_app if (use_coordinator or not direct_document) else document_app
-    if not use_coordinator and direct_document:
-        logger.info("build_runner: using document_app (coordinator bypass for uploads)")
-
+    logger.info("build_runner: using document_app (deterministic document entry, ADR-0021)")
     return Runner(
-        app=bound,
+        app=document_app,
         session_service=session_service or FirestoreSessionService(),
         artifact_service=artifact_service or InMemoryArtifactService(),
     )

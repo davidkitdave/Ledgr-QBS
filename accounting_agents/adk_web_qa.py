@@ -118,13 +118,13 @@ async def run_qa(
     )
     state = session.state if session else {}
 
-    # 1. Graph tab inventory (coordinator_graph — what the user sees in ADK web).
-    from accounting_agents.agent import coordinator_graph
+    # 1. Graph tab inventory (document_workflow — what adk web now shows, ADR-0021).
+    from accounting_agents.agent import document_workflow
 
-    graph_nodes = sorted(n.name for n in coordinator_graph.graph.nodes)
+    graph_nodes = sorted(n.name for n in document_workflow.graph.nodes)
     graph_edges = [
         (e.from_node.name, e.to_node.name, e.route)
-        for e in coordinator_graph.graph.edges
+        for e in document_workflow.graph.edges
     ]
 
     # 2. Traces tab — extract the sequence of node executions.
@@ -218,18 +218,19 @@ def _render_checklist(report: dict[str, Any], output_path: Path | None) -> None:
 
     # 1. Graph tab
     gt = report["graph_tab"]
-    lines.append("## 1. Graph tab (coordinator_graph)")
+    lines.append("## 1. Graph tab (document_workflow)")
     lines.append("")
-    lines.append("Expected after Track A + B:")
+    lines.append("Expected after ADR-0021 (deterministic entry):")
     lines.append(
-        "- START → coordinator → dynamic_router → classify_node → pipeline_* (inlined)"
+        "- START → classify_node → {commercial_doc: pipeline_commercial, bank_statement: pipeline_bank}"
     )
-    lines.append("- No nested `document_workflow` gray box")
+    lines.append("- No coordinator / dynamic_router / help_node")
     lines.append("")
-    lines.append(f"- coordinator_nodes: `{gt['coordinator_nodes']}`")
+    lines.append(f"- graph_nodes: `{gt['coordinator_nodes']}`")
     lines.append(f"- pipeline_subworkflows (drill-down): `{gt['pipeline_subworkflows']}`")
     flat_ok = (
-        "document_workflow" not in gt["coordinator_nodes"]
+        "coordinator" not in gt["coordinator_nodes"]
+        and "dynamic_router" not in gt["coordinator_nodes"]
         and "pipeline_commercial" in gt["coordinator_nodes"]
         and "pipeline_bank" in gt["coordinator_nodes"]
         and "classify_node" in gt["coordinator_nodes"]
@@ -264,7 +265,7 @@ def _render_checklist(report: dict[str, Any], output_path: Path | None) -> None:
     actual = tt["execution_order"]
     # The traces may include the parent workflow names; check the per-node
     # sequence is preserved in order.
-    seq = [n for n in actual if not n.startswith("pipeline_") and n != "coordinator_graph"]
+    seq = [n for n in actual if not n.startswith("pipeline_") and n != "document_workflow"]
     expected_present = [n for n in expected_commercial_prefix if n in seq]
     pipeline_ok = expected_present == expected_commercial_prefix
     lines.append(

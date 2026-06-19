@@ -16,16 +16,9 @@ from google.adk.workflow import Workflow
 
 from accounting_agents import nodes
 from accounting_agents.agent import (
-    ROUTE_DOCUMENT,
-    ROUTE_QUESTION,
-    ROUTE_UNKNOWN,
-    RouteDecision,
-    app,
-    coordinator,
-    coordinator_graph,
     document_workflow,
     document_workflow_driver,
-    dynamic_router,
+    root_agent,
 )
 
 
@@ -88,90 +81,75 @@ def _drive_driver(ctx: _RecordingContext):
 
 
 # =========================================================================== #
-# App construction
+# App construction (ADR-0021 — deterministic document entry)
 # =========================================================================== #
 
 
-def test_app_constructed_and_resumable():
-    assert isinstance(app, App)
-    assert app.name == "accounting_agents"
-    assert app.root_agent is coordinator_graph
-    assert isinstance(app.root_agent, Workflow)
-    assert app.resumability_config is not None
-    assert app.resumability_config.is_resumable is True
+def test_root_agent_is_document_workflow():
+    """module-level root_agent must be document_workflow (ADR-0021).
+
+    adk web discovers this name; it should now render the real document pipeline
+    rather than the retired LLM RouteDecision coordinator.
+    """
+    assert root_agent is document_workflow
+    assert isinstance(root_agent, Workflow)
+    assert root_agent.name == "document_workflow"
 
 
-def test_coordinator_has_profile_callback_and_schema():
-    # Schema-only router: structured output, no tools.
-    assert coordinator.output_schema is RouteDecision
-    assert not getattr(coordinator, "tools", None)
-    # mode must be single_turn to be usable as a graph node.
-    assert coordinator.mode == "single_turn"
-    # before_agent_callback wires the channel profile loader.
-    assert coordinator.before_agent_callback is not None
+def test_document_app_is_resumable():
+    """document_app (the sole document entry) must be resumable for HITL."""
+    from google.adk.apps import App
+    from accounting_agents.agent import document_app
+
+    assert isinstance(document_app, App)
+    assert document_app.name == "accounting_agents_document"
+    assert document_app.root_agent is document_workflow
+    assert document_app.resumability_config is not None
+    assert document_app.resumability_config.is_resumable is True
+
+
+def test_no_coordinator_symbols_in_agent_module():
+    """Retired coordinator symbols must not exist in accounting_agents.agent (ADR-0021)."""
+    import accounting_agents.agent as _agent
+
+    for retired in ("coordinator", "coordinator_graph", "RouteDecision",
+                    "dynamic_router", "help_node", "ROUTE_DOCUMENT",
+                    "ROUTE_QUESTION", "ROUTE_UNKNOWN"):
+        assert not hasattr(_agent, retired), (
+            f"Retired symbol {retired!r} still present in agent module"
+        )
 
 
 # =========================================================================== #
-# Top-level coordinator graph wiring
+# document_workflow (top-level) node topology — ADR-0021
 # =========================================================================== #
 
 
-def test_coordinator_graph_nodes_present():
-    names = _node_names(coordinator_graph)
-    # Track B (Phase 6): the top-level graph is FLAT — no nested
-    # ``document_workflow`` gray box. The classify + lane pipeline nodes
-    # are inlined so ADK web renders ONE connected graph from START to
-    # the terminal nodes (deliver_node inside pipeline_*).
+def test_document_workflow_entry_nodes():
+    """document_workflow starts at classify_node and fans out to lane pipelines.
+
+    This is now the primary graph adk web renders (root_agent = document_workflow).
+    No coordinator, dynamic_router, or help_node should appear here.
+    """
+    names = _node_names(document_workflow)
     assert {
         "__START__",
-        "coordinator",
-        "dynamic_router",
         "classify_node",
         "pipeline_commercial",
         "pipeline_bank",
-        "help_node",
     } <= names
-    # ``document_workflow`` is no longer a node in the top-level graph —
-    # it remains a separate Workflow used by ``document_app`` (Slack prod
-    # path) but is NOT in the coordinator pipeline.
-    assert "document_workflow" not in names
-    # Chat runs on a separate standalone ``assistant_app`` (ADR-0008),
-    # so ``assistant`` is NOT a node.
+    # Retired coordinator symbols must not appear in the document pipeline.
+    assert "coordinator" not in names
+    assert "dynamic_router" not in names
+    assert "help_node" not in names
+    # Chat runs on a separate standalone ``assistant_app`` (ADR-0008).
     assert "assistant" not in names
-    assert "qa_agent" not in names
 
 
-def test_coordinator_graph_start_chain_and_routes():
-    edges = _edges(coordinator_graph)
-    # START -> coordinator -> dynamic_router (unconditional chain).
-    assert ("__START__", "coordinator", None) in edges
-    assert ("coordinator", "dynamic_router", None) in edges
-    # Track B (Phase 6): dynamic_router fans out to classify_node
-    # (not document_workflow) when route=document. The document
-    # workflow is now INLINED into the top-level graph, so ADK web
-    # shows one connected pipeline instead of a nested gray box.
-    assert ("dynamic_router", "classify_node", ROUTE_DOCUMENT) in edges
-    # classify_node fans out to per-lane pipelines via the Event.route
-    # label written by classify_node (commercial_doc / bank_statement).
-    classify_edges = {
-        (t, r)
-        for f, t, r in edges
-        if f == "classify_node"
-    }
-    assert ("pipeline_commercial", "commercial_doc") in classify_edges
-    assert ("pipeline_bank", "bank_statement") in classify_edges
-    # The question lane is repointed to help_node as a defensive fallback
-    # (real text goes through assistant_app). ADK rejects duplicate
-    # (from, to) edges, so the question + unknown labels share a single
-    # edge carrying ``route=[ROUTE_QUESTION, ROUTE_UNKNOWN]``.
-    help_routes = {
-        tuple(r) if isinstance(r, list) else (r,)
-        for frm, to, r in edges
-        if frm == "dynamic_router" and to == "help_node"
-    }
-    assert any(
-        ROUTE_QUESTION in r and ROUTE_UNKNOWN in r for r in help_routes
-    ), f"expected a (dynamic_router → help_node) edge covering both routes, got {help_routes}"
+def test_document_workflow_start_edge_to_classify():
+    """START → classify_node is the unconditional first edge of document_workflow."""
+    edges = _edges(document_workflow)
+    assert ("__START__", "classify_node", None) in edges
 
 
 def test_qa_agent_not_imported_from_agent():
@@ -373,30 +351,6 @@ def test_driver_recovers_decision_from_resume_inputs_fallback():
     _drive_driver(ctx)
     apply_inputs = [inp for name, inp in ctx.calls if name == "apply_decision_node"]
     assert apply_inputs == [decision]
-
-
-# =========================================================================== #
-# dynamic_router behavior (no network)
-# =========================================================================== #
-
-
-def _run_router(node_input):
-    ctx = _FakeContext(state={})
-    # FunctionNode stores the wrapped callable on the ``_func`` PrivateAttr.
-    fn = dynamic_router._func
-    result = fn(ctx, node_input)
-    if asyncio.iscoroutine(result):
-        result = asyncio.run(result)
-    return result
-
-
-def test_dynamic_router_maps_each_intent():
-    assert _run_router(RouteDecision(intent="document")).actions.route == ROUTE_DOCUMENT
-    assert _run_router(RouteDecision(intent="question")).actions.route == ROUTE_QUESTION
-    assert _run_router(RouteDecision(intent="unknown")).actions.route == ROUTE_UNKNOWN
-    # Dict / unexpected input falls back to 'unknown' without raising.
-    assert _run_router({"intent": "question"}).actions.route == ROUTE_QUESTION
-    assert _run_router(object()).actions.route == ROUTE_UNKNOWN
 
 
 # =========================================================================== #
