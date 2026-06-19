@@ -29,6 +29,10 @@ invoice_processing/data/alf_output/
 
 # Local eval data (real invoices — never commit, see no-real-client-data rule)
 tests/eval_invoices/
+# Scratch: probes, QA docs/screenshots, real sample PDFs — never commit
+scratch/
+# Local playground profile may carry a real client name — never commit
+playground_profile.json
 # Knowledge-graph tooling output
 graphify-out/
 .qa_tmp/
