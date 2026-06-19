@@ -20,7 +20,7 @@ State-key / artifact-filename convention (hand this to the Slack + graph tasks):
 - ``classify_node`` emits ``Event(route="invoice"|"bank_statement")`` and writes
   the resolved ``doc_type`` / ``direction`` back into state under
   :data:`DOC_TYPE_KEY` / :data:`DIRECTION_KEY`.
-- ``extract_invoice_node`` writes a fan-out LIST of normalized invoices (as
+- ``extract_invoice_document_node`` writes a fan-out LIST of normalized invoices (as
   dicts) under :data:`NORMALIZED_KEY`; ``categorize_node`` / ``tax_node`` read
   and rewrite that same list.
 - ``extract_bank_node`` writes a list of bank statements under
@@ -59,8 +59,6 @@ from invoice_processing.export.exporters import (
 )
 from invoice_processing.export.models import BankStatement, NormalizedInvoice
 from invoice_processing.export.routing import DocRoute, route_document
-from invoice_processing.export.tax_classifier import TaxClassifier
-
 # Jurisdiction + LLM tax reasoning (multi-country support, replaces the
 # previous SG-only TaxClassifier call inside tax_node).
 from .jurisdiction import (
@@ -70,6 +68,7 @@ from .jurisdiction import (
     TAX_JURISDICTION_KEY,
     TAX_SYSTEM_HINT_KEY,
     JurisdictionResolution,
+    resolution_from_state as _resolution_from_state,
     resolve_jurisdiction as _resolve_jurisdiction_fn,
     write_to_state as _write_jurisdiction_to_state,
 )
@@ -800,73 +799,10 @@ def _retry_resolve_direction_llm(ctx, extract: dict) -> str:
     return "unknown"
 
 
-async def extract_document_node(ctx) -> Event:
-    """Phase 1 — faithful DocumentRecord capture (legacy path only)."""
-    data, mime_type = await _load_pdf_bytes(ctx)
-    review_hint = (ctx.state.get("review_hint") or "").strip()
-    kwargs: dict = {"model": MODEL_READ}
-    if review_hint:
-        kwargs["hint"] = review_hint
-    from invoice_processing.extract.document_normalizer import slim_document_record_for_state
-
-    bundle: DocumentRecordBundle = EXTRACT_DOCUMENT_FN(data, mime_type, **kwargs)
-    slimmed = [slim_document_record_for_state(doc) for doc in bundle.documents]
-    ctx.state[DOCUMENT_RECORDS_KEY] = _guard_state_payload(
-        DOCUMENT_RECORDS_KEY,
-        slimmed,
-    )
-    if bundle.skipped_pages is not None:
-        ctx.state["skipped_pages"] = bundle.skipped_pages
-    if bundle.notes:
-        ctx.state["document_read_notes"] = bundle.notes
-    return Event(output={"count": len(bundle.documents)})
-
-
-async def normalize_document_node(ctx) -> Event:
-    """Phase 2 — map DocumentRecord(s) to NormalizedInvoice(s)."""
-
-    raw = ctx.state.get(DOCUMENT_RECORDS_KEY) or []
-    if not raw:
-        ctx.state[NORMALIZED_KEY] = _guard_state_payload(NORMALIZED_KEY, [])
-        return Event(output={"count": 0})
-
-    records = [DocumentRecord.model_validate(d) if isinstance(d, dict) else d for d in raw]
-    bundle = DocumentRecordBundle(documents=records)
-    if len(bundle.documents) > 1:
-        from invoice_processing.extract.record_merge import merge_document_records
-
-        bundle = merge_document_records(bundle)
-        ctx.state[DOCUMENT_RECORDS_KEY] = _guard_state_payload(
-            DOCUMENT_RECORDS_KEY,
-            [doc.model_dump() for doc in bundle.documents],
-        )
-    direction = ctx.state.get(DIRECTION_KEY) or "purchase"
-    our_gst = bool(ctx.state.get("tax_registered", True))
-    base_currency: str = ctx.state.get("base_currency") or "SGD"
-    normalized = NORMALIZE_DOCUMENT_FN(
-        bundle,
-        direction=direction,
-        our_gst_registered=our_gst,
-        base_currency=base_currency,
-        client_name=ctx.state.get("client_name"),
-        client_uen=ctx.state.get("client_uen"),
-    )
-    ctx.state[NORMALIZED_KEY] = _guard_state_payload(
-        NORMALIZED_KEY, [_inv_to_dict(i) for i in normalized]
-    )
-    return Event(output={"count": len(normalized)})
-
-
-@node
-async def extract_invoice_node(ctx) -> Event:
-    """Invoice lane: understand or legacy extraction in one step."""
-    return await extract_invoice_document_node._func(ctx)
-
-
 def _normalize_bundle(ctx, bundle: ExtractedInvoiceBundle) -> list[NormalizedInvoice]:
     """Reconcile + normalize every invoice in ``bundle`` into NormalizedInvoices.
 
-    Shared by ``extract_invoice_node`` (first pass) and the extract reviewer's
+    Shared by ``extract_invoice_document_node`` (first pass) and the extract reviewer's
     re-extract path (``_run_reviewer_loop``) so the normalization logic — totals
     reconcile, FX flag preservation, and the self-referential / unknown-direction
     review guards — lives in exactly one place. Reads direction / GST / base
@@ -982,7 +918,7 @@ async def categorize_node(ctx) -> Event:
 
 @node
 async def resolve_jurisdiction_node(ctx) -> Event:
-    """Resolve tax jurisdiction from session state — runs once before tax_node.
+    """Resolve tax jurisdiction from session state — single authority for WS2a.
 
     Multi-country support: reads ``state["region"]`` + ``state["base_currency"]``
     + ``state["supplier_country"]`` / ``state["customer_country"]`` and writes
@@ -993,7 +929,16 @@ async def resolve_jurisdiction_node(ctx) -> Event:
     Per ADK best practice (Sessions/State docs): region lives in user-level
     state (``state["region"]``) seeded by the profile callback. The router
     is a thin pure function — no LLM, no I/O. Pure data in / pure data out.
+
+    WS2a: party countries (supplier_country / customer_country) are seeded HERE
+    from the normalized invoices so that cross-border detection is complete
+    before the single ``_resolve_jurisdiction_fn`` call.  ``tax_node`` reads
+    the five jurisdiction keys from state via ``_resolution_from_state`` and
+    must NOT re-resolve.
     """
+    # Seed supplier_country / customer_country from normalized invoices so that
+    # cross-border determination has complete inputs on this single resolve call.
+    _populate_party_countries_from_invoices(ctx.state)
     resolution = _resolve_jurisdiction_fn(ctx.state)
     _write_jurisdiction_to_state(ctx.state, resolution)
     return Event(
@@ -1046,7 +991,8 @@ async def tax_node(ctx) -> Event:
 
     Replaces the previous SG-only ``TaxClassifier()`` call. Flow:
 
-    1. Re-resolve the jurisdiction (cheap pure function — idempotent).
+    1. Read the already-resolved jurisdiction from state (written by
+       ``resolve_jurisdiction_node``, the single authority per WS2a).
     2. For each invoice, call ``tax_reasoning.reason_one_invoice`` which:
        * Builds an LLM prompt with jurisdiction context (region, tax system,
          standard rate, supplier country) via state templating.
@@ -1056,15 +1002,17 @@ async def tax_node(ctx) -> Event:
          (no per-line signal spaghetti — just arithmetic + tolerance).
        * Falls back to the deterministic ``TaxClassifier`` for SG invoices
          when the LLM is unreachable (preserves C6–C8 golden behaviour).
-    3. Writes the resolved jurisdiction into ``state["tax_jurisdiction"]``
-       so ADK web's State tab and trace events show the rule set used.
-    """
-    # Country info from extracted invoices must be in state for the router
-    # to consider it (extract fills it on the model, not in state).
-    _populate_party_countries_from_invoices(ctx.state)
+    3. Emits the jurisdiction keys from state so ADK web's State tab and
+       trace events show the rule set used.
 
-    resolution = _resolve_jurisdiction_fn(ctx.state)
-    _write_jurisdiction_to_state(ctx.state, resolution)
+    WS2a invariant: this node MUST NOT call ``_resolve_jurisdiction_fn`` or
+    ``_populate_party_countries_from_invoices``.  If ``tax_jurisdiction`` is
+    absent, ``_resolution_from_state`` raises ``RuntimeError`` so the missing
+    ``resolve_jurisdiction_node`` is loud, not silent.
+    """
+    # Read the jurisdiction that resolve_jurisdiction_node already wrote.
+    # Raises RuntimeError if tax_node ran before resolve_jurisdiction_node.
+    resolution = _resolution_from_state(ctx.state)
 
     invoices = _normalized_from_state(ctx.state)
     flagged_total = 0
@@ -1731,20 +1679,6 @@ async def route_node(ctx) -> Event:
 
     ctx.state[ROUTES_KEY] = routes
     return Event(output={"count": len(routes)})
-
-
-# --------------------------------------------------------------------------- #
-# HITL + delivery nodes — PASS-THROUGH PLACEHOLDERS (owned by later tasks).
-#
-# The real logic lives in:
-#   - approval_gate     -> task6 (HITL: yield RequestInput + Firestore interrupt)
-#   - consolidate_node  -> task8 (SlackLedgerStore append rows to FY workbook)
-#   - deliver_node      -> task8 (re-upload workbook to Slack + Firestore pointer)
-#
-# Until those tasks land, these are deterministic pass-throughs so the graph is
-# importable and a wiring test can run a full document pass end-to-end with fakes.
-# Each forwards state untouched and emits a small Event; none raise.
-# --------------------------------------------------------------------------- #
 
 
 def _needs_review(state: dict) -> tuple[bool, list[str]]:

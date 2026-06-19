@@ -573,10 +573,7 @@ def _synthesize_confirmation_message(fc_id: str, confirmation: Any, *, confirmed
 #: pulls the trailing node name and we look it up here to drive the live status.
 _STAGE_LABELS: dict[str, str] = {
     "classify_node": "🔍 Taking a look at this document…",
-    "extract_document_node": "📄 Reading every field on the document…",
-    "normalize_document_node": "🧾 Mapping fields to ledger shape…",
     "extract_invoice_document_node": "📄 Understanding this document…",
-    "extract_invoice_node": "🧾 Looks like an invoice — reading the line items…",
     "extract_bank_node": "🏦 Looks like a bank statement — reading each transaction…",
     "categorize_node": "🗂️ Matching each line to your chart of accounts…",
     "tax_node": "🧮 Checking the tax treatment and reconciling…",
@@ -618,10 +615,7 @@ def event_stage_label(event: Any) -> Optional[str]:
 #: Maps graph node name → canonical pipeline stage key used by _StageState.
 _STAGE_KEY_MAP: dict[str, str] = {
     "classify_node": "understand",
-    "extract_document_node": "understand",
-    "normalize_document_node": "understand",
     "extract_invoice_document_node": "understand",
-    "extract_invoice_node": "understand",
     "extract_bank_node": "understand",
     "categorize_node": "policy",
     "tax_node": "policy",
@@ -633,10 +627,7 @@ _STAGE_KEY_MAP: dict[str, str] = {
 #: Nodes whose plan-block output belongs to the understand stage (not policy).
 _UNDERSTAND_OUTPUT_NODES: frozenset[str] = frozenset({
     "classify_node",
-    "extract_document_node",
-    "normalize_document_node",
     "extract_invoice_document_node",
-    "extract_invoice_node",
     "extract_bank_node",
 })
 
@@ -2450,12 +2441,7 @@ def _stage_output_for_completed_node(node_name: str, state: dict) -> Optional[st
             label = f"{direction.title()} {label.lower()}" if direction else label
         return label
 
-    if node_name in (
-        "extract_document_node",
-        "normalize_document_node",
-        "extract_invoice_document_node",
-        "extract_invoice_node",
-    ):
+    if node_name == "extract_invoice_document_node":
         if not invs:
             return None
         first = invs[0] if isinstance(invs[0], dict) else {}

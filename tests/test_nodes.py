@@ -301,7 +301,7 @@ def test_classify_missing_artifact_raises():
 
 
 # =========================================================================== #
-# extract_invoice_node fan-out
+# extract_invoice_document_node fan-out
 # =========================================================================== #
 
 
@@ -312,7 +312,7 @@ def test_invoice_bundle_fanout_three():
     _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(bundle))
 
     ctx = FakeContext(_base_state(**{nodes.DIRECTION_KEY: "purchase"}))
-    event = asyncio.run(nodes.extract_invoice_node._func(ctx))
+    event = asyncio.run(nodes.extract_invoice_document_node._func(ctx))
 
     assert event.output == {"count": 3}
     normalized = ctx.state[nodes.NORMALIZED_KEY]
@@ -329,7 +329,7 @@ def test_multi_receipt_page_fanout_four():
     _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(bundle))
 
     ctx = FakeContext(_base_state(**{nodes.DIRECTION_KEY: "purchase"}))
-    event = asyncio.run(nodes.extract_invoice_node._func(ctx))
+    event = asyncio.run(nodes.extract_invoice_document_node._func(ctx))
 
     assert event.output == {"count": 4}
     assert len(ctx.state[nodes.NORMALIZED_KEY]) == 4
@@ -346,7 +346,7 @@ def test_soa_skip_extracts_only_embedded_invoice():
     _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(bundle))
 
     ctx = FakeContext(_base_state(**{nodes.DIRECTION_KEY: "purchase"}))
-    event = asyncio.run(nodes.extract_invoice_node._func(ctx))
+    event = asyncio.run(nodes.extract_invoice_document_node._func(ctx))
 
     assert event.output == {"count": 1}
     normalized = ctx.state[nodes.NORMALIZED_KEY]
@@ -407,7 +407,7 @@ def test_soa_phantom_invoices_dropped_by_normalize_bundle():
     _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(bundle))
 
     ctx = FakeContext(_base_state(**{nodes.DIRECTION_KEY: "purchase"}))
-    event = asyncio.run(nodes.extract_invoice_node._func(ctx))
+    event = asyncio.run(nodes.extract_invoice_document_node._func(ctx))
 
     # Gate must have dropped the 2 phantoms — only the real invoice survives.
     assert event.output == {"count": 1}, (
@@ -426,7 +426,7 @@ def test_invoice_node_defaults_direction_to_purchase():
         ExtractedInvoiceBundle(invoices=[_ex_invoice("INV-X")])
     ))
     ctx = FakeContext(_base_state())  # no direction in state
-    asyncio.run(nodes.extract_invoice_node._func(ctx))
+    asyncio.run(nodes.extract_invoice_document_node._func(ctx))
     assert ctx.state[nodes.NORMALIZED_KEY][0]["doc_type"] == "purchase"
 
 
@@ -448,8 +448,12 @@ def test_categorize_and_tax_chain():
     nodes.CATEGORIZE_FN = _fake_categorize
 
     ctx = FakeContext(_base_state(**{nodes.DIRECTION_KEY: "purchase"}))
-    asyncio.run(nodes.extract_invoice_node._func(ctx))
+    asyncio.run(nodes.extract_invoice_document_node._func(ctx))
     asyncio.run(nodes.categorize_node._func(ctx))
+    # WS2a: resolve_jurisdiction_node is the single authority — must run before
+    # tax_node (mirrors the real lane order: categorize → resolve_jurisdiction
+    # → tax).
+    asyncio.run(nodes.resolve_jurisdiction_node._func(ctx))
     asyncio.run(nodes.tax_node._func(ctx))
 
     line = ctx.state[nodes.NORMALIZED_KEY][0]["lines"][0]
@@ -595,7 +599,7 @@ def test_route_node_invoice_fy_and_sheet():
         ExtractedInvoiceBundle(invoices=[_ex_invoice("INV-1"), _ex_invoice("INV-2")])
     ))
     ctx = FakeContext(_base_state(**{nodes.DIRECTION_KEY: "purchase"}))
-    asyncio.run(nodes.extract_invoice_node._func(ctx))
+    asyncio.run(nodes.extract_invoice_document_node._func(ctx))
     event = asyncio.run(nodes.route_node._func(ctx))
 
     assert event.output == {"count": 2}
@@ -923,7 +927,7 @@ def test_deliver_bank_names_bank_statement_not_ledger():
 
 
 # =========================================================================== #
-# Self-referential / dividend guard — end-to-end through extract_invoice_node
+# Self-referential / dividend guard — end-to-end through extract_invoice_document_node
 # =========================================================================== #
 
 
@@ -953,13 +957,13 @@ def _self_ref_bundle() -> "ExtractedInvoiceBundle":
 
 
 def test_extract_node_self_referential_flagged_for_review():
-    """extract_invoice_node must mark self-referential docs reconciled=False
+    """extract_invoice_document_node must mark self-referential docs reconciled=False
     with a 'needs review' note — never silently book as a clean purchase."""
     _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(_self_ref_bundle()))
 
     state = _base_state(**{nodes.DIRECTION_KEY: "self_referential"})
     ctx = FakeContext(state)
-    asyncio.run(nodes.extract_invoice_node._func(ctx))
+    asyncio.run(nodes.extract_invoice_document_node._func(ctx))
 
     normalized_list = ctx.state[nodes.NORMALIZED_KEY]
     assert len(normalized_list) == 1
@@ -979,12 +983,12 @@ def test_extract_node_self_referential_flagged_for_review():
 
 
 def test_extract_node_unknown_direction_flagged_for_review():
-    """extract_invoice_node must flag 'unknown' direction for review too."""
+    """extract_invoice_document_node must flag 'unknown' direction for review too."""
     _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(_self_ref_bundle()))
 
     state = _base_state(**{nodes.DIRECTION_KEY: "unknown"})
     ctx = FakeContext(state)
-    asyncio.run(nodes.extract_invoice_node._func(ctx))
+    asyncio.run(nodes.extract_invoice_document_node._func(ctx))
 
     normalized_list = ctx.state[nodes.NORMALIZED_KEY]
     assert len(normalized_list) == 1
@@ -1005,7 +1009,7 @@ def test_extract_node_clean_purchase_unaffected():
 
     state = _base_state(**{nodes.DIRECTION_KEY: "purchase"})
     ctx = FakeContext(state)
-    asyncio.run(nodes.extract_invoice_node._func(ctx))
+    asyncio.run(nodes.extract_invoice_document_node._func(ctx))
 
     inv = ctx.state[nodes.NORMALIZED_KEY][0]
     note = inv.get("reconcile_note") or ""
@@ -1059,7 +1063,7 @@ def test_extract_node_usd_doc_sgd_client_books_in_usd():
 
     state = _base_state(**{nodes.DIRECTION_KEY: "purchase", "base_currency": "SGD"})
     ctx = FakeContext(state)
-    asyncio.run(nodes.extract_invoice_node._func(ctx))
+    asyncio.run(nodes.extract_invoice_document_node._func(ctx))
 
     inv = ctx.state[nodes.NORMALIZED_KEY][0]
     assert inv.get("needs_fx_review") is False, (
@@ -1092,7 +1096,7 @@ def test_extract_node_usd_doc_with_fx_rate_converts_amounts():
 
     state = _base_state(**{nodes.DIRECTION_KEY: "purchase", "base_currency": "SGD"})
     ctx = FakeContext(state)
-    asyncio.run(nodes.extract_invoice_node._func(ctx))
+    asyncio.run(nodes.extract_invoice_document_node._func(ctx))
 
     inv = ctx.state[nodes.NORMALIZED_KEY][0]
     assert inv.get("needs_fx_review") is False, (
@@ -1115,7 +1119,7 @@ def test_extract_node_myr_client_myr_doc_not_flagged():
 
     state = _base_state(**{nodes.DIRECTION_KEY: "purchase", "base_currency": "MYR"})
     ctx = FakeContext(state)
-    asyncio.run(nodes.extract_invoice_node._func(ctx))
+    asyncio.run(nodes.extract_invoice_document_node._func(ctx))
 
     inv = ctx.state[nodes.NORMALIZED_KEY][0]
     assert inv.get("needs_fx_review") is False, (
@@ -1132,7 +1136,7 @@ def test_extract_node_needs_fx_review_routes_to_human_review():
     approval_gate pauses for human review rather than auto-approving."""
     from accounting_agents.nodes import _needs_review
 
-    # Simulate what extract_invoice_node writes for a USD doc with no rate.
+    # Simulate what extract_invoice_document_node writes for a USD doc with no rate.
     state = _base_state()
     state[nodes.NORMALIZED_KEY] = [
         {
@@ -1279,7 +1283,7 @@ def test_guard_warns_on_count_exceeding_threshold(caplog):
 
 def test_guard_no_warning_below_thresholds(caplog):
     """(b) A small payload (under both thresholds) must NOT warn, and the state
-    list must be stored unchanged through extract_invoice_node."""
+    list must be stored unchanged through extract_invoice_document_node."""
     import logging
 
     _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(
@@ -1287,7 +1291,7 @@ def test_guard_no_warning_below_thresholds(caplog):
     ))
     ctx = FakeContext(_base_state(**{nodes.DIRECTION_KEY: "purchase"}))
     with caplog.at_level(logging.WARNING, logger="accounting_agents.nodes"):
-        asyncio.run(nodes.extract_invoice_node._func(ctx))
+        asyncio.run(nodes.extract_invoice_document_node._func(ctx))
 
     # No size-guard warnings should appear (filter to guard-specific messages only).
     guard_warnings = [
@@ -1337,7 +1341,7 @@ def test_guard_warns_on_payload_size_exceeding_threshold(caplog):
 
 
 # =========================================================================== #
-# extract_invoice_node honors state["review_hint"] on the FIRST extraction
+# extract_invoice_document_node honors state["review_hint"] on the FIRST extraction
 # (Step 7 / ADR-0010 — re_extract_document seeds the hint into run state).
 # =========================================================================== #
 

@@ -387,3 +387,60 @@ def write_to_state(state: dict, resolution: JurisdictionResolution) -> None:
         # Avoid forcing None into state — leaves cleaner State-tab rendering.
         if v is not None:
             state[k] = v
+
+
+def resolution_from_state(state: dict) -> JurisdictionResolution:
+    """Reconstruct a :class:`JurisdictionResolution` from already-written state keys.
+
+    This is a READ-ONLY helper — it does NOT re-run cross-border or
+    party-country determination logic.  It is the companion to
+    :func:`write_to_state`: read what ``resolve_jurisdiction_node`` wrote,
+    rebuild the typed object so downstream code (tax_node, _reason_one_invoice)
+    receives a ``JurisdictionResolution`` without re-resolving.
+
+    Raises ``RuntimeError`` when the mandatory ``tax_jurisdiction`` key is
+    absent, enforcing the single-authority invariant loudly rather than
+    silently falling back to re-resolution.
+    """
+    jurisdiction_code = state.get(TAX_JURISDICTION_KEY)
+    if not jurisdiction_code:
+        raise RuntimeError(
+            "resolution_from_state: tax_jurisdiction missing from state; "
+            "resolve_jurisdiction_node must run before tax_node"
+        )
+
+    tax_system = state.get(TAX_SYSTEM_HINT_KEY, "")
+    rates: dict = state.get(JURISDICTION_RATES_KEY) or {}
+
+    # Derive cross_border / flag_for_human from the stored code.
+    cross_border = jurisdiction_code == JURISDICTION_CROSS_BORDER
+    flag_for_human = jurisdiction_code in (JURISDICTION_CROSS_BORDER, JURISDICTION_AMBIGUOUS)
+
+    rule = JurisdictionRule(
+        code=jurisdiction_code,
+        region=state.get("client_region") or state.get("region") or "",
+        tax_system=tax_system,
+        reference_yaml=rates.get("reference_yaml"),
+        standard_rate=rates.get("standard_rate"),
+        rate_tolerance=float(rates.get("rate_tolerance") or 0.01),
+        rate_band_label=rates.get("rate_band_label"),
+        cross_border=cross_border,
+        flag_for_human=flag_for_human,
+    )
+
+    client_region = _norm_region(
+        state.get("client_region") or state.get("region") or ""
+    )
+    client_currency = str(
+        state.get("base_currency")
+        or _REGION_DEFAULT_CURRENCY.get(client_region, "")
+        or "SGD"
+    ).strip().upper()
+
+    return JurisdictionResolution(
+        jurisdiction=rule,
+        client_region=client_region,
+        client_currency=client_currency,
+        supplier_country=state.get(SUPPLIER_COUNTRY_KEY),
+        customer_country=state.get(CUSTOMER_COUNTRY_KEY),
+    )

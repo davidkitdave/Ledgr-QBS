@@ -978,7 +978,7 @@ def test_event_stage_label_maps_known_nodes():
     assert "document" in event_stage_label(_node_event("classify_node")).lower()
     # Extract labels name WHAT the doc was identified as.
     assert "bank statement" in event_stage_label(_node_event("extract_bank_node"))
-    assert "invoice" in event_stage_label(_node_event("extract_invoice_node"))
+    assert event_stage_label(_node_event("extract_invoice_document_node")) is not None
     # Unmapped / untagged events do not trigger a status change.
     assert event_stage_label(_node_event("some_unknown_node")) is None
     assert event_stage_label(SimpleNamespace()) is None
@@ -992,7 +992,7 @@ def test_process_file_event_posts_status_once_and_updates_per_stage():
     # A realistic single-document stream: classify → extract → tax → final text.
     events = [
         _node_event("classify_node"),
-        _node_event("extract_invoice_node"),
+        _node_event("extract_invoice_document_node"),
         _node_event("tax_node"),
         _node_event("deliver_node", text="done"),
     ]
@@ -1028,7 +1028,7 @@ def test_process_file_event_posts_status_once_and_updates_per_stage():
     update_texts = [u["text"] for u in slack.updates]
     lowered = [t.lower() for t in update_texts]
     assert any("taking a look" in t for t in lowered)            # classify
-    assert any("reading the line items" in t for t in lowered)   # extract (invoice)
+    assert any("understanding this document" in t for t in lowered)   # extract (invoice)
     assert any("reconciling" in t for t in lowered)              # tax/approval
     assert update_texts[-1].startswith("✅ Added to")
     # Every update targeted the single status message ts.

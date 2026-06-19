@@ -337,6 +337,12 @@ class TestTaxNodeWritesJurisdiction:
             "normalized_invoices": [invoice_to_dict(_build_normalized_for_state("MY"))],
         }
         ctx = FakeContext(state)
+        # WS2a: resolve_jurisdiction_node is the single authority; run it first
+        # (mirrors the real invoice lane order: categorize → resolve_jurisdiction
+        # → tax).  This seeds party countries from invoices and writes the five
+        # jurisdiction state keys so tax_node can read them via
+        # _resolution_from_state.
+        asyncio.run(nodes.resolve_jurisdiction_node._func(ctx))
         event = asyncio.run(nodes.tax_node._func(ctx))
         assert event.output["tax_jurisdiction"] == "MALAYSIA"
         assert event.output["tax_system"] == "SST"
