@@ -63,6 +63,8 @@ import time
 import uuid
 from typing import Any, Callable, Optional
 
+from accounting_agents.config import _ns as _config_ns
+
 logger = logging.getLogger(__name__)
 
 #: Firestore collection holding client profiles (lock lives in a subcollection).
@@ -152,7 +154,7 @@ class FirestoreLeaseLock:
 
     def _lock_ref(self, client_id: str, fy: str) -> Any:
         return (
-            self._db.collection(_CLIENTS_COLLECTION)
+            self._db.collection(_config_ns(_CLIENTS_COLLECTION))
             .document(client_id)
             .collection(_LEDGER_LOCKS_SUBCOLLECTION)
             .document(str(fy))

@@ -45,6 +45,8 @@ from google.adk.sessions.base_session_service import (
 )
 from google.adk.sessions.session import Session
 
+from accounting_agents.config import _ns
+
 logger = logging.getLogger(__name__)
 
 #: Top-level Firestore collection holding all ADK sessions.
@@ -79,7 +81,7 @@ class FirestoreSessionService(BaseSessionService):
     def _session_ref(self, app_name: str, user_id: str, session_id: str) -> Any:
         """Document ref for a single session."""
         return (
-            self.client.collection(_ROOT_COLLECTION)
+            self.client.collection(_ns(_ROOT_COLLECTION))
             .document(app_name)
             .collection("users")
             .document(user_id)
@@ -162,7 +164,7 @@ class FirestoreSessionService(BaseSessionService):
     ) -> ListSessionsResponse:
         sessions: list[Session] = []
         users_col = (
-            self.client.collection(_ROOT_COLLECTION).document(app_name).collection("users")
+            self.client.collection(_ns(_ROOT_COLLECTION)).document(app_name).collection("users")
         )
         user_docs = (
             [users_col.document(user_id)] if user_id is not None else list(users_col.list_documents())

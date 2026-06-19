@@ -41,6 +41,7 @@ from typing import Any, Optional
 
 from openpyxl import Workbook, load_workbook
 
+from accounting_agents.config import _ns
 from accounting_agents.lease_lock import FirestoreLeaseLock
 
 from invoice_processing.export.exporters import (
@@ -147,7 +148,7 @@ class SlackLedgerStore:
 
     def _pointer_ref(self, client_id: str, fy: str) -> Any:
         return (
-            self._db.collection(_CLIENTS_COLLECTION)
+            self._db.collection(_ns(_CLIENTS_COLLECTION))
             .document(client_id)
             .collection(_LEDGERS_SUBCOLLECTION)
             .document(str(fy))
@@ -163,7 +164,7 @@ class SlackLedgerStore:
     def latest_fy(self, client_id: str) -> Optional[str]:
         """Return the highest FY label that has a ledger pointer, or ``None``."""
         coll = (
-            self._db.collection(_CLIENTS_COLLECTION)
+            self._db.collection(_ns(_CLIENTS_COLLECTION))
             .document(client_id)
             .collection(_LEDGERS_SUBCOLLECTION)
         )
@@ -181,7 +182,7 @@ class SlackLedgerStore:
         correct one when the user asks "show me last year's books".
         """
         coll = (
-            self._db.collection(_CLIENTS_COLLECTION)
+            self._db.collection(_ns(_CLIENTS_COLLECTION))
             .document(client_id)
             .collection(_LEDGERS_SUBCOLLECTION)
         )
@@ -415,7 +416,7 @@ class SlackLedgerStore:
     def _stash_ref(self, client_id: str, stash_key: str):
         doc_id = urllib.parse.quote(stash_key, safe="")
         return (
-            self._db.collection(_CLIENTS_COLLECTION)
+            self._db.collection(_ns(_CLIENTS_COLLECTION))
             .document(client_id)
             .collection(_LEDGER_STASH_COLLECTION)
             .document(doc_id)
