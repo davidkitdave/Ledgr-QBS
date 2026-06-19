@@ -414,9 +414,9 @@ def pnl_for_fy(tool_context: ToolContext) -> str:
             amount = 0.0
 
         doc_type = str(row.get("Doc Type") or "").strip().upper()
-        if doc_type == "S":
+        if doc_type in ("S", "SALES"):
             revenue += amount
-        elif doc_type == "P":
+        elif doc_type in ("P", "PURCHASE"):
             expenses += amount
         else:
             # Fallback: positive = revenue, negative = expense.
@@ -1615,10 +1615,8 @@ def _resolve_tax_code(treatment: str, doc_type: str, resolution) -> str:
         # Prefer QBS when present (matches the chat tool's expected write format).
         for system in ("qbs", "xero"):
             table = code_map.get(system, {}).get(direction, {})
-            if table and treatment in table:
+            if treatment in table:
                 return table[treatment]
-            if table and "SR" in table:
-                return table.get(treatment, table["SR"])
     # No reference YAML — return the canonical treatment string itself so the
     # caller still gets a meaningful code (was the previous behaviour when
     # only SG was supported).
@@ -2073,7 +2071,9 @@ def replace_recorded_month(tool_context: ToolContext, month: str) -> str:
         return _empty_ledger_message(tool_context)
 
     # Parse the month arg.
-    fy = str(tool_context.state.get("fy") or "").strip() or None
+    fy = str(
+        tool_context.state.get("fy_loaded") or tool_context.state.get("fy") or ""
+    ).strip() or None
     try:
         year, month_num = _parse_month_arg(month, fy=fy)
     except ValueError as exc:
