@@ -71,6 +71,17 @@ Produce:
   the company letterhead is the approver, not the issuer).
 - tax_visible_on_document strictly per the schema description (true only
   when a literal "GST" / "Tax" / "VAT" row, column, or percentage appears).
+- from_party.country / to_party.country: 2-letter country code (SG / MY /
+  US / ...) inferred from any country indicator on the document (address
+  block, country prefix on phone, "Made in <country>", tax-reg-no country
+  prefix, explicit country text). CRITICAL for multi-jurisdiction tax
+  routing — the YAU LEE Malaysia receipt was wrongly processed under SG
+  GST because this was null. Always populate when ANY country indicator is
+  visible; null only when truly absent.
+- tax_system_hint: "GST" / "SST" / "VAT" / "NONE" / null inferred from
+  explicit tax wording on the document (e.g. "Service Tax 8%" -> "SST",
+  "GST 9%" -> "GST", "VAT 20%" -> "VAT"). Informational; the jurisdiction
+  router applies the canonical rule based on the client profile + this hint.
 
 Granularity:
 - Simple invoice / receipt: usually one ledger line with the service total.
@@ -171,6 +182,13 @@ class PartyField(BaseModel):
     role: Literal["issuer", "recipient"] = Field(
         description="issuer = the party that sent/issued; recipient = the party billed/addressed"
     )
+    country: Optional[str] = Field(
+        default=None,
+        description=(
+            "2-letter country code (SG / MY / US / ...). Infer from any country "
+            "indicator on the document. CRITICAL for multi-jurisdiction tax routing."
+        ),
+    )
 
 
 class SummaryField(BaseModel):
@@ -226,6 +244,14 @@ class DocumentLedgerExtract(BaseModel):
     subtotal: Optional[float] = Field(None, description="Ex-GST total if shown separately")
     gst_total: Optional[float] = Field(None, description="GST grand total if shown")
     issuer_gst_regno: Optional[str] = None
+    tax_system_hint: Optional[str] = Field(
+        default=None,
+        description=(
+            "Informational hint of which tax system applies (GST / SST / VAT / NONE). "
+            "The jurisdiction router in accounting_agents.jurisdiction applies the "
+            "canonical rule based on the client profile + this hint."
+        ),
+    )
     doc_kind: DocKind = Field(
         default="invoice",
         description=(
@@ -397,13 +423,17 @@ def ledger_extract_to_extracted_invoice(extract: DocumentLedgerExtract) -> Extra
     # Prefer structured parties when present; they win over the legacy strings.
     issuer_name = extract.vendor_name
     issuer_gst_regno = extract.issuer_gst_regno
+    issuer_country: Optional[str] = None
     bill_to_name = extract.customer_name
+    bill_to_country: Optional[str] = None
     if extract.from_party and extract.from_party.name:
         issuer_name = extract.from_party.name
         if extract.from_party.uen:
             issuer_gst_regno = extract.from_party.uen
+        issuer_country = extract.from_party.country
     if extract.to_party and extract.to_party.name:
         bill_to_name = extract.to_party.name
+        bill_to_country = extract.to_party.country
     # Expense-claim routing: the claimant (employee / contractor) is the
     # supplier; the company letterhead is the approver.
     if extract.doc_kind == "expense_claim" and extract.claimant_name:
@@ -416,7 +446,10 @@ def ledger_extract_to_extracted_invoice(extract: DocumentLedgerExtract) -> Extra
         currency=extract.currency,
         issuer_name=issuer_name,
         issuer_gst_regno=issuer_gst_regno,
+        issuer_country=issuer_country,
+        issuer_tax_system=extract.tax_system_hint,
         bill_to_name=bill_to_name,
+        bill_to_country=bill_to_country,
         lines=lines,
         subtotal=extract.subtotal,
         gst_total=extract.gst_total,

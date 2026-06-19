@@ -310,8 +310,14 @@ def test_process_file_event_completion_appends_ledger_once():
     )
 
     assert result["status"] == "delivered"
-    # The PDF was saved as an artifact under the convention name.
-    assert ("C1", "inbox/F1.pdf") in runner.artifact_service.saved
+    # The PDF was saved as an artifact under the convention name. The
+    # artifact-dev-naming fix uses flat names (``{file_id}.pdf``) in all
+    # non-prod envs so ADK web's FastAPI artifact route matches (the
+    # slash in ``inbox/...`` would 404 in dev). Prod keeps the namespaced
+    # form for collision safety alongside other artifacts.
+    from accounting_agents import nodes as _nodes
+    expected_artifact = _nodes.artifact_name_for("F1")
+    assert ("C1", expected_artifact) in runner.artifact_service.saved
     assert downloaded["file_id"] == "F1"
     # The ledger workbook was uploaded exactly once, with one row.
     assert len(slack.uploads) == 1

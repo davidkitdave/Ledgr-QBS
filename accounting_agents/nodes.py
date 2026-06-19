@@ -61,6 +61,20 @@ from invoice_processing.export.models import BankStatement, NormalizedInvoice
 from invoice_processing.export.routing import DocRoute, route_document
 from invoice_processing.export.tax_classifier import TaxClassifier
 
+# Jurisdiction + LLM tax reasoning (multi-country support, replaces the
+# previous SG-only TaxClassifier call inside tax_node).
+from .jurisdiction import (
+    CUSTOMER_COUNTRY_KEY,
+    JURISDICTION_RATES_KEY,
+    SUPPLIER_COUNTRY_KEY,
+    TAX_JURISDICTION_KEY,
+    TAX_SYSTEM_HINT_KEY,
+    JurisdictionResolution,
+    resolve_jurisdiction as _resolve_jurisdiction_fn,
+    write_to_state as _write_jurisdiction_to_state,
+)
+from .tax_reasoning import reason_one_invoice as _reason_one_invoice
+
 from .normalized_invoice_codec import (
     bank_to_dict,
     dict_to_bank,
@@ -135,7 +149,42 @@ def _guard_state_payload(key: str, items: list) -> list:
 ARTIFACT_NAME_KEY = "temp:artifact_name"
 
 #: Filename convention the Slack layer uses when it ``save_artifact``s the PDF.
+#:
+#: ADK's FastAPI dev server registers artifact routes with a single ``{artifact_name}``
+#: path parameter, which by default does NOT match the slash character. Names like
+#: ``inbox/upload.pdf`` therefore return 404 in the dev UI even when the file is
+#: on disk. To keep dev tooling working we collapse the path to a flat
+#: ``"{file_id}.pdf"`` in non-prod; prod keeps the namespace prefix for collision
+#: safety with other tools writing into the same artifact bucket.
 ARTIFACT_NAME_FMT = "inbox/{file_id}.pdf"
+
+
+def artifact_name_for(file_id: str) -> str:
+    """Return the artifact filename to use for ``file_id`` in the current env.
+
+    In **every** non-prod environment the flat form (``"{file_id}.pdf"``) is
+    returned so the dev FastAPI route matches. ADK's dev FastAPI registers
+    artifact routes with a single ``{artifact_name}`` path parameter that
+    does NOT match the slash character — names like ``inbox/upload.pdf``
+    therefore return 404 in the dev UI even when the file is on disk.
+
+    Prod keeps the namespaced ``"inbox/{file_id}.pdf"`` form for collision
+    safety alongside other artifacts.
+
+    Previous behaviour gated the flat form on ``is_playground_seed_enabled()``
+    which is enabled in dev/unset but ALSO active in any non-prod scenario
+    where a playground seed was used. Phase 1 / artifact-dev-naming
+    simplifies the gate to a direct ``LEDGR_ENV != "prod"`` check so the
+    flat form is used universally outside prod — eliminates the 404 in any
+    ADK web / agents-cli playground session regardless of seed state.
+    """
+    import os as _os
+    from .config import is_playground_seed_enabled
+
+    env = (_os.environ.get("LEDGR_ENV") or "dev").strip().lower()
+    if env != "prod" or is_playground_seed_enabled():
+        return f"{file_id}.pdf"
+    return ARTIFACT_NAME_FMT.format(file_id=file_id)
 
 #: State keys for routing / extraction outputs.
 DOC_TYPE_KEY = "doc_type"
@@ -310,23 +359,116 @@ REVIEWER_FN: Callable[..., dict]
 # --------------------------------------------------------------------------- #
 
 
+def _is_document_mime(mime: str) -> bool:
+    """Return True for mime types accepted as document bytes."""
+    return mime.startswith("image/") or mime in ("application/pdf", "application/octet-stream", "")
+
+
 async def _load_pdf_bytes(ctx) -> tuple[bytes, str]:
     """Recover the uploaded PDF bytes + mime type from the ADK artifact service.
 
-    Reads the artifact filename from ``ctx.state[ARTIFACT_NAME_KEY]`` and loads
-    it via ``ctx.load_artifact``. Returns ``(data, mime_type)``.
+    Fallback chain (in order):
+
+    1. **Slack path** — ``ctx.state[ARTIFACT_NAME_KEY]`` is set: load via
+       ``ctx.load_artifact``.  Behaviour is identical to the original
+       implementation, including the "missing or has no inline bytes" error.
+
+    2. **Playground / adk-web path** — scan ``ctx.user_content.parts`` for the
+       first Part whose ``inline_data.data`` is non-empty and whose mime is a
+       PDF or image (or octet-stream / missing → treated as application/pdf).
+
+    3. **list_artifacts fallback** — call ``ctx.list_artifacts()`` and pick the
+       most suitable key (prefer one ending in ``.pdf`` or with an image mime);
+       load via ``ctx.load_artifact``.
+
+    4. **Nothing found** — raise ``ValueError`` listing what was tried.
+
+    Paths 2 and 3 *heal the precondition*: the recovered bytes are saved as an
+    ADK artifact and ``ctx.state[ARTIFACT_NAME_KEY]`` is set so that downstream
+    nodes (which also call ``_load_pdf_bytes``) behave identically to the Slack
+    path.  Path 1 is idempotent — no re-save occurs.
     """
+    # ------------------------------------------------------------------ #
+    # Path 1: Slack path — artifact key already in state
+    # ------------------------------------------------------------------ #
     filename = ctx.state.get(ARTIFACT_NAME_KEY)
-    if not filename:
-        raise ValueError(
-            f"No artifact filename in state[{ARTIFACT_NAME_KEY!r}] — the Slack "
-            "layer must save the PDF and set this key before the workflow runs."
-        )
-    part = await ctx.load_artifact(filename)
-    if part is None or part.inline_data is None or part.inline_data.data is None:
-        raise ValueError(f"Artifact {filename!r} is missing or has no inline bytes.")
-    mime_type = part.inline_data.mime_type or "application/pdf"
-    return part.inline_data.data, mime_type
+    if filename:
+        part = await ctx.load_artifact(filename)
+        if part is None or part.inline_data is None or part.inline_data.data is None:
+            raise ValueError(f"Artifact {filename!r} is missing or has no inline bytes.")
+        mime_type = part.inline_data.mime_type or "application/pdf"
+        return part.inline_data.data, mime_type
+
+    # ------------------------------------------------------------------ #
+    # Path 2: inline_data in ctx.user_content.parts  (playground / adk-web)
+    # ------------------------------------------------------------------ #
+    user_content = getattr(ctx, "user_content", None)
+    parts = getattr(user_content, "parts", None) if user_content is not None else None
+    if parts:
+        for p in parts:
+            inline = getattr(p, "inline_data", None)
+            if inline is None:
+                continue
+            data = getattr(inline, "data", None)
+            if not data:  # None or empty bytes
+                continue
+            mime = getattr(inline, "mime_type", None) or ""
+            if not _is_document_mime(mime):
+                continue
+            # Normalise octet-stream / missing to application/pdf
+            if mime in ("application/octet-stream", ""):
+                mime = "application/pdf"
+            # Heal: persist so downstream nodes see the same state as Slack path
+            heal_name = artifact_name_for("upload")
+            from google.genai import types as _genai_types
+            saved_part = _genai_types.Part(
+                inline_data=_genai_types.Blob(data=data, mime_type=mime)
+            )
+            await ctx.save_artifact(heal_name, saved_part)
+            ctx.state[ARTIFACT_NAME_KEY] = heal_name
+            return data, mime
+
+    # ------------------------------------------------------------------ #
+    # Path 3: list_artifacts fallback
+    # ------------------------------------------------------------------ #
+    keys: list[str] = []
+    try:
+        keys = await ctx.list_artifacts() or []
+    except Exception:
+        pass
+
+    if keys:
+        # Prefer keys ending in .pdf or image extensions; fall back to first key
+        def _key_score(k: str) -> int:
+            k_lower = k.lower()
+            if k_lower.endswith(".pdf"):
+                return 2
+            if any(k_lower.endswith(ext) for ext in (".png", ".jpg", ".jpeg", ".tiff", ".webp")):
+                return 1
+            return 0
+
+        best_key = max(keys, key=_key_score)
+        part = await ctx.load_artifact(best_key)
+        if part is not None and part.inline_data is not None and part.inline_data.data:
+            mime_type = part.inline_data.mime_type or "application/pdf"
+            # Heal
+            ctx.state[ARTIFACT_NAME_KEY] = best_key
+            return part.inline_data.data, mime_type
+
+    # ------------------------------------------------------------------ #
+    # Path 4: nothing available
+    # ------------------------------------------------------------------ #
+    tried = (
+        f"state[{ARTIFACT_NAME_KEY!r}] was absent, "
+        f"user_content.parts had no usable inline_data, "
+        f"list_artifacts returned {keys!r} with no loadable bytes"
+    )
+    raise ValueError(
+        f"No PDF bytes could be recovered for this session. Tried: {tried}. "
+        "If running via Slack, ensure the runner sets state[ARTIFACT_NAME_KEY] "
+        "before the workflow starts. If running via adk web / playground, "
+        "upload a PDF or image file with your message."
+    )
 
 
 def _parse_iso(s: Optional[str]) -> Optional[date]:
@@ -359,8 +501,12 @@ def _effective_fye_month(state: dict) -> tuple[int, bool]:
 async def classify_node(ctx) -> Event:
     """Classify the uploaded PDF and route to the invoice or bank-statement lane.
 
-    Emits ``Event(route="invoice"|"bank_statement")`` and records the resolved
-    ``doc_type`` in state for downstream nodes.
+    Emits ``Event(route="commercial_doc"|"bank_statement")`` (canonical lane
+    label from :mod:`accounting_agents.lane_config`) and records the resolved
+    ``doc_type`` in state for downstream nodes. ``classify_node`` and the
+    document workflow driver BOTH consult :data:`lane_config.DOC_TYPE_TO_LANE`
+    so the Event route label and the iterated node list never disagree —
+    that was the "route: invoice vs doc_type: receipt" trace gap (Phase 2).
 
     Direction is intentionally NOT resolved here for the invoice lane — the
     Understand (Drive-parity) call now owns parties + ``direction_for_client``
@@ -372,6 +518,7 @@ async def classify_node(ctx) -> Event:
     rewritten by a fuzzy Python pass).
     """
     from invoice_processing.classify.document_classifier import ALLOWED_DOC_TYPES
+    from .lane_config import ROUTE_BANK, ROUTE_COMMERCIAL_DOC, route_for_doc_type
 
     data, mime_type = await _load_pdf_bytes(ctx)
     cls: ClassificationResult = CLASSIFY_FN(data, mime_type, model=MODEL_LITE)
@@ -398,6 +545,11 @@ async def classify_node(ctx) -> Event:
     # (blank page, marketing flyer, non-financial contract).  Default is True.
     ctx.state[CLASSIFY_PROCESSABLE_KEY] = cls.processable
 
+    # Resolve route label via lane_config — single source of truth. We keep
+    # ``state[DOC_TYPE_KEY]`` as the raw enum ("invoice" / "receipt" / ...) so
+    # downstream nodes / traces show what the LLM classifier actually emitted;
+    # the Event route is the canonical lane label.
+    route_label = route_for_doc_type(doc_type)
     if doc_type == "bank_statement":
         ctx.state[DOC_TYPE_KEY] = "bank_statement"
         ctx.state[DIRECTION_KEY] = None
@@ -411,7 +563,7 @@ async def classify_node(ctx) -> Event:
     # or approval_gate) escalates — no fuzzy Python fallback in the graph.
     ctx.state[DIRECTION_KEY] = "auto"
     return Event(
-        route=ROUTE_INVOICE,
+        route=ROUTE_COMMERCIAL_DOC,
         output={"doc_type": doc_type, "direction": "auto"},
     )
 
@@ -496,8 +648,156 @@ async def extract_invoice_document_node(ctx) -> Event:
             result.ledger_extract,
             fallback=ctx.state.get(DIRECTION_KEY) or "purchase",
         )
+        if resolved == "unknown":
+            resolved = _retry_resolve_direction_llm(ctx, result.ledger_extract)
         ctx.state[DIRECTION_KEY] = resolved
     return Event(output={"count": len(result.normalized)})
+
+
+def _is_playground_placeholder(name: object) -> bool:
+    """True when ``name`` looks like the dev playground's synthetic client name.
+
+    The playground seed (``load_client_profile`` → ``_playground_default_context``)
+    uses one of a small set of recognisable placeholder strings. Treating them as
+    "real" clients makes the direction classifier fail (no match on the
+    document) and every test invoice resolve to ``unknown`` — which is the
+    opposite of what the playground is for. When we see a placeholder, we tell
+    the LLM to ignore the client name and reason from document context only.
+    """
+    if not isinstance(name, str):
+        return False
+    s = name.strip().lower()
+    if not s:
+        return True
+    placeholders = {
+        "playground client",
+        "playground",
+        "test client",
+        "demo client",
+        "default client",
+    }
+    return s in placeholders or s.startswith("playground ") or s.startswith("test ")
+
+
+def _retry_resolve_direction_llm(ctx, extract: dict) -> str:
+    """Refined retry logic to disambiguate direction using the LLM when first pass is unknown.
+
+    Special-cased: if the seeded client name is a recognisable playground
+    placeholder (so the user is running ``adk web`` / playground without a real
+    profile), the client-name match logic is skipped and the LLM is told to
+    infer the most likely direction from the document parties alone — purchase
+    is the right default for a typical test invoice.
+    """
+    client_name = ctx.state.get("client_name")
+    client_uen = ctx.state.get("client_uen")
+    client_is_placeholder = _is_playground_placeholder(client_name)
+
+    if not client_name:
+        return "unknown"
+
+    from_party = extract.get("from_party") or {}
+    to_party = extract.get("to_party") or {}
+    issuer_name = from_party.get("name") or extract.get("vendor_name")
+    issuer_uen = from_party.get("uen") or extract.get("issuer_gst_regno")
+    bill_to_name = to_party.get("name") or extract.get("customer_name")
+    bill_to_uen = to_party.get("uen")
+    doc_kind = extract.get("doc_kind") or "invoice"
+    summary_table = extract.get("summary_table") or []
+
+    summary_str = "\n".join(
+        f"- {s.get('category')}: {s.get('details')}"
+        for s in summary_table
+        if isinstance(s, dict)
+    )
+
+    # Two prompt variants: the standard one (name-match against the document) and
+    # a playground variant (no real client to match against — pick the most
+    # likely direction from document signals alone).
+    if client_is_placeholder:
+        instruction = (
+            "You are an expert SG/MY accountant. The user is running in a "
+            "DEV / playground session and has not loaded a real client profile. "
+            "Pick the single most likely direction from the perspective of a "
+            "typical small-business bookkeeper who just dropped this document "
+            "into their inbox.\n\n"
+            f"Document Details:\n"
+            f"- Issuer/From: {issuer_name or 'Not visible'} (UEN: {issuer_uen or 'Not visible'})\n"
+            f"- Billed To: {bill_to_name or 'Not visible'} (UEN: {bill_to_uen or 'Not visible'})\n"
+            f"- Type of Document: {doc_kind}\n"
+            "Visible Text Summary:\n"
+            f"{summary_str}\n\n"
+            "Heuristics (in priority order):\n"
+            "1. If the document is a third-party issued bill, tax invoice, "
+            "purchase order, statement of account, or anything that names the "
+            "bookkeeper's company in the 'Billed To' or 'Bill To' field, it's "
+            "a PURCHASE.\n"
+            "2. If the document names the bookkeeper's company in the 'From' / "
+            "'Issuer' / 'Sold To' field and bills an external party, it's a SALE.\n"
+            "3. If the document is a receipt of payment, expense reimbursement, "
+            "or petty cash slip, it's a PURCHASE.\n"
+            "4. If the document is a quote or proforma without a clear direction, "
+            "default to PURCHASE (a small-business bookkeeper uploads their own "
+            "bills 10x more often than their own sales docs).\n\n"
+            "Respond with a JSON object containing keys: 'direction' (must be "
+            "one of: purchase, sales) and 'reason' (short explanation of the "
+            "chosen direction)."
+        )
+    else:
+        instruction = (
+            "You are an expert SG/MY accountant. We are trying to determine if a document is a "
+            "purchase or a sale from the perspective of our client.\n\n"
+            f"Client Name: {client_name}\n"
+            f"Client UEN: {client_uen or 'Not visible'}\n\n"
+            "Document Details:\n"
+            f"- Issuer/From: {issuer_name or 'Not visible'} (UEN: {issuer_uen or 'Not visible'})\n"
+            f"- Billed To: {bill_to_name or 'Not visible'} (UEN: {bill_to_uen or 'Not visible'})\n"
+            f"- Type of Document: {doc_kind}\n"
+            "Visible Text Summary:\n"
+            f"{summary_str}\n\n"
+            "Rules:\n"
+            "1. purchase: Client is the one paying. Either they are the 'Billed To' party, the recipient, "
+            "or it is an expense claim / reimbursement for an employee.\n"
+            "2. sales: Client is the one collecting. They are the 'Issuer/From' party selling goods/services.\n"
+            "3. self_referential: The client is both the issuer and the recipient (e.g., dividend voucher, "
+            "internal cash transfer, own billing).\n"
+            "4. unknown: If it is completely ambiguous or the client name/UEN does not appear at all on the document.\n\n"
+            "Analyze carefully. If the client name has a slight typo or abbreviation but matches either issuer or billed to, "
+            "classify accordingly.\n"
+            "Respond with a JSON object containing keys: 'direction' (must be one of: purchase, sales, self_referential, unknown) "
+            "and 'reason' (short explanation)."
+        )
+
+    class _DirectionDecision(BaseModel):
+        direction: str = Field(description="purchase | sales | self_referential | unknown")
+        reason: str
+
+    try:
+        from google.genai import types as _genai_types
+
+        from invoice_processing.shared_libraries.genai_client import make_client
+        client = make_client()
+        resp = client.models.generate_content(
+            model=MODEL_LITE,
+            contents=[instruction],
+            config=_genai_types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=_DirectionDecision,
+                temperature=0,
+            ),
+        )
+        parsed = getattr(resp, "parsed", None)
+        if parsed is None:
+            text = (getattr(resp, "text", None) or "").strip()
+            parsed = _DirectionDecision(**json.loads(text))
+
+        direction = (parsed.direction or "unknown").strip().lower()
+        if direction in ("purchase", "sales", "self_referential", "unknown"):
+            logger.info("direction retry resolved to: %s (reason: %s)", direction, parsed.reason)
+            return direction
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("direction retry classification failed: %s", exc)
+
+    return "unknown"
 
 
 async def extract_document_node(ctx) -> Event:
@@ -649,6 +949,12 @@ async def categorize_node(ctx) -> Event:
     # the model hedges rather than assuming registered.  Distinct from tax_node's
     # `True` default, which drives the classifier's safe fallback for registered clients.
     tax_registered: bool | None = ctx.state.get("tax_registered")
+    # Region context for the LLM — Phase 8 / multi-country. Surfaces in the
+    # LLM prompt as {client_region?} (auto-injected by ADK from session state).
+    client_region: str = ctx.state.get("region") or ctx.state.get("client_region") or ""
+    client_currency: str = (
+        ctx.state.get("base_currency") or ctx.state.get("client_currency") or ""
+    ).upper()
 
     # ADR-0004: LLM guesses are PROVISIONAL — they flow into the invoice and
     # then through the HITL approval gate.  Auto-persisting them into
@@ -664,6 +970,8 @@ async def categorize_node(ctx) -> Event:
             model=MODEL_LITE,
             use_llm=True,
             tax_registered=tax_registered,
+            client_region=client_region,
+            client_currency=client_currency,
         )
 
     ctx.state[NORMALIZED_KEY] = _guard_state_payload(
@@ -673,18 +981,113 @@ async def categorize_node(ctx) -> Event:
 
 
 @node
+async def resolve_jurisdiction_node(ctx) -> Event:
+    """Resolve tax jurisdiction from session state — runs once before tax_node.
+
+    Multi-country support: reads ``state["region"]`` + ``state["base_currency"]``
+    + ``state["supplier_country"]`` / ``state["customer_country"]`` and writes
+    ``state["tax_jurisdiction"]`` + ``state["tax_system_hint"]`` +
+    ``state["jurisdiction_rates"]``. ADK web's State tab surfaces these keys so
+    the operator can see exactly which rule set was applied.
+
+    Per ADK best practice (Sessions/State docs): region lives in user-level
+    state (``state["region"]``) seeded by the profile callback. The router
+    is a thin pure function — no LLM, no I/O. Pure data in / pure data out.
+    """
+    resolution = _resolve_jurisdiction_fn(ctx.state)
+    _write_jurisdiction_to_state(ctx.state, resolution)
+    return Event(
+        output={
+            "tax_jurisdiction": resolution.jurisdiction.code,
+            "tax_system": resolution.jurisdiction.tax_system,
+            "flag_for_human": resolution.jurisdiction.flag_for_human,
+            "client_region": resolution.client_region,
+        }
+    )
+
+
+def _populate_party_countries_from_invoices(state: dict) -> None:
+    """Copy supplier.country / customer.country from normalized invoices to state.
+
+    The extract node writes country into ``NormalizedInvoice.supplier.country``
+    but does NOT push it into session state. The jurisdiction router reads
+    from state, so we bridge here. Called from the document_workflow_driver
+    between extract and tax.
+    """
+    invoices = _normalized_from_state(state)
+    if not invoices:
+        return
+    inv = invoices[0]  # one-invoice-at-a-time is the spine's invariant
+    if inv.supplier and inv.supplier.country:
+        state.setdefault(SUPPLIER_COUNTRY_KEY, _norm_country(inv.supplier.country))
+    if inv.customer and inv.customer.country:
+        state.setdefault(CUSTOMER_COUNTRY_KEY, _norm_country(inv.customer.country))
+
+
+def _norm_country(value: object) -> Optional[str]:
+    """Coerce a free-form country string to a 2-letter code (SG/MY/...).
+
+    Tiny local copy of ``jurisdiction._norm_country`` so this module has no
+    circular import on the public helper. Behaviour matches upstream.
+    """
+    if not value:
+        return None
+    s = str(value).strip().upper()
+    if not s:
+        return None
+    aliases = {"SG": "SG", "SGP": "SG", "SINGAPORE": "SG",
+               "MY": "MY", "MYS": "MY", "MALAYSIA": "MY", "MSIA": "MY"}
+    return aliases.get(s, s[:2] if len(s) >= 2 else s)
+
+
+@node
 async def tax_node(ctx) -> Event:
-    """Classify SG GST treatment per line, per normalized invoice."""
+    """Region-aware per-line tax classification (LLM-first, Python-guarded).
+
+    Replaces the previous SG-only ``TaxClassifier()`` call. Flow:
+
+    1. Re-resolve the jurisdiction (cheap pure function — idempotent).
+    2. For each invoice, call ``tax_reasoning.reason_one_invoice`` which:
+       * Builds an LLM prompt with jurisdiction context (region, tax system,
+         standard rate, supplier country) via state templating.
+       * Asks the LLM for a structured per-line decision
+         (tax_treatment / tax_confidence / tax_reason).
+       * Validates the LLM's math with a Python rate guard
+         (no per-line signal spaghetti — just arithmetic + tolerance).
+       * Falls back to the deterministic ``TaxClassifier`` for SG invoices
+         when the LLM is unreachable (preserves C6–C8 golden behaviour).
+    3. Writes the resolved jurisdiction into ``state["tax_jurisdiction"]``
+       so ADK web's State tab and trace events show the rule set used.
+    """
+    # Country info from extracted invoices must be in state for the router
+    # to consider it (extract fills it on the model, not in state).
+    _populate_party_countries_from_invoices(ctx.state)
+
+    resolution = _resolve_jurisdiction_fn(ctx.state)
+    _write_jurisdiction_to_state(ctx.state, resolution)
+
     invoices = _normalized_from_state(ctx.state)
-    clf = TaxClassifier()
+    flagged_total = 0
     for inv in invoices:
-        for line in inv.lines:
-            clf.classify_line(line, inv)
+        outcome = _reason_one_invoice(
+            inv,
+            state=ctx.state,
+            jurisdiction_resolution=resolution,
+        )
+        flagged_total += outcome.flagged_count
 
     ctx.state[NORMALIZED_KEY] = _guard_state_payload(
         NORMALIZED_KEY, [_inv_to_dict(i) for i in invoices]
     )
-    return Event(output={"count": len(invoices)})
+    return Event(
+        output={
+            "count": len(invoices),
+            "tax_jurisdiction": resolution.jurisdiction.code,
+            "tax_system": resolution.jurisdiction.tax_system,
+            "flagged_lines": flagged_total,
+            "cross_border": resolution.jurisdiction.cross_border,
+        }
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -1534,6 +1937,17 @@ async def consolidate_node(ctx) -> Event:
             )
     else:
         kind = "invoice"
+        # Guard: get_exporter raises ValueError for None/unknown; default to "qbs"
+        # so the pipeline completes in the playground (no client profile seeded yet
+        # at consolidate time) and in any other no-software scenario.
+        _software_key = (software or "").strip().lower()
+        if not _software_key or _software_key not in ("qbs", "xero"):
+            if software is not None and software != "":
+                logger.warning(
+                    "consolidate_node: unknown software %r; falling back to 'qbs'",
+                    software,
+                )
+            software = "qbs"
         exporter = get_exporter(software)
         invoices = _normalized_from_state(state)
         for idx, (inv, route) in enumerate(zip(invoices, routes)):

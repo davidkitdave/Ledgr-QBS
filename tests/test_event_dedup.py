@@ -111,6 +111,7 @@ def test_member_joined_dedup_calls_handler_once():
             runner=runner_mock,
             ledger_store=MagicMock(),
             db=MagicMock(),
+            store=MagicMock(),
         )
 
         handler = registered["member_joined_channel"]
@@ -164,6 +165,7 @@ def test_file_shared_dedup_does_not_call_process():
             runner=runner_mock,
             ledger_store=MagicMock(),
             db=MagicMock(),
+            store=MagicMock(),
         )
 
         handler = registered["file_shared"]
@@ -210,6 +212,7 @@ def test_message_dedup_calls_answer_once():
             runner=runner_mock,
             ledger_store=MagicMock(),
             db=MagicMock(),
+            store=MagicMock(),
         )
 
         handler = registered["message"]

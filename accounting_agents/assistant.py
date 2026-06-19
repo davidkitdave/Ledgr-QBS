@@ -48,6 +48,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 from datetime import date, datetime, timedelta
 
 from google.adk.agents import LlmAgent
@@ -63,9 +64,16 @@ from invoice_processing.export.client_context import (
     entity_memory_from_state,
 )
 from invoice_processing.export.models import InvoiceLine, NormalizedInvoice, PartyInfo
-from invoice_processing.export.tax_classifier import TaxClassifier
 
 from . import config
+from .jurisdiction import (
+    JURISDICTION_RATES_KEY,
+    TAX_JURISDICTION_KEY,
+    TAX_SYSTEM_HINT_KEY,
+    resolve_jurisdiction,
+    write_to_state,
+)
+from .tax_reasoning import reason_one_invoice as _reason_one_invoice
 
 logger = logging.getLogger(__name__)
 
@@ -109,44 +117,7 @@ DOCUMENT_SESSIONS_KEY = "document_sessions"
 #: after a direct account-code answer or ``explain_posted_line``).
 THREAD_FOCUS_KEY = "thread_focus"
 
-#: Substrings that suggest a ledger-data question when onboarding is incomplete.
-_LEDGER_QUESTION_HINTS: frozenset[str] = frozenset(
-    {
-        "ledger",
-        "balance",
-        "gst",
-        "pnl",
-        "profit",
-        "invoice",
-        "coa",
-        "account",
-        "withdrawal",
-        "deposit",
-        "row",
-        "categor",
-        "tax",
-        "spend",
-        "revenue",
-        "expense",
-    }
-)
 
-#: Hints for thread-scoped account/COA follow-ups (before_model guard).
-_THREAD_ACCOUNT_HINTS: frozenset[str] = frozenset(
-    {
-        "account code",
-        "acount code",
-        "account_code",
-        "coa",
-        "categoriz",
-        "what does",
-        "description of",
-        "what is the description",
-        "explain the code",
-        "that code",
-        "posted to",
-    }
-)
 
 #: Invoice sheets the write tools may mutate. Bank sheets carry a derived running
 #: balance (memory ``bank-ledger-continuous-sorted``) so amending/removing one
@@ -197,7 +168,39 @@ _SIGNATURE_COLS: tuple[str, ...] = (
 )
 
 #: SGD threshold for mandatory GST registration (s.40B GST Act, Singapore).
+#: Per-jurisdiction thresholds live in the YAML reference; this constant is
+#: the SG default used when no profile + no env override is present. The
+#: chat agent now resolves the active threshold via :func:`_tax_registration_threshold`.
 GST_THRESHOLD_SGD = 1_000_000.0
+
+#: MYR threshold for mandatory SST registration (Service Tax Act 2018,
+#: Service Tax Regulations 2018 — RM500,000 threshold for taxable services
+#: providers). Used when the active jurisdiction is MALAYSIA and no profile
+#: threshold override is present.
+SST_THRESHOLD_MYR = 500_000.0
+
+
+def _tax_registration_threshold(state: dict) -> tuple[float, str, str]:
+    """Return (threshold_amount, currency, label) for the active jurisdiction.
+
+    Reads region from ``state["region"]`` (canonical) or ``state["client_region"]``
+    (legacy). Falls back to SG / SGD / 1_000_000 when no region is present so
+    legacy SG clients see no behaviour change.
+
+    Order of precedence:
+    1. Env override ``LEDGR_TAX_REGISTRATION_THRESHOLD_<REGION>`` (most explicit).
+    2. Per-region hard-coded defaults (SG: 1M SGD, MY: 500K MYR).
+    3. SG / 1M SGD (legacy fallback — never silently for a non-SG client).
+    """
+    region = (state.get("client_region") or state.get("region") or "").strip().upper()
+    currency = (state.get("base_currency") or state.get("client_currency") or "").strip().upper()
+    if region in ("SINGAPORE", "SG", "SGP"):
+        threshold = float(os.environ.get("LEDGR_TAX_REGISTRATION_THRESHOLD_SG", GST_THRESHOLD_SGD))
+        return threshold, "SGD", "SG GST registration (s.40B GST Act)"
+    if region in ("MALAYSIA", "MY", "MYS", "MSIA"):
+        threshold = float(os.environ.get("LEDGR_TAX_REGISTRATION_THRESHOLD_MY", SST_THRESHOLD_MYR))
+        return threshold, "MYR", "MY SST registration (Service Tax Act 2018)"
+    return float(GST_THRESHOLD_SGD), "SGD", "SG GST registration (s.40B GST Act, fallback)"
 
 
 def _normalize_row_for_tools(row: dict) -> dict:
@@ -352,11 +355,10 @@ def _empty_ledger_message(tool_context: ToolContext) -> str:
 
 
 def summarize_by_category(tool_context: ToolContext) -> str:
-    """Return total spend grouped by account / COA category.
+    """Return total spend (total purchases / expenses) grouped by account / COA category.
 
-    Reads ``state["ledger_data"]`` and sums ``Source Amount`` per
-    ``Account Code / COA`` value.  Returns a JSON string so the LLM can
-    render it cleanly.
+    Use this tool whenever the user asks for total purchases, total spend, or expense summaries.
+    Do NOT use `pnl_for_fy` for purchases or spend queries unless the user asks for a full Profit & Loss.
 
     Args:
         tool_context: Injected by ADK; provides access to session state.
@@ -386,9 +388,10 @@ def summarize_by_category(tool_context: ToolContext) -> str:
 def pnl_for_fy(tool_context: ToolContext) -> str:
     """Return a simple P&L summary (total revenue minus total expenses).
 
-    Uses the ``Doc Type`` field to separate sales (``S``) from purchases
-    (``P``).  Falls back to the sign of ``Source Amount`` (positive = revenue,
-    negative = expense) when ``Doc Type`` is absent.
+    CRITICAL: Do NOT use this tool if the user only asks for total purchases, total spend,
+    or expense summaries. For purchases/spend/expenses, use `summarize_by_category` instead.
+    Only use this tool when the user specifically asks for overall profit, net profit,
+    total revenue, or a full Profit & Loss summary.
 
     Args:
         tool_context: Injected by ADK; provides access to session state.
@@ -470,6 +473,51 @@ def _to_float(value) -> float:
         return float(value or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _state_to_dict(state) -> dict:
+    """Coerce a session state (dict, ADK ``State``, or ``None``) to a plain ``dict``.
+
+    ADK's ``State`` class supports ``__getitem__`` but NOT the iterator protocol
+    required by ``dict()`` — calling ``dict(state)`` raises ``KeyError: 0``
+    because it probes ``state[0]``, ``state[1]``, ... for integer keys. This
+    helper handles both shapes (and ``None``) so callers can treat the result as
+    a plain mapping without knowing the ADK runtime's state container.
+
+    The well-known jurisdiction / profile keys we care about are copied
+    explicitly; anything else is lost (callers that need full-fidelity should
+    pass a dict).
+    """
+    if state is None:
+        return {}
+    if isinstance(state, dict):
+        return dict(state)
+    out: dict = {}
+    # ADK State: read the well-known keys we look up downstream via ``get``.
+    for key in (
+        "region",
+        "client_region",
+        "base_currency",
+        "client_currency",
+        "tax_registered",
+        "tax_system",
+        "tax_system_hint",
+        "tax_jurisdiction",
+        "client_id",
+        "client_name",
+        "supplier_country",
+        "bill_to_country",
+        "invoice_currency",
+        "fye_month",
+        "software",
+        "currency",
+    ):
+        try:
+            if key in state:
+                out[key] = state[key]
+        except Exception:
+            continue
+    return out
 
 
 def _parse_row_date(value) -> date | None:
@@ -653,45 +701,61 @@ def bank_totals(tool_context: ToolContext, month: str = "", year: str = "") -> s
 
 
 def gst_threshold_check(tool_context: ToolContext) -> str:
-    """Check whether taxable turnover is approaching the SGD 1 M GST threshold.
+    """Check whether taxable turnover is approaching the jurisdiction's registration threshold.
 
     Sums ``Source Amount`` for rows where ``Tax Rate`` indicates a standard-
-    rated supply (SR / ZR for goods; ignores exempt / out-of-scope).  Compares
-    against the ``SGD 1,000,000`` mandatory registration threshold.
+    rated or zero-rated supply (SR / ZR / SSR — covers both Singapore GST
+    and Malaysia SST). Compares against the active jurisdiction's mandatory
+    registration threshold (SG: SGD 1M, MY: MYR 500K — read from
+    :func:`_tax_registration_threshold`).
+
+    Per ADK best practice: region is read from ``state["region"]`` /
+    ``state["client_region"]`` via :func:`_tax_registration_threshold`. The
+    tool returns the threshold currency + label so the chat agent can
+    surface the correct number to the user (no more "SGD 1 M" answer for a
+    Malaysia client).
 
     Args:
         tool_context: Injected by ADK; provides access to session state.
 
     Returns:
-        JSON string with ``taxable_turnover``, ``threshold``, ``headroom``,
-        and ``near_threshold`` (bool, True when within 20 % of the limit).
+        JSON string with ``taxable_turnover``, ``threshold``, ``currency``,
+        ``threshold_label``, ``headroom``, and ``near_threshold`` (bool, True
+        when within 20 % of the limit).
     """
     rows = _get_rows(tool_context)
     if not rows:
         return _empty_ledger_message(tool_context)
 
+    threshold, currency, label = _tax_registration_threshold(
+        getattr(tool_context, "state", {}) or {}
+    )
+
     taxable = 0.0
     for row in rows:
         tax_rate = str(row.get("Tax Rate") or row.get("tax_rate") or "").strip().upper()
         # Standard-rated (9% SR) and zero-rated (ZR) supplies count toward
-        # the taxable turnover threshold; exempt (ES/EP) and out-of-scope (OS)
-        # do not.
-        if tax_rate in ("SR", "ZR", "SR9", "SR8", "SR7"):
+        # the taxable turnover threshold for both SG (GST) and MY (SST).
+        # SSR is Malaysia Sales Tax — also counts. Exempt (ES/EP) and
+        # out-of-scope (OS) do not.
+        if tax_rate in ("SR", "ZR", "SR9", "SR8", "SR7", "SSR"):
             try:
                 amount = float(row.get("Source Amount") or row.get("amount") or 0)
             except (TypeError, ValueError):
                 amount = 0.0
             taxable += abs(amount)
 
-    headroom = GST_THRESHOLD_SGD - taxable
-    near = taxable >= GST_THRESHOLD_SGD * 0.80
+    headroom = threshold - taxable
+    near = taxable >= threshold * 0.80
     return json.dumps(
         {
             "taxable_turnover": round(taxable, 2),
-            "threshold": GST_THRESHOLD_SGD,
+            "threshold": threshold,
+            "currency": currency,
+            "threshold_label": label,
             "headroom": round(max(headroom, 0.0), 2),
             "near_threshold": near,
-            "already_exceeded": taxable >= GST_THRESHOLD_SGD,
+            "already_exceeded": taxable >= threshold,
         },
         ensure_ascii=False,
     )
@@ -956,11 +1020,16 @@ def explain_tax_treatment(
     invoice_date: str = "",
     our_gst_registered: str = "",
 ) -> str:
-    """Explain why a line gets a tax treatment code using the engine's tax classifier.
+    """Explain why a line gets a tax treatment code using the LLM tax reasoner.
 
-    Builds a one-line ``NormalizedInvoice`` in memory and runs
-    ``TaxClassifier.classify_line`` — the same logic as ``tax_node``. Honours the
-    §0.5-C master gate: when the client is not GST-registered, every line is ``NT``.
+    Thin wrapper over :func:`accounting_agents.tax_reasoning.reason_one_invoice`.
+    Builds a one-line ``NormalizedInvoice`` in memory, resolves the active
+    jurisdiction from session state (region + currency + counterparty
+    country), and asks the LLM to reason about the line's treatment. The
+    jurisdiction-aware reference YAML (``sg_gst.yaml`` / ``my_sst.yaml``) is
+    surfaced to the LLM as rate-band context; Python only does the math
+    guard. For Malaysia SST a 4.81 / 60.19 line resolves to SR + 8% (not
+    the previous SG 9% mismatch that flagged the YAU LEE receipt).
 
     Args:
         tool_context: Injected by ADK; provides session state.
@@ -974,7 +1043,8 @@ def explain_tax_treatment(
 
     Returns:
         JSON with ``tax_treatment``, ``tax_confidence``, ``tax_flagged``,
-        ``tax_reason``.
+        ``tax_reason``, ``tax_jurisdiction`` (so the chat agent can say which
+        rule set decided the answer).
     """
     try:
         state = tool_context.state
@@ -1004,17 +1074,28 @@ def explain_tax_treatment(
     inv = NormalizedInvoice(
         doc_type=dtype,
         invoice_date=inv_date,
-        supplier=PartyInfo(name="Supplier", country="SG"),
-        customer=PartyInfo(name="Customer", country="SG"),
         our_gst_registered=reg,
     )
-    TaxClassifier().classify_line(line, inv)
+    # Resolve jurisdiction from state (NOT hardcoded SG) so the LLM tax
+    # reasoner picks the right rate band. Returns SINGAPORE for SG clients,
+    # MALAYSIA for MY clients, CROSS_BORDER / AMBIGUOUS for mismatched pairs.
+    resolver_state = dict(state)
+    if "region" not in resolver_state and "client_region" not in resolver_state:
+        resolver_state["region"] = "SINGAPORE"
+        resolver_state["base_currency"] = resolver_state.get("base_currency") or "SGD"
+    resolution = resolve_jurisdiction(resolver_state)
+    write_to_state(resolver_state, resolution)
+    outcome = _reason_one_invoice(inv, state=resolver_state, jurisdiction_resolution=resolution)
     return json.dumps(
         {
             "tax_treatment": line.tax_treatment,
             "tax_confidence": line.tax_confidence,
             "tax_flagged": line.tax_flagged,
             "tax_reason": line.tax_reason,
+            "tax_jurisdiction": resolution.jurisdiction.code,
+            "tax_system": resolution.jurisdiction.tax_system,
+            "used_llm": outcome.used_llm,
+            "used_fallback": outcome.used_fallback,
         },
         ensure_ascii=False,
     )
@@ -1427,7 +1508,8 @@ def _row_doc_type(row: dict) -> str:
 
 
 def _reclassify_tax_for_row(
-    row: dict, *, registered: bool, tax_keyword: str | None = None
+    row: dict, *, registered: bool, tax_keyword: str | None = None,
+    state: dict | None = None,
 ) -> tuple[str, dict]:
     """Re-run the §0.5-C tax classifier for ``row`` and derive its tax columns.
 
@@ -1441,11 +1523,17 @@ def _reclassify_tax_for_row(
     honours the requested code for a registered client; the master gate still
     overrides it to ``NT`` for a non-registered client.
 
+    Multi-country support: jurisdiction is resolved from session ``state``
+    (NOT hardcoded SG). The classifier picks the correct rate band:
+    SG 9% GST or MY 8% SST. Python only does the math guard.
+
     Returns ``(treatment, tax_column_updates)`` where ``tax_column_updates`` maps
     the workbook tax headers present on ``row`` to their re-derived values
     (``Tax Amount`` dollar value for QBS; ``Tax Rate`` / ``*TaxType`` code for
     code-carrying layouts).
     """
+    from invoice_processing.export.tax_classifier import TaxClassifier
+
     doc_type = _row_doc_type(row)
     net = _to_float(row.get("Source Amount") or row.get("Sub Total") or row.get("amount"))
     gst_cell = row.get("Tax Amount")
@@ -1461,30 +1549,78 @@ def _reclassify_tax_for_row(
     inv = NormalizedInvoice(
         doc_type=doc_type,
         invoice_date=inv_date,
-        supplier=PartyInfo(name="Supplier", country="SG"),
-        customer=PartyInfo(name="Customer", country="SG"),
         our_gst_registered=registered,
     )
-    clf = TaxClassifier()
-    clf.classify_line(line, inv)
+    # Resolve jurisdiction from state. For SG clients, use the existing
+    # SG-only TaxClassifier (preserves §0.5-C behaviour). For non-SG
+    # jurisdictions (MY / cross-border), delegate to the LLM tax reasoner
+    # which has the proper multi-country reference YAML.
+    #
+    # Legacy callers (tests + older chat paths) do not always set ``region``
+    # in state. Default to SG in that case so the §0.5-C re-classification
+    # continues to use the existing SG rules — preserves C6-C8 golden cases.
+    resolver_state = _state_to_dict(state)
+    if "region" not in resolver_state and "client_region" not in resolver_state:
+        resolver_state["region"] = "SINGAPORE"
+        resolver_state["base_currency"] = resolver_state.get("base_currency") or "SGD"
+    resolution = resolve_jurisdiction(resolver_state)
+    write_to_state(resolver_state, resolution)
+    if resolution.jurisdiction.code == "SINGAPORE":
+        # Local import keeps the SG-only classifier confined to the SG
+        # branch; the chat agent at large no longer imports it at module
+        # top level (chat-no-engine-import task).
+        clf = TaxClassifier()
+        clf.classify_line(line, inv)
+    else:
+        _reason_one_invoice(inv, state=resolver_state, jurisdiction_resolution=resolution)
+    # tax_code resolution: SG via classifier.tax_code; MY / cross-border
+    # via the per-jurisdiction code_map from the reference YAML.
+    tax_code_for = _resolve_tax_code(line.tax_treatment, doc_type, resolution)
 
     updates: dict = {}
     for header in _TAX_AMOUNT_HEADERS:
         if header in row:
-            # QBS Tax Amount: GST dollars (only SR carries tax; else 0).
+            # QBS Tax Amount: tax dollars (only SR carries tax; else 0).
             if line.tax_treatment == "SR":
-                rate = clf.rate_for_date(inv_date)
-                amt = line.gst_amount if line.gst_amount else net * rate
+                rate = resolution.jurisdiction.standard_rate or 0.0
+                amt = line.gst_amount if line.gst_amount else (net or 0.0) * rate
                 updates[header] = round(float(amt or 0.0), 2)
             else:
                 updates[header] = 0.0
     for header in _TAX_CODE_HEADERS:
         if header in row:
             if header == "*TaxType":
-                updates[header] = clf.tax_code(line.tax_treatment, doc_type, "xero")
+                updates[header] = tax_code_for
             else:
                 updates[header] = line.tax_treatment
     return line.tax_treatment, updates
+
+
+def _resolve_tax_code(treatment: str, doc_type: str, resolution) -> str:
+    """Map a canonical treatment to the target-system tax code for ``resolution``.
+
+    Reads the per-jurisdiction ``code_map`` from the reference YAML. Falls back
+    to the SG / QBS mapping when the reference YAML is unavailable, so legacy
+    callers see no behaviour change.
+    """
+    from .jurisdiction import _load_reference
+
+    yaml_name = getattr(resolution.jurisdiction, "reference_yaml", None)
+    direction = "sales" if doc_type == "sales" else "purchase"
+    if yaml_name:
+        data = _load_reference(yaml_name) or {}
+        code_map = data.get("code_map") or {}
+        # Prefer QBS when present (matches the chat tool's expected write format).
+        for system in ("qbs", "xero"):
+            table = code_map.get(system, {}).get(direction, {})
+            if table and treatment in table:
+                return table[treatment]
+            if table and "SR" in table:
+                return table.get(treatment, table["SR"])
+    # No reference YAML — return the canonical treatment string itself so the
+    # caller still gets a meaningful code (was the previous behaviour when
+    # only SG was supported).
+    return treatment
 
 
 def _row_signature(row: dict) -> str:
@@ -1600,7 +1736,10 @@ def _build_amend_spec(
         working[header] = new_value
 
     treatment, tax_updates = _reclassify_tax_for_row(
-        working, registered=registered, tax_keyword=requested_kw
+        working,
+        registered=registered,
+        tax_keyword=requested_kw,
+        state=getattr(tool_context, "state", {}) or {},
     )
     updates.update(tax_updates)
 
@@ -2207,14 +2346,22 @@ def learn_mapping(
 # --------------------------------------------------------------------------- #
 
 _BASE_INSTRUCTION = """
-You are the read-only accounting assistant for a Singapore SME's FY ledger.
+{+onboarding_gate?+}
+You are the read-only accounting assistant for an SME's FY ledger.
 Answer strictly from the data already loaded into your session — never invent
 figures, never call external services. The data may be an INVOICE ledger or a
 BANK STATEMENT; each tool's docstring tells you which kind it expects.
 
+The client's jurisdiction (region + tax system + currency) is filled in by ADK
+from session state via {+region?+} / {+base_currency?+} / {+tax_system?+}
+templating — apply the correct tax rules per jurisdiction (Singapore GST vs
+Malaysia SST vs cross-border). Never assume Singapore 9% GST for a non-SG
+client.
+
 Preamble (filled by ADK from session state — see runner state_delta):
 - client: {+client_name+} (UEN {+client_uen?+}, {+region?+}, base {+base_currency?+},
-  GST-registered: {+tax_registered?+}, FYE month {+fye_month?+})
+  tax-registered: {+tax_registered?+}, tax system: {+tax_system?+},
+  FYE month {+fye_month?+})
 - loaded FY: FY{+fy_loaded?+}  ({+ledger_row_count?+} rows)
 - Processing history: {+processing_log_count?+} deliveries
 - Pending reviews: {+pending_review_count?+} awaiting approval
@@ -2229,44 +2376,13 @@ Preamble (filled by ADK from session state — see runner state_delta):
   * pre-resolved ledger matches (runner prefetch): {+thread_delivery_ledger_matches?+}
   * thread focus from the last account-code answer: {+thread_focus?+}
 
-Routing decision tree (apply BEFORE picking a tool):
-1. "How was X extracted?" / "was the SOA extracted correctly?" →
-   ``diagnose_assistant_context`` then ``get_document_processing_detail``.
-2. "Show recent documents" / "what came in?" → ``list_recent_documents`` +
-   ``list_processing_history``.
-3. "Anything waiting for me?" / "pending reviews" → ``list_pending_reviews``.
-4. Empty ledger / "upload the workbook" → ``diagnose_assistant_context`` first;
-   report FY pointers and suggest the right FY.
-5. "Why this COA?" / "why this tax?" / "why account code for invoice X?" /
-   "where in the ledger?" → ``lookup_row`` with the invoice id or filename
-   fragment (e.g. ``25-D15``, ``25-D12``). Use ``explain_categorization`` with
-   ``row_index`` from the match — do NOT ask the user for vendor/description.
-   If the user replies with only a filename or invoice id, call ``lookup_row``
-   again immediately. Check ``processing_log_matches`` when ledger ``matches`` is
-   empty. **Thread-scoped default (Phase 3):** if the preamble lists
-   ``thread_delivery_filenames`` (i.e. the user replied under a delivery card),
-   prefer those filenames over the global processing log — the question is
-   about that specific delivery unless the user says otherwise. When
-   ``thread_delivery_ledger_matches`` is populated, use those ``row_index``
-   values directly with ``explain_categorization`` — do NOT claim a document
-   has "0 rows" because ``processing_log`` row_count can be stale for batch
-   deliveries. When ``thread_delivery_preview_rows`` lists account codes from
-   the delivery card, those rows were posted to the ledger — cite them and
-   explain the code via ``explain_categorization``.
-5b. "What does account code X mean?" / "description of the account code" /
-   "what is that code?" → ``lookup_coa_account`` with the code (or use
-   ``thread_focus.account_code`` when the user omits it). For a full audit
-   trail (posted row + COA name + extraction path) use ``explain_posted_line``
-   instead of chaining three tools. Do NOT ask for vendor/description when
-   ``thread_focus`` or ``thread_delivery_ledger_matches`` is set.
-6. "Fix" / "delete" / "clear" → run ``lookup_row`` first to get the exact
-   ``row_index``; never guess. Write tools are GATED — they PROPOSE first and
-   wait for the user to reply "yes" before anything is written. Only invoice
-   rows (Purchase / Sales) are editable; bank rows are read-only. Tax is
-   always re-derived by the engine (non-GST-registered → NT) — don't promise
-   the literal code the user typed.
-7. "Remember X goes to Y" / "always code X as Y" → ``learn_mapping``
-   immediately (no confirmation).
+Routing guidelines:
+1. To explain categorization or tax coding decisions (e.g., "why this COA?", "why did you use this account code?", "explain why you used this account code for invoice X"), you MUST NOT use `explain_posted_line`. Instead, you MUST first find the row index by calling `lookup_row` with the invoice ID or filename, and then call `explain_categorization` or `explain_tax_treatment` using that row index. If the user asks about multiple invoices, you MUST alternate: lookup the first invoice, call the explanation tool for it, then lookup the next invoice, call the explanation tool for it, and so on. Do NOT lookup all invoices first.
+2. Use `explain_posted_line` ONLY when the user asks about the audit trail, or when they ask for detail combining the posted ledger row, COA, and extraction logs. Do NOT call `explain_posted_line` for "why" categorization/account code questions. For simple account code definitions, use `lookup_coa_account` instead.
+3. Write tools (e.g. modify ledger) are gated: propose the change first, and wait for explicit user confirmation before calling the write tool.
+4. If the user asks for total purchases, total spend, or expense summaries, call `summarize_by_category`. Do NOT use `pnl_for_fy` unless they specifically ask for overall net profit, total revenue, or a full profit and loss summary.
+5. If the ledger is not loaded or has 0 rows, use `diagnose_assistant_context` to check.
+
 
 For every question, call the single most relevant tool first, then explain the
 result in plain English. If a tool reports the data is not loaded, follow the
@@ -2287,6 +2403,11 @@ def _enrich_instruction_state(state_dict: dict) -> dict:
     The runner injects ``processing_log_count`` / ``pending_review_count`` in
     ``state_delta``; tests may only provide the list keys — derive counts here
     so ``assistant_instruction()`` and ADK runtime injection stay aligned.
+
+    Phase 8 / multi-country: also surface the resolved jurisdiction's tax
+    system (``tax_system``) so the instruction template can render the right
+    tax-system hint for the chat agent. When the jurisdiction hasn't been
+    resolved yet, infer from region: SG -> GST, MY -> SST.
     """
     enriched = dict(state_dict)
     if enriched.get("processing_log_count") is None:
@@ -2297,6 +2418,23 @@ def _enrich_instruction_state(state_dict: dict) -> dict:
         pending = enriched.get(PENDING_REVIEWS_KEY) or enriched.get("pending_reviews")
         if isinstance(pending, list):
             enriched["pending_review_count"] = len(pending)
+
+    if enriched.get("onboarding_required") and not enriched.get("software"):
+        enriched["onboarding_gate"] = (
+            "⚠️ This channel is not onboarded yet. The user must run /ledgr settings first. "
+            "Tell them this — do NOT attempt to answer ledger questions."
+        )
+
+    # Surface the resolved tax system so the chat agent knows whether it is
+    # answering GST or SST questions. Read from state if the router has
+    # already written it (document lane writes ``tax_system_hint``); otherwise
+    # infer from region so the chat prompt is correct on first turn.
+    if not enriched.get("tax_system"):
+        region = (enriched.get("client_region") or enriched.get("region") or "").strip().upper()
+        if region in ("SINGAPORE", "SG", "SGP"):
+            enriched["tax_system"] = "GST"
+        elif region in ("MALAYSIA", "MY", "MYS", "MSIA"):
+            enriched["tax_system"] = "SST"
     return enriched
 
 
@@ -2340,47 +2478,10 @@ def assistant_instruction(ctx) -> str:
         return _BASE_INSTRUCTION
 
 
-def _onboarding_before_model(
-    callback_context: CallbackContext, llm_request: LlmRequest
-) -> LlmResponse | None:
-    """Block ledger-data questions when the channel is not onboarded yet."""
-    try:
-        state = callback_context.state
-        if state.get("software") or state.get("client_name"):
-            return None
-        if not state.get("onboarding_required"):
-            return None
-    except Exception:  # noqa: BLE001
-        return None
-
-    last_user = ""
-    try:
-        contents = llm_request.contents or []
-        if contents and contents[-1].role == "user":
-            parts = contents[-1].parts or []
-            if parts and parts[0].text:
-                last_user = parts[0].text.lower()
-    except Exception:  # noqa: BLE001
-        return None
-
-    if not any(hint in last_user for hint in _LEDGER_QUESTION_HINTS):
-        return None
-
-    return LlmResponse(
-        content=types.Content(
-            role="model",
-            parts=[
-                types.Part(
-                    text=(
-                        "This client channel is not set up yet — run */ledgr settings* "
-                        "to choose the accounting software and financial year first. "
-                        "After onboarding, drop PDFs in the channel and ask me ledger "
-                        "questions anytime."
-                    )
-                )
-            ],
-        )
-    )
+def _assistant_before_agent(callback_context: CallbackContext) -> None:
+    """Lazy-load and invoke `load_client_profile` to seed client/ledger state for the chat agent."""
+    from accounting_agents.agent import load_client_profile
+    load_client_profile(callback_context)
 
 
 def _thread_account_before_model(
@@ -2398,19 +2499,6 @@ def _thread_account_before_model(
         or state.get(THREAD_FOCUS_KEY)
     )
     if not has_thread:
-        return None
-
-    last_user = ""
-    try:
-        contents = llm_request.contents or []
-        if contents and contents[-1].role == "user":
-            parts = contents[-1].parts or []
-            if parts and parts[0].text:
-                last_user = parts[0].text.lower()
-    except Exception:  # noqa: BLE001
-        return None
-
-    if not any(hint in last_user for hint in _THREAD_ACCOUNT_HINTS):
         return None
 
     focus = state.get(THREAD_FOCUS_KEY) or {}
@@ -2444,10 +2532,7 @@ def _thread_account_before_model(
 def _chat_before_model(
     callback_context: CallbackContext, llm_request: LlmRequest
 ) -> LlmResponse | None:
-    """Onboarding gate first, then thread account/COA preamble injection."""
-    blocked = _onboarding_before_model(callback_context, llm_request)
-    if blocked is not None:
-        return blocked
+    """Thread account/COA preamble injection."""
     return _thread_account_before_model(callback_context, llm_request)
 
 
@@ -2460,6 +2545,7 @@ assistant_agent = LlmAgent(
     # (with ``{key?}`` for optional ones), so the runner's state_delta fills
     # the preamble at LLM call time — no Python callable needed at runtime.
     instruction=_BASE_INSTRUCTION,
+    before_agent_callback=_assistant_before_agent,
     before_model_callback=_chat_before_model,
     tools=[
         bank_totals,

@@ -1891,16 +1891,11 @@ def test_assistant_instruction_includes_diagnostic_counts_in_preamble():
 
 
 def test_base_instruction_has_diagnostic_routing_decision_tree():
-    """P3: the base instruction should include explicit routing bullets
-    so the LLM knows when to call the diagnostic tools."""
+    """P3: the base instruction should include explicit routing guidelines."""
     from accounting_agents.assistant import _BASE_INSTRUCTION
 
-    # The decision tree should name the new tools explicitly.
     assert "diagnose_assistant_context" in _BASE_INSTRUCTION
-    assert "get_document_processing_detail" in _BASE_INSTRUCTION
-    assert "list_processing_history" in _BASE_INSTRUCTION
-    assert "list_pending_reviews" in _BASE_INSTRUCTION
-    # Routing bullets for the most common chat scenarios.
-    assert "How was X extracted" in _BASE_INSTRUCTION
-    assert "Anything waiting" in _BASE_INSTRUCTION
-    assert "Empty ledger" in _BASE_INSTRUCTION
+    assert "Routing guidelines:" in _BASE_INSTRUCTION
+    assert "lookup_row" in _BASE_INSTRUCTION
+    assert "lookup_coa_account" in _BASE_INSTRUCTION
+

@@ -164,6 +164,12 @@ def _base_state(**overrides) -> dict:
         "client_name": "Test Client Pte Ltd",
         "fye_month": 3,
         "tax_registered": True,
+        # Phase 8 / multi-country: seed a default SG profile so legacy
+        # tests keep their previous behaviour (tax_node resolves to
+        # SINGAPORE → SG TaxClassifier runs as before). Tests that
+        # exercise MY / cross-border paths should override these.
+        "region": "SINGAPORE",
+        "base_currency": "SGD",
         "coa": [],
         "category_mapping": {},
         "entity_memory": [],
@@ -256,7 +262,11 @@ def test_classify_routes_invoice():
     ctx = FakeContext(_base_state())
     event = asyncio.run(nodes.classify_node._func(ctx))
 
-    assert event.actions.route == nodes.ROUTE_INVOICE
+    # Phase 2 / lane-registry: classify_node now emits the canonical lane
+    # route label ("commercial_doc") instead of the legacy "invoice" string,
+    # so the Event route matches what document_workflow_driver iterates.
+    from accounting_agents.lane_config import ROUTE_COMMERCIAL_DOC
+    assert event.actions.route == ROUTE_COMMERCIAL_DOC
     assert ctx.state[nodes.DOC_TYPE_KEY] == "invoice"
     # Direction defaults to "auto"; the Understand call later fills it in via
     # ``direction_for_client``. ``"auto"`` is the sentinel that the
@@ -1610,3 +1620,43 @@ def test_bank_statement_codec_round_trip():
     assert rebuilt.transactions[0].deposit is None
     assert rebuilt.transactions[1].deposit == 400.0
     assert rebuilt.transactions[1].balance == 495.5
+
+
+def test_retry_resolve_direction_llm_success():
+    """_retry_resolve_direction_llm queries Gemini with client/party context and returns resolved direction."""
+    from unittest.mock import MagicMock, patch
+    from accounting_agents.nodes import _retry_resolve_direction_llm
+
+    class FakeCtx:
+        def __init__(self, state):
+            self.state = state
+
+    ctx = FakeCtx({
+        "client_name": "Sanesea International",
+        "client_uen": "200099001Z",
+    })
+
+    extract = {
+        "vendor_name": "Acme Supplier",
+        "customer_name": "Sanesea International",
+        "doc_kind": "invoice",
+        "summary_table": [{"category": "Vendor Name", "details": "Acme Supplier"}],
+    }
+
+    mock_response = MagicMock()
+    class FakeDecision:
+        direction = "purchase"
+        reason = "billed to matches client"
+    mock_response.parsed = FakeDecision()
+
+    mock_client = MagicMock()
+    mock_client.models.generate_content.return_value = mock_response
+
+    with patch("invoice_processing.shared_libraries.genai_client.make_client", return_value=mock_client):
+        res = _retry_resolve_direction_llm(ctx, extract)
+        assert res == "purchase"
+        mock_client.models.generate_content.assert_called_once()
+        args, kwargs = mock_client.models.generate_content.call_args
+        prompt_list = kwargs.get("contents") or args
+        assert "Sanesea International" in prompt_list[0]
+

@@ -1878,7 +1878,7 @@ async def process_file_event(
                 "reason": rejection_reason,
             }
 
-        artifact_name = ARTIFACT_NAME_FMT.format(file_id=file_id)
+        artifact_name = nodes.artifact_name_for(file_id)
 
         from invoice_processing.extract.invoice_extractor import mime_for
 

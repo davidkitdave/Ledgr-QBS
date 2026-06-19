@@ -4,7 +4,7 @@ agent_directory: "accounting_agents"
 # Chat-lane eval (cluster B) — session-state-heavy; use eval/ledgr_eval_generate.py
 # or point agents-cli at this directory for prompt-only smoke tests.
 chat_agent_directory: "accounting_agents/chat_eval"
-region: "us-east1"
+region: "asia-southeast1"  # PDPA residency — must match Cloud Run/Vertex deploy region (see .github/workflows/deploy.yml)
 base_template: "local_Ledgr-QBS"
 generated_at: "2026-06-13T04:02:21.623559+00:00"
 language: "python"

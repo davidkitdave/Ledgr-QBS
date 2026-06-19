@@ -1,0 +1,389 @@
+"""Multi-country jurisdiction routing for the ADK document lane.
+
+The YAU LEE Malaysia session (c92951d1) proved that the previous build was
+implicitly Singapore-only: ``tax_node`` always loaded ``sg_gst.yaml`` regardless
+of the client profile's ``region``. This module is the single source of truth
+for **which tax system / rate band applies** based on session state, and is
+designed to be consumed by:
+
+1. The ``resolve_jurisdiction`` @node — runs once per document, writes
+   ``state["tax_jurisdiction"]`` for ADK web visibility.
+2. The LLM tax reasoning agent — receives the resolved jurisdiction as
+   ``{client_region?}`` / ``{tax_jurisdiction?}`` state-template variables in
+   its instruction (see ADK docs on state templating).
+3. Python rate guards — validates the LLM's per-line math against the
+   jurisdiction's reference rate bands.
+
+Per ADK best practices (Sessions/State, Function tools, Dynamic workflows docs):
+* Read region/currency from ``state`` (``tool_context.state.get('client_region')``
+  or ``ctx.state['region']``) — never hardcode.
+* Use ``{key?}`` state templating in LLM instructions — the framework
+  auto-injects the right values, no manual string concat.
+* Keep Python guards thin (math, tolerance, HITL flag). LLM is the brain.
+
+New jurisdictions are added by:
+1. Adding a ``JurisdictionRule`` entry below.
+2. Adding a per-jurisdiction reference YAML under
+   ``invoice_processing/shared_libraries/{region_code}.yaml`` (rates + code_map).
+3. Optionally adding jurisdiction-specific signal lexicons in the YAML.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Optional
+
+import yaml
+
+logger = logging.getLogger(__name__)
+
+# --------------------------------------------------------------------------- #
+# State keys (kept short; surfaced in ADK web State tab for visibility)
+# --------------------------------------------------------------------------- #
+TAX_JURISDICTION_KEY = "tax_jurisdiction"
+SUPPLIER_COUNTRY_KEY = "supplier_country"
+CUSTOMER_COUNTRY_KEY = "customer_country"
+TAX_SYSTEM_HINT_KEY = "tax_system_hint"
+JURISDICTION_RATES_KEY = "jurisdiction_rates"
+
+# --------------------------------------------------------------------------- #
+# Canonical region codes (mirror ClientContext.region values)
+# --------------------------------------------------------------------------- #
+REGION_SINGAPORE = "SINGAPORE"
+REGION_MALAYSIA = "MALAYSIA"
+
+# Cross-border: client in one country, counterparty in another.
+JURISDICTION_CROSS_BORDER = "CROSS_BORDER"
+JURISDICTION_AMBIGUOUS = "AMBIGUOUS"
+
+# Tax system labels (for state visibility + LLM prompts).
+TAX_SYSTEM_GST = "GST"
+TAX_SYSTEM_SST = "SST"
+TAX_SYSTEM_OUT_OF_SCOPE = "OS"
+
+# Default currency by region (used as a sanity check when state is missing).
+_REGION_DEFAULT_CURRENCY = {
+    REGION_SINGAPORE: "SGD",
+    REGION_MALAYSIA: "MYR",
+}
+
+
+@dataclass
+class JurisdictionRule:
+    """A per-region rule set for tax reasoning + validation.
+
+    Attributes:
+        code: short jurisdiction key written to ``state["tax_jurisdiction"]``
+            ("SINGAPORE", "MALAYSIA", "CROSS_BORDER", "AMBIGUOUS").
+        region: the client's home region (mirrors ``state["region"]``).
+        tax_system: "GST" | "SST" | "OS" — written to
+            ``state["tax_system_hint"]`` for LLM consumption.
+        reference_yaml: file name under ``invoice_processing/shared_libraries/``
+            used for rate bands + code_map. None for cross-border/ambiguous.
+        standard_rate: the current standard rate as a decimal (0.09 = 9%).
+            Used by Python rate guards. None if jurisdiction is ambiguous.
+        rate_tolerance: absolute fractional tolerance for rate-match checks
+            (default 0.01 = 1%). Loaded from YAML when available.
+        rate_band_label: human-readable label for the rate band ("9% GST",
+            "8% SST"). Surfaced in trace + state tab.
+        cross_border: True when client region != counterparty country.
+        flag_for_human: True when the system cannot make a confident decision
+            and must escalate to HITL.
+        notes: free-form notes (jurisdiction selection rationale).
+    """
+
+    code: str
+    region: str
+    tax_system: str
+    reference_yaml: Optional[str] = None
+    standard_rate: Optional[float] = None
+    rate_tolerance: float = 0.01
+    rate_band_label: Optional[str] = None
+    cross_border: bool = False
+    flag_for_human: bool = False
+    notes: Optional[str] = None
+
+
+@dataclass
+class JurisdictionResolution:
+    """Output of :func:`resolve_jurisdiction`. Pure data — safe to put in state."""
+
+    jurisdiction: JurisdictionRule
+    client_region: str
+    client_currency: str
+    supplier_country: Optional[str]
+    customer_country: Optional[str]
+
+    def to_state_dict(self) -> dict[str, Any]:
+        """Plain-dict view (basic types only) for ``session.state``."""
+        return {
+            TAX_JURISDICTION_KEY: self.jurisdiction.code,
+            TAX_SYSTEM_HINT_KEY: self.jurisdiction.tax_system,
+            JURISDICTION_RATES_KEY: {
+                "rate_band_label": self.jurisdiction.rate_band_label,
+                "standard_rate": self.jurisdiction.standard_rate,
+                "rate_tolerance": self.jurisdiction.rate_tolerance,
+                "reference_yaml": self.jurisdiction.reference_yaml,
+            },
+            SUPPLIER_COUNTRY_KEY: self.supplier_country,
+            CUSTOMER_COUNTRY_KEY: self.customer_country,
+        }
+
+
+# --------------------------------------------------------------------------- #
+# YAML reference loader (cached per-process)
+# --------------------------------------------------------------------------- #
+_YAML_CACHE: dict[str, dict] = {}
+
+
+def _load_reference(yaml_name: str) -> dict:
+    """Load a jurisdiction reference YAML (rates + code_map) with caching.
+
+    Path: ``invoice_processing/shared_libraries/{yaml_name}``.
+    """
+    if yaml_name in _YAML_CACHE:
+        return _YAML_CACHE[yaml_name]
+    here = Path(__file__).resolve().parent
+    path = here.parent / "invoice_processing" / "shared_libraries" / yaml_name
+    if not path.is_file():
+        logger.warning("jurisdiction reference YAML not found: %s", path)
+        _YAML_CACHE[yaml_name] = {}
+        return {}
+    with open(path, encoding="utf-8") as f:
+        loaded = yaml.safe_load(f) or {}
+    _YAML_CACHE[yaml_name] = loaded
+    return loaded
+
+
+def clear_jurisdiction_cache() -> None:
+    """Reset cached YAML loads. Test helper."""
+    _YAML_CACHE.clear()
+
+
+def _current_standard_rate(yaml_name: Optional[str]) -> tuple[Optional[float], Optional[str]]:
+    """Pick the current (latest) standard rate from the YAML's ``rate_by_date`` bands."""
+    if not yaml_name:
+        return None, None
+    data = _load_reference(yaml_name)
+    bands = data.get("rate_by_date") or []
+    if not bands:
+        return None, None
+    last = bands[-1]
+    rate = last.get("rate")
+    label = f"{int(rate * 100)}% {data.get('tax_system', '')}".strip()
+    return rate, label
+
+
+# --------------------------------------------------------------------------- #
+# Region normalization
+# --------------------------------------------------------------------------- #
+_REGION_ALIASES = {
+    "SG": REGION_SINGAPORE,
+    "SGP": REGION_SINGAPORE,
+    "SINGAPORE": REGION_SINGAPORE,
+    "MY": REGION_MALAYSIA,
+    "MYS": REGION_MALAYSIA,
+    "MALAYSIA": REGION_MALAYSIA,
+    "M'SIA": REGION_MALAYSIA,
+    "MSIA": REGION_MALAYSIA,
+}
+
+
+def _norm_region(value: Any) -> str:
+    """Normalize a free-form region string to the canonical code.
+
+    Falls back to SINGAPORE only when env ``LEDGR_DEFAULT_REGION`` explicitly
+    sets it (otherwise leaves empty so the caller can flag as ambiguous).
+    """
+    if not value:
+        default = os.environ.get("LEDGR_DEFAULT_REGION", "").strip().upper()
+        if default in _REGION_ALIASES.values():
+            return default
+        return ""
+    s = str(value).strip().upper()
+    return _REGION_ALIASES.get(s, s)
+
+
+_COUNTRY_ALIASES = {
+    "SG": "SG", "SGP": "SG", "SINGAPORE": "SG",
+    "MY": "MY", "MYS": "MY", "MALAYSIA": "MY", "M'SIA": "MY", "MSIA": "MY",
+}
+
+
+def _norm_country(value: Any) -> Optional[str]:
+    """Normalize a country string to a 2-letter ISO-style code (SG/MY/...)."""
+    if not value:
+        return None
+    s = str(value).strip().upper()
+    if not s:
+        return None
+    return _COUNTRY_ALIASES.get(s, s[:2] if len(s) >= 2 else s)
+
+
+# --------------------------------------------------------------------------- #
+# resolve_jurisdiction — the single source of truth
+# --------------------------------------------------------------------------- #
+def resolve_jurisdiction(state: dict) -> JurisdictionResolution:
+    """Resolve the tax jurisdiction from session state. Pure function.
+
+    Reads:
+      * ``state["region"]`` or ``state["client_region"]`` (home region)
+      * ``state["base_currency"]``
+      * ``state["supplier_country"]`` (set by extract node, may be None)
+      * ``state["customer_country"]`` (set by extract node, may be None)
+
+    Returns a :class:`JurisdictionResolution` carrying a :class:`JurisdictionRule`
+    that downstream nodes (tax_node, categorize_node, LLM prompts, Python guards)
+    can read without re-deriving from raw state.
+
+    Behavior:
+
+    * When client region + currency clearly map to one of the supported
+      jurisdictions and the counterparty is in the SAME country → that
+      jurisdiction, NOT cross-border.
+    * When client region + counterparty country differ → CROSS_BORDER with
+      ``flag_for_human=True`` (reverse charge / import review).
+    * When client region is unknown or unsupported → AMBIGUOUS, flag for human.
+    """
+    raw_region = state.get("client_region") or state.get("region") or ""
+    client_region = _norm_region(raw_region)
+    client_currency = str(
+        state.get("base_currency") or _REGION_DEFAULT_CURRENCY.get(client_region, "") or "SGD"
+    ).strip().upper()
+
+    supplier_country = _norm_country(state.get(SUPPLIER_COUNTRY_KEY))
+    customer_country = _norm_country(state.get(CUSTOMER_COUNTRY_KEY))
+
+    # Counterparty = supplier for purchases, customer for sales. The state key
+    # the extract node sets depends on direction; the router node downstream of
+    # extract (categorize / tax) normalizes this. For jurisdiction routing we
+    # treat EITHER country as a counterparty signal — the dominant one wins.
+    counterparty_country = supplier_country or customer_country
+
+    if not client_region:
+        # No region in state — ambiguous; flag for human so we don't apply
+        # Singapore math to a non-SG client (or vice versa).
+        return JurisdictionResolution(
+            jurisdiction=JurisdictionRule(
+                code=JURISDICTION_AMBIGUOUS,
+                region="",
+                tax_system="",
+                flag_for_human=True,
+                notes="client region not set in state; cannot pick a rule set",
+            ),
+            client_region=client_region or "",
+            client_currency=client_currency,
+            supplier_country=supplier_country,
+            customer_country=customer_country,
+        )
+
+    # Cross-border: client + counterparty in different countries.
+    if counterparty_country and client_region == REGION_SINGAPORE and counterparty_country != "SG":
+        return JurisdictionResolution(
+            jurisdiction=JurisdictionRule(
+                code=JURISDICTION_CROSS_BORDER,
+                region=client_region,
+                tax_system=TAX_SYSTEM_OUT_OF_SCOPE,
+                reference_yaml="sg_gst.yaml",
+                standard_rate=None,
+                flag_for_human=True,
+                cross_border=True,
+                notes=(
+                    f"Singapore client, counterparty country={counterparty_country}; "
+                    "import / reverse-charge review"
+                ),
+            ),
+            client_region=client_region,
+            client_currency=client_currency,
+            supplier_country=supplier_country,
+            customer_country=customer_country,
+        )
+    if counterparty_country and client_region == REGION_MALAYSIA and counterparty_country != "MY":
+        return JurisdictionResolution(
+            jurisdiction=JurisdictionRule(
+                code=JURISDICTION_CROSS_BORDER,
+                region=client_region,
+                tax_system=TAX_SYSTEM_OUT_OF_SCOPE,
+                reference_yaml="my_sst.yaml",
+                standard_rate=None,
+                flag_for_human=True,
+                cross_border=True,
+                notes=(
+                    f"Malaysia client, counterparty country={counterparty_country}; "
+                    "import / reverse-charge review"
+                ),
+            ),
+            client_region=client_region,
+            client_currency=client_currency,
+            supplier_country=supplier_country,
+            customer_country=customer_country,
+        )
+
+    # Domestic routes (one rule per supported region).
+    if client_region == REGION_SINGAPORE and client_currency == "SGD":
+        rate, label = _current_standard_rate("sg_gst.yaml")
+        return JurisdictionResolution(
+            jurisdiction=JurisdictionRule(
+                code=REGION_SINGAPORE,
+                region=client_region,
+                tax_system=TAX_SYSTEM_GST,
+                reference_yaml="sg_gst.yaml",
+                standard_rate=rate,
+                rate_band_label=label,
+            ),
+            client_region=client_region,
+            client_currency=client_currency,
+            supplier_country=supplier_country,
+            customer_country=customer_country,
+        )
+
+    if client_region == REGION_MALAYSIA and client_currency == "MYR":
+        rate, label = _current_standard_rate("my_sst.yaml")
+        return JurisdictionResolution(
+            jurisdiction=JurisdictionRule(
+                code=REGION_MALAYSIA,
+                region=client_region,
+                tax_system=TAX_SYSTEM_SST,
+                reference_yaml="my_sst.yaml",
+                standard_rate=rate,
+                rate_band_label=label,
+            ),
+            client_region=client_region,
+            client_currency=client_currency,
+            supplier_country=supplier_country,
+            customer_country=customer_country,
+        )
+
+    # Region known but currency mismatch (e.g. SG client, MYR base currency)
+    # — flag rather than silently picking a wrong rate.
+    return JurisdictionResolution(
+        jurisdiction=JurisdictionRule(
+            code=JURISDICTION_AMBIGUOUS,
+            region=client_region,
+            tax_system="",
+            flag_for_human=True,
+            notes=(
+                f"region={client_region} but base_currency={client_currency}; "
+                "cannot pick a rule set without confirmation"
+            ),
+        ),
+        client_region=client_region,
+        client_currency=client_currency,
+        supplier_country=supplier_country,
+        customer_country=customer_country,
+    )
+
+
+def write_to_state(state: dict, resolution: JurisdictionResolution) -> None:
+    """Persist the resolution into session state (basic types only).
+
+    Writes the standard set of keys consumed by ``tax_node``, the LLM tax
+    agent (via ``{key?}`` state templating), and the ADK web State tab.
+    """
+    for k, v in resolution.to_state_dict().items():
+        # Avoid forcing None into state — leaves cleaner State-tab rendering.
+        if v is not None:
+            state[k] = v

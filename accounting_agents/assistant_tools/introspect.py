@@ -254,10 +254,14 @@ def explain_posted_line(
 ) -> str:
     """Explain what was posted for an invoice line (ledger + COA + extraction).
 
-    Combines the FY ledger row (what was **posted**), the COA entry (what the
-    code **means**), and the per-document session snapshot (how extraction
-    **assigned** it). Prefer ``row_index`` from ``lookup_row`` or
-    ``thread_delivery_ledger_matches``; otherwise pass ``invoice_id``.
+    CRITICAL: Do NOT call this tool if the user is asking "why" an account code, COA,
+    or tax treatment was used or chosen (e.g., "why did you use this account code?",
+    "why this COA?"). For categorization or tax coding explanations, you MUST first
+    find the row index by calling `lookup_row` and then call `explain_categorization`
+    or `explain_tax_treatment` using that row index.
+
+    This tool is only for audit trail queries and details combining the posted row,
+    COA, and extraction logs.
 
     Args:
         tool_context: Injected by ADK; provides session state.

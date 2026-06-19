@@ -1608,6 +1608,85 @@
           "expected_outcome": "direction unknown triggers HITL approval gate"
         }
       }
+    },
+
+    {
+      "eval_id": "F12_MY_receipt_yau_lee_sst",
+      "description": "YAU LEE MOTOR Malaysia SST 8% receipt — Phase 8 / multi-country eval. The YAU LEE ADK session (c92951d1) wrongly flagged a valid Malaysia 8% SST line as a Singapore 9% GST mismatch. After the LLM tax reasoner + jurisdiction router, the line must resolve to SR with confidence >= 0.8 and tax_flagged=false.",
+      "session_input": {
+        "app_name": "accounting_agents",
+        "user_id": "eval_user",
+        "state": {
+          "client_id": "jbi-plus-auto",
+          "client_name": "JBI PLUS AUTO SDN BHD",
+          "client_uen": "202401012345",
+          "region": "MALAYSIA",
+          "base_currency": "MYR",
+          "tax_registered": true,
+          "fye_month": 12,
+          "software": "qbs",
+          "coa": [
+            {"code": "500-010", "name": "Cost of Sales - Vehicle Parts & Accessories"},
+            {"code": "500-020", "name": "Cost of Sales - Labour & Workshop Services"},
+            {"code": "6100", "name": "Motor Vehicle Expenses"}
+          ],
+          "entity_memory": [
+            {
+              "name": "YAU LEE MOTOR",
+              "reg_no": "202301011111",
+              "mapping_code": "500-020",
+              "role": "Creditor",
+              "tax_code": "SR"
+            }
+          ],
+          "category_mapping": {}
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "F12-inv-01",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "YAU LEE MOTOR issued a Malaysia workshop receipt to JBI PLUS AUTO. Net 60.19 MYR, Service Tax 4.81 (8% SST), Total 65.00. Source: ${LEDGR_TEST_DOC_DIR}/receipts/yau_lee_motor_receipt.pdf. Confirm direction, tax jurisdiction, and per-line treatment."
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "direction=purchase; tax_jurisdiction=MALAYSIA; tax_system=SST; per-line tax_treatment=SR with confidence ~0.9 and tax_flagged=false (4.81 = 8% of 60.19 reconciles to MY SST band; no SG 9% flag). account_code=500-020 from entity memory."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [],
+            "intermediate_responses": []
+          }
+        }
+      ],
+      "test_document": {
+        "doc_kind": "receipt",
+        "from_party": {"name": "YAU LEE MOTOR", "country": "MY", "role": "issuer"},
+        "to_party": {"name": "JBI PLUS AUTO SDN BHD", "country": "MY", "role": "recipient"},
+        "lines": [
+          {"description": "Workshop labour", "net_amount": 60.19, "gst_amount": 4.81, "tax_keyword": null}
+        ],
+        "subtotal": 60.19,
+        "gst_total": 4.81,
+        "document_total": 65.00,
+        "currency": "MYR",
+        "tax_system_hint": "SST"
+      },
+      "final_session_state": {
+        "_eval_assertions": {
+          "tax_jurisdiction": "MALAYSIA",
+          "tax_system": "SST",
+          "expected_outcome": "per-line tax_treatment=SR with tax_flagged=false; 4.81 / 60.19 = 7.99% within 1% of MY 8% SST band; no SG 9% mismatch flag; account_code=500-020 (YAU LEE entity memory match)"
+        }
+      }
     }
 
   ]

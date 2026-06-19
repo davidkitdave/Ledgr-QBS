@@ -118,15 +118,25 @@ def test_coordinator_has_profile_callback_and_schema():
 
 def test_coordinator_graph_nodes_present():
     names = _node_names(coordinator_graph)
-    # The graph carries the document + help lanes; chat runs on a separate
-    # standalone ``assistant_app`` (ADR-0008), so ``assistant`` is NOT a node.
+    # Track B (Phase 6): the top-level graph is FLAT — no nested
+    # ``document_workflow`` gray box. The classify + lane pipeline nodes
+    # are inlined so ADK web renders ONE connected graph from START to
+    # the terminal nodes (deliver_node inside pipeline_*).
     assert {
         "__START__",
         "coordinator",
         "dynamic_router",
-        "document_workflow",
+        "classify_node",
+        "pipeline_commercial",
+        "pipeline_bank",
         "help_node",
     } <= names
+    # ``document_workflow`` is no longer a node in the top-level graph —
+    # it remains a separate Workflow used by ``document_app`` (Slack prod
+    # path) but is NOT in the coordinator pipeline.
+    assert "document_workflow" not in names
+    # Chat runs on a separate standalone ``assistant_app`` (ADR-0008),
+    # so ``assistant`` is NOT a node.
     assert "assistant" not in names
     assert "qa_agent" not in names
 
@@ -136,11 +146,24 @@ def test_coordinator_graph_start_chain_and_routes():
     # START -> coordinator -> dynamic_router (unconditional chain).
     assert ("__START__", "coordinator", None) in edges
     assert ("coordinator", "dynamic_router", None) in edges
-    # dynamic_router fans out by route label. The question lane is repointed
-    # to help_node as a defensive fallback (real text goes through assistant_app);
-    # ADK rejects duplicate (from, to) edges, so the question + unknown labels
-    # share a single edge carrying ``route=[ROUTE_QUESTION, ROUTE_UNKNOWN]``.
-    assert ("dynamic_router", "document_workflow", ROUTE_DOCUMENT) in edges
+    # Track B (Phase 6): dynamic_router fans out to classify_node
+    # (not document_workflow) when route=document. The document
+    # workflow is now INLINED into the top-level graph, so ADK web
+    # shows one connected pipeline instead of a nested gray box.
+    assert ("dynamic_router", "classify_node", ROUTE_DOCUMENT) in edges
+    # classify_node fans out to per-lane pipelines via the Event.route
+    # label written by classify_node (commercial_doc / bank_statement).
+    classify_edges = {
+        (t, r)
+        for f, t, r in edges
+        if f == "classify_node"
+    }
+    assert ("pipeline_commercial", "commercial_doc") in classify_edges
+    assert ("pipeline_bank", "bank_statement") in classify_edges
+    # The question lane is repointed to help_node as a defensive fallback
+    # (real text goes through assistant_app). ADK rejects duplicate
+    # (from, to) edges, so the question + unknown labels share a single
+    # edge carrying ``route=[ROUTE_QUESTION, ROUTE_UNKNOWN]``.
     help_routes = {
         tuple(r) if isinstance(r, list) else (r,)
         for frm, to, r in edges
@@ -169,12 +192,30 @@ def test_qa_agent_not_imported_from_agent():
 # =========================================================================== #
 
 
-def test_document_workflow_is_single_driver_edge():
-    # The Workflow now holds exactly one edge: START -> the driver node.
-    assert _node_names(document_workflow) == {"__START__", "document_workflow_driver"}
-    assert _edges(document_workflow) == [("__START__", "document_workflow_driver", None)]
-    # The driver MUST rerun on resume (ctx.run_node requires it; it is what lets
-    # a HITL resume replay the driver while sub-nodes are fast-forwarded).
+def test_document_workflow_is_declarative_pipeline():
+    """Track A: ``document_workflow`` is a declarative pipeline (Phase 6).
+
+    ADK web renders the edges below as a left→right pipeline:
+        START → classify_node → {commercial_doc → pipeline_commercial,
+                                 bank_statement → pipeline_bank}
+
+    The legacy ``document_workflow_driver`` is retained for behaviour tests
+    (see ``test_driver_runs_all_nodes_present`` etc.) but no longer wired
+    into the workflow's edges.
+    """
+    names = _node_names(document_workflow)
+    assert "classify_node" in names
+    # Each lane pipeline is a separate sub-Workflow (visible as a labelled
+    # node in the Graph tab; double-click to drill into the chain).
+    assert "pipeline_commercial" in names
+    assert "pipeline_bank" in names
+    # The imperative driver is intentionally absent from the App edge graph
+    # (kept only for ``test_driver_*`` coverage).
+    assert "document_workflow_driver" not in names
+    # Edge correctness: START → classify_node is unconditional; classify →
+    # pipelines is conditional on the Event.route label.
+    edges = _edges(document_workflow)
+    assert ("__START__", "classify_node", None) in edges
     assert document_workflow_driver.rerun_on_resume is True
 
 
@@ -185,11 +226,15 @@ def test_driver_runs_all_nodes_present():
         state_writes={"classify_node": {nodes.DOC_TYPE_KEY: nodes.ROUTE_INVOICE}},
     )
     _drive_driver(ctx)
+    # Phase 8 / multi-country: resolve_jurisdiction_node now runs in the
+    # commercial lane between categorize_node and tax_node so the tax LLM
+    # sees a resolved jurisdiction (region, tax_system, rate band).
     assert set(ctx.call_names) == {
         "classify_node",
         "extract_invoice_document_node",
         "review_extraction_node",
         "categorize_node",
+        "resolve_jurisdiction_node",
         "tax_node",
         "approval_gate",
         "apply_decision_node",
@@ -227,18 +272,26 @@ def test_driver_classify_fanout_bank_branch():
 
 
 def test_driver_invoice_lane_chain_order():
-    """The invoice lane runs extract -> review -> categorize -> tax in order."""
+    """The invoice lane runs extract -> review -> categorize -> jurisdiction -> tax in order."""
     ctx = _RecordingContext(
         state={},
         state_writes={"classify_node": {nodes.DOC_TYPE_KEY: nodes.ROUTE_INVOICE}},
     )
     _drive_driver(ctx)
     names = ctx.call_names
-    chain = ["extract_invoice_document_node", "review_extraction_node", "categorize_node", "tax_node"]
+    chain = [
+        "extract_invoice_document_node",
+        "review_extraction_node",
+        "categorize_node",
+        "resolve_jurisdiction_node",
+        "tax_node",
+    ]
     idxs = [names.index(n) for n in chain]
     assert idxs == sorted(idxs)
     assert names.index("review_extraction_node") > names.index("extract_invoice_document_node")
     assert names.index("review_extraction_node") < names.index("categorize_node")
+    assert names.index("resolve_jurisdiction_node") > names.index("categorize_node")
+    assert names.index("resolve_jurisdiction_node") < names.index("tax_node")
 
 
 def test_driver_branches_converge_on_approval_gate():
@@ -446,3 +499,100 @@ def _drain_gate(ctx) -> list:
         return [item async for item in nodes.approval_gate(ctx)]
 
     return asyncio.run(_collect())
+
+
+# =========================================================================== #
+# Declarative lane pipelines (Track A, Phase 6)
+#
+# Each lane is a static ``Workflow(edges=[...])`` so ADK web shows it as a
+# proper left→right pipeline. The legacy driver above covers behaviour; the
+# tests below cover shape (correct edges + node order) per lane.
+# =========================================================================== #
+
+
+def test_commercial_pipeline_is_sequential_chain():
+    """The commercial lane must be a single linear chain (no star-from-START).
+
+    ADK web renders a linear ``edges=[(a,b), (b,c), ...]`` chain as a
+    pipeline; a fan-out from START looks like a star. Track A requirement.
+    """
+    from accounting_agents.lane_config import COMMERCIAL_LANE
+    from accounting_agents.agent import _LANE_PIPELINES
+
+    pipeline = _LANE_PIPELINES[COMMERCIAL_LANE.route_label]
+    edges = _edges(pipeline)
+
+    # The lane nodes + terminal spine in declared order.
+    expected_chain = [
+        "extract_invoice_document_node",
+        "review_extraction_node",
+        "categorize_node",
+        "resolve_jurisdiction_node",
+        "tax_node",
+        "approval_gate",
+        "apply_decision_node",
+        "route_node",
+        "consolidate_node",
+        "deliver_node",
+    ]
+
+    # Walk the chain via edges — every node (except START and last) has
+    # exactly one successor, and edges form a strict linear chain.
+    pairs = [(f, t) for f, t, _r in edges]
+    assert pairs[0][0] == "__START__"
+    assert pairs[0][1] == expected_chain[0]
+    # Sequential edges chain correctly.
+    for i, (f, t) in enumerate(pairs[1:], start=1):
+        assert f == expected_chain[i - 1], (
+            f"Edge {i} expected from={expected_chain[i-1]!r}, got {f!r}"
+        )
+        assert t == expected_chain[i], (
+            f"Edge {i} expected to={expected_chain[i]!r}, got {t!r}"
+        )
+    # No duplicate node names (each appears exactly once in the chain).
+    assert len(set(expected_chain)) == len(expected_chain)
+
+
+def test_bank_pipeline_is_short_sequential_chain():
+    """The bank lane has one extraction node then the terminal spine."""
+    from accounting_agents.lane_config import BANK_LANE
+    from accounting_agents.agent import _LANE_PIPELINES
+
+    pipeline = _LANE_PIPELINES[BANK_LANE.route_label]
+    pairs = [(f, t) for f, t, _r in _edges(pipeline)]
+    # START -> extract_bank -> approval_gate -> ... -> deliver_node
+    assert pairs[0] == ("__START__", "extract_bank_node")
+    # Terminal spine is identical to commercial lane.
+    expected_tail = [
+        "approval_gate",
+        "apply_decision_node",
+        "route_node",
+        "consolidate_node",
+        "deliver_node",
+    ]
+    for i, expected in enumerate(expected_tail, start=1):
+        assert pairs[i][1] == expected
+
+
+def test_document_workflow_dispatches_by_route():
+    """classify_node's Event.route label picks the lane pipeline."""
+    from accounting_agents.lane_config import COMMERCIAL_LANE, BANK_LANE
+    from accounting_agents.agent import _LANE_PIPELINES
+
+    edges = _edges(document_workflow)
+    # The conditional edge from classify_node carries both route labels.
+    classify_edges = [
+        (t, r) for f, t, r in edges if f == "classify_node"
+    ]
+    targets = {t: r for t, r in classify_edges}
+    # If classify emits a dict-like conditional, target is the dict.
+    # If it emits individual edges, each route maps to a pipeline node.
+    if len(classify_edges) == 1 and classify_edges[0][1] is None:
+        # The dict-style edge is encoded as (classify_node, {label: pipeline}).
+        # ADK validates this at construction; just assert the pipelines exist.
+        assert COMMERCIAL_LANE.route_label in _LANE_PIPELINES
+        assert BANK_LANE.route_label in _LANE_PIPELINES
+    else:
+        # Each route has its own edge entry.
+        assert targets.get("pipeline_commercial") == COMMERCIAL_LANE.route_label
+        assert targets.get("pipeline_bank") == BANK_LANE.route_label

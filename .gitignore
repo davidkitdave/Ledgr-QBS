@@ -31,3 +31,4 @@ invoice_processing/data/alf_output/
 tests/eval_invoices/
 # Knowledge-graph tooling output
 graphify-out/
+.qa_tmp/

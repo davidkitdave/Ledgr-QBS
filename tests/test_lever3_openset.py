@@ -361,7 +361,11 @@ class TestClassifyNodePlumbing:
         ctx = FakeContext(_base_state())
         event = asyncio.run(nodes.classify_node._func(ctx))
 
-        assert event.actions.route == nodes.ROUTE_INVOICE
+        # Phase 2 / lane-registry: off-enum doc types ("delivery_order") now
+        # emit the canonical lane route label "commercial_doc" — the same
+        # label the driver uses to look up which lane nodes to run.
+        from accounting_agents.lane_config import ROUTE_COMMERCIAL_DOC
+        assert event.actions.route == ROUTE_COMMERCIAL_DOC
 
 
 # --------------------------------------------------------------------------- #

@@ -123,10 +123,18 @@ def _llm_match_lines(
     model: Optional[str],
     *,
     tax_registered: Optional[bool] = None,
+    client_region: str = "",
+    client_currency: str = "",
 ) -> dict[int, dict]:
     """Return {line_index: {account_key, reason, confidence}} from one Gemini call.
 
     Returns {} on any failure so categorization never crashes.
+
+    Region context: when ``client_region`` / ``client_currency`` are supplied
+    the prompt includes them so the LLM can pick country-appropriate expense
+    accounts (e.g. "Service Tax" vs "GST" hint words). Pure Passthrough via
+    ADK state templating (``{client_region?}``) — the graph node is expected
+    to fill these from session state before calling.
     """
     from google.genai import types
 
@@ -170,6 +178,13 @@ def _llm_match_lines(
     else:
         gst_ctx = "unknown"
 
+    region_ctx = (
+        f"\nClient region: {client_region or 'unknown'}\n"
+        f"Client base currency: {client_currency or 'unknown'}\n"
+        if client_region or client_currency
+        else ""
+    )
+
     prompt = (
         "You are an accounting assistant categorizing invoice/receipt lines to a client's "
         "Chart of Accounts (COA). For each line, pick the single best-matching COA account by "
@@ -177,7 +192,8 @@ def _llm_match_lines(
         "accounts for purchase costs. Return a short reason and a confidence in [0,1].\n\n"
         "IMPORTANT — your task is ONLY to assign an account_code from the COA list below. "
         "Do NOT choose or infer a tax treatment or GST code (SR/ZR/ES/OS etc.); that is "
-        "decided separately by a deterministic master gate and is outside your scope.\n\n"
+        "decided separately by a deterministic master gate and is outside your scope."
+        f"{region_ctx}\n"
         f"Client GST-registered: {gst_ctx}\n\n"
         "You MUST return the JSON results object for every line provided. "
         "Never reply empty or omit the results array.\n\n"
@@ -228,8 +244,16 @@ def categorize_invoice(
     use_llm: bool = True,
     model: Optional[str] = None,
     tax_registered: Optional[bool] = None,
+    client_region: str = "",
+    client_currency: str = "",
 ) -> NormalizedInvoice:
-    """Fill ``InvoiceLine.account_code`` for every line. Never crashes; returns ``inv``."""
+    """Fill ``InvoiceLine.account_code`` for every line. Never crashes; returns ``inv``.
+
+    Region context (client_region / client_currency) is forwarded into the LLM
+    COA match prompt so it can pick country-appropriate expense accounts.
+    Both default to empty string — backward-compatible with every existing
+    caller.
+    """
     party = inv.counterparty
     vendor_name = party.name
     reg_no = party.gst_regno
@@ -253,7 +277,14 @@ def categorize_invoice(
             unresolved.append((i, line.description or "", vendor_name or ""))
 
     if unresolved and use_llm and coa:
-        matches = _llm_match_lines(unresolved, coa, model, tax_registered=tax_registered)
+        matches = _llm_match_lines(
+            unresolved,
+            coa,
+            model,
+            tax_registered=tax_registered,
+            client_region=client_region,
+            client_currency=client_currency,
+        )
         for idx, m in matches.items():
             if idx < 0 or idx >= len(resolutions):
                 continue

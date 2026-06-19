@@ -62,6 +62,31 @@ def _env_prefix() -> str:
     return "[dev] " if env == "dev" else ""
 
 
+def is_playground_seed_enabled() -> bool:
+    """Return True when the dev playground default-profile seed should activate.
+
+    The seed injects a synthetic ``ClientContext`` into session state when no
+    real channel/client profile resolves (e.g. ``adk web`` / agents-cli playground).
+    It is NEVER active in production.
+
+    Rules (checked in priority order):
+    1. ``LEDGR_PLAYGROUND_SEED=false`` → always off (explicit opt-out).
+    2. ``LEDGR_ENV=prod`` → always off (production guard).
+    3. ``LEDGR_PLAYGROUND_SEED=true`` → always on.
+    4. Default (env unset or "dev") → on.
+    """
+    seed_flag = os.environ.get("LEDGR_PLAYGROUND_SEED", "").strip().lower()
+    if seed_flag == "false":
+        return False
+    env = (os.environ.get("LEDGR_ENV") or "dev").strip().lower()
+    if env == "prod":
+        return False
+    if seed_flag == "true":
+        return True
+    # Default: enabled in dev/unset environments.
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Firestore namespace helper
 # ---------------------------------------------------------------------------

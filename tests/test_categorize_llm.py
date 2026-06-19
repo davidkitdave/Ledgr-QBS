@@ -446,8 +446,8 @@ def test_tax_registered_threaded_from_categorize_invoice(monkeypatch):
         "invoice_processing.export.categorizer", fromlist=["_llm_match_lines"]
     )._llm_match_lines
 
-    def spy_llm(unresolved, coa, model, *, tax_registered=None):
-        captured_kwargs.append({"tax_registered": tax_registered})
+    def spy_llm(unresolved, coa, model, *, tax_registered=None, **kwargs):
+        captured_kwargs.append({"tax_registered": tax_registered, **kwargs})
         return {}
 
     monkeypatch.setattr(

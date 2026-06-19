@@ -75,7 +75,40 @@ class ExtractedInvoice(BaseModel):
     )
     issuer_name: Optional[str] = Field(None, description="Supplier/seller — who issued the document")
     issuer_gst_regno: Optional[str] = Field(None, description="Issuer GST registration no. / UEN if shown")
+    issuer_country: Optional[str] = Field(
+        None,
+        description=(
+            "Country of the issuer / supplier as a 2-letter code (SG / MY / US / etc.). "
+            "Infer from any country indicator on the document: country code in address, "
+            "country prefix on phone, \"Made in <country>\", tax reg no. country prefix "
+            "(MY SST numbers start with country code, SG GST with \"M\"), or explicit "
+            "country text. CRITICAL for multi-jurisdiction tax routing — the previous "
+            "extractor left this null which caused the YAU LEE Malaysia receipt to be "
+            "wrongly routed through Singapore GST rules. Always return a 2-letter code "
+            "when any country indicator is visible; null only when truly absent."
+        ),
+    )
+    issuer_tax_system: Optional[str] = Field(
+        None,
+        description=(
+            "Tax system that applies to this issuer (informational only; the "
+            "jurisdiction router will override this with the resolved rule). One of: "
+            "'GST' (Singapore-style goods & services tax), 'SST' (Malaysia Sales Tax / "
+            "Service Tax), 'VAT' (European-style), 'NONE' (no tax system — e.g. US "
+            "domestic), or null when the document carries no tax column at all. "
+            "Infer from explicit tax wording on the document ('Service Tax', 'SST', "
+            "'GST 9%', 'VAT', etc.)."
+        ),
+    )
     bill_to_name: Optional[str] = Field(None, description="Customer/buyer — who it is billed to")
+    bill_to_country: Optional[str] = Field(
+        None,
+        description=(
+            "Country of the bill-to / customer, 2-letter code. Same inference rules as "
+            "issuer_country. Important for cross-border detection (SG client + MY "
+            "supplier triggers reverse-charge review)."
+        ),
+    )
     lines: list[ExtractedLine] = Field(default_factory=list)
     subtotal: Optional[float] = None
     gst_total: Optional[float] = None
@@ -137,6 +170,18 @@ Per line:
 
 Document-level fields:
 - issuer_name = the supplier/seller (letterhead/"From"); bill_to_name = who it is addressed to.
+- issuer_country = 2-letter country code of the issuer (SG / MY / US / ...). Infer from any
+  country indicator on the doc: country code in address, country prefix on phone, "Made in
+  <country>", tax-reg-no country prefix (MY SST numbers prefix with country code; SG GST
+  with "M"), explicit country text. CRITICAL for multi-jurisdiction tax routing — the
+  YAU LEE Malaysia receipt was wrongly processed under SG GST because this field was null.
+  Always return a 2-letter code when any country indicator is visible; null only when truly
+  absent.
+- issuer_tax_system = "GST" / "SST" / "VAT" / "NONE" / null — infer from explicit tax
+  wording on the document (e.g. "Service Tax 8%", "SST", "GST 9%", "VAT"). Informational;
+  the jurisdiction router applies the canonical rule based on the client profile + this hint.
+- bill_to_country = 2-letter country code of the bill-to / customer (same inference rules).
+  Important for cross-border detection (SG client + MY supplier triggers reverse-charge).
 - issuer_gst_regno = the supplier's GST registration number / UEN if printed.
 - invoice_number = the document reference. Accept ANY label: Invoice No, Bill No, Tax Invoice No,
   Receipt No, Ref, Reference No, Doc No — all map to invoice_number. Always capture it; do NOT
@@ -394,8 +439,15 @@ def to_normalized(
     or when fx_rate conversion was requested but is missing on a conflicting doc.
     """
     doc_type = "sales" if direction == "sales" else "purchase"
-    supplier = PartyInfo(name=ex.issuer_name, gst_regno=ex.issuer_gst_regno)
-    customer = PartyInfo(name=ex.bill_to_name)
+    supplier = PartyInfo(
+        name=ex.issuer_name,
+        gst_regno=ex.issuer_gst_regno,
+        country=ex.issuer_country,
+    )
+    customer = PartyInfo(
+        name=ex.bill_to_name,
+        country=ex.bill_to_country,
+    )
 
     doc_currency = (ex.currency or base_currency).upper()
     is_foreign = doc_currency != base_currency.upper()
