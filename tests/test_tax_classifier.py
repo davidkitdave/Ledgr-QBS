@@ -248,18 +248,15 @@ class TestAmbiguousCasesStillFlag:
         result = CLF.classify_line(line, inv)
 
         # supplier.is_overseas=False so not the OS path; no gst_registered; no gst_amount
-        # → should hit NT (not GST-registered / no GST line) which is NOT flagged — but
-        # this is still deterministic (NT). What we guard is: it must NOT return SR
-        # with high confidence without evidence.
-        # Actually NT is a valid low-confidence-safe resolution; the key guard is that
-        # we don't return SR, no-flag without explicit evidence.
-        assert result.tax_treatment in ("NT", "SR"), (
-            f"Unexpected treatment {result.tax_treatment}"
+        # → rule 6 "NT: supplier not GST-registered / no GST line" fires before rule 7.
+        # Rule 7 (genuinely indeterminate) now returns None+flagged, never SR silently.
+        assert result.tax_treatment in ("NT", None), (
+            f"Unexpected treatment {result.tax_treatment!r} — must not silently emit SR"
         )
-        # If it resolved SR without a standard-rate signal, it must flag
-        if result.tax_treatment == "SR":
+        # If it resolved None (indeterminate), it must be flagged for human review
+        if result.tax_treatment is None:
             assert result.tax_flagged, (
-                "SR resolved without explicit standard-rate signal must be flagged"
+                "Indeterminate (None) treatment must be flagged for human review"
             )
 
     def test_zero_rated_wording_does_not_become_sr(self):
@@ -585,3 +582,101 @@ class TestGetTaxClassifierIntegration:
         tax_type = rows[0].get("*TaxType")
         # SG Xero purchase SR → "SR"
         assert tax_type == "SR", f"SG Xero purchase SR should be 'SR', got {tax_type!r}"
+
+
+# ===========================================================================
+# Indeterminate treatment → None, never SR (fix for silent SR-default bug)
+# ===========================================================================
+
+class TestIndeterminateNullBehavior:
+    """Focused regression tests for the SR-default removal.
+
+    Rule: a genuinely-indeterminate purchase line (registered client, supplier
+    GST-registered but no GST amount on line, no explicit signals) must return
+    tax_treatment=None + tax_flagged=True. The tax_code() method and
+    _resolve_tax_code must return "" (blank) for a None/unmapped treatment,
+    never the SR code.
+    """
+
+    def test_indeterminate_purchase_returns_none_flagged(self):
+        """Registered client, supplier GST-registered, no GST amount, no signals
+        → tax_treatment is None and tax_flagged is True (rule 7 changed)."""
+        # Build a line that exhausts all earlier rules:
+        # - our_gst_registered=True  (skips master NT gate)
+        # - no tax_keyword
+        # - no zero_rated / exempt / no_tax signals in description
+        # - gst=0  (skips rule 2 GST-positive branch)
+        # - not overseas  (skips rule 4)
+        # - no standard_rated signal  (skips rule 5)
+        # - supplier.gst_registered=True  (skips rule 6 NT: not-registered)
+        # → falls through to rule 7: indeterminate
+        line = InvoiceLine(
+            description="Mystery service",
+            net_amount=1000.0,
+            gst_amount=0.0,
+        )
+        inv = NormalizedInvoice(
+            doc_type="purchase",
+            invoice_date=date(2024, 6, 1),
+            our_gst_registered=True,
+            supplier=PartyInfo(gst_regno="M12345678X", country="SG"),
+        )
+        inv.lines.append(line)
+        result = CLF.classify_line(line, inv)
+        assert result.tax_treatment is None, (
+            f"Indeterminate line must return None, got {result.tax_treatment!r}"
+        )
+        assert result.tax_flagged is True, (
+            "Indeterminate (None) treatment must be flagged for human review"
+        )
+
+    def test_tax_code_none_treatment_returns_blank(self):
+        """tax_code(None, ...) must return '' (blank), never the SR code."""
+        code = CLF.tax_code(None, "purchase", "qbs")
+        assert code == "", f"tax_code(None, ...) must return blank, got {code!r}"
+        code_xero = CLF.tax_code(None, "purchase", "xero")
+        assert code_xero == "", f"tax_code(None, ...) must return blank for xero, got {code_xero!r}"
+
+    def test_tax_code_unmapped_treatment_returns_blank_not_sr(self):
+        """tax_code with a treatment not in the code_map must return '' not the SR code.
+
+        Uses a QBS code_map where NT is present but a hypothetical 'UNKNOWN' is not.
+        Confirms the old table.get('SR', '') fallback is gone.
+        """
+        # NT is in the SG QBS map; 'UNMAPPED_CODE' is not.
+        code = CLF.tax_code("UNMAPPED_CODE", "purchase", "qbs")
+        assert code == "", (
+            f"Unmapped treatment must return blank not SR, got {code!r}"
+        )
+        # Confirm SR still maps correctly (not broken by the fix).
+        sr_code = CLF.tax_code("SR", "purchase", "qbs")
+        assert sr_code != "", "SR must still map to a real code (regression guard)"
+
+    def test_none_treatment_exports_blank_tax_amount(self):
+        """An indeterminate (None treatment) line exports as 0 tax amount, not SR amount."""
+        from invoice_processing.export.exporters import QbsLedgerExporter
+        inv = NormalizedInvoice(
+            doc_type="purchase",
+            invoice_date=date(2024, 6, 1),
+            our_gst_registered=True,
+            supplier=PartyInfo(gst_regno="M12345678X"),
+        )
+        line = InvoiceLine(
+            description="Indeterminate service",
+            net_amount=1000.0,
+            gst_amount=0.0,
+            tax_treatment=None,   # explicitly set to None (as rule 7 now produces)
+            tax_flagged=True,
+        )
+        inv.lines.append(line)
+        exporter = QbsLedgerExporter()
+        # _ensure_classified will re-classify since tax_treatment is None;
+        # the re-classified result should still be None+flagged (rule 7).
+        # We call rows() which internally calls _ensure_classified then _purchase_row.
+        rows = exporter.rows([inv], "purchase")
+        assert rows, "Expected one export row"
+        tax_amount = rows[0].get("Tax Amount")
+        # None treatment → _tax_amount returns 0.0 (not SR 9%)
+        assert tax_amount == 0.0, (
+            f"Indeterminate line must export Tax Amount=0, got {tax_amount!r}"
+        )

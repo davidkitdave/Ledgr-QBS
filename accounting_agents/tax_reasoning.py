@@ -427,12 +427,10 @@ def _fallback_classify(
                     f"SR (fallback): tax reconciles to {standard_rate:.0%} within tolerance"
                 )
                 continue
-        line.tax_treatment = "SR"
+        line.tax_treatment = None
         line.tax_confidence = 0.5
         line.tax_flagged = True
-        line.tax_reason = (
-            f"SR (fallback, review): math did not reconcile to {standard_rate:.0%} if known"
-        )
+        line.tax_reason = "Unresolved: indeterminate — needs human review"
         flagged += 1
     return TaxReasoningOutcome(
         invoice=inv, used_llm=False, used_fallback=True, flagged_count=flagged

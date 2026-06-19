@@ -1604,7 +1604,13 @@ def _resolve_tax_code(treatment: str, doc_type: str, resolution) -> str:
     Reads the per-jurisdiction ``code_map`` from the reference YAML. Falls back
     to the SG / QBS mapping when the reference YAML is unavailable, so legacy
     callers see no behaviour change.
+
+    Returns ``""`` (blank) when treatment is None or empty — a None treatment
+    means indeterminate/unresolved and must never render as the string "None"
+    or silently emit an SR code.
     """
+    if not treatment:
+        return ""
     from .jurisdiction import _load_reference
 
     yaml_name = getattr(resolution.jurisdiction, "reference_yaml", None)

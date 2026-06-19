@@ -251,8 +251,8 @@ class TaxClassifier:
         # 6. Supplier not GST-registered / no GST -> no tax.
         if not supplier.gst_registered and (not gst or gst == 0):
             return "NT", 0.95, False, "NT: supplier not GST-registered / no GST line"
-        # 7. Indeterminate -> legal default SR, flagged.
-        return "SR", 0.4, True, "SR(default): indeterminate — review"
+        # 7. Indeterminate -> null treatment, flagged for human review.
+        return None, 0.4, True, "Unresolved: indeterminate tax treatment — needs human review"
 
     def _classify_sales(self, line: InvoiceLine, inv: NormalizedInvoice):
         """§6.2 SALES — first match wins.
@@ -324,7 +324,7 @@ class TaxClassifier:
         """Map a canonical treatment to the target system's tax-code string."""
         direction = "sales" if doc_type == "sales" else "purchase"
         table = self.tax["code_map"][system][direction]
-        return table.get(treatment, table.get("SR", ""))
+        return table.get(treatment, "")
 
 
 def classify_invoice(inv: NormalizedInvoice, classifier: Optional[TaxClassifier] = None) -> NormalizedInvoice:
