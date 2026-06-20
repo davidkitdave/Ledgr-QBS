@@ -1,8 +1,28 @@
-# 0018 — CI/CD: GitHub Actions → Artifact Registry (SHA-tagged) → Cloud Run revision-tag promote
+# 0018 — CI/CD: GitHub Actions → Artifact Registry (SHA-tagged) → Cloud Run
 
-- **Status:** Accepted
+- **Status:** Accepted (simplified 2026-06-20 — see Update below)
 - **Date:** 2026-06-18
 - **Deciders:** Ledgr team
+
+> **Update 2026-06-20 — pipeline simplified to direct deploy.** The original
+> no-traffic release-candidate + `/healthz` smoke probe + manual-promote
+> Environment gate (steps 4–7 below) was dropped at the user's request. It
+> repeatedly failed at the smoke step: the served app
+> (`accounting_agents.slack_runner.build_fastapi_app` behind `app.main:app`)
+> *does* expose `/healthz`, but Google's front-end returns its own HTML 404 for
+> that path on a `--no-traffic` **tagged** revision URL, so the probe never
+> reached FastAPI (verified: `/slack/events` on the same tagged URL returned 405,
+> proving the app was healthy). Rather than debug GFE tag-URL routing for a
+> customer-facing tool the user wanted shipping, the pipeline is now:
+> **push to main → test gate (ruff + pytest) → build & push SHA image → `gcloud
+> run deploy` with 100% traffic.** The test gate is the safety net; a
+> `workflow_dispatch` rollback job (shift traffic to a named prior revision)
+> remains. Trade-off accepted: no human approval gate before customers see a new
+> revision. The Cloud Run service traffic was set `--to-latest` so plain deploys
+> auto-serve the newest revision (earlier RC experiments had pinned traffic to a
+> specific revision, which silently starved the first simplified deploy of
+> traffic until `--to-latest` was applied). Sections 4–8 below describe the
+> original design and are retained for historical context.
 
 ## Context
 
