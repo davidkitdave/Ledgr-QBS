@@ -432,6 +432,20 @@ class ProfileLedgerExporter(LedgerExporter):
                 row[col] = val
         return row
 
+    def column_for_field(self, field_name: str, doc_type: str) -> str | None:
+        """Return the actual ERP column name for a logical *field_name* in *doc_type*.
+
+        Inverts the profile ``purchase_fields`` / ``sales_fields`` map (which is
+        ``{column: context_key}``) to find the column whose context_key equals
+        *field_name*.  Returns ``None`` when the field has no mapped column for
+        this doc type (e.g. ``creditor_code`` on a sales sheet).
+        """
+        field_map = self._field_map(doc_type)
+        for col, ctx_key in field_map.items():
+            if ctx_key == field_name:
+                return col
+        return None
+
     def _purchase_row(self, inv, line):
         return self._profile_row(inv, line, "purchase")
 
@@ -591,18 +605,29 @@ def collect_export_unmapped_summary(
         sheet = batch.get("sheet") or "Purchase"
         row_doc_type = "sales" if sheet == "Sales" else "purchase"
         required = exporter.required_fields(row_doc_type)
+        # Resolve the actual invoice_number column name for this exporter/doc_type.
+        inv_col: str | None = None
+        if isinstance(exporter, ProfileLedgerExporter):
+            inv_col = exporter.column_for_field("invoice_number", row_doc_type)
         for idx, row in enumerate(batch.get("rows") or [], start=1):
             missing = [col for col in required if _is_empty(row.get(col, ""))]
             if missing:
+                # Try profile-derived column first, then legacy fallbacks.
+                invoice_number = (
+                    (row.get(inv_col) if inv_col else None)
+                    or row.get("Doc No")
+                    or row.get("Invoice Number")
+                    or row.get("*InvoiceNumber")
+                    or row.get("DocNo")
+                    or row.get("DOCNO(20)")
+                    or ""
+                )
                 details.append(
                     {
                         "sheet": sheet,
                         "row": idx,
                         "missing": missing,
-                        "invoice_number": row.get("Doc No")
-                        or row.get("Invoice Number")
-                        or row.get("*InvoiceNumber")
-                        or "",
+                        "invoice_number": invoice_number,
                     }
                 )
     return {"count": len(details), "details": details}
@@ -617,6 +642,123 @@ def format_unmapped_export_note(summary: dict | None) -> str:
         return ""
     noun = "row" if count == 1 else "rows"
     return f"{count} {noun} need creditor or tax codes before ERP import"
+
+
+def collect_import_readiness(
+    batches: list[dict],
+    exporter: LedgerExporter,
+    *,
+    unmapped: dict | None = None,
+) -> dict:
+    """Collect distinct ERP codes referenced across all export rows.
+
+    Only meaningful for :class:`ProfileLedgerExporter` (code-keyed ERPs like
+    AutoCount and SQL Account).  For QBS / Xero exporters returns an empty dict.
+
+    Returns a dict with keys:
+      - ``software``: display name of the ERP (e.g. "AutoCount")
+      - ``tax_codes``: sorted list of distinct non-empty tax code values
+      - ``party_codes``: sorted list of distinct non-empty creditor/debtor codes
+      - ``account_codes``: sorted list of distinct non-empty GL account codes
+      - ``unmapped``: the result of ``collect_export_unmapped_summary`` (reused)
+    """
+    if not isinstance(exporter, ProfileLedgerExporter):
+        return {}
+
+    tax_codes: set[str] = set()
+    party_codes: set[str] = set()
+    account_codes: set[str] = set()
+
+    for batch in batches:
+        sheet = batch.get("sheet") or "Purchase"
+        row_doc_type = "sales" if sheet == "Sales" else "purchase"
+
+        tax_col = exporter.column_for_field("tax_code", row_doc_type)
+        creditor_col = exporter.column_for_field("creditor_code", row_doc_type)
+        debtor_col = exporter.column_for_field("debtor_code", row_doc_type)
+        account_col = exporter.column_for_field("account_code", row_doc_type)
+
+        for row in batch.get("rows") or []:
+            if tax_col:
+                v = (row.get(tax_col) or "").strip()
+                if v:
+                    tax_codes.add(v)
+            if creditor_col:
+                v = (row.get(creditor_col) or "").strip()
+                if v:
+                    party_codes.add(v)
+            if debtor_col:
+                v = (row.get(debtor_col) or "").strip()
+                if v:
+                    party_codes.add(v)
+            if account_col:
+                v = (row.get(account_col) or "").strip()
+                if v:
+                    account_codes.add(v)
+
+    return {
+        "software": exporter.software_name,
+        "tax_codes": sorted(tax_codes),
+        "party_codes": sorted(party_codes),
+        "account_codes": sorted(account_codes),
+        "unmapped": unmapped or {},
+    }
+
+
+def format_import_readiness_note(readiness: dict | None) -> str:
+    """Concise human-readable checklist for the delivery card.
+
+    Returns ``""`` when *readiness* is empty or not applicable (QBS/Xero).
+
+    Example output:
+        "AutoCount import — needs these codes in your company: tax SV-6, SV-8
+         · creditors 400-G0001, 400-T0001 · accounts 610-0000. If your company
+         uses different tax-code names, upload your tax-code list and we'll
+         match it. ⚠️ 2 rows need a creditor code first (see above)."
+    """
+    if not readiness:
+        return ""
+    software = (readiness.get("software") or "").strip()
+    if not software:
+        return ""
+
+    _MAX_CODES = 8
+
+    def _fmt_list(codes: list[str]) -> str:
+        if len(codes) <= _MAX_CODES:
+            return ", ".join(codes)
+        shown = ", ".join(codes[:_MAX_CODES])
+        extra = len(codes) - _MAX_CODES
+        return f"{shown} …+{extra} more"
+
+    parts: list[str] = []
+    tax_codes = readiness.get("tax_codes") or []
+    party_codes = readiness.get("party_codes") or []
+    account_codes = readiness.get("account_codes") or []
+
+    if tax_codes:
+        parts.append(f"tax {_fmt_list(tax_codes)}")
+    if party_codes:
+        parts.append(f"creditors/debtors {_fmt_list(party_codes)}")
+    if account_codes:
+        parts.append(f"accounts {_fmt_list(account_codes)}")
+
+    if not parts:
+        return ""
+
+    codes_str = " · ".join(parts)
+    note = (
+        f"{software} import — needs these codes to exist in your company: "
+        f"{codes_str}. "
+        "If your company uses different tax-code names, upload your tax-code "
+        "list and we'll match it."
+    )
+    unmapped = readiness.get("unmapped") or {}
+    unmapped_count = int(unmapped.get("count") or 0)
+    if unmapped_count > 0:
+        noun = "row needs" if unmapped_count == 1 else "rows need"
+        note = f"{note} ⚠️ {unmapped_count} {noun} a creditor code first (see above)."
+    return note
 
 
 _SHEET_INVALID = str.maketrans({c: None for c in "[]:*?/\\"})

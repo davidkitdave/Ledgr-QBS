@@ -54,8 +54,11 @@ from invoice_processing.export.client_context import (
     tax_codes_from_state,
 )
 from invoice_processing.export.exporters import (
+    ProfileLedgerExporter,
     bank_sheet_title,
     collect_export_unmapped_summary,
+    collect_import_readiness,
+    format_import_readiness_note,
     format_unmapped_export_note,
     get_bank_exporter,
     get_exporter,
@@ -1972,6 +1975,8 @@ async def consolidate_node(ctx) -> Event:
     fy = str(routes[0]["fy"]) if routes else "unknown"
 
     batches: list[dict] = []
+    export_unmapped: dict = {}
+    import_readiness: dict = {}
 
     if doc_type == "bank_statement":
         kind = "bank"
@@ -1998,7 +2003,6 @@ async def consolidate_node(ctx) -> Event:
             )
     else:
         kind = "invoice"
-        export_unmapped = {}
         # Guard: get_exporter raises ValueError for None/unknown; default to "qbs"
         # so the pipeline completes in the playground (no client profile seeded yet
         # at consolidate time) and in any other no-software scenario.
@@ -2040,6 +2044,8 @@ async def consolidate_node(ctx) -> Event:
             )
         export_unmapped = collect_export_unmapped_summary(batches, exporter)
         state["export_unmapped_summary"] = export_unmapped
+        import_readiness = collect_import_readiness(batches, exporter, unmapped=export_unmapped)
+        state["import_readiness"] = import_readiness
 
     payload = {
         "client_id": client_id,
@@ -2058,6 +2064,7 @@ async def consolidate_node(ctx) -> Event:
         "delivered": bool(state.get("delivered")),
         "batches": batches,
         "export_unmapped_summary": export_unmapped if kind == "invoice" else {},
+        "import_readiness": import_readiness if kind == "invoice" else {},
     }
     state[LEDGER_ROWS_KEY] = payload
     state["consolidated_count"] = len(batches)
@@ -2245,8 +2252,21 @@ def compose_confident_note(
             currency = row_currency
 
     # Derive dominant account code (most frequent non-empty value).
+    # Use profile-aware column name so AutoCount "AccNo" / SQL "_ACCOUNT(10)" are found;
+    # fall back to the QBS/Xero "Account Code" column when not a profile-driven ERP.
     from collections import Counter
-    codes = [row.get("Account Code") for row in all_rows if row.get("Account Code")]
+    _sw = normalize_software_key(str(payload.get("software") or ""))
+    _account_col = "Account Code"  # QBS / Xero fallback
+    if _sw in ("autocount", "sql_account"):
+        try:
+            _tmp_exp = get_exporter(_sw)
+            if isinstance(_tmp_exp, ProfileLedgerExporter):
+                _col = _tmp_exp.column_for_field("account_code", "purchase")
+                if _col:
+                    _account_col = _col
+        except Exception:
+            pass
+    codes = [row.get(_account_col) for row in all_rows if row.get(_account_col)]
     dominant_code: Optional[str] = None
     if codes:
         dominant_code = Counter(codes).most_common(1)[0][0]
@@ -2265,6 +2285,9 @@ def compose_confident_note(
     unmapped_note = format_unmapped_export_note(payload.get("export_unmapped_summary"))
     if unmapped_note:
         note = f"{note} {unmapped_note}."
+    readiness_note = format_import_readiness_note(payload.get("import_readiness"))
+    if readiness_note:
+        note = f"{note} {readiness_note}"
     return note
 
 
