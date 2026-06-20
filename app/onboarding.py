@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from accounting_agents.jurisdiction import REGION_REGISTRY
+
 
 @dataclass
 class ProfileInput:
     client_name: str
+    region: str
     fye_month: int
     accounting_software: str
     gst_registered: bool
@@ -46,6 +49,17 @@ def parse_modal_state(view: dict) -> ProfileInput:
     if not client_name:
         raise ValueError("client_name is required")
 
+    # region
+    region_el = _get("region")
+    selected_region = region_el.get("selected_option")
+    if not selected_region:
+        raise ValueError("region is required")
+    region = (selected_region.get("value") or "").strip().upper()
+    if not region:
+        raise ValueError("region value is empty")
+    if region not in REGION_REGISTRY:
+        raise ValueError(f"region must be one of {list(REGION_REGISTRY.keys())}, got {region!r}")
+
     # fye_month
     fye_el = _get("fye_month")
     selected_fye = fye_el.get("selected_option")
@@ -76,6 +90,7 @@ def parse_modal_state(view: dict) -> ProfileInput:
 
     return ProfileInput(
         client_name=client_name,
+        region=region,
         fye_month=fye_month,
         accounting_software=accounting_software,
         gst_registered=gst_registered,
@@ -91,9 +106,10 @@ def profile_doc(
 ) -> dict:
     """Build the spec §1 Firestore profile dict from parsed modal input.
 
-    Defaults: region="SINGAPORE", base_currency="SGD", status="pending_coa",
-    category_mapping={}.
+    Base currency is derived from ``inp.region`` via ``REGION_REGISTRY``.
+    Defaults: status="pending_coa", category_mapping={}.
     """
+    base_currency = REGION_REGISTRY[inp.region]["currency"]
     return {
         "client_id": client_id,
         "channel_id": channel_id,
@@ -102,8 +118,8 @@ def profile_doc(
         "fye_month": inp.fye_month,
         "accounting_software": inp.accounting_software,
         "gst_registered": inp.gst_registered,
-        "region": "SINGAPORE",
-        "base_currency": "SGD",
+        "region": inp.region,
+        "base_currency": base_currency,
         "status": "pending_coa",
         "category_mapping": {},
     }

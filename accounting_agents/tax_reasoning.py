@@ -347,6 +347,8 @@ def reason_one_invoice(
     ``tax_reason`` on every line.
     """
     from .jurisdiction import (
+        JURISDICTION_AMBIGUOUS,
+        JURISDICTION_REVIEW_REASON_KEY,
         resolve_jurisdiction,
         JURISDICTION_RATES_KEY,
     )
@@ -377,8 +379,26 @@ def reason_one_invoice(
         )
 
     # Cross-border with flag (e.g. SG partially-exempt) or AMBIGUOUS:
-    # forced OS/NT, no LLM, escalate to HITL.
+    # forced OS/NT, no LLM. AMBIGUOUS → doc-level HITL only (not per-line flags).
     if rule.flag_for_human:
+        if rule.code == JURISDICTION_AMBIGUOUS:
+            review_reason = (
+                "Client tax region not set — please confirm region in client settings"
+            )
+            state[JURISDICTION_REVIEW_REASON_KEY] = review_reason
+            for line in inv.lines:
+                line.tax_treatment = "NT"
+                line.tax_confidence = 0.5
+                line.tax_flagged = False
+                line.tax_reason = rule.notes or review_reason
+            return TaxReasoningOutcome(
+                invoice=inv,
+                used_llm=False,
+                used_fallback=False,
+                flagged_count=0,
+                decisions=[],
+            )
+
         for line in inv.lines:
             line.tax_treatment = "OS" if rule.tax_system == "OS" else "NT"
             line.tax_confidence = 0.5

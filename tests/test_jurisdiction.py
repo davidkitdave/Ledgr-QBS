@@ -434,16 +434,59 @@ class TestTaxReasoningLLMPath:
         assert outcome.used_llm is False
         assert outcome.flagged_count == 1
 
-    def test_ambiguous_region_forces_nt_with_flag(self):
-        """No region in state → AMBIGUOUS → NT, flagged, no LLM call."""
+    def test_ambiguous_region_forces_nt_without_line_flags(self):
+        """No region in state → AMBIGUOUS → NT, not line-flagged; doc-level HITL."""
         from accounting_agents.tax_reasoning import reason_one_invoice
 
         inv = _inv_with_one_line()
         outcome = reason_one_invoice(inv, state={})
         line = inv.lines[0]
         assert line.tax_treatment == "NT"
-        assert line.tax_flagged is True
+        assert line.tax_flagged is False
         assert outcome.used_llm is False
+        assert outcome.flagged_count == 0
+
+    def test_ambiguous_jurisdiction_single_needs_review_reason(self):
+        """AMBIGUOUS jurisdiction → one doc-level reason, not N line tax flags."""
+        from accounting_agents.jurisdiction import JURISDICTION_REVIEW_REASON_KEY
+        from accounting_agents.nodes import _needs_review
+
+        inv = _inv_with_one_line()
+        inv.lines.append(
+            InvoiceLine(description="Second line", net_amount=10.0, gst_amount=0.0)
+        )
+        state = {
+            TAX_JURISDICTION_KEY: JURISDICTION_AMBIGUOUS,
+            FLAG_FOR_HUMAN_KEY: True,
+            JURISDICTION_REVIEW_REASON_KEY: (
+                "Client tax region not set — please confirm region in client settings"
+            ),
+            "normalized_invoices": [
+                {
+                    "invoice_number": "INV-1",
+                    "reconciled": True,
+                    "lines": [
+                        {
+                            "description": "Workshop labour",
+                            "tax_flagged": False,
+                            "tax_confidence": 0.5,
+                            "tax_reason": "AMBIGUOUS: client region not set",
+                        },
+                        {
+                            "description": "Second line",
+                            "tax_flagged": False,
+                            "tax_confidence": 0.5,
+                            "tax_reason": "AMBIGUOUS: client region not set",
+                        },
+                    ],
+                }
+            ],
+        }
+        needs_review, reasons = _needs_review(state)
+        assert needs_review is True
+        assert len(reasons) == 1
+        assert "Client tax region not set" in reasons[0]
+        assert "flagged for tax review" not in reasons[0]
 
     def test_sg_path_falls_back_to_classifier_when_llm_unavailable(self, monkeypatch):
         """SG invoice + LLM failure → fall back to deterministic SG classifier."""

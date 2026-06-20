@@ -65,9 +65,19 @@ def _view_state_values(
     fye_month: str = "12",
     accounting_software: str = "QBS Ledger",
     gst_value: str = "yes",
+    region: str = "SINGAPORE",
 ) -> dict:
     return {
         "client_name": {"val": {"type": "plain_text_input", "value": client_name}},
+        "region": {
+            "val": {
+                "type": "static_select",
+                "selected_option": {
+                    "text": {"type": "plain_text", "text": region.title()},
+                    "value": region,
+                },
+            }
+        },
         "fye_month": {
             "val": {
                 "type": "static_select",
@@ -99,6 +109,7 @@ def _submit_body(
     fye_month: str = "12",
     accounting_software: str = "QBS Ledger",
     gst_value: str = "yes",
+    region: str = "SINGAPORE",
 ) -> dict:
     """Build a synthetic Slack view_submission body."""
     return {
@@ -106,7 +117,11 @@ def _submit_body(
         "view": {
             "callback_id": "ledgr_onboarding",
             "private_metadata": channel_id,
-            "state": {"values": _view_state_values(client_name, fye_month, accounting_software, gst_value)},
+            "state": {
+                "values": _view_state_values(
+                    client_name, fye_month, accounting_software, gst_value, region
+                )
+            },
         },
     }
 
@@ -211,6 +226,13 @@ class TestHandleOnboardingSubmit:
         store, _, _ = self._run()
         ctx = store.get_by_channel("C-TEST-1")
         assert ctx.status == "pending_coa"
+
+    def test_profile_malaysia_region_and_myr(self):
+        body = _submit_body(region="MALAYSIA")
+        store, _, _ = self._run(body=body)
+        ctx = store.get_by_channel("C-TEST-1")
+        assert ctx.region == "MALAYSIA"
+        assert ctx.base_currency == "MYR"
 
     def test_profile_region_singapore(self):
         store, _, _ = self._run()

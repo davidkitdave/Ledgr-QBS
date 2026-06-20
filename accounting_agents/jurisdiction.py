@@ -53,6 +53,7 @@ CUSTOMER_COUNTRY_KEY = "customer_country"
 TAX_SYSTEM_HINT_KEY = "tax_system_hint"
 JURISDICTION_RATES_KEY = "jurisdiction_rates"
 FLAG_FOR_HUMAN_KEY = "flag_for_human"
+JURISDICTION_REVIEW_REASON_KEY = "jurisdiction_review_reason"
 CROSS_BORDER_KEY = "cross_border"
 
 # --------------------------------------------------------------------------- #

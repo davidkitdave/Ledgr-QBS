@@ -67,21 +67,42 @@ class TestOnboardingModal:
     def test_submit_label(self):
         assert self._modal()["submit"]["text"] == "Save"
 
-    def test_exactly_four_input_blocks(self):
+    def test_exactly_five_input_blocks(self):
         blocks = self._modal()["blocks"]
         input_blocks = [b for b in blocks if b["type"] == "input"]
-        assert len(input_blocks) == 4
+        assert len(input_blocks) == 5
 
     def test_block_ids(self):
         blocks = self._modal()["blocks"]
         block_ids = [b["block_id"] for b in blocks if b["type"] == "input"]
-        assert block_ids == ["client_name", "fye_month", "accounting_software", "gst_registered"]
+        assert block_ids == [
+            "client_name",
+            "region",
+            "fye_month",
+            "accounting_software",
+            "gst_registered",
+        ]
 
     def test_action_ids_are_val(self):
         blocks = self._modal()["blocks"]
         for block in blocks:
             if block["type"] == "input":
                 assert block["element"]["action_id"] == "val"
+
+    def test_region_is_static_select_with_supported_regions(self):
+        from accounting_agents.jurisdiction import supported_regions
+
+        block = next(b for b in self._modal()["blocks"] if b.get("block_id") == "region")
+        assert block["element"]["type"] == "static_select"
+        option_values = [o["value"] for o in block["element"]["options"]]
+        assert option_values == supported_regions()
+
+    def test_prefill_region_sets_initial_option(self):
+        modal = self._modal(prefill={"region": "MALAYSIA"})
+        block = next(b for b in modal["blocks"] if b.get("block_id") == "region")
+        initial = block["element"].get("initial_option")
+        assert initial is not None
+        assert initial["value"] == "MALAYSIA"
 
     def test_client_name_is_plain_text_input(self):
         block = next(b for b in self._modal()["blocks"] if b.get("block_id") == "client_name")

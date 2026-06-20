@@ -31,11 +31,14 @@ Client Setup workbook schema (verified against a sample client's files):
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Protocol
 
 from openpyxl import load_workbook
+
+from accounting_agents.jurisdiction import REGION_REGISTRY, _norm_region
 
 
 # --------------------------------------------------------------------------- #
@@ -73,10 +76,10 @@ class ClientContext:
     slack_team_id: Optional[str] = None
     firm_id: Optional[str] = None
     status: Optional[str] = None
-    region: str = "SINGAPORE"
+    region: str = ""
     accounting_software: str = "QBS Ledger"
-    base_currency: str = "SGD"
-    tax_registered: bool = True
+    base_currency: str = ""
+    tax_registered: Optional[bool] = None
     partial_exempt: bool = False
     fye_month: Optional[int] = None
     coa: list[CoaAccount] = field(default_factory=list)
@@ -294,16 +297,78 @@ def category_mapping_from_state(state: dict) -> dict[str, Optional[str]]:
     return dict(state.get("category_mapping") or {})
 
 
+def _profile_tax_registered(profile: dict) -> Optional[bool]:
+    """Map profile gst_registered / tax_registered to Optional[bool] (None = unknown)."""
+    if "gst_registered" in profile:
+        return bool(profile["gst_registered"])
+    if "tax_registered" in profile:
+        val = profile["tax_registered"]
+        if val is None:
+            return None
+        return bool(val)
+    return None
+
+
+def _profile_region_and_currency(profile: dict) -> tuple[str, str]:
+    """Resolve region + base_currency from a profile dict (Firestore/onboarding)."""
+    raw_region = profile.get("region")
+    if raw_region:
+        region = _norm_region(raw_region)
+        currency = REGION_REGISTRY.get(region, {}).get("currency") or ""
+        if not currency:
+            stored = profile.get("base_currency")
+            currency = str(stored).strip().upper() if stored else ""
+        return region, currency
+
+    if profile.get("legacy_profile") or profile.get("legacy"):
+        return "SINGAPORE", "SGD"
+
+    default_region = os.environ.get("LEDGR_DEFAULT_REGION", "").strip().upper()
+    if default_region in REGION_REGISTRY:
+        return default_region, REGION_REGISTRY[default_region]["currency"]
+
+    stored_currency = profile.get("base_currency")
+    currency = str(stored_currency).strip().upper() if stored_currency else ""
+    return "", currency
+
+
+def _state_region_and_currency(state: dict) -> tuple[str, str]:
+    """Resolve region + base_currency from session state."""
+    raw_region = state.get("region") or state.get("client_region") or ""
+    region = _norm_region(raw_region) if raw_region else ""
+    if not region:
+        default_region = os.environ.get("LEDGR_DEFAULT_REGION", "").strip().upper()
+        if default_region in REGION_REGISTRY:
+            region = default_region
+
+    if region and region in REGION_REGISTRY:
+        return region, REGION_REGISTRY[region]["currency"]
+
+    raw_currency = state.get("base_currency")
+    currency = str(raw_currency).strip().upper() if raw_currency else ""
+    return region, currency
+
+
+def _state_tax_registered(state: dict) -> Optional[bool]:
+    if "tax_registered" not in state:
+        return None
+    val = state.get("tax_registered")
+    if val is None:
+        return None
+    return bool(val)
+
+
 def client_context_from_state(state: dict) -> ClientContext:
     """Rebuild a :class:`ClientContext` from a plain ``to_state()`` dict."""
+    region, base_currency = _state_region_and_currency(state)
     return ClientContext(
         client_id=state.get("client_id"),
         client_name=state.get("client_name"),
         client_uen=state.get("client_uen"),
-        region=state.get("region") or "SINGAPORE",
+        region=region,
         accounting_software=state.get("software") or "QBS Ledger",
-        base_currency=state.get("base_currency") or "SGD",
-        tax_registered=bool(state.get("tax_registered", True)),
+        base_currency=base_currency,
+        tax_registered=_state_tax_registered(state),
         partial_exempt=bool(state.get("partial_exempt", False)),
         fye_month=state.get("fye_month"),
         coa=coa_from_state(state),
@@ -371,9 +436,7 @@ class InMemoryClientStore:
     def save_profile(self, profile: dict) -> None:
         """Build a ClientContext from a spec §1 profile dict and store it."""
         client_id = profile["client_id"]
-        tax_registered = bool(
-            profile.get("gst_registered", profile.get("tax_registered", True))
-        )
+        region, base_currency = _profile_region_and_currency(profile)
         ctx = ClientContext(
             client_id=client_id,
             client_name=profile.get("client_name"),
@@ -382,10 +445,10 @@ class InMemoryClientStore:
             slack_team_id=profile.get("slack_team_id"),
             firm_id=profile.get("firm_id"),
             fye_month=int(profile["fye_month"]) if profile.get("fye_month") is not None else None,
-            region=profile.get("region") or "SINGAPORE",
+            region=region,
             accounting_software=profile.get("accounting_software") or "QBS Ledger",
-            base_currency=profile.get("base_currency") or "SGD",
-            tax_registered=tax_registered,
+            base_currency=base_currency,
+            tax_registered=_profile_tax_registered(profile),
             partial_exempt=bool(profile.get("partial_exempt", False)),
             status=profile.get("status"),
             category_mapping=dict(profile.get("category_mapping") or {}),
@@ -679,11 +742,7 @@ class FirestoreClientStore:
             return None
         data = snap.to_dict() or {}
 
-        # tax_registered is the internal name; profile stores it as gst_registered.
-        # Fall back to legacy tax_registered key; default True if absent.
-        tax_registered = bool(
-            data.get("gst_registered", data.get("tax_registered", True))
-        )
+        region, base_currency = _profile_region_and_currency(data)
 
         ctx = ClientContext(
             client_id=client_id,
@@ -693,10 +752,10 @@ class FirestoreClientStore:
             slack_team_id=data.get("slack_team_id"),
             firm_id=data.get("firm_id"),
             fye_month=int(data["fye_month"]) if data.get("fye_month") is not None else None,
-            region=data.get("region") or "SINGAPORE",
+            region=region,
             accounting_software=data.get("accounting_software") or "QBS Ledger",
-            base_currency=data.get("base_currency") or "SGD",
-            tax_registered=tax_registered,
+            base_currency=base_currency,
+            tax_registered=_profile_tax_registered(data),
             partial_exempt=bool(data.get("partial_exempt", False)),
             status=data.get("status"),
             # category_mapping is a map field on the client doc (spec §1), not a subcollection.

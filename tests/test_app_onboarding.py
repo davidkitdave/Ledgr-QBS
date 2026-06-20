@@ -12,6 +12,7 @@ def _make_view_state(
     fye_month: str = "3",
     accounting_software: str = "Xero",
     gst_value: str = "yes",
+    region: str = "SINGAPORE",
 ) -> dict:
     """Build a synthetic Slack view dict matching the onboarding modal block/action ids."""
     return {
@@ -44,6 +45,15 @@ def _make_view_state(
                         "selected_option": {
                             "text": {"type": "plain_text", "text": "Yes" if gst_value == "yes" else "No"},
                             "value": gst_value,
+                        },
+                    }
+                },
+                "region": {
+                    "val": {
+                        "type": "static_select",
+                        "selected_option": {
+                            "text": {"type": "plain_text", "text": region.title()},
+                            "value": region,
                         },
                     }
                 },
@@ -83,6 +93,16 @@ class TestParseModalState:
     def test_gst_registered_no_is_false(self):
         inp = parse_modal_state(_make_view_state(gst_value="no"))
         assert inp.gst_registered is False
+
+    def test_region_parsed(self):
+        inp = parse_modal_state(_make_view_state(region="MALAYSIA"))
+        assert inp.region == "MALAYSIA"
+
+    def test_missing_region_block_raises_value_error(self):
+        view = _make_view_state()
+        del view["state"]["values"]["region"]
+        with pytest.raises(ValueError, match="region"):
+            parse_modal_state(view)
 
     def test_missing_state_raises_value_error(self):
         with pytest.raises(ValueError):
@@ -126,6 +146,7 @@ class TestProfileDoc:
             fye_month=3,
             accounting_software="Xero",
             gst_registered=True,
+            region="SINGAPORE",
         )
         defaults.update(kwargs)
         return ProfileInput(**defaults)
@@ -173,13 +194,23 @@ class TestProfileDoc:
         doc = profile_doc(self._inp(gst_registered=False), channel_id="C", team_id="T", client_id="x")
         assert doc["gst_registered"] is False
 
-    def test_region_default_singapore(self):
-        doc = profile_doc(self._inp(), channel_id="C", team_id="T", client_id="x")
+    def test_region_from_input(self):
+        doc = profile_doc(self._inp(region="SINGAPORE"), channel_id="C", team_id="T", client_id="x")
         assert doc["region"] == "SINGAPORE"
 
-    def test_base_currency_default_sgd(self):
-        doc = profile_doc(self._inp(), channel_id="C", team_id="T", client_id="x")
+    def test_base_currency_derived_from_singapore_region(self):
+        doc = profile_doc(self._inp(region="SINGAPORE"), channel_id="C", team_id="T", client_id="x")
         assert doc["base_currency"] == "SGD"
+
+    def test_base_currency_derived_from_malaysia_region(self):
+        doc = profile_doc(
+            self._inp(region="MALAYSIA"),
+            channel_id="C",
+            team_id="T",
+            client_id="x",
+        )
+        assert doc["region"] == "MALAYSIA"
+        assert doc["base_currency"] == "MYR"
 
     def test_status_pending_coa(self):
         doc = profile_doc(self._inp(), channel_id="C", team_id="T", client_id="x")

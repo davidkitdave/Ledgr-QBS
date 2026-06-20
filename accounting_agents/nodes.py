@@ -65,7 +65,10 @@ from invoice_processing.export.routing import DocRoute, route_document
 # previous SG-only TaxClassifier call inside tax_node).
 from .jurisdiction import (
     CUSTOMER_COUNTRY_KEY,
+    FLAG_FOR_HUMAN_KEY,
+    JURISDICTION_AMBIGUOUS,
     JURISDICTION_RATES_KEY,
+    JURISDICTION_REVIEW_REASON_KEY,
     SUPPLIER_COUNTRY_KEY,
     TAX_JURISDICTION_KEY,
     _norm_region,
@@ -632,6 +635,14 @@ def _base_currency_from_state(state: dict) -> str:
     return resolved or ""
 
 
+def _our_gst_registered_from_state(state: dict) -> bool:
+    """Map session tax_registered to extract bool — unknown (None) must not assume registered."""
+    val = state.get("tax_registered")
+    if val is None:
+        return False
+    return bool(val)
+
+
 @node
 async def extract_invoice_document_node(ctx) -> Event:
     """Understand or legacy extraction — single orchestrated invoice lane step."""
@@ -642,7 +653,7 @@ async def extract_invoice_document_node(ctx) -> Event:
         mime_type,
         doc_type=ctx.state.get(DOC_TYPE_KEY) or "invoice",
         direction=ctx.state.get(DIRECTION_KEY) or "auto",
-        our_gst_registered=bool(ctx.state.get("tax_registered", True)),
+        our_gst_registered=_our_gst_registered_from_state(ctx.state),
         base_currency=_base_currency_from_state(ctx.state),
         client_name=ctx.state.get("client_name"),
         client_uen=ctx.state.get("client_uen"),
@@ -830,7 +841,7 @@ def _normalize_bundle(ctx, bundle: ExtractedInvoiceBundle) -> list[NormalizedInv
     # never silently booked as its own vendor (self-referential case) or
     # routed without a confirmed side (unknown case).
     effective_direction = direction if direction in ("purchase", "sales") else "purchase"
-    our_gst = bool(ctx.state.get("tax_registered", True))
+    our_gst = _our_gst_registered_from_state(ctx.state)
     base_currency = _base_currency_from_state(ctx.state)
 
     normalized: list[NormalizedInvoice] = []
@@ -1396,7 +1407,7 @@ def _reextract_with_hint(ctx, hint: str, pdf_bytes: bytes, mime_type: str = "app
         mime_type,
         doc_type=ctx.state.get(DOC_TYPE_KEY) or "invoice",
         direction=ctx.state.get(DIRECTION_KEY) or "auto",
-        our_gst_registered=bool(ctx.state.get("tax_registered", True)),
+        our_gst_registered=_our_gst_registered_from_state(ctx.state),
         base_currency=_base_currency_from_state(ctx.state),
         client_name=ctx.state.get("client_name"),
         client_uen=ctx.state.get("client_uen"),
@@ -1693,12 +1704,28 @@ def _needs_review(state: dict) -> tuple[bool, list[str]]:
     used to build the approval prompt.
     """
     reasons: list[str] = []
+
+    jurisdiction_review = state.get(JURISDICTION_REVIEW_REASON_KEY)
+    if jurisdiction_review:
+        reasons.append(str(jurisdiction_review))
+    elif (
+        state.get(TAX_JURISDICTION_KEY) == JURISDICTION_AMBIGUOUS
+        and state.get(FLAG_FOR_HUMAN_KEY)
+    ):
+        reasons.append(
+            "Client tax region not set — please confirm region in client settings"
+        )
+
+    jurisdiction_ambiguous = state.get(TAX_JURISDICTION_KEY) == JURISDICTION_AMBIGUOUS
+
     for idx, inv in enumerate(_normalized_from_state(state)):
         label = inv.invoice_number or f"invoice #{idx + 1}"
         if not inv.reconciled:
             note = inv.reconcile_note or "totals do not reconcile"
             reasons.append(f"{label}: not reconciled ({note})")
         for line in inv.lines:
+            if jurisdiction_ambiguous:
+                continue
             if line.tax_flagged:
                 reasons.append(
                     f"{label}: line '{line.description}' flagged for tax review"

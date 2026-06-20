@@ -6,6 +6,7 @@ import urllib.parse
 from dataclasses import dataclass
 
 from app.native_blocks_compat import supports_native_blocks
+from accounting_agents.jurisdiction import supported_regions
 
 
 @dataclass(frozen=True)
@@ -420,11 +421,12 @@ def welcome_blocks() -> list:
 
 
 def onboarding_modal(prefill: dict | None = None) -> dict:
-    """Build the 4-field onboarding modal view dict.
+    """Build the onboarding modal view dict.
 
     Args:
-        prefill: optional dict with keys client_name, fye_month, accounting_software,
-                 gst_registered (bool) to pre-populate the modal for /ledgr settings.
+        prefill: optional dict with keys client_name, region, fye_month,
+                 accounting_software, gst_registered (bool) to pre-populate the
+                 modal for /ledgr settings.
     """
     p = prefill or {}
 
@@ -440,7 +442,31 @@ def onboarding_modal(prefill: dict | None = None) -> dict:
         },
     }
 
-    # --- block 2: fye_month ---
+    # --- block 2: region ---
+    region_initial = None
+    if p.get("region") in supported_regions():
+        region_val = p["region"]
+        region_initial = {
+            "text": {"type": "plain_text", "text": region_val.title()},
+            "value": region_val,
+        }
+
+    region_block = {
+        "type": "input",
+        "block_id": "region",
+        "label": {"type": "plain_text", "text": "Client tax region"},
+        "element": {
+            "type": "static_select",
+            "action_id": "val",
+            "options": [
+                {"text": {"type": "plain_text", "text": code.title()}, "value": code}
+                for code in supported_regions()
+            ],
+            **({"initial_option": region_initial} if region_initial else {}),
+        },
+    }
+
+    # --- block 3: fye_month ---
     fye_initial = None
     if p.get("fye_month") is not None:
         month_num = int(p["fye_month"])
@@ -463,7 +489,7 @@ def onboarding_modal(prefill: dict | None = None) -> dict:
         },
     }
 
-    # --- block 3: accounting_software ---
+    # --- block 4: accounting_software ---
     sw_initial = None
     if p.get("accounting_software") in _SOFTWARE_OPTIONS:
         sw_val = p["accounting_software"]
@@ -484,7 +510,7 @@ def onboarding_modal(prefill: dict | None = None) -> dict:
         },
     }
 
-    # --- block 4: gst_registered ---
+    # --- block 5: gst_registered ---
     gst_registered = p.get("gst_registered")
     gst_initial = None
     if gst_registered is True:
@@ -512,7 +538,7 @@ def onboarding_modal(prefill: dict | None = None) -> dict:
         "callback_id": "ledgr_onboarding",
         "title": {"type": "plain_text", "text": "Set up client"},
         "submit": {"type": "plain_text", "text": "Save"},
-        "blocks": [client_name_block, fye_block, software_block, gst_block],
+        "blocks": [client_name_block, region_block, fye_block, software_block, gst_block],
     }
 
 
