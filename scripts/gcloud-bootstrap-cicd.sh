@@ -150,7 +150,7 @@ else
     --issuer-uri="https://token.actions.githubusercontent.com" \
     --attribute-mapping="google.subject=assertion.sub,attribute.actor=assertion.actor,attribute.repository=assertion.repository,attribute.ref=assertion.ref" \
     --attribute-condition="${WIF_ATTRIBUTE_CONDITION}" \
-    --display-name="GitHub OIDC — Ledgr-QBS main only" \
+    --display-name="GitHub OIDC Ledgr-QBS" \
     --quiet
   ok "  OIDC provider created with attribute-condition: ${WIF_ATTRIBUTE_CONDITION}"
 fi
@@ -261,7 +261,7 @@ Bootstrap complete. One-time steps above are done.
 
 STEP 1 — Repository variables (Settings → Secrets and variables → Actions → Variables tab):
   These are REPOSITORY-level variables, NOT Environment-scoped.
-  Every workflow job resolves them via vars.* without an `environment:` declaration.
+  Every workflow job resolves them via vars.* without an \`environment:\` declaration.
   None are sensitive values.
 
   Variable name               Value
