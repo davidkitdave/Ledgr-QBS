@@ -460,3 +460,55 @@ def test_approval_gate_mixed_unreconciled_and_tax_flagged_no_auto_retry():
     assert nodes.RECONCILE_REEXTRACT_ATTEMPTED_KEY not in ctx.state
     assert len(events) == 1
     assert isinstance(events[0], RequestInput)
+
+
+# ---------------------------------------------------------------------------
+# FIX 1 — direction-uncertain reasons must NOT be treated as reconcile-only
+# ---------------------------------------------------------------------------
+
+def test_is_reconcile_only_excludes_direction_reasons():
+    """A reason mentioning 'direction' is NOT reconcile-only (WS4 fix)."""
+    direction_reason = "net_amount: not reconciled (direction unknown — debit or credit?)"
+    totals_reason = "net_amount: not reconciled (totals off by $10)"
+
+    # Pure direction reason → NOT reconcile-only
+    assert not nodes._is_reconcile_only_needs_review_reasons([direction_reason])
+
+    # Pure totals reason → IS reconcile-only
+    assert nodes._is_reconcile_only_needs_review_reasons([totals_reason])
+
+    # Mixed: direction + totals → NOT reconcile-only (any direction reason disqualifies)
+    assert not nodes._is_reconcile_only_needs_review_reasons([totals_reason, direction_reason])
+
+    # Empty → always False
+    assert not nodes._is_reconcile_only_needs_review_reasons([])
+
+
+def test_approval_gate_direction_uncertain_does_not_auto_retry():
+    """approval_gate: direction-uncertain reason escalates — no reconcile re-extract."""
+    from google.adk.events import RequestInput
+
+    extract_calls = {"n": 0}
+
+    def fake_extract(data, mime, **kw):
+        extract_calls["n"] += 1
+        return _reconciled_extract_result()
+
+    nodes.EXTRACT_INVOICE_DOCUMENT_FN = fake_extract
+    # reconcile_note contains "direction" — should NOT trigger WS4 auto-retry
+    inv = _clean_invoice(
+        reconciled=False,
+        reconcile_note="net_amount: not reconciled (direction unknown — debit or credit?)",
+    )
+    ctx = FakeContext(_state([inv]))
+
+    async def _run_gate():
+        events = []
+        async for event in nodes.approval_gate(ctx):
+            events.append(event)
+        return events
+
+    events = asyncio.run(_run_gate())
+
+    assert extract_calls["n"] == 0, "direction-uncertain doc must NOT trigger reconcile re-extract"
+    assert nodes.RECONCILE_REEXTRACT_ATTEMPTED_KEY not in ctx.state

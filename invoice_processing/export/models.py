@@ -40,6 +40,10 @@ class PartyInfo:
         .. deprecated::
             Prefer :meth:`is_overseas_for` with the client's home country so MY
             clients do not treat SG suppliers as domestic.
+
+        WARNING: hard-coded to SG.  Callers that serve non-SG clients MUST use
+        ``is_overseas_for(home_country)`` instead, or SG suppliers will be
+        incorrectly treated as domestic for e.g. a Malaysian client.
         """
         return self.is_overseas_for("SG")
 

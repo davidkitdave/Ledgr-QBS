@@ -1096,8 +1096,17 @@ def _is_unreconciled_only_detect_reasons(reasons: list[str]) -> bool:
 
 
 def _is_reconcile_only_needs_review_reasons(reasons: list[str]) -> bool:
-    """True when ``_needs_review`` reasons are only not-reconciled (WS4)."""
-    return bool(reasons) and all(": not reconciled (" in r for r in reasons)
+    """True when ``_needs_review`` reasons are only not-reconciled (WS4).
+
+    A reason that mentions ``direction`` (e.g. "direction unknown") is NOT
+    a reconcile-totals problem — it is a structural ambiguity that a totals-
+    focused re-extract cannot fix.  Exclude it so direction-uncertain docs
+    escalate to the reviewer rather than triggering a wasted re-read.
+    """
+    return bool(reasons) and all(
+        ": not reconciled (" in r and "direction" not in r.lower()
+        for r in reasons
+    )
 
 
 def detect_struggle(state: dict) -> tuple[bool, list[str]]:
