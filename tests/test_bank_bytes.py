@@ -15,11 +15,9 @@ raw PDF bytestring that pdfplumber can parse as digital.
 from __future__ import annotations
 
 import asyncio
-import io
 from types import SimpleNamespace
 from typing import Any
 
-import pytest
 
 import invoice_processing.extract.bank_statement_extractor as bse
 from accounting_agents import nodes
@@ -87,7 +85,7 @@ def _make_scanned_pdf_bytes() -> bytes:
     so _is_digital returns False and extract_bank_statement falls back to vision.
     We embed a minimal image-only PDF (no BT stream).
     """
-    content = b""  # empty content stream — no text layer
+    content = b""  # empty content stream — no text layer  # noqa: F841 — paired probe; sibling list is asserted
     pdf = (
         b"%PDF-1.4\n"
         b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
@@ -150,7 +148,7 @@ _FAKE_VISION_RESULT = ExtractedBankStatement(
 def test_digital_pdf_bytes_uses_pdfplumber_not_vision(monkeypatch):
     """When bytes are from a digital PDF, _extract_digital is called; _extract_vision must NOT be."""
     digital_called = []
-    vision_called = []
+    vision_called = []  # noqa: F841 — paired probe; sibling list is asserted
 
     monkeypatch.setattr(bse, "_extract_digital", lambda text, **kw: (digital_called.append(text), _FAKE_DIGITAL_RESULT)[1])
     monkeypatch.setattr(bse, "_extract_vision", lambda data, mime, **kw: (_ for _ in ()).throw(AssertionError("vision should NOT be called for a digital PDF")))
@@ -169,7 +167,7 @@ def test_digital_pdf_bytes_uses_pdfplumber_not_vision(monkeypatch):
 
 def test_scanned_pdf_bytes_falls_back_to_vision(monkeypatch):
     """When bytes have no text layer, _extract_vision is called; _extract_digital must NOT be."""
-    digital_called = []
+    digital_called = []  # noqa: F841 — paired probe; sibling list is asserted
     vision_called = []
 
     monkeypatch.setattr(bse, "_extract_digital", lambda text, **kw: (_ for _ in ()).throw(AssertionError("digital should NOT be called for a scanned PDF")))
@@ -198,6 +196,41 @@ def test_image_mime_type_always_uses_vision(monkeypatch):
 
     assert mode == "vision"
     assert len(vision_called) == 1
+
+
+def test_bank_model_routing_digital_lite_vision_std(monkeypatch):
+    """Digital path receives digital_model; vision path receives vision_model."""
+    models_seen: dict[str, str] = {}
+
+    def _digital(text, **kw):
+        models_seen["digital"] = kw.get("model")
+        return _FAKE_DIGITAL_RESULT
+
+    def _vision(data, mime, **kw):
+        models_seen["vision"] = kw.get("model")
+        return _FAKE_VISION_RESULT
+
+    monkeypatch.setattr(bse, "_extract_digital", _digital)
+    monkeypatch.setattr(bse, "_extract_vision", _vision)
+
+    pdf_bytes = _make_digital_pdf_bytes()
+    extract_bank_statement(
+        pdf_bytes,
+        "application/pdf",
+        digital_model="gemini-2.5-flash-lite",
+        vision_model="gemini-2.5-flash",
+    )
+    assert models_seen["digital"] == "gemini-2.5-flash-lite"
+
+    models_seen.clear()
+    pdf_bytes = _make_scanned_pdf_bytes()
+    extract_bank_statement(
+        pdf_bytes,
+        "application/pdf",
+        digital_model="gemini-2.5-flash-lite",
+        vision_model="gemini-2.5-flash",
+    )
+    assert models_seen["vision"] == "gemini-2.5-flash"
 
 
 # --------------------------------------------------------------------------- #
@@ -235,7 +268,7 @@ def test_extract_bank_node_digital_bytes_uses_pdfplumber(monkeypatch):
     nodes.EXTRACT_BANK_FN = real_bse.extract_bank_statement
     try:
         ctx = _FakeCtx(_make_digital_pdf_bytes())
-        event = asyncio.run(nodes.extract_bank_node(ctx))
+        event = asyncio.run(nodes.extract_bank_node._func(ctx))
     finally:
         nodes.EXTRACT_BANK_FN = saved
 
@@ -257,7 +290,7 @@ def test_extract_bank_node_scanned_bytes_uses_vision(monkeypatch):
     nodes.EXTRACT_BANK_FN = real_bse.extract_bank_statement
     try:
         ctx = _FakeCtx(_make_scanned_pdf_bytes())
-        event = asyncio.run(nodes.extract_bank_node(ctx))
+        event = asyncio.run(nodes.extract_bank_node._func(ctx))
     finally:
         nodes.EXTRACT_BANK_FN = saved
 

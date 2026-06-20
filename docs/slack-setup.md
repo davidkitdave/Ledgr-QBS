@@ -93,7 +93,7 @@ The bot is now live in your workspace.
 1. Invite the bot to a channel: `/invite @Ledgr`
 2. The bot posts a welcome card with a **Set up client** button.
 3. Click the button, fill in the onboarding form (company name, region, FYE month, etc.) and submit.
-4. Upload a Chart of Accounts spreadsheet, or click **Use standard SG SME COA**.
+4. Upload a Chart of Accounts spreadsheet (.xlsx or .csv).
 5. Drop a PDF invoice or bank statement into the channel.
 6. Ledgr processes it and posts the QBS Ledger import workbook back to the channel.
 

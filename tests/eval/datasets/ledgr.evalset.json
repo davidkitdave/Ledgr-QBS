@@ -1,0 +1,1693 @@
+{
+  "eval_set_id": "ledgr_golden_gate_v1",
+  "name": "Ledgr QBS — Golden Gate Eval Set (Step 1.5b)",
+  "description": "Gate set for master-plan Step 2 (extract reviewer). Schema: google.adk.evaluation.eval_set.EvalSet / eval_case.EvalCase Pydantic models — source verified at .venv/lib/python3.12/site-packages/google/adk/evaluation/eval_case.py (EvalCase, Invocation, IntermediateData, SessionInput) and eval_set.py. Each invocation carries: user_content (role=user), final_response (role=model, null OK when only trajectory matters), intermediate_data.tool_uses (list of {name, args}) for tool-trajectory assertions. Session state seeds the client profile + ledger rows required by each case cluster. Raw PDF/XLSX source documents are on the developer's machine only (see anonymisation-note.md). Human-readable strings use anonymised names.",
+  "eval_cases": [
+
+    {
+      "eval_id": "A1_happy_path_invoice_classify_extract",
+      "session_input": {
+        "app_name": "accounting_agents",
+        "user_id": "eval_user",
+        "state": {
+          "client_name": "Test Firm",
+          "client_uen": "200000001A",
+          "region": "SINGAPORE",
+          "base_currency": "SGD",
+          "tax_registered": false,
+          "fye_month": 3,
+          "coa": [
+            {"code": "6100", "name": "Professional Fees"},
+            {"code": "6200", "name": "Audit & Compliance"},
+            {"code": "6300", "name": "IT & Software"}
+          ],
+          "entity_memory": [],
+          "category_mapping": {}
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "A1-inv-01",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "I just uploaded an invoice from a professional-services sub-client (Test Sub-Client). Source PDF: ${LEDGR_TEST_DOC_DIR}/invoices/sample-invoice.pdf. What document type was detected and which account was it categorised to?"
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "The document was classified as an invoice (purchase direction). It was categorised to Professional Fees or Audit & Compliance. Because Test Firm is not GST-registered, all lines carry tax_treatment NT (No Tax)."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [],
+            "intermediate_responses": []
+          }
+        }
+      ]
+    },
+
+    {
+      "eval_id": "A2_happy_path_bank_statement_classify_extract",
+      "session_input": {
+        "app_name": "accounting_agents",
+        "user_id": "eval_user",
+        "state": {
+          "client_name": "Test Firm",
+          "client_uen": "200000002B",
+          "region": "SINGAPORE",
+          "base_currency": "SGD",
+          "tax_registered": false,
+          "fye_month": 12,
+          "coa": [],
+          "entity_memory": [],
+          "category_mapping": {}
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "A2-inv-01",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "I uploaded a bank statement for Test Sub-Client. Source PDF: ${LEDGR_TEST_BANK_DIR}/2025-01.pdf. How many transactions were extracted and what is the closing balance?"
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "The document was classified as a bank_statement. Transactions were extracted from the January 2025 period. The closing balance matches the figure in the ground-truth workbook (bank-statement-fy2025.xlsx tab Jan-2025)."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [],
+            "intermediate_responses": []
+          }
+        }
+      ]
+    },
+
+    {
+      "eval_id": "B3_chat_show_client_profile_trajectory",
+      "session_input": {
+        "app_name": "accounting_agents_assistant",
+        "user_id": "eval_user",
+        "state": {
+          "client_name": "Test Firm",
+          "client_uen": "200000003C",
+          "region": "SINGAPORE",
+          "base_currency": "SGD",
+          "tax_registered": true,
+          "fye_month": 6,
+          "coa": [],
+          "entity_memory": [],
+          "category_mapping": {},
+          "ledger_data": []
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "B3-inv-01",
+          "user_content": {
+            "role": "user",
+            "parts": [{"text": "who am I working with?"}]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "Test Firm"
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [
+              {"name": "show_client_profile", "args": {}}
+            ],
+            "intermediate_responses": []
+          }
+        }
+      ]
+    },
+
+    {
+      "eval_id": "B4_chat_summarize_by_category_trajectory",
+      "session_input": {
+        "app_name": "accounting_agents_assistant",
+        "user_id": "eval_user",
+        "state": {
+          "client_name": "Test Firm",
+          "client_uen": "200000004D",
+          "region": "SINGAPORE",
+          "base_currency": "SGD",
+          "tax_registered": true,
+          "fye_month": 3,
+          "coa": [],
+          "entity_memory": [],
+          "category_mapping": {},
+          "ledger_data": [
+            {"Account Code / COA": "Professional Fees", "Source Amount": 1200.00, "Doc Type": "P", "Tax Rate": "SR"},
+            {"Account Code / COA": "IT & Software", "Source Amount": 450.00, "Doc Type": "P", "Tax Rate": "SR"},
+            {"Account Code / COA": "Professional Fees", "Source Amount": 800.00, "Doc Type": "P", "Tax Rate": "SR"}
+          ]
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "B4-inv-01",
+          "user_content": {
+            "role": "user",
+            "parts": [{"text": "total purchases this FY?"}]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "2000"
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [
+              {"name": "summarize_by_category", "args": {}}
+            ],
+            "intermediate_responses": []
+          }
+        }
+      ]
+    },
+
+    {
+      "eval_id": "B5_chat_multi_turn_fye_then_currency",
+      "session_input": {
+        "app_name": "accounting_agents_assistant",
+        "user_id": "eval_user",
+        "state": {
+          "client_name": "Test Firm",
+          "client_uen": "200000005E",
+          "region": "SINGAPORE",
+          "base_currency": "SGD",
+          "tax_registered": true,
+          "fye_month": 9,
+          "coa": [],
+          "entity_memory": [],
+          "category_mapping": {},
+          "ledger_data": []
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "B5-inv-01",
+          "user_content": {
+            "role": "user",
+            "parts": [{"text": "what's my FYE month?"}]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "September"
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [
+              {"name": "show_client_profile", "args": {}}
+            ],
+            "intermediate_responses": []
+          }
+        },
+        {
+          "invocation_id": "B5-inv-02",
+          "user_content": {
+            "role": "user",
+            "parts": [{"text": "and the currency?"}]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "SGD"
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [],
+            "intermediate_responses": []
+          }
+        }
+      ]
+    },
+
+    {
+      "eval_id": "B6_chat_invoice_account_code_trajectory",
+      "session_input": {
+        "app_name": "accounting_agents_assistant",
+        "user_id": "eval_user",
+        "state": {
+          "client_name": "Company-A",
+          "client_uen": "201234567A",
+          "region": "SINGAPORE",
+          "base_currency": "SGD",
+          "tax_registered": false,
+          "fye_month": 10,
+          "software": "Xero Ledger",
+          "fy_loaded": "2025",
+          "ledger_row_count": 2,
+          "processing_log_count": 2,
+          "coa": [
+            {"code": "6-3000", "name": "Professional Fees"},
+            {"code": "5-1000", "name": "Cost of Sales"}
+          ],
+          "entity_memory": [],
+          "category_mapping": {},
+          "ledger_data": [
+            {
+              "_sheet": "Purchase",
+              "*InvoiceNumber": "25-D15",
+              "*ContactName": "Person-1",
+              "*Description": "Consulting fees",
+              "*AccountCode": "6-3000",
+              "*UnitAmount": "1200.00"
+            },
+            {
+              "_sheet": "Purchase",
+              "*InvoiceNumber": "25-D12",
+              "*ContactName": "Person-1",
+              "*Description": "Advisory",
+              "*AccountCode": "6-3000",
+              "*UnitAmount": "800.00"
+            }
+          ],
+          "processing_log": [
+            {
+              "filename": "25-D15-Company-A.pdf",
+              "file_id": "F-D15",
+              "doc_type": "invoice",
+              "extraction_path": "understand",
+              "fy": "2025",
+              "row_count": 1
+            },
+            {
+              "filename": "25-D12-Company-A.pdf",
+              "file_id": "F-D12",
+              "doc_type": "invoice",
+              "extraction_path": "understand",
+              "fy": "2025",
+              "row_count": 1
+            }
+          ]
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "B6-inv-01",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Tell me why you used this account code for invoice 25-D15 and 25-D12"
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "6-3000 Professional Fees"
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [
+              {"name": "lookup_row", "args": {"query": "25-D15"}},
+              {"name": "explain_categorization", "args": {"vendor_name": "Person-1", "line_description": "Consulting fees"}},
+              {"name": "lookup_row", "args": {"query": "25-D12"}},
+              {"name": "explain_categorization", "args": {"vendor_name": "Person-1", "line_description": "Advisory"}}
+            ],
+            "intermediate_responses": []
+          }
+        }
+      ]
+    },
+
+    {
+      "eval_id": "B7_chat_thread_delivery_context_trajectory",
+      "session_input": {
+        "app_name": "accounting_agents_assistant",
+        "user_id": "eval_user",
+        "state": {
+          "client_name": "Company-A",
+          "client_uen": "201234567A",
+          "region": "SINGAPORE",
+          "base_currency": "SGD",
+          "tax_registered": false,
+          "fye_month": 10,
+          "software": "Xero Ledger",
+          "fy_loaded": "2025",
+          "ledger_row_count": 2,
+          "processing_log_count": 2,
+          "thread_delivery_message_ts": "1700000099.000200",
+          "thread_delivery_filenames": [
+            "25-D15-Company-A.pdf",
+            "25-D12-Company-A.pdf"
+          ],
+          "thread_delivery_invoice_ids": ["25-D15", "25-D12"],
+          "thread_delivery_fy": "2025",
+          "coa": [
+            {"code": "6-3000", "name": "Professional Fees"},
+            {"code": "5-1000", "name": "Cost of Sales"}
+          ],
+          "entity_memory": [],
+          "category_mapping": {},
+          "ledger_data": [
+            {
+              "_sheet": "Purchase",
+              "*InvoiceNumber": "25-D15",
+              "*ContactName": "Person-1",
+              "*Description": "Consulting fees",
+              "*AccountCode": "6-3000",
+              "*UnitAmount": "1200.00"
+            },
+            {
+              "_sheet": "Purchase",
+              "*InvoiceNumber": "25-D12",
+              "*ContactName": "Person-1",
+              "*Description": "Advisory",
+              "*AccountCode": "6-3000",
+              "*UnitAmount": "800.00"
+            }
+          ],
+          "processing_log": [
+            {
+              "filename": "25-D15-Company-A.pdf",
+              "file_id": "F-D15",
+              "doc_type": "invoice",
+              "extraction_path": "understand",
+              "fy": "2025",
+              "row_count": 1,
+              "delivery_message_ts": "1700000099.000200",
+              "channel_id": "C-company-a",
+              "invoice_ids": ["25-D15"]
+            },
+            {
+              "filename": "25-D12-Company-A.pdf",
+              "file_id": "F-D12",
+              "doc_type": "invoice",
+              "extraction_path": "understand",
+              "fy": "2025",
+              "row_count": 1,
+              "delivery_message_ts": "1700000099.000200",
+              "channel_id": "C-company-a",
+              "invoice_ids": ["25-D12"]
+            }
+          ],
+          "thread_scoped_processing_log": [
+            {
+              "filename": "25-D15-Company-A.pdf",
+              "file_id": "F-D15",
+              "fy": "2025",
+              "delivery_message_ts": "1700000099.000200",
+              "invoice_ids": ["25-D15"]
+            },
+            {
+              "filename": "25-D12-Company-A.pdf",
+              "file_id": "F-D12",
+              "fy": "2025",
+              "delivery_message_ts": "1700000099.000200",
+              "invoice_ids": ["25-D12"]
+            }
+          ]
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "B7-inv-01",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Why account code for 25-D15 in this delivery?"
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "6-3000 Professional Fees"
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [
+              {"name": "lookup_row", "args": {"query": "25-D15"}},
+              {"name": "explain_categorization", "args": {"vendor_name": "Person-1", "line_description": "Consulting fees"}}
+            ],
+            "intermediate_responses": []
+          }
+        }
+      ]
+    },
+
+    {
+      "eval_id": "B8_thread_followup_coa_description",
+      "session_input": {
+        "app_name": "accounting_agents_assistant",
+        "user_id": "eval_user",
+        "state": {
+          "client_name": "Company-A",
+          "client_uen": "201234567A",
+          "region": "SINGAPORE",
+          "base_currency": "SGD",
+          "tax_registered": false,
+          "fye_month": 10,
+          "software": "Xero Ledger",
+          "fy_loaded": "2025",
+          "ledger_row_count": 1,
+          "processing_log_count": 1,
+          "thread_delivery_message_ts": "1700000099.000200",
+          "thread_delivery_filenames": ["25-D15-Company-A.pdf"],
+          "thread_delivery_invoice_ids": ["25-D15"],
+          "thread_delivery_fy": "2025",
+          "thread_focus": {
+            "invoice_id": "25-D15",
+            "account_code": "902-A02",
+            "vendor": "Person-1",
+            "line_description": "Consulting fees",
+            "row_index": 0
+          },
+          "coa": [
+            {"code": "902-A02", "description": "Professional Fees", "account_type": "Expense"}
+          ],
+          "entity_memory": [],
+          "category_mapping": {},
+          "ledger_data": [
+            {
+              "_sheet": "Purchase",
+              "*InvoiceNumber": "25-D15",
+              "*ContactName": "Person-1",
+              "*Description": "Consulting fees",
+              "*AccountCode": "902-A02",
+              "*UnitAmount": "1200.00"
+            }
+          ],
+          "processing_log": [
+            {
+              "filename": "25-D15-Company-A.pdf",
+              "file_id": "F-D15",
+              "doc_type": "invoice",
+              "extraction_path": "understand",
+              "fy": "2025",
+              "row_count": 1,
+              "delivery_message_ts": "1700000099.000200",
+              "channel_id": "C-company-a",
+              "invoice_ids": ["25-D15"]
+            }
+          ],
+          "thread_delivery_ledger_matches": [
+            {
+              "invoice_id": "25-D15",
+              "account_code": "902-A02",
+              "vendor": "Person-1",
+              "description": "Consulting fees",
+              "row_index": 0
+            }
+          ]
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "B8-inv-01",
+          "user_content": {
+            "role": "user",
+            "parts": [{"text": "Why account code for 25-D15?"}]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [{"text": "902-A02 posted for 25-D15"}]
+          },
+          "intermediate_data": {
+            "tool_uses": [
+              {"name": "lookup_row", "args": {"query": "25-D15"}},
+              {"name": "explain_categorization", "args": {"row_index": "0"}}
+            ],
+            "intermediate_responses": []
+          }
+        },
+        {
+          "invocation_id": "B8-inv-02",
+          "user_content": {
+            "role": "user",
+            "parts": [{"text": "What is the description of that account code?"}]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [{"text": "902-A02 Professional Fees"}]
+          },
+          "intermediate_data": {
+            "tool_uses": [
+              {"name": "lookup_coa_account", "args": {"account_code": "902-A02"}}
+            ],
+            "intermediate_responses": []
+          }
+        }
+      ]
+    },
+
+    {
+      "eval_id": "C6_gst_non_registered_invoice_all_nt",
+      "session_input": {
+        "app_name": "accounting_agents",
+        "user_id": "eval_user",
+        "state": {
+          "client_name": "Test Firm Non-GST",
+          "client_uen": "200000006F",
+          "region": "SINGAPORE",
+          "base_currency": "SGD",
+          "tax_registered": false,
+          "fye_month": 3,
+          "coa": [],
+          "entity_memory": [],
+          "category_mapping": {}
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "C6-inv-01",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Test Firm Non-GST is NOT GST-registered. I uploaded an invoice with a 9% GST line from a vendor. Source PDF: ${LEDGR_TEST_DOC_DIR}/invoices/sample-invoice.pdf. Confirm the tax_treatment assigned to every line."
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "NT"
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [],
+            "intermediate_responses": []
+          }
+        }
+      ],
+      "final_session_state": {
+        "_eval_assertions": {
+          "all_lines_tax_treatment": "NT",
+          "xero_code": "No Tax"
+        }
+      }
+    },
+
+    {
+      "eval_id": "C7_gst_registered_invoice_standard_rated",
+      "session_input": {
+        "app_name": "accounting_agents",
+        "user_id": "eval_user",
+        "state": {
+          "client_name": "Test Firm GST-Reg",
+          "client_uen": "200000007G",
+          "region": "SINGAPORE",
+          "base_currency": "SGD",
+          "tax_registered": true,
+          "fye_month": 3,
+          "coa": [],
+          "entity_memory": [],
+          "category_mapping": {}
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "C7-inv-01",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Test Firm GST-Reg IS GST-registered. I uploaded the same 9% invoice from a vendor. Source PDF: ${LEDGR_TEST_DOC_DIR}/invoices/sample-invoice.pdf. Confirm the tax_treatment and Xero code."
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "SR"
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [],
+            "intermediate_responses": []
+          }
+        }
+      ],
+      "final_session_state": {
+        "_eval_assertions": {
+          "all_lines_tax_treatment": "SR",
+          "xero_code": "SR"
+        }
+      }
+    },
+
+    {
+      "eval_id": "C8_gst_registered_zero_rated_line",
+      "session_input": {
+        "app_name": "accounting_agents",
+        "user_id": "eval_user",
+        "state": {
+          "client_name": "Test Firm GST-Reg",
+          "client_uen": "200000008H",
+          "region": "SINGAPORE",
+          "base_currency": "SGD",
+          "tax_registered": true,
+          "fye_month": 3,
+          "coa": [],
+          "entity_memory": [],
+          "category_mapping": {}
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "C8-inv-01",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Test Firm GST-Reg IS GST-registered. A telco/freight invoice line qualifies as zero-rated under Singapore GST (international service / exported goods). What tax_treatment should be assigned to that line?"
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "ZR"
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [],
+            "intermediate_responses": []
+          }
+        }
+      ],
+      "final_session_state": {
+        "_eval_assertions": {
+          "line_tax_treatment": "ZR",
+          "xero_code": "ZR"
+        }
+      }
+    },
+
+    {
+      "eval_id": "D9_hitl_edit_round_trip_field_names",
+      "session_input": {
+        "app_name": "accounting_agents",
+        "user_id": "eval_user",
+        "state": {
+          "client_name": "Test Firm",
+          "client_uen": "200000009I",
+          "region": "SINGAPORE",
+          "base_currency": "SGD",
+          "tax_registered": true,
+          "fye_month": 3,
+          "normalized_invoices": [
+            {
+              "invoice_number": "INV-EVAL-001",
+              "vendor": "Test Sub-Client",
+              "lines": [
+                {
+                  "description": "Consulting services",
+                  "net_amount": 100.00,
+                  "tax_treatment": "SR",
+                  "account_code": "6100",
+                  "index": 0
+                }
+              ]
+            }
+          ],
+          "coa": [],
+          "entity_memory": [],
+          "category_mapping": {}
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "D9-inv-01",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Apply an edit decision to invoice INV-EVAL-001 line 0: set tax_treatment to ZR and net_amount to 88.00. Confirm the updated values are reflected in normalized_invoices state."
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "ZR"
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [],
+            "intermediate_responses": []
+          }
+        }
+      ],
+      "final_session_state": {
+        "_eval_assertions": {
+          "normalized_invoices[0].lines[0].tax_treatment": "ZR",
+          "normalized_invoices[0].lines[0].net_amount": 88.00
+        }
+      }
+    },
+
+    {
+      "eval_id": "E10_adversarial_unreadable_pdf_flagged",
+      "session_input": {
+        "app_name": "accounting_agents",
+        "user_id": "eval_user",
+        "state": {
+          "client_name": "Test Firm",
+          "client_uen": "200000010J",
+          "region": "SINGAPORE",
+          "base_currency": "SGD",
+          "tax_registered": false,
+          "fye_month": 3,
+          "coa": [],
+          "entity_memory": [],
+          "category_mapping": {}
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "E10-inv-01",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "I uploaded a blurry/unreadable scanned document (credit note or illegible scan). The engine should NOT silently write a row with wrong values. What did the engine do with it?"
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "flagged"
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [],
+            "intermediate_responses": []
+          }
+        }
+      ],
+      "final_session_state": {
+        "_eval_assertions": {
+          "no_silent_wrong_row": true,
+          "expected_outcome": "tax_flagged=true OR low extract confidence OR HITL approval requested"
+        }
+      }
+    },
+
+    {
+      "eval_id": "F1_expense_claim_no_tax_purchase",
+      "session_input": {
+        "app_name": "accounting_agents",
+        "user_id": "eval_user",
+        "state": {
+          "client_name": "Company-A",
+          "client_uen": "200000011K",
+          "region": "SINGAPORE",
+          "base_currency": "SGD",
+          "tax_registered": false,
+          "fye_month": 3,
+          "coa": [],
+          "entity_memory": [],
+          "category_mapping": {},
+          "test_document": {
+            "doc_kind": "expense_claim",
+            "claimant_name": "Person-1",
+            "from_party": {"name": "Person-1", "role": "issuer"},
+            "to_party": {"name": "Company-A", "role": "recipient"},
+            "columns": ["Category", "Dates", "Task Card #", "Details", "Currency", "Amount"],
+            "lines": [
+              {"description": "Transportation", "net_amount": 131.77, "gst_amount": 0.0},
+              {"description": "Transportation", "net_amount": 132.08, "gst_amount": 0.0},
+              {"description": "Accommodations", "net_amount": 274.14, "gst_amount": 0.0},
+              {"description": "Travel per diem", "net_amount": 100.00, "gst_amount": 0.0},
+              {"description": "Travel per diem", "net_amount": 100.00, "gst_amount": 0.0},
+              {"description": "Travel per diem", "net_amount": 200.00, "gst_amount": 0.0},
+              {"description": "Travel per diem", "net_amount": 200.00, "gst_amount": 0.0},
+              {"description": "Taxi Fee Yangon", "net_amount": 57.12, "gst_amount": 0.0}
+            ],
+            "document_total": 1195.11,
+            "currency": "USD"
+          }
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "F1-inv-01",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "An employee reimbursement form for Company-A was uploaded. The Currency column on every line says USD; the footer reads 'TOTAL USD 1,195.11'. No GST, no Tax, no percentage on the document. Confirm direction, doc_kind, tax_visible, currency, and per-line tax_treatment."
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "direction=purchase doc_kind=expense_claim tax_visible=false currency=USD tax_treatment=NT on all lines."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [],
+            "intermediate_responses": []
+          }
+        }
+      ],
+      "final_session_state": {
+        "_eval_assertions": {
+          "direction_for_client": "purchase",
+          "doc_kind": "expense_claim",
+          "claimant_name": "Person-1",
+          "tax_visible_on_document": false,
+          "issuer_name": "Person-1",
+          "currency": "USD",
+          "all_lines_tax_treatment": "NT",
+          "xero_code": "No Tax"
+        }
+      }
+    },
+
+    {
+      "eval_id": "F2_expense_claim_overseas_purchase",
+      "session_input": {
+        "app_name": "accounting_agents",
+        "user_id": "eval_user",
+        "state": {
+          "client_name": "Company-A",
+          "client_uen": "200000012L",
+          "region": "SINGAPORE",
+          "base_currency": "SGD",
+          "tax_registered": true,
+          "fye_month": 3,
+          "coa": [],
+          "entity_memory": [],
+          "category_mapping": {},
+          "test_document": {
+            "doc_kind": "expense_claim",
+            "claimant_name": "Person-2",
+            "from_party": {"name": "Person-2", "role": "issuer"},
+            "to_party": {"name": "Company-A", "role": "recipient"},
+            "columns": ["Category", "Details", "Currency", "Amount"],
+            "lines": [
+              {"description": "Bangkok hotel", "net_amount": 320.00, "gst_amount": 0.0, "currency": "THB"},
+              {"description": "Bangkok taxi", "net_amount": 45.00, "gst_amount": 0.0, "currency": "THB"},
+              {"description": "Yangon hotel", "net_amount": 180.00, "gst_amount": 0.0, "currency": "USD"}
+            ],
+            "document_total": 545.00,
+            "currency": "SGD"
+          }
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "F2-inv-01",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "An expense claim with foreign-country receipts (Bangkok hotel + taxi, Yangon hotel). No SG GST column. Client is GST-registered. Confirm direction and per-line tax_treatment."
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "direction=purchase tax_visible=false tax_treatment=NT on all lines (no SG GST column on document)."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [],
+            "intermediate_responses": []
+          }
+        }
+      ],
+      "final_session_state": {
+        "_eval_assertions": {
+          "direction_for_client": "purchase",
+          "doc_kind": "expense_claim",
+          "tax_visible_on_document": false,
+          "all_lines_tax_treatment": "NT"
+        }
+      }
+    },
+
+    {
+      "eval_id": "F3_invoice_sales_local_gst_registered",
+      "session_input": {
+        "app_name": "accounting_agents",
+        "user_id": "eval_user",
+        "state": {
+          "client_name": "Company-A",
+          "client_uen": "200000013M",
+          "region": "SINGAPORE",
+          "base_currency": "SGD",
+          "tax_registered": true,
+          "fye_month": 3,
+          "coa": [],
+          "entity_memory": [],
+          "category_mapping": {},
+          "test_document": {
+            "doc_kind": "invoice",
+            "from_party": {"name": "Company-A", "role": "issuer", "uen": "200000013M"},
+            "to_party": {"name": "Company-B", "role": "recipient"},
+            "lines": [
+              {"description": "Consulting", "net_amount": 1000.00, "gst_amount": 90.00, "tax_keyword": "SR"}
+            ],
+            "subtotal": 1000.00,
+            "gst_total": 90.00,
+            "document_total": 1090.00,
+            "currency": "SGD"
+          }
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "F3-inv-01",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Company-A issued a Tax Invoice to Company-B with a 9% GST line. Confirm direction, tax_visible, and per-line tax_treatment."
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "direction=sales tax_visible=true tax_treatment=SR."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [],
+            "intermediate_responses": []
+          }
+        }
+      ],
+      "final_session_state": {
+        "_eval_assertions": {
+          "direction_for_client": "sales",
+          "doc_kind": "invoice",
+          "tax_visible_on_document": true,
+          "all_lines_tax_treatment": "SR",
+          "xero_code": "SR"
+        }
+      }
+    },
+
+    {
+      "eval_id": "F4_invoice_purchase_local_gst_registered",
+      "session_input": {
+        "app_name": "accounting_agents",
+        "user_id": "eval_user",
+        "state": {
+          "client_name": "Company-B",
+          "client_uen": "200000014N",
+          "region": "SINGAPORE",
+          "base_currency": "SGD",
+          "tax_registered": true,
+          "fye_month": 3,
+          "coa": [],
+          "entity_memory": [],
+          "category_mapping": {},
+          "test_document": {
+            "doc_kind": "invoice",
+            "from_party": {"name": "Company-A", "role": "issuer", "uen": "200000013M"},
+            "to_party": {"name": "Company-B", "role": "recipient"},
+            "lines": [
+              {"description": "Consulting", "net_amount": 1000.00, "gst_amount": 90.00, "tax_keyword": "SR"}
+            ],
+            "subtotal": 1000.00,
+            "gst_total": 90.00,
+            "document_total": 1090.00,
+            "currency": "SGD"
+          }
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "F4-inv-01",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Company-B received a Tax Invoice from Company-A with a 9% GST line. Confirm direction, tax_visible, and per-line tax_treatment."
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "direction=purchase tax_visible=true tax_treatment=SR."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [],
+            "intermediate_responses": []
+          }
+        }
+      ],
+      "final_session_state": {
+        "_eval_assertions": {
+          "direction_for_client": "purchase",
+          "doc_kind": "invoice",
+          "tax_visible_on_document": true,
+          "all_lines_tax_treatment": "SR",
+          "xero_code": "SR"
+        }
+      }
+    },
+
+    {
+      "eval_id": "F5_invoice_purchase_telco_split",
+      "session_input": {
+        "app_name": "accounting_agents",
+        "user_id": "eval_user",
+        "state": {
+          "client_name": "Company-B",
+          "client_uen": "200000015P",
+          "region": "SINGAPORE",
+          "base_currency": "SGD",
+          "tax_registered": true,
+          "fye_month": 3,
+          "coa": [],
+          "entity_memory": [],
+          "category_mapping": {},
+          "test_document": {
+            "doc_kind": "invoice",
+            "from_party": {"name": "Telco-A", "role": "issuer"},
+            "to_party": {"name": "Company-B", "role": "recipient"},
+            "lines": [
+              {"description": "Local calls (9%)", "net_amount": 100.00, "gst_amount": 9.00, "tax_keyword": "SR"},
+              {"description": "International calls (0% IDD)", "net_amount": 50.00, "gst_amount": 0.0, "tax_keyword": "ZR"}
+            ],
+            "subtotal": 150.00,
+            "gst_total": 9.00,
+            "document_total": 159.00,
+            "currency": "SGD"
+          }
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "F5-inv-01",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Company-B received a telco bill with both 9% local and 0% international lines. Confirm direction and per-line tax_treatment for the two summary rows."
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "direction=purchase; one SR row (local 9%) and one ZR row (international 0%)."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [],
+            "intermediate_responses": []
+          }
+        }
+      ],
+      "final_session_state": {
+        "_eval_assertions": {
+          "direction_for_client": "purchase",
+          "doc_kind": "invoice",
+          "tax_visible_on_document": true,
+          "line_tax_treatments": ["SR", "ZR"]
+        }
+      }
+    },
+
+    {
+      "eval_id": "F6_invoice_purchase_overseas_no_gst",
+      "session_input": {
+        "app_name": "accounting_agents",
+        "user_id": "eval_user",
+        "state": {
+          "client_name": "Company-B",
+          "client_uen": "200000016Q",
+          "region": "SINGAPORE",
+          "base_currency": "SGD",
+          "tax_registered": true,
+          "fye_month": 3,
+          "coa": [],
+          "entity_memory": [],
+          "category_mapping": {},
+          "test_document": {
+            "doc_kind": "invoice",
+            "from_party": {"name": "Overseas Vendor A", "role": "issuer", "is_overseas": true},
+            "to_party": {"name": "Company-B", "role": "recipient"},
+            "lines": [
+              {"description": "Software licence", "net_amount": 500.00, "gst_amount": 0.0, "currency": "USD"}
+            ],
+            "subtotal": 500.00,
+            "gst_total": 0.0,
+            "document_total": 500.00,
+            "currency": "USD"
+          }
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "F6-inv-01",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Company-B received an invoice from an overseas vendor (no GST line). Confirm direction and tax_treatment, and whether reverse-charge review is needed."
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "direction=purchase; per-line tax_treatment=OS; reverse-charge review flagged."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [],
+            "intermediate_responses": []
+          }
+        }
+      ],
+      "final_session_state": {
+        "_eval_assertions": {
+          "direction_for_client": "purchase",
+          "doc_kind": "invoice",
+          "all_lines_tax_treatment": "OS",
+          "tax_flagged": true
+        }
+      }
+    },
+
+    {
+      "eval_id": "F7_invoice_purchase_no_tax_gst_registered_client",
+      "session_input": {
+        "app_name": "accounting_agents",
+        "user_id": "eval_user",
+        "state": {
+          "client_name": "Company-B",
+          "client_uen": "200000017R",
+          "region": "SINGAPORE",
+          "base_currency": "SGD",
+          "tax_registered": true,
+          "fye_month": 3,
+          "coa": [],
+          "entity_memory": [],
+          "category_mapping": {},
+          "test_document": {
+            "doc_kind": "invoice",
+            "from_party": {"name": "Small Local Supplier", "role": "issuer"},
+            "to_party": {"name": "Company-B", "role": "recipient"},
+            "lines": [
+              {"description": "Stationery", "net_amount": 50.00, "gst_amount": 0.0}
+            ],
+            "subtotal": 50.00,
+            "gst_total": 0.0,
+            "document_total": 50.00,
+            "currency": "SGD"
+          }
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "F7-inv-01",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Company-B (GST-registered) received an invoice from a small local supplier that did not show any GST. Confirm direction, tax_visible, and per-line tax_treatment."
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "direction=purchase tax_visible=false tax_treatment=NT."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [],
+            "intermediate_responses": []
+          }
+        }
+      ],
+      "final_session_state": {
+        "_eval_assertions": {
+          "direction_for_client": "purchase",
+          "doc_kind": "invoice",
+          "tax_visible_on_document": false,
+          "all_lines_tax_treatment": "NT"
+        }
+      }
+    },
+
+    {
+      "eval_id": "F8_invoice_sales_no_tax_gst_registered_client",
+      "session_input": {
+        "app_name": "accounting_agents",
+        "user_id": "eval_user",
+        "state": {
+          "client_name": "Company-A",
+          "client_uen": "200000018S",
+          "region": "SINGAPORE",
+          "base_currency": "SGD",
+          "tax_registered": true,
+          "fye_month": 3,
+          "coa": [],
+          "entity_memory": [],
+          "category_mapping": {},
+          "test_document": {
+            "doc_kind": "invoice",
+            "from_party": {"name": "Company-A", "role": "issuer"},
+            "to_party": {"name": "Company-B", "role": "recipient"},
+            "lines": [
+              {"description": "Advisory", "net_amount": 200.00, "gst_amount": 0.0}
+            ],
+            "subtotal": 200.00,
+            "gst_total": 0.0,
+            "document_total": 200.00,
+            "currency": "SGD"
+          }
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "F8-inv-01",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Company-A (GST-registered) issued a sales invoice with no GST line shown. Per policy, this is treated as NT (no tax visible). Confirm direction and per-line tax_treatment."
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "direction=sales tax_visible=false tax_treatment=NT."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [],
+            "intermediate_responses": []
+          }
+        }
+      ],
+      "final_session_state": {
+        "_eval_assertions": {
+          "direction_for_client": "sales",
+          "doc_kind": "invoice",
+          "tax_visible_on_document": false,
+          "all_lines_tax_treatment": "NT"
+        }
+      }
+    },
+
+    {
+      "eval_id": "F9_non_gst_client_purchase_with_supplier_gst",
+      "session_input": {
+        "app_name": "accounting_agents",
+        "user_id": "eval_user",
+        "state": {
+          "client_name": "Company-C",
+          "client_uen": "200000019T",
+          "region": "SINGAPORE",
+          "base_currency": "SGD",
+          "tax_registered": false,
+          "fye_month": 3,
+          "coa": [],
+          "entity_memory": [],
+          "category_mapping": {},
+          "test_document": {
+            "doc_kind": "invoice",
+            "from_party": {"name": "Company-A", "role": "issuer", "uen": "200000013M"},
+            "to_party": {"name": "Company-C", "role": "recipient"},
+            "lines": [
+              {"description": "Consulting", "net_amount": 1000.00, "gst_amount": 90.00, "tax_keyword": "SR"}
+            ],
+            "subtotal": 1000.00,
+            "gst_total": 90.00,
+            "document_total": 1090.00,
+            "currency": "SGD"
+          }
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "F9-inv-01",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Company-C is NOT GST-registered. They received an invoice that DOES show a 9% GST line. Confirm direction and per-line tax_treatment (input GST is absorbed into cost)."
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "direction=purchase; per-line tax_treatment=NT (client not GST-registered; input GST absorbed)."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [],
+            "intermediate_responses": []
+          }
+        }
+      ],
+      "final_session_state": {
+        "_eval_assertions": {
+          "direction_for_client": "purchase",
+          "doc_kind": "invoice",
+          "tax_visible_on_document": true,
+          "all_lines_tax_treatment": "NT",
+          "xero_code": "No Tax"
+        }
+      }
+    },
+
+    {
+      "eval_id": "F10_non_gst_client_sales_with_gst_shown",
+      "session_input": {
+        "app_name": "accounting_agents",
+        "user_id": "eval_user",
+        "state": {
+          "client_name": "Company-C",
+          "client_uen": "200000020U",
+          "region": "SINGAPORE",
+          "base_currency": "SGD",
+          "tax_registered": false,
+          "fye_month": 3,
+          "coa": [],
+          "entity_memory": [],
+          "category_mapping": {},
+          "test_document": {
+            "doc_kind": "invoice",
+            "from_party": {"name": "Company-C", "role": "issuer"},
+            "to_party": {"name": "Company-B", "role": "recipient"},
+            "lines": [
+              {"description": "Advisory", "net_amount": 200.00, "gst_amount": 18.00, "tax_keyword": "SR"}
+            ],
+            "subtotal": 200.00,
+            "gst_total": 18.00,
+            "document_total": 218.00,
+            "currency": "SGD"
+          }
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "F10-inv-01",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Company-C is NOT GST-registered but a sales invoice they issued accidentally shows a 9% GST line. Per IRAS, a non-registered seller cannot charge GST. Confirm direction and per-line tax_treatment."
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "direction=sales; per-line tax_treatment=NT (client not GST-registered; master gate wins over tax_keyword)."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [],
+            "intermediate_responses": []
+          }
+        }
+      ],
+      "final_session_state": {
+        "_eval_assertions": {
+          "direction_for_client": "sales",
+          "doc_kind": "invoice",
+          "tax_visible_on_document": true,
+          "all_lines_tax_treatment": "NT",
+          "xero_code": "No Tax"
+        }
+      }
+    },
+
+    {
+      "eval_id": "F11_credit_note_sales",
+      "session_input": {
+        "app_name": "accounting_agents",
+        "user_id": "eval_user",
+        "state": {
+          "client_name": "Company-A",
+          "client_uen": "200000021V",
+          "region": "SINGAPORE",
+          "base_currency": "SGD",
+          "tax_registered": true,
+          "fye_month": 3,
+          "coa": [],
+          "entity_memory": [],
+          "category_mapping": {},
+          "test_document": {
+            "doc_kind": "credit_note",
+            "from_party": {"name": "Company-A", "role": "issuer"},
+            "to_party": {"name": "Company-B", "role": "recipient"},
+            "lines": [
+              {"description": "Returned goods", "net_amount": 100.00, "gst_amount": 9.00, "tax_keyword": "SR"}
+            ],
+            "subtotal": 100.00,
+            "gst_total": 9.00,
+            "document_total": 109.00,
+            "currency": "SGD"
+          }
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "F11-inv-01",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Company-A issued a credit note to Company-B reversing a previous SR sale. Confirm direction, doc_kind, and per-line tax_treatment."
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "direction=sales doc_kind=credit_note tax_treatment=SR."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [],
+            "intermediate_responses": []
+          }
+        }
+      ],
+      "final_session_state": {
+        "_eval_assertions": {
+          "direction_for_client": "sales",
+          "doc_kind": "credit_note",
+          "tax_visible_on_document": true,
+          "all_lines_tax_treatment": "SR"
+        }
+      }
+    },
+
+    {
+      "eval_id": "F12_ambiguous_unknown",
+      "session_input": {
+        "app_name": "accounting_agents",
+        "user_id": "eval_user",
+        "state": {
+          "client_name": "Company-A",
+          "client_uen": "200000022W",
+          "region": "SINGAPORE",
+          "base_currency": "SGD",
+          "tax_registered": true,
+          "fye_month": 3,
+          "coa": [],
+          "entity_memory": [],
+          "category_mapping": {},
+          "test_document": {
+            "doc_kind": "other",
+            "from_party": null,
+            "to_party": null,
+            "lines": [],
+            "document_total": 0.0,
+            "currency": "SGD"
+          }
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "F12-inv-01",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "A document was uploaded that does not contain Company-A's identity anywhere and has no recognisable From/To or Bill-To block. What should direction_for_client be?"
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "unknown"
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [],
+            "intermediate_responses": []
+          }
+        }
+      ],
+      "final_session_state": {
+        "_eval_assertions": {
+          "direction_for_client": "unknown",
+          "doc_kind": "other",
+          "expected_outcome": "direction unknown triggers HITL approval gate"
+        }
+      }
+    },
+
+    {
+      "eval_id": "F12_MY_receipt_yau_lee_sst",
+      "description": "YAU LEE MOTOR Malaysia SST 8% receipt — Phase 8 / multi-country eval. The YAU LEE ADK session (c92951d1) wrongly flagged a valid Malaysia 8% SST line as a Singapore 9% GST mismatch. After the LLM tax reasoner + jurisdiction router, the line must resolve to SR with confidence >= 0.8 and tax_flagged=false.",
+      "session_input": {
+        "app_name": "accounting_agents",
+        "user_id": "eval_user",
+        "state": {
+          "client_id": "jbi-plus-auto",
+          "client_name": "JBI PLUS AUTO SDN BHD",
+          "client_uen": "202401012345",
+          "region": "MALAYSIA",
+          "base_currency": "MYR",
+          "tax_registered": true,
+          "fye_month": 12,
+          "software": "qbs",
+          "coa": [
+            {"code": "500-010", "name": "Cost of Sales - Vehicle Parts & Accessories"},
+            {"code": "500-020", "name": "Cost of Sales - Labour & Workshop Services"},
+            {"code": "6100", "name": "Motor Vehicle Expenses"}
+          ],
+          "entity_memory": [
+            {
+              "name": "YAU LEE MOTOR",
+              "reg_no": "202301011111",
+              "mapping_code": "500-020",
+              "role": "Creditor",
+              "tax_code": "SR"
+            }
+          ],
+          "category_mapping": {}
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "F12-inv-01",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "YAU LEE MOTOR issued a Malaysia workshop receipt to JBI PLUS AUTO. Net 60.19 MYR, Service Tax 4.81 (8% SST), Total 65.00. Source: ${LEDGR_TEST_DOC_DIR}/receipts/yau_lee_motor_receipt.pdf. Confirm direction, tax jurisdiction, and per-line treatment."
+              }
+            ]
+          },
+          "final_response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "direction=purchase; tax_jurisdiction=MALAYSIA; tax_system=SST; per-line tax_treatment=SR with confidence ~0.9 and tax_flagged=false (4.81 = 8% of 60.19 reconciles to MY SST band; no SG 9% flag). account_code=500-020 from entity memory."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [],
+            "intermediate_responses": []
+          }
+        }
+      ],
+      "test_document": {
+        "doc_kind": "receipt",
+        "from_party": {"name": "YAU LEE MOTOR", "country": "MY", "role": "issuer"},
+        "to_party": {"name": "JBI PLUS AUTO SDN BHD", "country": "MY", "role": "recipient"},
+        "lines": [
+          {"description": "Workshop labour", "net_amount": 60.19, "gst_amount": 4.81, "tax_keyword": null}
+        ],
+        "subtotal": 60.19,
+        "gst_total": 4.81,
+        "document_total": 65.00,
+        "currency": "MYR",
+        "tax_system_hint": "SST"
+      },
+      "final_session_state": {
+        "_eval_assertions": {
+          "tax_jurisdiction": "MALAYSIA",
+          "tax_system": "SST",
+          "expected_outcome": "per-line tax_treatment=SR with tax_flagged=false; 4.81 / 60.19 = 7.99% within 1% of MY 8% SST band; no SG 9% mismatch flag; account_code=500-020 (YAU LEE entity memory match)"
+        }
+      }
+    }
+
+  ]
+}

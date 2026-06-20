@@ -24,7 +24,7 @@ from app.blocks import (
     welcome_blocks,
 )
 from app.commands import parse_ledgr_command, settings_prefill
-from app.coa_ingest import coa_rows_from_file, ingest_coa, standard_coa_rows
+from app.coa_ingest import coa_rows_from_file, ingest_coa
 from app.onboarding import parse_modal_state, profile_doc
 
 logger = logging.getLogger(__name__)
@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 # OAuthSettings (multi-workspace install) and slack/manifest-distributed.json.
 BOT_SCOPES = [
     "chat:write",
+    "reactions:write",
     "files:read",
     "files:write",
     "channels:history",
@@ -309,34 +310,12 @@ def handle_onboarding_submit(
     client.chat_postMessage(channel=channel_id, blocks=coa_prompt_blocks())
 
 
-def handle_use_standard_coa(body: dict, ack: Callable, client, store) -> None:
-    """Ack the button, ingest the standard SG SME COA for this channel's client."""
-    ack()
-    channel_id = (
-        body.get("container", {}).get("channel_id")
-        or body.get("channel", {}).get("id")
-        or body.get("channel_id")
-        or ""
-    )
-
-    def _say(**kwargs) -> None:
-        client.chat_postMessage(channel=channel_id, **kwargs)
-
-    ingest_coa(
-        channel_id=channel_id,
-        store=store,
-        rows=standard_coa_rows(),
-        say_fn=_say,
-    )
-
-
-def handle_ledgr_command(ack: Callable, body: dict, client, store, archive=None) -> None:
+def handle_ledgr_command(ack: Callable, body: dict, client, store) -> None:
     """Handle the /ledgr slash command.
 
     Subcommands:
       settings — open the onboarding modal prefilled with existing profile data.
-      export   — re-upload the most recent workbook(s) from the archive when
-                 available; otherwise post the "no ledger yet" message.
+      export   — post the "export unavailable" message (archive removed).
       help     — post usage card (default for unknown subcommands).
     """
     ack()
@@ -351,7 +330,7 @@ def handle_ledgr_command(ack: Callable, body: dict, client, store, archive=None)
         client.views_open(trigger_id=body["trigger_id"], view=modal)
 
     elif cmd.subcommand == "export":
-        _handle_export(channel_id=channel_id, client=client, store=store, archive=archive)
+        _handle_export(channel_id=channel_id, client=client)
 
     elif cmd.subcommand == "profile":
         existing = store.get_by_channel(channel_id)
@@ -373,52 +352,13 @@ def handle_ledgr_command(ack: Callable, body: dict, client, store, archive=None)
         client.chat_postMessage(channel=channel_id, blocks=ledgr_help_blocks())
 
 
-def _handle_export(*, channel_id: str, client, store, archive=None) -> None:
-    """Implement /ledgr export: re-upload the latest workbook(s) from the archive.
+def _handle_export(*, channel_id: str, client) -> None:
+    """Implement /ledgr export: post the export-unavailable message.
 
-    Strategy:
-    - If no archive or no client profile → post export_unavailable_blocks().
-    - list_workbooks → pick the highest FY; for that FY re-upload every distinct
-      workbook filename found there.
-    - If list_workbooks returns [] → post export_unavailable_blocks().
-    - On success → also post a short confirmation message.
+    GCS archive was removed (ADR-0002). Export is always unavailable;
+    the Slack-hosted ledger canvas is the system of record.
     """
-    # No archive wired or no channel profile
-    resolved = store.get_by_channel(channel_id) if archive is not None else None
-    if archive is None or resolved is None:
-        client.chat_postMessage(channel=channel_id, blocks=export_unavailable_blocks())
-        return
-
-    workbooks = archive.list_workbooks(resolved.client_id)
-    if not workbooks:
-        client.chat_postMessage(channel=channel_id, blocks=export_unavailable_blocks())
-        return
-
-    # Pick the latest FY
-    latest_fy = max(fy for fy, _ in workbooks)
-    latest = [(fy, fname) for fy, fname in workbooks if fy == latest_fy]
-
-    # De-duplicate filenames (keep latest fy, which they all share here)
-    seen: set[str] = set()
-    uploaded_names: list[str] = []
-    for fy, filename in latest:
-        if filename in seen:
-            continue
-        seen.add(filename)
-        data = archive.get_workbook(resolved.client_id, fy, filename)
-        if data is None:
-            continue
-        slack_upload_workbook(client, channel_id, filename, data, filename)
-        uploaded_names.append(filename)
-
-    if uploaded_names:
-        names_str = ", ".join(f"`{n}`" for n in uploaded_names)
-        client.chat_postMessage(
-            channel=channel_id,
-            text=f"Re-sent your latest ledger(s): {names_str}",
-        )
-    else:
-        client.chat_postMessage(channel=channel_id, blocks=export_unavailable_blocks())
+    client.chat_postMessage(channel=channel_id, blocks=export_unavailable_blocks())
 
 
 def handle_member_joined(body: dict, ack: Optional[Callable], client, bot_user_id: str) -> None:

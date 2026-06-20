@@ -1,0 +1,1450 @@
+{
+  "eval_case_results": [
+    {
+      "eval_case_index": 0,
+      "response_candidate_results": [
+        {
+          "response_index": 0,
+          "metric_results": {
+            "chat_tool_trajectory_match": {
+              "metric_name": "chat_tool_trajectory_match",
+              "score": 1.0,
+              "explanation": "expected=['show_client_profile'] actual=['show_client_profile'] matched=1/1",
+              "rubric_verdicts": null,
+              "raw_output": null,
+              "error_message": null
+            },
+            "custom_response_quality": {
+              "metric_name": "custom_response_quality",
+              "score": 5.0,
+              "explanation": "The assistant correctly understood the user's implicit query about the client/firm they are working with. It successfully used the `show_client_profile` tool to retrieve relevant data from its internal state/ledger, demonstrating excellent use of available information without prompting the user. The final response is accurate, comprehensive, and presented clearly and concisely. It directly answers the question with all pertinent details.",
+              "rubric_verdicts": null,
+              "raw_output": null,
+              "error_message": null
+            }
+          }
+        }
+      ]
+    },
+    {
+      "eval_case_index": 1,
+      "response_candidate_results": [
+        {
+          "response_index": 0,
+          "metric_results": {
+            "chat_tool_trajectory_match": {
+              "metric_name": "chat_tool_trajectory_match",
+              "score": 0.0,
+              "explanation": "expected=['summarize_by_category'] actual=['pnl_for_fy'] matched=0/1",
+              "rubric_verdicts": null,
+              "raw_output": null,
+              "error_message": null
+            },
+            "custom_response_quality": {
+              "metric_name": "custom_response_quality",
+              "score": 5.0,
+              "explanation": "The response is perfectly accurate, clear, and demonstrates excellent use of ledger data. It directly answers the user's question with specific, relevant information (total purchases/expenses, amount, currency, and fiscal year) without needing to ask clarifying questions. The tool trace confirms that the `pnl_for_fy` function was successfully called to retrieve the necessary data.",
+              "rubric_verdicts": null,
+              "raw_output": null,
+              "error_message": null
+            }
+          }
+        }
+      ]
+    },
+    {
+      "eval_case_index": 2,
+      "response_candidate_results": [
+        {
+          "response_index": 0,
+          "metric_results": {
+            "chat_tool_trajectory_match": {
+              "metric_name": "chat_tool_trajectory_match",
+              "score": 1.0,
+              "explanation": "expected=['show_client_profile'] actual=['show_client_profile'] matched=1/1",
+              "rubric_verdicts": null,
+              "raw_output": null,
+              "error_message": null
+            },
+            "custom_response_quality": {
+              "metric_name": "custom_response_quality",
+              "score": 4.0,
+              "explanation": "The assistant accurately identifies and states the base currency (SGD) using the `show_client_profile` tool, fulfilling the user's request. It also proactively reminds the user of their Financial Year End (FYE) month. While repeating the FYE month from the previous turn is not strictly necessary for *this* question, it's not incorrect and maintains context. The response is clear and directly answers the primary question. The score is not a 5 due to the slight redundancy of repeating the FYE month, which was not asked for in this specific turn, making the response slightly less concise than it could have been.",
+              "rubric_verdicts": null,
+              "raw_output": null,
+              "error_message": null
+            }
+          }
+        }
+      ]
+    },
+    {
+      "eval_case_index": 3,
+      "response_candidate_results": [
+        {
+          "response_index": 0,
+          "metric_results": {
+            "chat_tool_trajectory_match": {
+              "metric_name": "chat_tool_trajectory_match",
+              "score": 1.0,
+              "explanation": "expected=['lookup_row', 'explain_categorization', 'lookup_row', 'explain_categorization'] actual=['lookup_row', 'explain_categorization', 'lookup_row', 'explain_categorization'] matched=4/4",
+              "rubric_verdicts": null,
+              "raw_output": null,
+              "error_message": null
+            },
+            "custom_response_quality": {
+              "metric_name": "custom_response_quality",
+              "score": 5.0,
+              "explanation": "The assistant accurately explains that a deterministic match was not found for the account codes for both invoices. It correctly infers that this would lead to flagging for review or an LLM fallback for categorization, and then provides the currently assigned account code. The response effectively uses the implied ledger data (vendor name, description) without asking the user for information already available. The explanation is clear and addresses the user's 'why' question by stating the absence of a clear rule-based match and the subsequent process.",
+              "rubric_verdicts": null,
+              "raw_output": null,
+              "error_message": null
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "summary_metrics": [
+    {
+      "metric_name": "chat_tool_trajectory_match",
+      "num_cases_total": 4,
+      "num_cases_valid": 4,
+      "num_cases_error": 0,
+      "mean_score": 0.75,
+      "stdev_score": 0.5,
+      "pass_rate": null
+    },
+    {
+      "metric_name": "custom_response_quality",
+      "num_cases_total": 4,
+      "num_cases_valid": 4,
+      "num_cases_error": 0,
+      "mean_score": 4.75,
+      "stdev_score": 0.5,
+      "pass_rate": null
+    }
+  ],
+  "win_rates": null,
+  "evaluation_dataset": [
+    {
+      "bigquery_source": null,
+      "gcs_source": null,
+      "eval_cases": [
+        {
+          "prompt": {
+            "parts": [
+              {
+                "media_resolution": null,
+                "code_execution_result": null,
+                "executable_code": null,
+                "file_data": null,
+                "function_call": null,
+                "function_response": null,
+                "inline_data": null,
+                "text": "who am I working with?",
+                "thought": null,
+                "thought_signature": null,
+                "video_metadata": null,
+                "tool_call": null,
+                "tool_response": null,
+                "part_metadata": null
+              }
+            ],
+            "role": "user"
+          },
+          "responses": [
+            {
+              "response": {
+                "parts": [
+                  {
+                    "media_resolution": null,
+                    "code_execution_result": null,
+                    "executable_code": null,
+                    "file_data": null,
+                    "function_call": null,
+                    "function_response": null,
+                    "inline_data": null,
+                    "text": "You are working with Test Firm (UEN 200000003C), a Singapore-based company with SGD as its base currency. They are GST-registered, and their Financial Year ends in June.\n",
+                    "thought": null,
+                    "thought_signature": null,
+                    "video_metadata": null,
+                    "tool_call": null,
+                    "tool_response": null,
+                    "part_metadata": null
+                  }
+                ],
+                "role": "model"
+              }
+            }
+          ],
+          "reference": {
+            "response": {
+              "parts": [
+                {
+                  "media_resolution": null,
+                  "code_execution_result": null,
+                  "executable_code": null,
+                  "file_data": null,
+                  "function_call": null,
+                  "function_response": null,
+                  "inline_data": null,
+                  "text": "Test Firm",
+                  "thought": null,
+                  "thought_signature": null,
+                  "video_metadata": null,
+                  "tool_call": null,
+                  "tool_response": null,
+                  "part_metadata": null
+                }
+              ],
+              "role": "model"
+            }
+          },
+          "system_instruction": null,
+          "conversation_history": null,
+          "rubric_groups": null,
+          "eval_case_id": "B3_chat_show_client_profile_trajectory",
+          "intermediate_events": null,
+          "agent_info": null,
+          "agent_data": {
+            "agents": {
+              "assistant": {
+                "agent_id": "assistant",
+                "agent_type": null,
+                "description": null,
+                "instruction": "Ledgr chat assistant.",
+                "tools": null,
+                "sub_agents": null
+              }
+            },
+            "turns": [
+              {
+                "turn_index": 0,
+                "turn_id": null,
+                "events": [
+                  {
+                    "author": "user",
+                    "content": {
+                      "parts": [
+                        {
+                          "media_resolution": null,
+                          "code_execution_result": null,
+                          "executable_code": null,
+                          "file_data": null,
+                          "function_call": null,
+                          "function_response": null,
+                          "inline_data": null,
+                          "text": "who am I working with?",
+                          "thought": null,
+                          "thought_signature": null,
+                          "video_metadata": null,
+                          "tool_call": null,
+                          "tool_response": null,
+                          "part_metadata": null
+                        }
+                      ],
+                      "role": "user"
+                    },
+                    "event_time": null,
+                    "state_delta": null,
+                    "active_tools": null
+                  },
+                  {
+                    "author": "assistant",
+                    "content": {
+                      "parts": [
+                        {
+                          "media_resolution": null,
+                          "code_execution_result": null,
+                          "executable_code": null,
+                          "file_data": null,
+                          "function_call": {
+                            "id": null,
+                            "args": {},
+                            "name": "show_client_profile",
+                            "partial_args": null,
+                            "will_continue": null
+                          },
+                          "function_response": null,
+                          "inline_data": null,
+                          "text": null,
+                          "thought": null,
+                          "thought_signature": null,
+                          "video_metadata": null,
+                          "tool_call": null,
+                          "tool_response": null,
+                          "part_metadata": null
+                        }
+                      ],
+                      "role": null
+                    },
+                    "event_time": null,
+                    "state_delta": null,
+                    "active_tools": null
+                  },
+                  {
+                    "author": "assistant",
+                    "content": {
+                      "parts": [
+                        {
+                          "media_resolution": null,
+                          "code_execution_result": null,
+                          "executable_code": null,
+                          "file_data": null,
+                          "function_call": null,
+                          "function_response": {
+                            "will_continue": null,
+                            "scheduling": null,
+                            "parts": null,
+                            "id": null,
+                            "name": "show_client_profile",
+                            "response": {
+                              "status": "ok"
+                            }
+                          },
+                          "inline_data": null,
+                          "text": null,
+                          "thought": null,
+                          "thought_signature": null,
+                          "video_metadata": null,
+                          "tool_call": null,
+                          "tool_response": null,
+                          "part_metadata": null
+                        }
+                      ],
+                      "role": null
+                    },
+                    "event_time": null,
+                    "state_delta": null,
+                    "active_tools": null
+                  },
+                  {
+                    "author": "assistant",
+                    "content": {
+                      "parts": [
+                        {
+                          "media_resolution": null,
+                          "code_execution_result": null,
+                          "executable_code": null,
+                          "file_data": null,
+                          "function_call": null,
+                          "function_response": null,
+                          "inline_data": null,
+                          "text": "You are working with Test Firm (UEN 200000003C), a Singapore-based company with SGD as its base currency. They are GST-registered, and their Financial Year ends in June.\n",
+                          "thought": null,
+                          "thought_signature": null,
+                          "video_metadata": null,
+                          "tool_call": null,
+                          "tool_response": null,
+                          "part_metadata": null
+                        }
+                      ],
+                      "role": "model"
+                    },
+                    "event_time": null,
+                    "state_delta": null,
+                    "active_tools": null
+                  }
+                ]
+              }
+            ]
+          },
+          "user_scenario": null,
+          "expected_tool_trajectory": [
+            "show_client_profile"
+          ],
+          "actual_tool_trajectory": [
+            "show_client_profile"
+          ]
+        },
+        {
+          "prompt": {
+            "parts": [
+              {
+                "media_resolution": null,
+                "code_execution_result": null,
+                "executable_code": null,
+                "file_data": null,
+                "function_call": null,
+                "function_response": null,
+                "inline_data": null,
+                "text": "total purchases this FY?",
+                "thought": null,
+                "thought_signature": null,
+                "video_metadata": null,
+                "tool_call": null,
+                "tool_response": null,
+                "part_metadata": null
+              }
+            ],
+            "role": "user"
+          },
+          "responses": [
+            {
+              "response": {
+                "parts": [
+                  {
+                    "media_resolution": null,
+                    "code_execution_result": null,
+                    "executable_code": null,
+                    "file_data": null,
+                    "function_call": null,
+                    "function_response": null,
+                    "inline_data": null,
+                    "text": "This fiscal year, your total purchases (expenses) amount to 2450.00 SGD.",
+                    "thought": null,
+                    "thought_signature": null,
+                    "video_metadata": null,
+                    "tool_call": null,
+                    "tool_response": null,
+                    "part_metadata": null
+                  }
+                ],
+                "role": "model"
+              }
+            }
+          ],
+          "reference": {
+            "response": {
+              "parts": [
+                {
+                  "media_resolution": null,
+                  "code_execution_result": null,
+                  "executable_code": null,
+                  "file_data": null,
+                  "function_call": null,
+                  "function_response": null,
+                  "inline_data": null,
+                  "text": "2000",
+                  "thought": null,
+                  "thought_signature": null,
+                  "video_metadata": null,
+                  "tool_call": null,
+                  "tool_response": null,
+                  "part_metadata": null
+                }
+              ],
+              "role": "model"
+            }
+          },
+          "system_instruction": null,
+          "conversation_history": null,
+          "rubric_groups": null,
+          "eval_case_id": "B4_chat_summarize_by_category_trajectory",
+          "intermediate_events": null,
+          "agent_info": null,
+          "agent_data": {
+            "agents": {
+              "assistant": {
+                "agent_id": "assistant",
+                "agent_type": null,
+                "description": null,
+                "instruction": "Ledgr chat assistant.",
+                "tools": null,
+                "sub_agents": null
+              }
+            },
+            "turns": [
+              {
+                "turn_index": 0,
+                "turn_id": null,
+                "events": [
+                  {
+                    "author": "user",
+                    "content": {
+                      "parts": [
+                        {
+                          "media_resolution": null,
+                          "code_execution_result": null,
+                          "executable_code": null,
+                          "file_data": null,
+                          "function_call": null,
+                          "function_response": null,
+                          "inline_data": null,
+                          "text": "total purchases this FY?",
+                          "thought": null,
+                          "thought_signature": null,
+                          "video_metadata": null,
+                          "tool_call": null,
+                          "tool_response": null,
+                          "part_metadata": null
+                        }
+                      ],
+                      "role": "user"
+                    },
+                    "event_time": null,
+                    "state_delta": null,
+                    "active_tools": null
+                  },
+                  {
+                    "author": "assistant",
+                    "content": {
+                      "parts": [
+                        {
+                          "media_resolution": null,
+                          "code_execution_result": null,
+                          "executable_code": null,
+                          "file_data": null,
+                          "function_call": {
+                            "id": null,
+                            "args": {},
+                            "name": "pnl_for_fy",
+                            "partial_args": null,
+                            "will_continue": null
+                          },
+                          "function_response": null,
+                          "inline_data": null,
+                          "text": null,
+                          "thought": null,
+                          "thought_signature": null,
+                          "video_metadata": null,
+                          "tool_call": null,
+                          "tool_response": null,
+                          "part_metadata": null
+                        }
+                      ],
+                      "role": null
+                    },
+                    "event_time": null,
+                    "state_delta": null,
+                    "active_tools": null
+                  },
+                  {
+                    "author": "assistant",
+                    "content": {
+                      "parts": [
+                        {
+                          "media_resolution": null,
+                          "code_execution_result": null,
+                          "executable_code": null,
+                          "file_data": null,
+                          "function_call": null,
+                          "function_response": {
+                            "will_continue": null,
+                            "scheduling": null,
+                            "parts": null,
+                            "id": null,
+                            "name": "pnl_for_fy",
+                            "response": {
+                              "status": "ok"
+                            }
+                          },
+                          "inline_data": null,
+                          "text": null,
+                          "thought": null,
+                          "thought_signature": null,
+                          "video_metadata": null,
+                          "tool_call": null,
+                          "tool_response": null,
+                          "part_metadata": null
+                        }
+                      ],
+                      "role": null
+                    },
+                    "event_time": null,
+                    "state_delta": null,
+                    "active_tools": null
+                  },
+                  {
+                    "author": "assistant",
+                    "content": {
+                      "parts": [
+                        {
+                          "media_resolution": null,
+                          "code_execution_result": null,
+                          "executable_code": null,
+                          "file_data": null,
+                          "function_call": null,
+                          "function_response": null,
+                          "inline_data": null,
+                          "text": "This fiscal year, your total purchases (expenses) amount to 2450.00 SGD.",
+                          "thought": null,
+                          "thought_signature": null,
+                          "video_metadata": null,
+                          "tool_call": null,
+                          "tool_response": null,
+                          "part_metadata": null
+                        }
+                      ],
+                      "role": "model"
+                    },
+                    "event_time": null,
+                    "state_delta": null,
+                    "active_tools": null
+                  }
+                ]
+              }
+            ]
+          },
+          "user_scenario": null,
+          "expected_tool_trajectory": [
+            "summarize_by_category"
+          ],
+          "actual_tool_trajectory": [
+            "pnl_for_fy"
+          ]
+        },
+        {
+          "prompt": {
+            "parts": [
+              {
+                "media_resolution": null,
+                "code_execution_result": null,
+                "executable_code": null,
+                "file_data": null,
+                "function_call": null,
+                "function_response": null,
+                "inline_data": null,
+                "text": "and the currency?",
+                "thought": null,
+                "thought_signature": null,
+                "video_metadata": null,
+                "tool_call": null,
+                "tool_response": null,
+                "part_metadata": null
+              }
+            ],
+            "role": "user"
+          },
+          "responses": [
+            {
+              "response": {
+                "parts": [
+                  {
+                    "media_resolution": null,
+                    "code_execution_result": null,
+                    "executable_code": null,
+                    "file_data": null,
+                    "function_call": null,
+                    "function_response": null,
+                    "inline_data": null,
+                    "text": "Your Financial Year End (FYE) month is September, and your base currency is SGD.",
+                    "thought": null,
+                    "thought_signature": null,
+                    "video_metadata": null,
+                    "tool_call": null,
+                    "tool_response": null,
+                    "part_metadata": null
+                  }
+                ],
+                "role": "model"
+              }
+            }
+          ],
+          "reference": {
+            "response": {
+              "parts": [
+                {
+                  "media_resolution": null,
+                  "code_execution_result": null,
+                  "executable_code": null,
+                  "file_data": null,
+                  "function_call": null,
+                  "function_response": null,
+                  "inline_data": null,
+                  "text": "SGD",
+                  "thought": null,
+                  "thought_signature": null,
+                  "video_metadata": null,
+                  "tool_call": null,
+                  "tool_response": null,
+                  "part_metadata": null
+                }
+              ],
+              "role": "model"
+            }
+          },
+          "system_instruction": null,
+          "conversation_history": null,
+          "rubric_groups": null,
+          "eval_case_id": "B5_chat_multi_turn_fye_then_currency",
+          "intermediate_events": null,
+          "agent_info": null,
+          "agent_data": {
+            "agents": {
+              "assistant": {
+                "agent_id": "assistant",
+                "agent_type": null,
+                "description": null,
+                "instruction": "Ledgr chat assistant (eval trace export).",
+                "tools": null,
+                "sub_agents": null
+              }
+            },
+            "turns": [
+              {
+                "turn_index": 0,
+                "turn_id": null,
+                "events": [
+                  {
+                    "author": "user",
+                    "content": {
+                      "parts": [
+                        {
+                          "media_resolution": null,
+                          "code_execution_result": null,
+                          "executable_code": null,
+                          "file_data": null,
+                          "function_call": null,
+                          "function_response": null,
+                          "inline_data": null,
+                          "text": "what's my FYE month?",
+                          "thought": null,
+                          "thought_signature": null,
+                          "video_metadata": null,
+                          "tool_call": null,
+                          "tool_response": null,
+                          "part_metadata": null
+                        }
+                      ],
+                      "role": "user"
+                    },
+                    "event_time": null,
+                    "state_delta": null,
+                    "active_tools": null
+                  },
+                  {
+                    "author": "assistant",
+                    "content": {
+                      "parts": [
+                        {
+                          "media_resolution": null,
+                          "code_execution_result": null,
+                          "executable_code": null,
+                          "file_data": null,
+                          "function_call": {
+                            "id": null,
+                            "args": {},
+                            "name": "show_client_profile",
+                            "partial_args": null,
+                            "will_continue": null
+                          },
+                          "function_response": null,
+                          "inline_data": null,
+                          "text": null,
+                          "thought": null,
+                          "thought_signature": null,
+                          "video_metadata": null,
+                          "tool_call": null,
+                          "tool_response": null,
+                          "part_metadata": null
+                        }
+                      ],
+                      "role": null
+                    },
+                    "event_time": null,
+                    "state_delta": null,
+                    "active_tools": null
+                  },
+                  {
+                    "author": "assistant",
+                    "content": {
+                      "parts": [
+                        {
+                          "media_resolution": null,
+                          "code_execution_result": null,
+                          "executable_code": null,
+                          "file_data": null,
+                          "function_call": null,
+                          "function_response": {
+                            "will_continue": null,
+                            "scheduling": null,
+                            "parts": null,
+                            "id": null,
+                            "name": "show_client_profile",
+                            "response": {
+                              "status": "ok"
+                            }
+                          },
+                          "inline_data": null,
+                          "text": null,
+                          "thought": null,
+                          "thought_signature": null,
+                          "video_metadata": null,
+                          "tool_call": null,
+                          "tool_response": null,
+                          "part_metadata": null
+                        }
+                      ],
+                      "role": null
+                    },
+                    "event_time": null,
+                    "state_delta": null,
+                    "active_tools": null
+                  },
+                  {
+                    "author": "assistant",
+                    "content": {
+                      "parts": [
+                        {
+                          "media_resolution": null,
+                          "code_execution_result": null,
+                          "executable_code": null,
+                          "file_data": null,
+                          "function_call": null,
+                          "function_response": null,
+                          "inline_data": null,
+                          "text": "September",
+                          "thought": null,
+                          "thought_signature": null,
+                          "video_metadata": null,
+                          "tool_call": null,
+                          "tool_response": null,
+                          "part_metadata": null
+                        }
+                      ],
+                      "role": "model"
+                    },
+                    "event_time": null,
+                    "state_delta": null,
+                    "active_tools": null
+                  }
+                ]
+              },
+              {
+                "turn_index": 1,
+                "turn_id": null,
+                "events": [
+                  {
+                    "author": "user",
+                    "content": {
+                      "parts": [
+                        {
+                          "media_resolution": null,
+                          "code_execution_result": null,
+                          "executable_code": null,
+                          "file_data": null,
+                          "function_call": null,
+                          "function_response": null,
+                          "inline_data": null,
+                          "text": "and the currency?",
+                          "thought": null,
+                          "thought_signature": null,
+                          "video_metadata": null,
+                          "tool_call": null,
+                          "tool_response": null,
+                          "part_metadata": null
+                        }
+                      ],
+                      "role": "user"
+                    },
+                    "event_time": null,
+                    "state_delta": null,
+                    "active_tools": null
+                  },
+                  {
+                    "author": "assistant",
+                    "content": {
+                      "parts": [
+                        {
+                          "media_resolution": null,
+                          "code_execution_result": null,
+                          "executable_code": null,
+                          "file_data": null,
+                          "function_call": {
+                            "id": null,
+                            "args": {},
+                            "name": "show_client_profile",
+                            "partial_args": null,
+                            "will_continue": null
+                          },
+                          "function_response": null,
+                          "inline_data": null,
+                          "text": null,
+                          "thought": null,
+                          "thought_signature": null,
+                          "video_metadata": null,
+                          "tool_call": null,
+                          "tool_response": null,
+                          "part_metadata": null
+                        }
+                      ],
+                      "role": null
+                    },
+                    "event_time": null,
+                    "state_delta": null,
+                    "active_tools": null
+                  },
+                  {
+                    "author": "assistant",
+                    "content": {
+                      "parts": [
+                        {
+                          "media_resolution": null,
+                          "code_execution_result": null,
+                          "executable_code": null,
+                          "file_data": null,
+                          "function_call": null,
+                          "function_response": {
+                            "will_continue": null,
+                            "scheduling": null,
+                            "parts": null,
+                            "id": null,
+                            "name": "show_client_profile",
+                            "response": {
+                              "status": "ok"
+                            }
+                          },
+                          "inline_data": null,
+                          "text": null,
+                          "thought": null,
+                          "thought_signature": null,
+                          "video_metadata": null,
+                          "tool_call": null,
+                          "tool_response": null,
+                          "part_metadata": null
+                        }
+                      ],
+                      "role": null
+                    },
+                    "event_time": null,
+                    "state_delta": null,
+                    "active_tools": null
+                  },
+                  {
+                    "author": "assistant",
+                    "content": {
+                      "parts": [
+                        {
+                          "media_resolution": null,
+                          "code_execution_result": null,
+                          "executable_code": null,
+                          "file_data": null,
+                          "function_call": null,
+                          "function_response": null,
+                          "inline_data": null,
+                          "text": "Your Financial Year End (FYE) month is September, and your base currency is SGD.",
+                          "thought": null,
+                          "thought_signature": null,
+                          "video_metadata": null,
+                          "tool_call": null,
+                          "tool_response": null,
+                          "part_metadata": null
+                        }
+                      ],
+                      "role": "model"
+                    },
+                    "event_time": null,
+                    "state_delta": null,
+                    "active_tools": null
+                  }
+                ]
+              }
+            ]
+          },
+          "user_scenario": null,
+          "expected_tool_trajectory": [
+            "show_client_profile"
+          ],
+          "actual_tool_trajectory": [
+            "show_client_profile"
+          ]
+        },
+        {
+          "prompt": {
+            "parts": [
+              {
+                "media_resolution": null,
+                "code_execution_result": null,
+                "executable_code": null,
+                "file_data": null,
+                "function_call": null,
+                "function_response": null,
+                "inline_data": null,
+                "text": "Tell me why you used this account code for invoice 25-D15 and 25-D12",
+                "thought": null,
+                "thought_signature": null,
+                "video_metadata": null,
+                "tool_call": null,
+                "tool_response": null,
+                "part_metadata": null
+              }
+            ],
+            "role": "user"
+          },
+          "responses": [
+            {
+              "response": {
+                "parts": [
+                  {
+                    "media_resolution": null,
+                    "code_execution_result": null,
+                    "executable_code": null,
+                    "file_data": null,
+                    "function_call": null,
+                    "function_response": null,
+                    "inline_data": null,
+                    "text": "For invoice 25-D15 (vendor Darrell Podaima, description 'Consulting fees') and invoice 25-D12 (vendor Darrell Podaima, description 'Advisory'), the system did not find a deterministic match for the account code. Both lines would have been flagged for review or required an LLM fallback for categorization. The account code currently assigned to both invoices is 6-3000.",
+                    "thought": null,
+                    "thought_signature": null,
+                    "video_metadata": null,
+                    "tool_call": null,
+                    "tool_response": null,
+                    "part_metadata": null
+                  }
+                ],
+                "role": "model"
+              }
+            }
+          ],
+          "reference": {
+            "response": {
+              "parts": [
+                {
+                  "media_resolution": null,
+                  "code_execution_result": null,
+                  "executable_code": null,
+                  "file_data": null,
+                  "function_call": null,
+                  "function_response": null,
+                  "inline_data": null,
+                  "text": "6-3000 Professional Fees",
+                  "thought": null,
+                  "thought_signature": null,
+                  "video_metadata": null,
+                  "tool_call": null,
+                  "tool_response": null,
+                  "part_metadata": null
+                }
+              ],
+              "role": "model"
+            }
+          },
+          "system_instruction": null,
+          "conversation_history": null,
+          "rubric_groups": null,
+          "eval_case_id": "B6_chat_invoice_account_code_trajectory",
+          "intermediate_events": null,
+          "agent_info": null,
+          "agent_data": {
+            "agents": {
+              "assistant": {
+                "agent_id": "assistant",
+                "agent_type": null,
+                "description": null,
+                "instruction": "Ledgr chat assistant.",
+                "tools": null,
+                "sub_agents": null
+              }
+            },
+            "turns": [
+              {
+                "turn_index": 0,
+                "turn_id": null,
+                "events": [
+                  {
+                    "author": "user",
+                    "content": {
+                      "parts": [
+                        {
+                          "media_resolution": null,
+                          "code_execution_result": null,
+                          "executable_code": null,
+                          "file_data": null,
+                          "function_call": null,
+                          "function_response": null,
+                          "inline_data": null,
+                          "text": "Tell me why you used this account code for invoice 25-D15 and 25-D12",
+                          "thought": null,
+                          "thought_signature": null,
+                          "video_metadata": null,
+                          "tool_call": null,
+                          "tool_response": null,
+                          "part_metadata": null
+                        }
+                      ],
+                      "role": "user"
+                    },
+                    "event_time": null,
+                    "state_delta": null,
+                    "active_tools": null
+                  },
+                  {
+                    "author": "assistant",
+                    "content": {
+                      "parts": [
+                        {
+                          "media_resolution": null,
+                          "code_execution_result": null,
+                          "executable_code": null,
+                          "file_data": null,
+                          "function_call": {
+                            "id": null,
+                            "args": {
+                              "query": "25-D15"
+                            },
+                            "name": "lookup_row",
+                            "partial_args": null,
+                            "will_continue": null
+                          },
+                          "function_response": null,
+                          "inline_data": null,
+                          "text": null,
+                          "thought": null,
+                          "thought_signature": null,
+                          "video_metadata": null,
+                          "tool_call": null,
+                          "tool_response": null,
+                          "part_metadata": null
+                        }
+                      ],
+                      "role": null
+                    },
+                    "event_time": null,
+                    "state_delta": null,
+                    "active_tools": null
+                  },
+                  {
+                    "author": "assistant",
+                    "content": {
+                      "parts": [
+                        {
+                          "media_resolution": null,
+                          "code_execution_result": null,
+                          "executable_code": null,
+                          "file_data": null,
+                          "function_call": null,
+                          "function_response": {
+                            "will_continue": null,
+                            "scheduling": null,
+                            "parts": null,
+                            "id": null,
+                            "name": "lookup_row",
+                            "response": {
+                              "status": "ok"
+                            }
+                          },
+                          "inline_data": null,
+                          "text": null,
+                          "thought": null,
+                          "thought_signature": null,
+                          "video_metadata": null,
+                          "tool_call": null,
+                          "tool_response": null,
+                          "part_metadata": null
+                        }
+                      ],
+                      "role": null
+                    },
+                    "event_time": null,
+                    "state_delta": null,
+                    "active_tools": null
+                  },
+                  {
+                    "author": "assistant",
+                    "content": {
+                      "parts": [
+                        {
+                          "media_resolution": null,
+                          "code_execution_result": null,
+                          "executable_code": null,
+                          "file_data": null,
+                          "function_call": {
+                            "id": null,
+                            "args": {
+                              "vendor_name": "Darrell Podaima",
+                              "line_description": "Consulting fees"
+                            },
+                            "name": "explain_categorization",
+                            "partial_args": null,
+                            "will_continue": null
+                          },
+                          "function_response": null,
+                          "inline_data": null,
+                          "text": null,
+                          "thought": null,
+                          "thought_signature": null,
+                          "video_metadata": null,
+                          "tool_call": null,
+                          "tool_response": null,
+                          "part_metadata": null
+                        }
+                      ],
+                      "role": null
+                    },
+                    "event_time": null,
+                    "state_delta": null,
+                    "active_tools": null
+                  },
+                  {
+                    "author": "assistant",
+                    "content": {
+                      "parts": [
+                        {
+                          "media_resolution": null,
+                          "code_execution_result": null,
+                          "executable_code": null,
+                          "file_data": null,
+                          "function_call": null,
+                          "function_response": {
+                            "will_continue": null,
+                            "scheduling": null,
+                            "parts": null,
+                            "id": null,
+                            "name": "explain_categorization",
+                            "response": {
+                              "status": "ok"
+                            }
+                          },
+                          "inline_data": null,
+                          "text": null,
+                          "thought": null,
+                          "thought_signature": null,
+                          "video_metadata": null,
+                          "tool_call": null,
+                          "tool_response": null,
+                          "part_metadata": null
+                        }
+                      ],
+                      "role": null
+                    },
+                    "event_time": null,
+                    "state_delta": null,
+                    "active_tools": null
+                  },
+                  {
+                    "author": "assistant",
+                    "content": {
+                      "parts": [
+                        {
+                          "media_resolution": null,
+                          "code_execution_result": null,
+                          "executable_code": null,
+                          "file_data": null,
+                          "function_call": {
+                            "id": null,
+                            "args": {
+                              "query": "25-D12"
+                            },
+                            "name": "lookup_row",
+                            "partial_args": null,
+                            "will_continue": null
+                          },
+                          "function_response": null,
+                          "inline_data": null,
+                          "text": null,
+                          "thought": null,
+                          "thought_signature": null,
+                          "video_metadata": null,
+                          "tool_call": null,
+                          "tool_response": null,
+                          "part_metadata": null
+                        }
+                      ],
+                      "role": null
+                    },
+                    "event_time": null,
+                    "state_delta": null,
+                    "active_tools": null
+                  },
+                  {
+                    "author": "assistant",
+                    "content": {
+                      "parts": [
+                        {
+                          "media_resolution": null,
+                          "code_execution_result": null,
+                          "executable_code": null,
+                          "file_data": null,
+                          "function_call": null,
+                          "function_response": {
+                            "will_continue": null,
+                            "scheduling": null,
+                            "parts": null,
+                            "id": null,
+                            "name": "lookup_row",
+                            "response": {
+                              "status": "ok"
+                            }
+                          },
+                          "inline_data": null,
+                          "text": null,
+                          "thought": null,
+                          "thought_signature": null,
+                          "video_metadata": null,
+                          "tool_call": null,
+                          "tool_response": null,
+                          "part_metadata": null
+                        }
+                      ],
+                      "role": null
+                    },
+                    "event_time": null,
+                    "state_delta": null,
+                    "active_tools": null
+                  },
+                  {
+                    "author": "assistant",
+                    "content": {
+                      "parts": [
+                        {
+                          "media_resolution": null,
+                          "code_execution_result": null,
+                          "executable_code": null,
+                          "file_data": null,
+                          "function_call": {
+                            "id": null,
+                            "args": {
+                              "line_description": "Advisory",
+                              "vendor_name": "Darrell Podaima"
+                            },
+                            "name": "explain_categorization",
+                            "partial_args": null,
+                            "will_continue": null
+                          },
+                          "function_response": null,
+                          "inline_data": null,
+                          "text": null,
+                          "thought": null,
+                          "thought_signature": null,
+                          "video_metadata": null,
+                          "tool_call": null,
+                          "tool_response": null,
+                          "part_metadata": null
+                        }
+                      ],
+                      "role": null
+                    },
+                    "event_time": null,
+                    "state_delta": null,
+                    "active_tools": null
+                  },
+                  {
+                    "author": "assistant",
+                    "content": {
+                      "parts": [
+                        {
+                          "media_resolution": null,
+                          "code_execution_result": null,
+                          "executable_code": null,
+                          "file_data": null,
+                          "function_call": null,
+                          "function_response": {
+                            "will_continue": null,
+                            "scheduling": null,
+                            "parts": null,
+                            "id": null,
+                            "name": "explain_categorization",
+                            "response": {
+                              "status": "ok"
+                            }
+                          },
+                          "inline_data": null,
+                          "text": null,
+                          "thought": null,
+                          "thought_signature": null,
+                          "video_metadata": null,
+                          "tool_call": null,
+                          "tool_response": null,
+                          "part_metadata": null
+                        }
+                      ],
+                      "role": null
+                    },
+                    "event_time": null,
+                    "state_delta": null,
+                    "active_tools": null
+                  },
+                  {
+                    "author": "assistant",
+                    "content": {
+                      "parts": [
+                        {
+                          "media_resolution": null,
+                          "code_execution_result": null,
+                          "executable_code": null,
+                          "file_data": null,
+                          "function_call": null,
+                          "function_response": null,
+                          "inline_data": null,
+                          "text": "For invoice 25-D15 (vendor Darrell Podaima, description 'Consulting fees') and invoice 25-D12 (vendor Darrell Podaima, description 'Advisory'), the system did not find a deterministic match for the account code. Both lines would have been flagged for review or required an LLM fallback for categorization. The account code currently assigned to both invoices is 6-3000.",
+                          "thought": null,
+                          "thought_signature": null,
+                          "video_metadata": null,
+                          "tool_call": null,
+                          "tool_response": null,
+                          "part_metadata": null
+                        }
+                      ],
+                      "role": "model"
+                    },
+                    "event_time": null,
+                    "state_delta": null,
+                    "active_tools": null
+                  }
+                ]
+              }
+            ]
+          },
+          "user_scenario": null,
+          "expected_tool_trajectory": [
+            "lookup_row",
+            "explain_categorization",
+            "lookup_row",
+            "explain_categorization"
+          ],
+          "actual_tool_trajectory": [
+            "lookup_row",
+            "explain_categorization",
+            "lookup_row",
+            "explain_categorization"
+          ]
+        }
+      ],
+      "eval_dataset_df": null,
+      "candidate_name": null
+    }
+  ],
+  "metadata": {
+    "candidate_names": [
+      "candidate_1"
+    ],
+    "dataset_name": null,
+    "dataset_id": null,
+    "creation_timestamp": "2026-06-17T03:49:06.469666Z",
+    "dataset": [
+      {
+        "prompt_display_text": "who am I working with?",
+        "prompt_raw_json": "{\n  \"parts\": [\n    {\n      \"text\": \"who am I working with?\"\n    }\n  ],\n  \"role\": \"user\"\n}",
+        "reference": "Test Firm",
+        "reference_raw_json": "{\n  \"parts\": [\n    {\n      \"text\": \"Test Firm\"\n    }\n  ],\n  \"role\": \"model\"\n}",
+        "response_display_text": "You are working with Test Firm (UEN 200000003C), a Singapore-based company with SGD as its base currency. They are GST-registered, and their Financial Year ends in June.\n",
+        "response_raw_json": "{\n  \"parts\": [\n    {\n      \"text\": \"You are working with Test Firm (UEN 200000003C), a Singapore-based company with SGD as its base currency. They are GST-registered, and their Financial Year ends in June.\\n\"\n    }\n  ],\n  \"role\": \"model\"\n}",
+        "intermediate_events": null,
+        "agent_data": "{\"agents\": {\"assistant\": {\"agent_id\": \"assistant\", \"instruction\": \"Ledgr chat assistant.\"}}, \"turns\": [{\"turn_index\": 0, \"events\": [{\"author\": \"user\", \"content\": {\"parts\": [{\"text\": \"who am I working with?\"}], \"role\": \"user\"}}, {\"author\": \"assistant\", \"content\": {\"parts\": [{\"function_call\": {\"args\": {}, \"name\": \"show_client_profile\"}}]}}, {\"author\": \"assistant\", \"content\": {\"parts\": [{\"function_response\": {\"name\": \"show_client_profile\", \"response\": {\"status\": \"ok\"}}}]}}, {\"author\": \"assistant\", \"content\": {\"parts\": [{\"text\": \"You are working with Test Firm (UEN 200000003C), a Singapore-based company with SGD as its base currency. They are GST-registered, and their Financial Year ends in June.\\n\"}], \"role\": \"model\"}}]}]}"
+      },
+      {
+        "prompt_display_text": "total purchases this FY?",
+        "prompt_raw_json": "{\n  \"parts\": [\n    {\n      \"text\": \"total purchases this FY?\"\n    }\n  ],\n  \"role\": \"user\"\n}",
+        "reference": "2000",
+        "reference_raw_json": "{\n  \"parts\": [\n    {\n      \"text\": \"2000\"\n    }\n  ],\n  \"role\": \"model\"\n}",
+        "response_display_text": "This fiscal year, your total purchases (expenses) amount to 2450.00 SGD.",
+        "response_raw_json": "{\n  \"parts\": [\n    {\n      \"text\": \"This fiscal year, your total purchases (expenses) amount to 2450.00 SGD.\"\n    }\n  ],\n  \"role\": \"model\"\n}",
+        "intermediate_events": null,
+        "agent_data": "{\"agents\": {\"assistant\": {\"agent_id\": \"assistant\", \"instruction\": \"Ledgr chat assistant.\"}}, \"turns\": [{\"turn_index\": 0, \"events\": [{\"author\": \"user\", \"content\": {\"parts\": [{\"text\": \"total purchases this FY?\"}], \"role\": \"user\"}}, {\"author\": \"assistant\", \"content\": {\"parts\": [{\"function_call\": {\"args\": {}, \"name\": \"pnl_for_fy\"}}]}}, {\"author\": \"assistant\", \"content\": {\"parts\": [{\"function_response\": {\"name\": \"pnl_for_fy\", \"response\": {\"status\": \"ok\"}}}]}}, {\"author\": \"assistant\", \"content\": {\"parts\": [{\"text\": \"This fiscal year, your total purchases (expenses) amount to 2450.00 SGD.\"}], \"role\": \"model\"}}]}]}"
+      },
+      {
+        "prompt_display_text": "and the currency?",
+        "prompt_raw_json": "{\n  \"parts\": [\n    {\n      \"text\": \"and the currency?\"\n    }\n  ],\n  \"role\": \"user\"\n}",
+        "reference": "SGD",
+        "reference_raw_json": "{\n  \"parts\": [\n    {\n      \"text\": \"SGD\"\n    }\n  ],\n  \"role\": \"model\"\n}",
+        "response_display_text": "Your Financial Year End (FYE) month is September, and your base currency is SGD.",
+        "response_raw_json": "{\n  \"parts\": [\n    {\n      \"text\": \"Your Financial Year End (FYE) month is September, and your base currency is SGD.\"\n    }\n  ],\n  \"role\": \"model\"\n}",
+        "intermediate_events": null,
+        "agent_data": "{\"agents\": {\"assistant\": {\"agent_id\": \"assistant\", \"instruction\": \"Ledgr chat assistant (eval trace export).\"}}, \"turns\": [{\"turn_index\": 0, \"events\": [{\"author\": \"user\", \"content\": {\"parts\": [{\"text\": \"what's my FYE month?\"}], \"role\": \"user\"}}, {\"author\": \"assistant\", \"content\": {\"parts\": [{\"function_call\": {\"args\": {}, \"name\": \"show_client_profile\"}}]}}, {\"author\": \"assistant\", \"content\": {\"parts\": [{\"function_response\": {\"name\": \"show_client_profile\", \"response\": {\"status\": \"ok\"}}}]}}, {\"author\": \"assistant\", \"content\": {\"parts\": [{\"text\": \"September\"}], \"role\": \"model\"}}]}, {\"turn_index\": 1, \"events\": [{\"author\": \"user\", \"content\": {\"parts\": [{\"text\": \"and the currency?\"}], \"role\": \"user\"}}, {\"author\": \"assistant\", \"content\": {\"parts\": [{\"function_call\": {\"args\": {}, \"name\": \"show_client_profile\"}}]}}, {\"author\": \"assistant\", \"content\": {\"parts\": [{\"function_response\": {\"name\": \"show_client_profile\", \"response\": {\"status\": \"ok\"}}}]}}, {\"author\": \"assistant\", \"content\": {\"parts\": [{\"text\": \"Your Financial Year End (FYE) month is September, and your base currency is SGD.\"}], \"role\": \"model\"}}]}]}"
+      },
+      {
+        "prompt_display_text": "Tell me why you used this account code for invoice 25-D15 and 25-D12",
+        "prompt_raw_json": "{\n  \"parts\": [\n    {\n      \"text\": \"Tell me why you used this account code for invoice 25-D15 and 25-D12\"\n    }\n  ],\n  \"role\": \"user\"\n}",
+        "reference": "6-3000 Professional Fees",
+        "reference_raw_json": "{\n  \"parts\": [\n    {\n      \"text\": \"6-3000 Professional Fees\"\n    }\n  ],\n  \"role\": \"model\"\n}",
+        "response_display_text": "For invoice 25-D15 (vendor Darrell Podaima, description 'Consulting fees') and invoice 25-D12 (vendor Darrell Podaima, description 'Advisory'), the system did not find a deterministic match for the account code. Both lines would have been flagged for review or required an LLM fallback for categorization. The account code currently assigned to both invoices is 6-3000.",
+        "response_raw_json": "{\n  \"parts\": [\n    {\n      \"text\": \"For invoice 25-D15 (vendor Darrell Podaima, description 'Consulting fees') and invoice 25-D12 (vendor Darrell Podaima, description 'Advisory'), the system did not find a deterministic match for the account code. Both lines would have been flagged for review or required an LLM fallback for categorization. The account code currently assigned to both invoices is 6-3000.\"\n    }\n  ],\n  \"role\": \"model\"\n}",
+        "intermediate_events": null,
+        "agent_data": "{\"agents\": {\"assistant\": {\"agent_id\": \"assistant\", \"instruction\": \"Ledgr chat assistant.\"}}, \"turns\": [{\"turn_index\": 0, \"events\": [{\"author\": \"user\", \"content\": {\"parts\": [{\"text\": \"Tell me why you used this account code for invoice 25-D15 and 25-D12\"}], \"role\": \"user\"}}, {\"author\": \"assistant\", \"content\": {\"parts\": [{\"function_call\": {\"args\": {\"query\": \"25-D15\"}, \"name\": \"lookup_row\"}}]}}, {\"author\": \"assistant\", \"content\": {\"parts\": [{\"function_response\": {\"name\": \"lookup_row\", \"response\": {\"status\": \"ok\"}}}]}}, {\"author\": \"assistant\", \"content\": {\"parts\": [{\"function_call\": {\"args\": {\"vendor_name\": \"Darrell Podaima\", \"line_description\": \"Consulting fees\"}, \"name\": \"explain_categorization\"}}]}}, {\"author\": \"assistant\", \"content\": {\"parts\": [{\"function_response\": {\"name\": \"explain_categorization\", \"response\": {\"status\": \"ok\"}}}]}}, {\"author\": \"assistant\", \"content\": {\"parts\": [{\"function_call\": {\"args\": {\"query\": \"25-D12\"}, \"name\": \"lookup_row\"}}]}}, {\"author\": \"assistant\", \"content\": {\"parts\": [{\"function_response\": {\"name\": \"lookup_row\", \"response\": {\"status\": \"ok\"}}}]}}, {\"author\": \"assistant\", \"content\": {\"parts\": [{\"function_call\": {\"args\": {\"line_description\": \"Advisory\", \"vendor_name\": \"Darrell Podaima\"}, \"name\": \"explain_categorization\"}}]}}, {\"author\": \"assistant\", \"content\": {\"parts\": [{\"function_response\": {\"name\": \"explain_categorization\", \"response\": {\"status\": \"ok\"}}}]}}, {\"author\": \"assistant\", \"content\": {\"parts\": [{\"text\": \"For invoice 25-D15 (vendor Darrell Podaima, description 'Consulting fees') and invoice 25-D12 (vendor Darrell Podaima, description 'Advisory'), the system did not find a deterministic match for the account code. Both lines would have been flagged for review or required an LLM fallback for categorization. The account code currently assigned to both invoices is 6-3000.\"}], \"role\": \"model\"}}]}]}"
+      }
+    ]
+  },
+  "agent_info": null
+}

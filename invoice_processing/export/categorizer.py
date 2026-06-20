@@ -25,7 +25,7 @@ from .client_context import (
     coa_from_state,
     entity_memory_from_state,
 )
-from .models import NormalizedInvoice
+from .models import NormalizedInvoice, PartyInfo
 
 
 @dataclass
@@ -41,6 +41,43 @@ class AccountResolution:
 def _norm(s: Optional[str]) -> str:
     """Lowercase alphanumerics only — mirrors document_classifier._norm."""
     return "".join(ch for ch in (s or "").lower() if ch.isalnum())
+
+
+def canonical_party_name(
+    party: PartyInfo,
+    entity_memory: list[EntityMemoryEntry],
+) -> Optional[str]:
+    """Return the canonical ``EntityMemoryEntry.name`` when a confident match is found.
+
+    Match criteria (exact only — no fuzzy/substring):
+      1. reg_no exact match (both non-empty after _norm).
+      2. Exact normalized-name equality.
+
+    Returns None when:
+      - No entry matches.
+      - The matched entry has an empty name.
+      - The matched name already equals party.name (no-op).
+    """
+    n_party = _norm(party.name)
+    n_reg = _norm(getattr(party, "gst_regno", None))
+
+    for entry in entity_memory:
+        n_entry_name = _norm(entry.name)
+        if not n_entry_name:
+            continue
+
+        reg_hit = bool(n_reg) and bool(_norm(entry.reg_no)) and _norm(entry.reg_no) == n_reg
+        name_hit = bool(n_party) and n_entry_name == n_party
+
+        if reg_hit or name_hit:
+            canon = entry.name
+            if not canon:
+                return None
+            if canon == party.name:
+                return None  # already canonical
+            return canon
+
+    return None
 
 
 def _split_keywords(raw: Optional[str]) -> list[str]:
@@ -121,14 +158,24 @@ def _llm_match_lines(
     unresolved: list[tuple[int, str, str]],   # (line_index, description, vendor)
     coa: list[CoaAccount],
     model: Optional[str],
+    *,
+    tax_registered: Optional[bool] = None,
+    client_region: str = "",
+    client_currency: str = "",
 ) -> dict[int, dict]:
     """Return {line_index: {account_key, reason, confidence}} from one Gemini call.
 
     Returns {} on any failure so categorization never crashes.
+
+    Region context: when ``client_region`` / ``client_currency`` are supplied
+    the prompt includes them so the LLM can pick country-appropriate expense
+    accounts (e.g. "Service Tax" vs "GST" hint words). Pure Passthrough via
+    ADK state templating (``{client_region?}``) — the graph node is expected
+    to fill these from session state before calling.
     """
     from google.genai import types
 
-    from ..shared_libraries.genai_client import default_model, make_client
+    from ..shared_libraries.genai_client import lite_model, make_client
 
     coa_for_prompt = [
         {"key": a.key, "description": a.description, "account_type": a.account_type or ""}
@@ -161,11 +208,32 @@ def _llm_match_lines(
         "required": ["results"],
     }
 
+    if tax_registered is True:
+        gst_ctx = "yes"
+    elif tax_registered is False:
+        gst_ctx = "no"
+    else:
+        gst_ctx = "unknown"
+
+    region_ctx = (
+        f"\nClient region: {client_region or 'unknown'}\n"
+        f"Client base currency: {client_currency or 'unknown'}\n"
+        if client_region or client_currency
+        else ""
+    )
+
     prompt = (
         "You are an accounting assistant categorizing invoice/receipt lines to a client's "
         "Chart of Accounts (COA). For each line, pick the single best-matching COA account by "
         "its exact `key`, or null if no account is a reasonable fit. Prefer Profit & Loss expense "
         "accounts for purchase costs. Return a short reason and a confidence in [0,1].\n\n"
+        "IMPORTANT — your task is ONLY to assign an account_code from the COA list below. "
+        "Do NOT choose or infer a tax treatment or GST code (SR/ZR/ES/OS etc.); that is "
+        "decided separately by a deterministic master gate and is outside your scope."
+        f"{region_ctx}\n"
+        f"Client GST-registered: {gst_ctx}\n\n"
+        "You MUST return the JSON results object for every line provided. "
+        "Never reply empty or omit the results array.\n\n"
         "COA (choose key from these only):\n"
         f"{json.dumps(coa_for_prompt, ensure_ascii=False)}\n\n"
         "Lines to categorize:\n"
@@ -175,7 +243,7 @@ def _llm_match_lines(
     try:
         client = make_client()
         resp = client.models.generate_content(
-            model=model or default_model(),
+            model=model or lite_model(),
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
@@ -212,11 +280,27 @@ def categorize_invoice(
     entity_memory: list[EntityMemoryEntry],
     use_llm: bool = True,
     model: Optional[str] = None,
+    tax_registered: Optional[bool] = None,
+    client_region: str = "",
+    client_currency: str = "",
 ) -> NormalizedInvoice:
-    """Fill ``InvoiceLine.account_code`` for every line. Never crashes; returns ``inv``."""
+    """Fill ``InvoiceLine.account_code`` for every line. Never crashes; returns ``inv``.
+
+    Region context (client_region / client_currency) is forwarded into the LLM
+    COA match prompt so it can pick country-appropriate expense accounts.
+    Both default to empty string — backward-compatible with every existing
+    caller.
+    """
     party = inv.counterparty
     vendor_name = party.name
     reg_no = party.gst_regno
+
+    # Contact-master name normalization (WS4.5): replace extracted name with the
+    # canonical form from entity_memory so the ERP sees a single consistent ContactName.
+    canon = canonical_party_name(party, entity_memory)
+    if canon:
+        party.name = canon
+        vendor_name = canon
 
     # COA lookup by key -> description, for mapping LLM keys back to names.
     by_key = {a.key: a for a in coa if a.key}
@@ -237,7 +321,14 @@ def categorize_invoice(
             unresolved.append((i, line.description or "", vendor_name or ""))
 
     if unresolved and use_llm and coa:
-        matches = _llm_match_lines(unresolved, coa, model)
+        matches = _llm_match_lines(
+            unresolved,
+            coa,
+            model,
+            tax_registered=tax_registered,
+            client_region=client_region,
+            client_currency=client_currency,
+        )
         for idx, m in matches.items():
             if idx < 0 or idx >= len(resolutions):
                 continue

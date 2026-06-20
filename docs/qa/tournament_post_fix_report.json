@@ -1,0 +1,157 @@
+{
+  "client": "Company-A",
+  "hermetic": false,
+  "fixtures": [
+    "vendor_invoice_sample",
+    "vendor_invoice_d12",
+    "management_fees",
+    "expense_claim"
+  ],
+  "variants": [
+    "V3"
+  ],
+  "results": [
+    {
+      "variant": "V3",
+      "path": "~/Desktop/LocalTest/TestDoc/Sample Test Group/Company-A/Purchase/FY2026/INV-2026-003-sample.pdf",
+      "error": null,
+      "document_count": 1,
+      "invoice_count": 1,
+      "completeness": 1.0,
+      "reconcile_rate": 1.0,
+      "score": 1.0,
+      "metrics": {
+        "has_invoice_number": true,
+        "has_invoice_date": true,
+        "has_doc_total": true,
+        "has_lines": true,
+        "fx_review_count": 0,
+        "details": []
+      },
+      "phase2": [
+        {
+          "invoice_number": "INV-2026-003",
+          "invoice_date": "2025-11-19",
+          "supplier": "Vendor Alpha Pte Ltd",
+          "currency": "USD",
+          "doc_total": 2000.0,
+          "needs_fx_review": false,
+          "reconciled": true,
+          "reconcile_note": "reconciled",
+          "line_count": 2
+        }
+      ],
+      "fixture_id": "vendor_invoice_sample",
+      "file": "INV-2026-003-sample.pdf"
+    },
+    {
+      "variant": "V3",
+      "path": "~/Desktop/LocalTest/TestDoc/Sample Test Group/Company-A/Purchase/FY2025/INV-2025-012-sample.pdf",
+      "error": null,
+      "document_count": 1,
+      "invoice_count": 1,
+      "completeness": 1.0,
+      "reconcile_rate": 1.0,
+      "score": 1.0,
+      "metrics": {
+        "has_invoice_number": true,
+        "has_invoice_date": true,
+        "has_doc_total": true,
+        "has_lines": true,
+        "fx_review_count": 0,
+        "details": []
+      },
+      "phase2": [
+        {
+          "invoice_number": "#INV-2025-012",
+          "invoice_date": "2025-05-21",
+          "supplier": "Vendor Alpha Pte Ltd",
+          "currency": "USD",
+          "doc_total": 2000.0,
+          "needs_fx_review": false,
+          "reconciled": true,
+          "reconcile_note": "reconciled",
+          "line_count": 2
+        }
+      ],
+      "fixture_id": "vendor_invoice_d12",
+      "file": "INV-2025-012-sample.pdf"
+    },
+    {
+      "variant": "V3",
+      "path": "~/Desktop/LocalTest/TestDoc/Sample Test Group/Company-A/Purchase/FY2025/MGT-2025-011-sample.pdf",
+      "error": null,
+      "document_count": 1,
+      "invoice_count": 1,
+      "completeness": 1.0,
+      "reconcile_rate": 1.0,
+      "score": 1.0,
+      "metrics": {
+        "has_invoice_number": true,
+        "has_invoice_date": true,
+        "has_doc_total": true,
+        "has_lines": true,
+        "fx_review_count": 0,
+        "details": []
+      },
+      "phase2": [
+        {
+          "invoice_number": "MGT-2025-011-INV",
+          "invoice_date": "2025-01-15",
+          "supplier": "ACME REGIONAL LTD",
+          "currency": "USD",
+          "doc_total": 6500.0,
+          "needs_fx_review": false,
+          "reconciled": true,
+          "reconcile_note": "reconciled",
+          "line_count": 1
+        }
+      ],
+      "fixture_id": "management_fees",
+      "file": "MGT-2025-011-sample.pdf"
+    },
+    {
+      "variant": "V3",
+      "path": "~/Desktop/LocalTest/TestDoc/Sample Test Group/Company-A/Purchase/FY2026/EXP-2026-040-sample.pdf",
+      "error": null,
+      "document_count": 1,
+      "invoice_count": 1,
+      "completeness": 1.0,
+      "reconcile_rate": 1.0,
+      "score": 1.0,
+      "metrics": {
+        "has_invoice_number": true,
+        "has_invoice_date": true,
+        "has_doc_total": true,
+        "has_lines": true,
+        "fx_review_count": 0,
+        "details": []
+      },
+      "phase2": [
+        {
+          "invoice_number": "AAI-25-040",
+          "invoice_date": "2025-12-11",
+          "supplier": "Muhammad Supplier Gamma Fadhilah",
+          "currency": "USD",
+          "doc_total": 311.79,
+          "needs_fx_review": false,
+          "reconciled": true,
+          "reconcile_note": "reconciled",
+          "line_count": 1
+        }
+      ],
+      "fixture_id": "expense_claim",
+      "file": "EXP-2026-040-sample.pdf"
+    }
+  ],
+  "ranking": [
+    {
+      "variant": "V3",
+      "avg_score": 1.0,
+      "avg_completeness": 1.0,
+      "avg_reconcile": 1.0,
+      "false_splits": 0
+    }
+  ],
+  "winner": "V3"
+}

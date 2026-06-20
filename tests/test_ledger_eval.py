@@ -6,10 +6,7 @@ deterministic stubs returning real model objects.
 
 from __future__ import annotations
 
-import tempfile
 from pathlib import Path
-from typing import Optional
-from unittest.mock import patch
 
 import pytest
 
@@ -19,7 +16,6 @@ from invoice_processing.pipeline import ProcessedDoc
 from invoice_processing.export.routing import DocRoute
 
 from eval.ledger_eval import (
-    DocEval,
     EvalReport,
     default_client,
     discover_samples,

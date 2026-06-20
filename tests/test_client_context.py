@@ -6,11 +6,9 @@ with openpyxl in tmp_path so every test is fully self-contained.
 
 from __future__ import annotations
 
-import pytest
 from openpyxl import Workbook
 
 from invoice_processing.export.client_context import (
-    ClientContext,
     client_context_from_state,
     load_client_setup,
     InMemoryClientStore,

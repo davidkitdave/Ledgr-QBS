@@ -1,0 +1,208 @@
+{
+  "eval_cases": [
+    {
+      "eval_case_id": "B6_chat_invoice_account_code_trajectory",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "Tell me why you used this account code for invoice 25-D15 and 25-D12"
+          }
+        ]
+      },
+      "expected_tool_trajectory": [
+        "lookup_row",
+        "explain_categorization",
+        "lookup_row",
+        "explain_categorization"
+      ],
+      "actual_tool_trajectory": [
+        "lookup_row",
+        "explain_categorization",
+        "lookup_row",
+        "explain_categorization"
+      ],
+      "agent_data": {
+        "agents": {
+          "assistant": {
+            "agent_id": "assistant",
+            "instruction": "Ledgr chat assistant."
+          }
+        },
+        "turns": [
+          {
+            "turn_index": 0,
+            "events": [
+              {
+                "author": "user",
+                "content": {
+                  "role": "user",
+                  "parts": [
+                    {
+                      "text": "Tell me why you used this account code for invoice 25-D15 and 25-D12"
+                    }
+                  ]
+                }
+              },
+              {
+                "author": "assistant",
+                "content": {
+                  "parts": [
+                    {
+                      "function_call": {
+                        "name": "lookup_row",
+                        "args": {
+                          "query": "25-D15"
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "author": "assistant",
+                "content": {
+                  "parts": [
+                    {
+                      "function_response": {
+                        "name": "lookup_row",
+                        "response": {
+                          "status": "ok"
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "author": "assistant",
+                "content": {
+                  "parts": [
+                    {
+                      "function_call": {
+                        "name": "explain_categorization",
+                        "args": {
+                          "vendor_name": "Darrell Podaima",
+                          "line_description": "Consulting fees"
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "author": "assistant",
+                "content": {
+                  "parts": [
+                    {
+                      "function_response": {
+                        "name": "explain_categorization",
+                        "response": {
+                          "status": "ok"
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "author": "assistant",
+                "content": {
+                  "parts": [
+                    {
+                      "function_call": {
+                        "name": "lookup_row",
+                        "args": {
+                          "query": "25-D12"
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "author": "assistant",
+                "content": {
+                  "parts": [
+                    {
+                      "function_response": {
+                        "name": "lookup_row",
+                        "response": {
+                          "status": "ok"
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "author": "assistant",
+                "content": {
+                  "parts": [
+                    {
+                      "function_call": {
+                        "name": "explain_categorization",
+                        "args": {
+                          "line_description": "Advisory",
+                          "vendor_name": "Darrell Podaima"
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "author": "assistant",
+                "content": {
+                  "parts": [
+                    {
+                      "function_response": {
+                        "name": "explain_categorization",
+                        "response": {
+                          "status": "ok"
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "author": "assistant",
+                "content": {
+                  "role": "model",
+                  "parts": [
+                    {
+                      "text": "For invoice 25-D15 (\"Consulting fees\" from Darrell Podaima) and invoice 25-D12 (\"Advisory\" from Darrell Podaima), the system did not find a deterministic match for the account code. Both lines would have been flagged for review or processed by an LLM fallback."
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "responses": [
+        {
+          "response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "For invoice 25-D15 (\"Consulting fees\" from Darrell Podaima) and invoice 25-D12 (\"Advisory\" from Darrell Podaima), the system did not find a deterministic match for the account code. Both lines would have been flagged for review or processed by an LLM fallback."
+              }
+            ]
+          }
+        }
+      ],
+      "reference": {
+        "response": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "6-3000 Professional Fees"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

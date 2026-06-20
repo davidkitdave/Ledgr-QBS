@@ -49,6 +49,7 @@ dev = [
     "ruff>=0.15.9",
     "agent-starter-pack>=0.14.1",
     "pytest>=9.0.3",
+    "google-adk[eval]>=2.0.0,<3.0.0",
 ]
 
 [tool.pytest.ini_options]
@@ -60,6 +61,11 @@ testpaths = ["tests"]
 # deliberately: `uv run pytest tests/integration` (with creds + server) or
 # `agents-cli eval` for tests/eval.
 addopts = "--ignore=tests/integration --ignore=tests/eval"
+markers = [
+    "unit: fast hermetic tests — default CI gate",
+    "integration: live service / creds required",
+    "eval: gated golden eval cases — require live Gemini creds; run with `pytest tests/eval/ -m eval`",
+]
 
 [tool.agent_packs]
 template = "adk"
@@ -77,3 +83,10 @@ default = true
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]
+# tracked: scripts do dotenv/sys.path setup before imports — E402 is intentional
+"scripts/*.py" = ["E402"]
+# tracked: eval scripts call load_dotenv() before project imports — E402 is intentional
+"eval/*.py" = ["E402"]
+# tracked: test module imports a symbol that is only registered after a prior import block
+"tests/test_app_blocks.py" = ["E402"]
+"tests/test_assistant_agent.py" = ["E402"]

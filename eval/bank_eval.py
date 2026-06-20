@@ -35,7 +35,7 @@ BASE_DIR = Path(_bank_eval_dir) if _bank_eval_dir else Path(".")
 
 CLIENTS = [
     "AAAC GALLERY PRIVATELIMITED",
-    "Akar Enterprises Pte. Ltd.",
+    "Sample Bank Client Pte Ltd",
     "Bfit Life Pte Ltd",
     "DMTV Global Pte Ltd",
     "Envistore Pte. Ltd.",

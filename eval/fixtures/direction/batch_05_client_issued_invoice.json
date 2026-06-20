@@ -1,0 +1,18 @@
+{
+  "client": "Company-A",
+  "client_uen": "201700001A",
+  "file_label": "Client-Issued-INV-26-042.pdf",
+  "expected_direction": "sales",
+  "from_party": {
+    "name": "Company-A",
+    "uen": "201700001A",
+    "role": "issuer"
+  },
+  "to_party": {
+    "name": "Customer Beta Pte Ltd",
+    "uen": "201899995Z",
+    "role": "recipient"
+  },
+  "expected_direction_for_client": "sales",
+  "notes": "Sales case — client is the issuer. Symmetric control to the contractor invoice case. Understand call returns sales based on From party matching client UEN."
+}

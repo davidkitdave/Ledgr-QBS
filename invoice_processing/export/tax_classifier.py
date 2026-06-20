@@ -11,6 +11,7 @@ that Xero / QBS code strings stay outside the classification logic.
 
 from __future__ import annotations
 
+import logging
 from datetime import date
 from pathlib import Path
 from typing import Optional
@@ -19,19 +20,73 @@ import yaml
 
 from .models import InvoiceLine, NormalizedInvoice
 
-_GST_YAML = Path(__file__).resolve().parent.parent / "shared_libraries" / "sg_gst.yaml"
+_SHARED_LIBS = Path(__file__).resolve().parent.parent / "shared_libraries"
+_DEFAULT_YAML = "sg_gst.yaml"
+
+# Per-name cache so repeated TaxClassifier construction in a single process
+# (e.g. batch fan-out of 20 docs) doesn't re-read the same YAML from disk.
+_TAXONOMY_CACHE: dict[str, dict] = {}
+
+logger = logging.getLogger(__name__)
+
+# Jurisdiction-string → yaml filename mapping (case-insensitive).
+_JURISDICTION_TO_YAML: dict[str, str] = {
+    "malaysia": "my_sst.yaml",
+    "MY": "my_sst.yaml",
+}
+_JURISDICTION_UPPER_TO_YAML: dict[str, str] = {
+    "MALAYSIA": "my_sst.yaml",
+}
 
 
-def _load_taxonomy() -> dict:
-    with open(_GST_YAML, encoding="utf-8") as f:
-        return yaml.safe_load(f)
+def _load_taxonomy(yaml_name: str = _DEFAULT_YAML) -> dict:
+    """Load and cache a taxonomy YAML from shared_libraries by filename."""
+    if yaml_name not in _TAXONOMY_CACHE:
+        yaml_path = _SHARED_LIBS / yaml_name
+        with open(yaml_path, encoding="utf-8") as f:
+            _TAXONOMY_CACHE[yaml_name] = yaml.safe_load(f)
+    return _TAXONOMY_CACHE[yaml_name]
+
+
+def get_tax_classifier(reference_yaml: Optional[str] = None) -> "TaxClassifier":
+    """Build a :class:`TaxClassifier` for the given taxonomy reference.
+
+    Accepts:
+    - A bare YAML filename  ("my_sst.yaml", "sg_gst.yaml")
+    - A jurisdiction string ("MALAYSIA", "SINGAPORE", "CROSS_BORDER")
+    - ``None`` / empty / unrecognised → falls back to ``sg_gst.yaml``
+
+    Validates the resolved file exists; falls back to ``sg_gst.yaml`` with a
+    logged warning if it does not (defensive for unexpected reference_yaml values).
+    """
+    ref = (reference_yaml or "").strip()
+
+    # Resolve jurisdiction code → yaml filename.
+    if ref and not ref.endswith(".yaml"):
+        ref = _JURISDICTION_UPPER_TO_YAML.get(ref.upper(), _DEFAULT_YAML)
+
+    # Empty or unrecognised → default.
+    yaml_name = ref or _DEFAULT_YAML
+
+    # Validate the file exists; fall back with warning if not.
+    yaml_path = _SHARED_LIBS / yaml_name
+    if not yaml_path.exists():
+        logger.warning(
+            "get_tax_classifier: '%s' not found in shared_libraries; "
+            "falling back to %s",
+            yaml_name,
+            _DEFAULT_YAML,
+        )
+        yaml_name = _DEFAULT_YAML
+
+    return TaxClassifier(taxonomy=_load_taxonomy(yaml_name))
 
 
 class TaxClassifier:
     """Classifies invoice lines to canonical SG GST treatments and maps to a target system."""
 
     def __init__(self, taxonomy: Optional[dict] = None):
-        self.tax = taxonomy or _load_taxonomy()
+        self.tax = taxonomy if taxonomy is not None else _load_taxonomy()
         self._signals = {k: [s.lower() for s in v] for k, v in self.tax["signals"].items()}
         self._threshold = self.tax["review"]["confidence_threshold"]
         self._rate_tol = self.tax["review"]["rate_tolerance"]
@@ -56,6 +111,29 @@ class TaxClassifier:
 
     # -- per-line classification ------------------------------------------------
     def classify_line(self, line: InvoiceLine, inv: NormalizedInvoice) -> InvoiceLine:
+        # Overseas supplier with no GST line on the document -> out-of-scope
+        # (review for reverse charge) BEFORE the tax_visible short-circuit.
+        # An overseas supplier legitimately has no SG GST line; the short-
+        # circuit would otherwise silently mark it NT and miss the reverse-
+        # charge review. ADR-0015 SG-GST decision table, F6 row.
+        if (
+            inv.doc_type == "purchase"
+            and inv.supplier.is_overseas
+            and inv.tax_visible_on_document is False
+        ):
+            line.tax_treatment = "OS"
+            line.tax_confidence = 0.55
+            line.tax_flagged = True
+            line.tax_reason = "OS: overseas supplier, no GST — review Reverse Charge"
+            return line
+
+        if inv.tax_visible_on_document is False:
+            line.tax_treatment = "NT"
+            line.tax_confidence = 0.95
+            line.tax_flagged = False
+            line.tax_reason = "NT: no tax column on document"
+            return line
+
         if inv.doc_type == "sales":
             code, conf, flag, reason = self._classify_sales(line, inv)
         else:
@@ -77,7 +155,21 @@ class TaxClassifier:
         return line
 
     def _classify_purchase(self, line: InvoiceLine, inv: NormalizedInvoice):
-        """§6.1 PURCHASES — first match wins."""
+        """§6.1 PURCHASES — first match wins.
+
+        Master gate: if OUR client is NOT GST-registered, every purchase line
+        is ``NT`` regardless of what the supplier's invoice says. A
+        non-registered Ledgr client cannot reclaim input GST — any GST shown
+        on a received invoice becomes part of the cost, not a recoverable
+        input. This overrides explicit tax_keyword and signal matches because
+        the legal effect on OUR books is the same in either case.
+        See memory ``sg-gst-tax-rule-and-xero-codes``.
+        """
+        if not inv.our_gst_registered:
+            return "NT", 0.95, False, (
+                "NT: client not GST-registered — input GST treated as cost"
+            )
+
         desc = line.description or ""
         supplier = inv.supplier
         gst = line.gst_amount
@@ -158,12 +250,22 @@ class TaxClassifier:
             return "SR", 0.85, False, "SR: explicit standard-rate signal in description"
         # 6. Supplier not GST-registered / no GST -> no tax.
         if not supplier.gst_registered and (not gst or gst == 0):
-            return "NT", 0.7, False, "NT: supplier not GST-registered / no GST line"
-        # 7. Indeterminate -> legal default SR, flagged.
-        return "SR", 0.4, True, "SR(default): indeterminate — review"
+            return "NT", 0.95, False, "NT: supplier not GST-registered / no GST line"
+        # 7. Indeterminate -> null treatment, flagged for human review.
+        return None, 0.4, True, "Unresolved: indeterminate tax treatment — needs human review"
 
     def _classify_sales(self, line: InvoiceLine, inv: NormalizedInvoice):
-        """§6.2 SALES — first match wins."""
+        """§6.2 SALES — first match wins.
+
+        Master gate: if OUR client is NOT GST-registered they cannot legally
+        charge GST on sales. Every sales line is ``NT`` regardless of what's
+        written on the invoice. Hoisted above the tax_keyword block so an
+        accidental ``"SR"`` keyword on a non-registered client's invoice does
+        not bypass this rule. See memory ``sg-gst-tax-rule-and-xero-codes``.
+        """
+        if not inv.our_gst_registered:
+            return "NT", 0.95, False, "NT: client not GST-registered"
+
         desc = line.description or ""
         customer = inv.customer
 
@@ -203,9 +305,6 @@ class TaxClassifier:
             if kw == "g" or kw == "gst" or kw.startswith("sr") or kw.startswith("tx") or "9%" in kw or "8%" in kw or "7%" in kw or "standard" in kw:
                 return "SR", 0.95, False, f"SR: explicit tax_keyword '{line.tax_keyword}'"
 
-        # 5. We are not GST-registered -> cannot charge GST.
-        if not inv.our_gst_registered:
-            return "NT", 0.95, False, "NT: client not GST-registered"
         # 2. Export / international service -> zero-rated (verify §21(3) fit).
         if self._matches(desc, "zero_rated") or customer.is_overseas:
             conf = 0.85 if self._matches(desc, "zero_rated") else 0.6
@@ -225,7 +324,7 @@ class TaxClassifier:
         """Map a canonical treatment to the target system's tax-code string."""
         direction = "sales" if doc_type == "sales" else "purchase"
         table = self.tax["code_map"][system][direction]
-        return table.get(treatment, table.get("SR", ""))
+        return table.get(treatment, "")
 
 
 def classify_invoice(inv: NormalizedInvoice, classifier: Optional[TaxClassifier] = None) -> NormalizedInvoice:

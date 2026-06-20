@@ -204,6 +204,9 @@ class TestStandardCoaRows:
         for row in rows:
             assert row["description"].strip(), f"Empty description in {row}"
 
+    def test_docstring_marks_eval_only(self):
+        assert "eval" in standard_coa_rows.__doc__.lower()
+
 
 # --------------------------------------------------------------------------- #
 # ingest_coa — active path
@@ -395,45 +398,52 @@ class TestCoaUploadRouting:
 
 
 # --------------------------------------------------------------------------- #
-# handle_use_standard_coa
+# ingest_coa — validation_failed path
 # --------------------------------------------------------------------------- #
 
-class TestHandleUseStandardCoa:
+class TestIngestCoaValidationFailed:
 
-    def _run(self, channel_id: str = "C-STD-1"):
-        from app.slack_app import handle_use_standard_coa
+    def test_validation_failed_status(self):
+        store = _pending_store("C-VAL-1")
+        rows = [
+            {"code": "", "description": "Sales", "account_type": "Revenue",
+             "financial_statement": "", "nature": "", "keywords": ""},
+        ]
+        outcome = ingest_coa(
+            channel_id="C-VAL-1",
+            store=store,
+            rows=rows,
+            say_fn=lambda **kw: None,
+        )
+        assert outcome.status == "validation_failed"
 
-        store = _pending_store(channel_id)
-        ack = FakeAck()
-        client = FakeClient()
-        body = {
-            "container": {"channel_id": channel_id},
-        }
-        handle_use_standard_coa(body, ack, client, store)
-        return store, ack, client
+    def test_validation_failed_keeps_pending_coa(self):
+        store = _pending_store("C-VAL-1")
+        rows = [
+            {"code": "", "description": "Sales", "account_type": "Revenue",
+             "financial_statement": "", "nature": "", "keywords": ""},
+        ]
+        ingest_coa(
+            channel_id="C-VAL-1",
+            store=store,
+            rows=rows,
+            say_fn=lambda **kw: None,
+        )
+        assert store.get_by_channel("C-VAL-1").status == "pending_coa"
 
-    def test_acks(self):
-        _, ack, _ = self._run()
-        assert ack.called
-
-    def test_client_status_becomes_active(self):
-        store, _, _ = self._run("C-STD-1")
-        ctx = store.get_by_channel("C-STD-1")
-        assert ctx.status == "active"
-
-    def test_coa_populated_with_standard_rows(self):
-        store, _, _ = self._run("C-STD-1")
-        ctx = store.get_by_channel("C-STD-1")
-        assert len(ctx.coa) == len(standard_coa_rows())
-
-    def test_confirmation_message_posted(self):
-        _, _, client = self._run("C-STD-1")
-        assert len(client.posted_messages) == 1
-
-    def test_confirmation_message_channel(self):
-        _, _, client = self._run("C-STD-1")
-        assert client.posted_messages[0]["channel"] == "C-STD-1"
-
-    def test_confirmation_has_blocks(self):
-        _, _, client = self._run("C-STD-1")
-        assert "blocks" in client.posted_messages[0]
+    def test_validation_failed_posts_error_blocks(self):
+        store = _pending_store("C-VAL-1")
+        posted: list[dict] = []
+        rows = [
+            {"code": "", "description": "Sales", "account_type": "Revenue",
+             "financial_statement": "", "nature": "", "keywords": ""},
+        ]
+        ingest_coa(
+            channel_id="C-VAL-1",
+            store=store,
+            rows=rows,
+            say_fn=lambda **kw: posted.append(kw),
+        )
+        assert len(posted) == 1
+        assert "blocks" in posted[0]
+        assert "validation failed" in str(posted[0]["blocks"]).lower()

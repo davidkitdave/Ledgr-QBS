@@ -1,0 +1,63 @@
+{
+  "display_information": {
+    "name": "Ledgr-QBS",
+    "description": "Accounting document processor — drop a PDF or invoice and get a Ledger import file back.",
+    "background_color": "#1a1a2e"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "Ledgr-QBS",
+      "always_online": true
+    },
+    "slash_commands": [
+      {
+        "command": "/ledgr",
+        "url": "https://ledgr-640071771526.asia-southeast1.run.app/slack/events",
+        "description": "Ledgr settings & export",
+        "usage_hint": "settings | export",
+        "should_escape": false
+      }
+    ]
+  },
+  "oauth_config": {
+    "redirect_urls": [
+      "https://ledgr-640071771526.asia-southeast1.run.app/slack/oauth_redirect"
+    ],
+    "scopes": {
+      "bot": [
+        "app_mentions:read",
+        "channels:history",
+        "channels:read",
+        "chat:write",
+        "commands",
+        "files:read",
+        "files:write",
+        "groups:history",
+        "groups:read",
+        "im:history",
+        "reactions:write",
+        "users:read"
+      ]
+    },
+    "pkce_enabled": false
+  },
+  "settings": {
+    "event_subscriptions": {
+      "request_url": "https://ledgr-640071771526.asia-southeast1.run.app/slack/events",
+      "bot_events": [
+        "member_joined_channel",
+        "message.channels",
+        "message.groups",
+        "file_shared"
+      ]
+    },
+    "interactivity": {
+      "is_enabled": true,
+      "request_url": "https://ledgr-640071771526.asia-southeast1.run.app/slack/events"
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false,
+    "is_mcp_enabled": false
+  }
+}

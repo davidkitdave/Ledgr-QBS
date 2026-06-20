@@ -1,0 +1,18 @@
+{
+  "client": "Company-A",
+  "client_uen": "201700001A",
+  "file_label": "SUP-001-invoice.pdf",
+  "expected_direction": "purchase",
+  "from_party": {
+    "name": "Supplier Gamma Trading Pte Ltd",
+    "uen": "201800002B",
+    "role": "issuer"
+  },
+  "to_party": {
+    "name": "Company-A",
+    "uen": "201700001A",
+    "role": "recipient"
+  },
+  "expected_direction_for_client": "purchase",
+  "notes": "Plain supplier invoice to the client. Control case for simple purchase direction."
+}

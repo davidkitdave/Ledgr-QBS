@@ -1,0 +1,12 @@
+{
+  "winner": "V3",
+  "ranking": [
+    {
+      "variant": "V3",
+      "avg_score": 1.0,
+      "avg_completeness": 1.0,
+      "avg_reconcile": 1.0,
+      "false_splits": 0
+    }
+  ]
+}

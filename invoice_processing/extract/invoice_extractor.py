@@ -7,6 +7,8 @@ line is kept separate so a mixed SR/ZR bill stays two lines for the tax classifi
 
 from __future__ import annotations
 
+import logging
+import re
 from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
@@ -15,7 +17,9 @@ from google.genai import types
 from pydantic import BaseModel, Field
 
 from ..export.models import InvoiceLine, NormalizedInvoice, PartyInfo
-from ..shared_libraries.genai_client import default_model, make_client
+from ..shared_libraries.genai_client import lite_model, make_client
+
+logger = logging.getLogger(__name__)
 
 _MIME_BY_EXT = {
     ".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg",
@@ -71,7 +75,40 @@ class ExtractedInvoice(BaseModel):
     )
     issuer_name: Optional[str] = Field(None, description="Supplier/seller — who issued the document")
     issuer_gst_regno: Optional[str] = Field(None, description="Issuer GST registration no. / UEN if shown")
+    issuer_country: Optional[str] = Field(
+        None,
+        description=(
+            "Country of the issuer / supplier as a 2-letter code (SG / MY / US / etc.). "
+            "Infer from any country indicator on the document: country code in address, "
+            "country prefix on phone, \"Made in <country>\", tax reg no. country prefix "
+            "(MY SST numbers start with country code, SG GST with \"M\"), or explicit "
+            "country text. CRITICAL for multi-jurisdiction tax routing — the previous "
+            "extractor left this null which caused the YAU LEE Malaysia receipt to be "
+            "wrongly routed through Singapore GST rules. Always return a 2-letter code "
+            "when any country indicator is visible; null only when truly absent."
+        ),
+    )
+    issuer_tax_system: Optional[str] = Field(
+        None,
+        description=(
+            "Tax system that applies to this issuer (informational only; the "
+            "jurisdiction router will override this with the resolved rule). One of: "
+            "'GST' (Singapore-style goods & services tax), 'SST' (Malaysia Sales Tax / "
+            "Service Tax), 'VAT' (European-style), 'NONE' (no tax system — e.g. US "
+            "domestic), or null when the document carries no tax column at all. "
+            "Infer from explicit tax wording on the document ('Service Tax', 'SST', "
+            "'GST 9%', 'VAT', etc.)."
+        ),
+    )
     bill_to_name: Optional[str] = Field(None, description="Customer/buyer — who it is billed to")
+    bill_to_country: Optional[str] = Field(
+        None,
+        description=(
+            "Country of the bill-to / customer, 2-letter code. Same inference rules as "
+            "issuer_country. Important for cross-border detection (SG client + MY "
+            "supplier triggers reverse-charge review)."
+        ),
+    )
     lines: list[ExtractedLine] = Field(default_factory=list)
     subtotal: Optional[float] = None
     gst_total: Optional[float] = None
@@ -133,6 +170,18 @@ Per line:
 
 Document-level fields:
 - issuer_name = the supplier/seller (letterhead/"From"); bill_to_name = who it is addressed to.
+- issuer_country = 2-letter country code of the issuer (SG / MY / US / ...). Infer from any
+  country indicator on the doc: country code in address, country prefix on phone, "Made in
+  <country>", tax-reg-no country prefix (MY SST numbers prefix with country code; SG GST
+  with "M"), explicit country text. CRITICAL for multi-jurisdiction tax routing — the
+  YAU LEE Malaysia receipt was wrongly processed under SG GST because this field was null.
+  Always return a 2-letter code when any country indicator is visible; null only when truly
+  absent.
+- issuer_tax_system = "GST" / "SST" / "VAT" / "NONE" / null — infer from explicit tax
+  wording on the document (e.g. "Service Tax 8%", "SST", "GST 9%", "VAT"). Informational;
+  the jurisdiction router applies the canonical rule based on the client profile + this hint.
+- bill_to_country = 2-letter country code of the bill-to / customer (same inference rules).
+  Important for cross-border detection (SG client + MY supplier triggers reverse-charge).
 - issuer_gst_regno = the supplier's GST registration number / UEN if printed.
 - invoice_number = the document reference. Accept ANY label: Invoice No, Bill No, Tax Invoice No,
   Receipt No, Ref, Reference No, Doc No — all map to invoice_number. Always capture it; do NOT
@@ -186,6 +235,14 @@ def mime_for(path: str | Path) -> str:
     return _MIME_BY_EXT.get(Path(path).suffix.lower(), "application/octet-stream")
 
 
+def _append_hint(prompt: str, hint: Optional[str]) -> str:
+    """Append a human steering hint to an extraction prompt when provided."""
+    hint = (hint or "").strip()
+    if not hint:
+        return prompt
+    return f"{prompt}\n\nAdditional instruction from the accountant:\n{hint}"
+
+
 def extract_invoice(
     data: bytes,
     mime_type: str,
@@ -193,13 +250,14 @@ def extract_invoice(
     project: Optional[str] = None,
     location: Optional[str] = None,
     model: Optional[str] = None,
+    hint: Optional[str] = None,
 ) -> ExtractedInvoice:
     client = make_client(project, location)
-    model = model or default_model()
+    model = model or lite_model()
     part = types.Part.from_bytes(data=data, mime_type=mime_type)
     resp = client.models.generate_content(
         model=model,
-        contents=[part, _PROMPT],
+        contents=[part, _append_hint(_PROMPT, hint)],
         config=types.GenerateContentConfig(
             temperature=0,
             response_mime_type="application/json",
@@ -221,6 +279,7 @@ def extract_invoice_bundle(
     project: Optional[str] = None,
     location: Optional[str] = None,
     model: Optional[str] = None,
+    hint: Optional[str] = None,
 ) -> ExtractedInvoiceBundle:
     """Extract one-or-more invoices/receipts from a single document into a bundle.
 
@@ -229,11 +288,11 @@ def extract_invoice_bundle(
     rather than raising on a model that returns no entries.
     """
     client = make_client(project, location)
-    model = model or default_model()
+    model = model or lite_model()
     part = types.Part.from_bytes(data=data, mime_type=mime_type)
     resp = client.models.generate_content(
         model=model,
-        contents=[part, _BUNDLE_PROMPT],
+        contents=[part, _append_hint(_BUNDLE_PROMPT, hint)],
         config=types.GenerateContentConfig(
             temperature=0,
             response_mime_type="application/json",
@@ -248,25 +307,91 @@ def extract_file_bundle(path: str | Path, **kwargs) -> ExtractedInvoiceBundle:
     return extract_invoice_bundle(path.read_bytes(), mime_for(path), **kwargs)
 
 
-def _parse_date(s: Optional[str]) -> Optional[date]:
-    if not s:
-        return None
-    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%Y/%m/%d", "%m/%d/%Y"):
+_DATE_FORMATS = (
+    "%Y-%m-%d",
+    "%d/%m/%Y",
+    "%d/%m/%y",
+    "%d-%m-%Y",
+    "%d.%m.%Y",
+    "%Y/%m/%d",
+    "%m/%d/%Y",
+    "%d %b %Y",
+    "%d %B %Y",
+    "%B %d, %Y",
+    "%d %b %y",
+)
+
+
+def _strip_ordinals(text: str) -> str:
+    return re.sub(r"\b(\d{1,2})(st|nd|rd|th)\b", r"\1", text, flags=re.I)
+
+
+def _parse_date_part(part: str) -> Optional[date]:
+    cleaned = _strip_ordinals(part.strip())
+    for fmt in _DATE_FORMATS:
         try:
-            return datetime.strptime(s.strip(), fmt).date()
+            return datetime.strptime(cleaned, fmt).date()
         except ValueError:
             continue
     return None
 
 
-def reconcile(ex: ExtractedInvoice, *, tol_abs: float = 0.05, tol_rel: float = 0.01) -> tuple[bool, str]:
-    """Check that the ledger lines tie out to the document totals.
+def _parse_date(s: Optional[str]) -> Optional[date]:
+    """Parse a single invoice date from common formats and date ranges."""
+    if not s:
+        return None
+    raw = s.strip()
+    direct = _parse_date_part(raw)
+    if direct:
+        return direct
+    for sep in (" – ", " - ", " to "):
+        if sep == " to ":
+            if not re.search(r"\s+to\s+", raw, flags=re.I):
+                continue
+            segments = re.split(r"\s+to\s+", raw, flags=re.I)
+        elif sep in raw:
+            segments = raw.split(sep)
+        else:
+            continue
+        parsed = [_parse_date_part(seg) for seg in segments]
+        parsed = [d for d in parsed if d is not None]
+        if parsed:
+            return parsed[-1]
+    return None
 
-    Returns (ok, detail). ok=False means the summary grouping dropped/duplicated money and
-    should be flagged for human review. Uses max(tol_abs, tol_rel*reference) tolerance.
+
+def _has_currency_conflict(
+    ex: ExtractedInvoice,
+    *,
+    line_currencies: Optional[list[str]] = None,
+) -> bool:
+    """True when the same document mixes more than one currency."""
+    seen: set[str] = set()
+    if ex.currency:
+        seen.add(ex.currency.upper())
+    for code in line_currencies or []:
+        if code:
+            seen.add(code.upper())
+    return len(seen) > 1
+
+
+def reconcile(
+    ex: ExtractedInvoice,
+    *,
+    tol_abs: float = 0.05,
+    tol_rel: float = 0.01,
+    tax_visible_on_document: Optional[bool] = None,
+    subtotal_in_capture: Optional[bool] = None,
+) -> tuple[bool, str]:
+    """Check that ledger lines tie out to document totals (footer-first).
+
+    When ``subtotal_in_capture`` is False, skip subtotal-only checks (fixes false
+    alarms when the capture has no Sub Total row). When
+    ``tax_visible_on_document`` is False, skip GST checks.
     """
-    net_sum = sum(l.net_amount or 0.0 for l in ex.lines)
-    gst_sum = sum(l.gst_amount or 0.0 for l in ex.lines)
+    net_sum = sum(ln.net_amount or 0.0 for ln in ex.lines)
+    gst_sum = sum(ln.gst_amount or 0.0 for ln in ex.lines)
+    line_total = net_sum + gst_sum
 
     mismatches: list[str] = []
 
@@ -276,15 +401,20 @@ def reconcile(ex: ExtractedInvoice, *, tol_abs: float = 0.05, tol_rel: float = 0
         tol = max(tol_abs, tol_rel * abs(reference))
         if abs(computed - reference) > tol:
             mismatches.append(
-                f"{label}: lines={computed:.2f} vs doc={reference:.2f} (diff={computed - reference:+.2f}, tol={tol:.2f})"
+                f"{label}: lines={computed:.2f} vs doc={reference:.2f} "
+                f"(diff={computed - reference:+.2f}, tol={tol:.2f})"
             )
 
-    _check("subtotal", net_sum, ex.subtotal)
-    _check("gst", gst_sum, ex.gst_total)
-    _check("total", net_sum + gst_sum, ex.total)
+    if subtotal_in_capture is not False:
+        _check("subtotal", net_sum, ex.subtotal)
+    if tax_visible_on_document is not False:
+        _check("gst", gst_sum, ex.gst_total)
+    _check("total", line_total, ex.total)
 
     if mismatches:
         return False, "; ".join(mismatches)
+    if ex.total is not None:
+        return True, f"Lines total ${line_total:.2f} · Footer ${ex.total:.2f} · OK"
     return True, "reconciled"
 
 
@@ -296,94 +426,74 @@ def to_normalized(
     client_country: str = "SG",
     base_currency: str = "SGD",
     fx_rate: Optional[float] = None,
+    currency_conflict: bool = False,
+    line_currencies: Optional[list[str]] = None,
 ) -> NormalizedInvoice:
     """Map an ExtractedInvoice to a NormalizedInvoice for the tax classifier + exporter.
 
     direction: 'purchase' (we are the buyer; counterparty = supplier=issuer) or
     'sales' (we are the seller; counterparty = customer=bill_to).
 
-    base_currency: the client's ledger currency (e.g. 'SGD').  When the document
-    currency differs, fx_rate must be supplied to convert amounts.  If not supplied
-    for a non-base currency document, the doc is flagged for human review
-    (needs_fx_review=True, reconciled=False) rather than silently booked at rate=1.
+    Foreign-currency invoices are booked in their document currency (standard AP in
+    QBS/Xero).  needs_fx_review is set only when the same document mixes currencies
+    or when fx_rate conversion was requested but is missing on a conflicting doc.
     """
     doc_type = "sales" if direction == "sales" else "purchase"
-    supplier = PartyInfo(name=ex.issuer_name, gst_regno=ex.issuer_gst_regno)
-    customer = PartyInfo(name=ex.bill_to_name)
+    supplier = PartyInfo(
+        name=ex.issuer_name,
+        gst_regno=ex.issuer_gst_regno,
+        country=ex.issuer_country,
+    )
+    customer = PartyInfo(
+        name=ex.bill_to_name,
+        country=ex.bill_to_country,
+    )
 
     doc_currency = (ex.currency or base_currency).upper()
-    is_foreign = doc_currency != base_currency.upper()
 
     lines = [
         InvoiceLine(
-            description=l.description,
-            quantity=l.quantity,
-            unit_amount=l.unit_amount,
-            net_amount=l.net_amount,
-            gst_amount=l.gst_amount,
-            tax_keyword=l.tax_label,
+            description=ln.description,
+            quantity=ln.quantity,
+            unit_amount=ln.unit_amount,
+            net_amount=ln.net_amount,
+            gst_amount=ln.gst_amount,
+            tax_keyword=ln.tax_label,
         )
-        for l in ex.lines
+        for ln in ex.lines
     ]
     ok, detail = reconcile(ex)
+    mixed_currencies = currency_conflict or _has_currency_conflict(
+        ex, line_currencies=line_currencies
+    )
 
     # ------------------------------------------------------------------ #
-    # FX conversion
+    # Currency — record as shown, no conversion
     # ------------------------------------------------------------------ #
+    # Ledgr records invoice amounts and currency EXACTLY as printed on the
+    # document.  No FX conversion is ever applied here — the accountant
+    # converts in their ERP.
+    #
+    # fx_rate: the rate the document prints, passed in as-is, or None when
+    #   the document prints none.  Never silently set to 1.0.
+    # ledger_currency: always the document currency (never base_currency).
+    # needs_fx_review: only True when multiple currencies appear on ONE
+    #   document (mixed_currencies) — a single foreign currency is NOT flagged.
     needs_fx_review = False
-    resolved_fx_rate: Optional[float]
-    ledger_currency: str
+    resolved_fx_rate: Optional[float] = fx_rate  # printed rate or None
+    ledger_currency: str = doc_currency           # always the document currency
     doc_subtotal = ex.subtotal
     doc_gst_total = ex.gst_total
     doc_total = ex.total
-    original_currency: Optional[str] = None
-    original_total: Optional[float] = None
+    original_currency: Optional[str] = None       # no conversion → no "original"
+    original_total: Optional[float] = None        # no conversion → no "original"
 
-    if not is_foreign:
-        # Same currency as ledger — no conversion needed.
-        resolved_fx_rate = 1.0
-        ledger_currency = doc_currency
-    elif fx_rate is not None:
-        # Rate provided: convert document-level amounts to base currency.
-        resolved_fx_rate = fx_rate
-        ledger_currency = base_currency.upper()
-        original_currency = doc_currency
-        original_total = ex.total
-        if doc_subtotal is not None:
-            doc_subtotal = round(doc_subtotal * fx_rate, 2)
-        if doc_gst_total is not None:
-            doc_gst_total = round(doc_gst_total * fx_rate, 2)
-        if doc_total is not None:
-            doc_total = round(doc_total * fx_rate, 2)
-        # Scale each line's amounts so per-line reconcile still passes.
-        scaled_lines = []
-        for line in lines:
-            scaled_lines.append(InvoiceLine(
-                description=line.description,
-                quantity=line.quantity,
-                unit_amount=round(line.unit_amount * fx_rate, 4) if line.unit_amount is not None else None,
-                net_amount=round(line.net_amount * fx_rate, 2) if line.net_amount is not None else None,
-                gst_amount=round(line.gst_amount * fx_rate, 2) if line.gst_amount is not None else None,
-                tax_keyword=line.tax_keyword,
-                account_code=line.account_code,
-                item_code=line.item_code,
-                tax_treatment=line.tax_treatment,
-                tax_confidence=line.tax_confidence,
-                tax_flagged=line.tax_flagged,
-                tax_reason=line.tax_reason,
-            ))
-        lines = scaled_lines
-    else:
-        # Non-base currency but no rate available — flag for review.
+    if mixed_currencies:
         needs_fx_review = True
-        resolved_fx_rate = None
-        ledger_currency = doc_currency  # keep original currency; do not convert
-        original_currency = doc_currency
-        original_total = ex.total
         ok = False
         fx_note = (
-            f"needs fx review: document currency {doc_currency} differs from "
-            f"base currency {base_currency}; no exchange rate available"
+            "needs fx review: multiple currencies on the same document; "
+            "confirm which currency and amounts to book"
         )
         detail = f"{detail}; {fx_note}" if detail else fx_note
 
@@ -409,6 +519,34 @@ def to_normalized(
     )
 
 
+def _is_soa_summary_invoice(ex: ExtractedInvoice) -> bool:
+    """Return True when an ExtractedInvoice looks like a phantom SOA-summary row.
+
+    The model is instructed to skip SOA cover pages and record them in
+    ``skipped_pages``, but it can hallucinate invoices from the SOA summary
+    table — particularly when the table lists many invoice numbers with amounts.
+    These phantom invoices share a distinctive shape: ALL their lines have a
+    bare description (empty, "INVOICE", or "INVOICES"), zero GST, and no
+    item_code on the extraction-layer model.
+
+    This is a deterministic gate — no LLM call.  Only drop when ALL lines
+    match the shape so that real invoices with tax_label==NT and gst_amount==0
+    are preserved (their descriptions are specific product/service names, not
+    the bare "INVOICE" sentinel).
+
+    Conservative: returns False when the invoice has no lines (let the
+    downstream reconciler flag it instead).
+    """
+    if not ex.lines:
+        return False
+    _sentinel_descs = {"", "INVOICE", "INVOICES"}
+    return all(
+        (line.description or "").strip().upper() in _sentinel_descs
+        and (line.gst_amount or 0.0) == 0.0
+        for line in ex.lines
+    )
+
+
 def to_normalized_bundle(
     bundle: ExtractedInvoiceBundle,
     *,
@@ -422,16 +560,42 @@ def to_normalized_bundle(
 
     Each entry in bundle.invoices becomes one NormalizedInvoice.  SOA cover pages
     are already excluded by the model (they appear in bundle.skipped_pages, not in
-    bundle.invoices), so this function simply maps each ExtractedInvoice in order.
+    bundle.invoices), but the model can still hallucinate phantom invoices from
+    the SOA summary table.  This function applies two deterministic hard-gates
+    before conversion — no LLM call:
+
+      1. Drop any invoice whose invoice_number appears in ``bundle.skipped_pages``
+         (defensive; the model should not emit these but we enforce it in code).
+      2. Drop any invoice whose lines are ALL summary-shaped (bare "INVOICE"
+         description + zero GST): these are phantom rows hallucinated from the
+         SOA cover table.  See ``_is_soa_summary_invoice`` for the full predicate.
+
+    Both gates log a structured warning so operators can observe when the model
+    needed hardening.
 
     fx_rates: optional dict mapping ISO currency code -> exchange rate to base_currency,
-    e.g. {'USD': 1.35, 'IDR': 0.000085}.  When not provided and a document is in a
-    non-base currency, it is flagged for review (needs_fx_review=True).
+    e.g. {'USD': 1.35, 'IDR': 0.000085}.  When provided, amounts are converted to
+    base_currency.  Single-currency foreign invoices without a rate are booked in
+    their document currency; needs_fx_review is set only for mixed-currency docs.
     """
     if fx_rates is None:
         fx_rates = {}
+
     results: list[NormalizedInvoice] = []
+
     for ex in bundle.invoices:
+        # Gate 2: drop phantom summary-shaped invoices hallucinated from SOA cover.
+        if _is_soa_summary_invoice(ex):
+            logger.warning(
+                "hard-gate: dropping SOA-summary phantom invoice",
+                extra={
+                    "invoice_number": ex.invoice_number,
+                    "line_count": len(ex.lines),
+                    "reason": "all_lines_summary_shaped",
+                },
+            )
+            continue
+
         doc_currency = (ex.currency or base_currency).upper()
         rate = fx_rates.get(doc_currency)
         normalized = to_normalized(
@@ -443,4 +607,5 @@ def to_normalized_bundle(
             fx_rate=rate,
         )
         results.append(normalized)
+
     return results

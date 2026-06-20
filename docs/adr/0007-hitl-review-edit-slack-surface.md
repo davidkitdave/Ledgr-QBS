@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-06-14
-- **Deciders:** David (developer); grounded in Slack Block Kit docs + ADK HITL docs (via the adk-docs / google-dev-knowledge MCPs).
+- **Deciders:** Ledgr team; grounded in Slack Block Kit docs + ADK HITL docs (via the adk-docs / google-dev-knowledge MCPs).
 
 ## Context
 

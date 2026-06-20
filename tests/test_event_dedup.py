@@ -111,6 +111,7 @@ def test_member_joined_dedup_calls_handler_once():
             runner=runner_mock,
             ledger_store=MagicMock(),
             db=MagicMock(),
+            store=MagicMock(),
         )
 
         handler = registered["member_joined_channel"]
@@ -129,8 +130,15 @@ def test_member_joined_dedup_calls_handler_once():
 # ---------------------------------------------------------------------------
 
 
-def test_file_shared_dedup_calls_process_once():
-    """Same file_shared event_id delivered twice → process_file_event called once."""
+def test_file_shared_dedup_does_not_call_process():
+    """Same file_shared event_id delivered twice → process_file_event is NEVER called.
+
+    After Phase 1A (file_shared race fix), ``file_shared`` is no longer the
+    document owner — the message/file_share handler is. So duplicate
+    file_shared events should both be no-ops, and process_file_event should
+    not be invoked from this path at all. Dedup is still enforced via the
+    ``file:{id}`` guard for the COA ingest path.
+    """
     from accounting_agents import slack_runner
 
     fresh_seen = _SeenEvents()
@@ -157,17 +165,18 @@ def test_file_shared_dedup_calls_process_once():
             runner=runner_mock,
             ledger_store=MagicMock(),
             db=MagicMock(),
+            store=MagicMock(),
         )
 
         handler = registered["file_shared"]
 
-        # First delivery.
+        # First delivery — must NOT call process_file_event (message handler owns it).
         asyncio.run(handler(event=event, body=body, client=fake_client))
-        assert mock_pfe.call_count == 1
+        assert mock_pfe.call_count == 0
 
-        # Duplicate delivery.
+        # Duplicate delivery — also no-op.
         asyncio.run(handler(event=event, body=body, client=fake_client))
-        assert mock_pfe.call_count == 1  # still 1
+        assert mock_pfe.call_count == 0  # still 0
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +212,7 @@ def test_message_dedup_calls_answer_once():
             runner=runner_mock,
             ledger_store=MagicMock(),
             db=MagicMock(),
+            store=MagicMock(),
         )
 
         handler = registered["message"]

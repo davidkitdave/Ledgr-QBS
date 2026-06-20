@@ -77,6 +77,7 @@ class ClientContext:
     accounting_software: str = "QBS Ledger"
     base_currency: str = "SGD"
     tax_registered: bool = True
+    partial_exempt: bool = False
     fye_month: Optional[int] = None
     coa: list[CoaAccount] = field(default_factory=list)
     category_mapping: dict[str, Optional[str]] = field(default_factory=dict)  # category -> account_code | null
@@ -91,6 +92,7 @@ class ClientContext:
             "client_uen": self.client_uen,
             "region": self.region,
             "tax_registered": self.tax_registered,
+            "partial_exempt": self.partial_exempt,
             "software": self.accounting_software,
             "base_currency": self.base_currency,
             "fye_month": self.fye_month,
@@ -302,6 +304,7 @@ def client_context_from_state(state: dict) -> ClientContext:
         accounting_software=state.get("software") or "QBS Ledger",
         base_currency=state.get("base_currency") or "SGD",
         tax_registered=bool(state.get("tax_registered", True)),
+        partial_exempt=bool(state.get("partial_exempt", False)),
         fye_month=state.get("fye_month"),
         coa=coa_from_state(state),
         category_mapping=category_mapping_from_state(state),
@@ -383,6 +386,7 @@ class InMemoryClientStore:
             accounting_software=profile.get("accounting_software") or "QBS Ledger",
             base_currency=profile.get("base_currency") or "SGD",
             tax_registered=tax_registered,
+            partial_exempt=bool(profile.get("partial_exempt", False)),
             status=profile.get("status"),
             category_mapping=dict(profile.get("category_mapping") or {}),
         )
@@ -440,6 +444,88 @@ class InMemoryClientStore:
         ctx.entity_memory.append(EntityMemoryEntry(
             name=vendor, mapping_code=account_code, tax_code=tax_code,
         ))
+
+    # ---------------------------------------------------------------------- #
+    # Familiarity store (ADR-0017 §6, Lever 4)
+    # ---------------------------------------------------------------------- #
+
+    def _familiarity_key(self, doc_type: str, vendor: Optional[str] = None) -> str:
+        return f"{doc_type}:{vendor}" if vendor else doc_type
+
+    def record_familiarity(self, *, client_id: str, doc_type: str,
+                           vendor: Optional[str] = None,
+                           direction: Optional[str] = None) -> None:
+        """Increment seen_count for the doc_type (and doc_type:vendor) familiarity key(s).
+
+        Mirrors :meth:`FirestoreClientStore.record_familiarity` for the
+        in-process store so tests can exercise the Lever 4 hook without GCP.
+        When ``vendor`` is supplied, BOTH the bare ``doc_type`` key and the
+        compound ``doc_type:vendor`` key are incremented.
+        """
+        if not (client_id and doc_type):
+            return
+        if client_id not in self._by_id:
+            return
+        if not hasattr(self, "_familiarity"):
+            self._familiarity: dict[str, dict[str, dict]] = {}
+        per_client = self._familiarity.setdefault(client_id, {})
+
+        # Always increment the bare doc_type key.
+        bare = self._familiarity_key(doc_type)
+        entry = per_client.setdefault(bare, {"seen_count": 0})
+        entry["seen_count"] = entry.get("seen_count", 0) + 1
+        if direction:
+            entry["last_direction"] = direction
+
+        # Also increment the compound key when vendor is known.
+        if vendor:
+            compound = self._familiarity_key(doc_type, vendor)
+            v_entry = per_client.setdefault(compound, {"seen_count": 0})
+            v_entry["seen_count"] = v_entry.get("seen_count", 0) + 1
+            if direction:
+                v_entry["last_direction"] = direction
+
+    def reset_familiarity(self, *, client_id: str, doc_type: str,
+                          vendor: Optional[str] = None) -> None:
+        """Set seen_count to 0 for the matching familiarity key(s).
+
+        When ``vendor`` is supplied, only the compound ``doc_type:vendor`` key
+        is reset (the bare ``doc_type`` key is left intact). When ``vendor`` is
+        absent, only the bare ``doc_type`` key is reset.
+
+        Mirrors :meth:`FirestoreClientStore.reset_familiarity`.
+        """
+        if not (client_id and doc_type):
+            return
+        if not hasattr(self, "_familiarity"):
+            return
+        per_client = self._familiarity.get(client_id, {})
+        key = self._familiarity_key(doc_type, vendor)
+        if key in per_client:
+            per_client[key]["seen_count"] = 0
+
+    def get_familiarity(self, client_id: str, doc_type: str,
+                        vendor: Optional[str] = None) -> int:
+        """Return the current seen_count for the given key (0 if absent).
+
+        Used by tests; not part of the production store contract.
+        """
+        if not hasattr(self, "_familiarity"):
+            return 0
+        per_client = self._familiarity.get(client_id, {})
+        key = self._familiarity_key(doc_type, vendor)
+        return per_client.get(key, {}).get("seen_count", 0)
+
+    def get_familiarity_map(self, client_id: str) -> dict:
+        """Return the full {key: {seen_count: n, ...}} map for a client.
+
+        This is the format injected into ``state[FAMILIARITY_KEY]`` by the
+        profile callback so ``detect_struggle`` can read it without touching
+        the store directly.
+        """
+        if not hasattr(self, "_familiarity"):
+            return {}
+        return dict(self._familiarity.get(client_id, {}))
 
     @classmethod
     def from_setup_dir(cls, directory: str | Path) -> "InMemoryClientStore":
@@ -553,9 +639,11 @@ class FirestoreClientStore:
 
     def __init__(self, project: Optional[str] = None, database: Optional[str] = None,
                  collection: str = "clients", client=None):
+        from accounting_agents.config import _ns
         self._project = project
         self._database = database
-        self._collection = collection
+        self._collection = _ns(collection)
+        self._channels_collection = _ns("channels")
         self._injected_client = client  # test seam: if set, _firestore() returns it directly
         self._client = None  # lazy real client
 
@@ -609,6 +697,7 @@ class FirestoreClientStore:
             accounting_software=data.get("accounting_software") or "QBS Ledger",
             base_currency=data.get("base_currency") or "SGD",
             tax_registered=tax_registered,
+            partial_exempt=bool(data.get("partial_exempt", False)),
             status=data.get("status"),
             # category_mapping is a map field on the client doc (spec §1), not a subcollection.
             category_mapping=dict(data.get("category_mapping") or {}),
@@ -652,7 +741,7 @@ class FirestoreClientStore:
         if not channel_id:
             return None
         db = self._firestore()
-        snap = db.collection("channels").document(channel_id).get()
+        snap = db.collection(self._channels_collection).document(channel_id).get()
         if not snap.exists:
             return None
         data = snap.to_dict() or {}
@@ -671,7 +760,7 @@ class FirestoreClientStore:
     def set_channel(self, channel_id: str, client_id: str) -> None:
         """Write the reverse-index ``channels/{channel_id}`` doc."""
         db = self._firestore()
-        db.collection("channels").document(channel_id).set({"client_id": client_id})
+        db.collection(self._channels_collection).document(channel_id).set({"client_id": client_id})
 
     def save_coa(self, client_id: str, coa_rows: list[dict]) -> None:
         """REPLACE the COA: delete every existing ``coa/{n}`` doc, then write the
@@ -694,6 +783,48 @@ class FirestoreClientStore:
         """Merge-update the status field on ``clients/{client_id}``."""
         db = self._firestore()
         db.collection(self._collection).document(client_id).set({"status": status}, merge=True)
+
+    def append_processing_log(
+        self, *, client_id: str, file_id: str, entry: dict
+    ) -> None:
+        """Write one document-delivery record under ``clients/{id}/processing_log/{file_id}``."""
+        if not (client_id and file_id and entry):
+            return
+        db = self._firestore()
+        (
+            db.collection(self._collection)
+            .document(client_id)
+            .collection("processing_log")
+            .document(file_id)
+            .set(entry, merge=True)
+        )
+
+    def list_processing_log(
+        self, client_id: Optional[str], *, limit: int = 20
+    ) -> list[dict]:
+        """Return recent processing-log entries for a client (newest first)."""
+        if not client_id:
+            return []
+        cap = max(1, min(int(limit), 50))
+        db = self._firestore()
+        entries: list[dict] = []
+        for snap in (
+            db.collection(self._collection)
+            .document(client_id)
+            .collection("processing_log")
+            .stream()
+        ):
+            row = snap.to_dict() or {}
+            doc_id = (
+                row.get("file_id")
+                or getattr(snap, "id", None)
+                or getattr(getattr(snap, "reference", None), "_doc_id", None)
+            )
+            if doc_id:
+                row["file_id"] = doc_id
+            entries.append(row)
+        entries.sort(key=lambda r: str(r.get("delivered_at") or ""), reverse=True)
+        return entries[:cap]
 
     def add_correction(self, *, client_id: str, vendor: str,
                        account_code: Optional[str] = None,
@@ -722,3 +853,90 @@ class FirestoreClientStore:
         if tax_code:
             patch["tax_code"] = tax_code
         ref.set(patch, merge=True)
+
+    # ---------------------------------------------------------------------- #
+    # Familiarity store (ADR-0017 §6, Lever 4)
+    # ---------------------------------------------------------------------- #
+
+    @staticmethod
+    def _familiarity_key(doc_type: str, vendor: Optional[str] = None) -> str:
+        return f"{doc_type}:{vendor}" if vendor else doc_type
+
+    def record_familiarity(self, *, client_id: str, doc_type: str,
+                           vendor: Optional[str] = None,
+                           direction: Optional[str] = None) -> None:
+        """Increment seen_count for the doc_type (and optionally doc_type:vendor) key.
+
+        Uses a Firestore atomic increment so concurrent calls are safe.
+        When ``vendor`` is supplied, BOTH the bare ``doc_type`` key and the
+        compound ``doc_type:vendor`` key are incremented.
+
+        Subcollection layout:
+            clients/{client_id}/familiarity/{key} -> {seen_count, last_seen_at,
+                                                       last_direction}
+        """
+        if not (client_id and doc_type):
+            return
+        from datetime import datetime, timezone
+        from google.cloud import firestore as _fs  # lazy import — not loaded in tests
+
+        db = self._firestore()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        fam_coll = (
+            db.collection(self._collection)
+            .document(client_id)
+            .collection("familiarity")
+        )
+
+        patch: dict = {"seen_count": _fs.Increment(1), "last_seen_at": now_iso}
+        if direction:
+            patch["last_direction"] = direction
+
+        # Always update the bare doc_type key.
+        fam_coll.document(self._familiarity_key(doc_type)).set(patch, merge=True)
+
+        # Also update the compound key when vendor is known.
+        if vendor:
+            fam_coll.document(self._familiarity_key(doc_type, vendor)).set(
+                patch, merge=True
+            )
+
+    def reset_familiarity(self, *, client_id: str, doc_type: str,
+                          vendor: Optional[str] = None) -> None:
+        """Set seen_count to 0 for the matching familiarity key.
+
+        When ``vendor`` is supplied, only the compound ``doc_type:vendor`` key
+        is reset (the bare ``doc_type`` key is left intact). When ``vendor`` is
+        absent, only the bare ``doc_type`` key is reset.
+        """
+        if not (client_id and doc_type):
+            return
+        db = self._firestore()
+        key = self._familiarity_key(doc_type, vendor)
+        (
+            db.collection(self._collection)
+            .document(client_id)
+            .collection("familiarity")
+            .document(key)
+            .set({"seen_count": 0}, merge=True)
+        )
+
+    def get_familiarity_map(self, client_id: str) -> dict:
+        """Load the full familiarity map for ``client_id`` from Firestore.
+
+        Returns ``{key: {seen_count: n, ...}}`` — the format injected into
+        ``state[FAMILIARITY_KEY]`` by the profile callback.
+        """
+        if not client_id:
+            return {}
+        db = self._firestore()
+        result: dict = {}
+        for snap in (
+            db.collection(self._collection)
+            .document(client_id)
+            .collection("familiarity")
+            .stream()
+        ):
+            row = snap.to_dict() or {}
+            result[snap.id] = row
+        return result

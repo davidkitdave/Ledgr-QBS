@@ -42,7 +42,7 @@ from .export.client_context import (
 )
 from .export.exporters import (
     BankStatementExporter,
-    _sheet_title,
+    bank_sheet_title,
     get_bank_exporter,
     get_exporter,
     validate_required_fields,
@@ -60,6 +60,7 @@ from .extract.invoice_extractor import (
     reconcile,
     to_normalized,
 )
+from .extract.pipeline_spine import normalize_path_two_phase
 
 # --------------------------------------------------------------------------- #
 # Result dataclasses
@@ -154,12 +155,20 @@ def _build_bank_workbook(
 
     Statements sharing an account sheet are merged into one continuous, date-sorted
     chain (see :class:`BankStatementExporter`), so a year of monthly statements for
-    an account lands as a single cross-month-reconciling sheet.
+    an account lands as a single cross-month-reconciling sheet. Multi-currency
+    statements of the same account split into distinct sheets (one per currency).
     """
     wb = Workbook()
     grouped: dict[str, list[BankStatement]] = {}
     for stmt in statements:
-        grouped.setdefault(_sheet_title(stmt.bank_name), []).append(stmt)
+        grouped.setdefault(
+            bank_sheet_title(
+                bank_name=stmt.bank_name,
+                account_number=stmt.account_number,
+                currency=stmt.currency or "SGD",
+            ),
+            [],
+        ).append(stmt)
 
     for i, (title, stmts) in enumerate(grouped.items()):
         sheet = wb.active if i == 0 else wb.create_sheet()
@@ -260,16 +269,28 @@ def process_document(
         # ProcessedDoc so the reviewer sees the real outcome.
         effective_direction = direction if direction in ("purchase", "sales") else "purchase"
 
-        ex: ExtractedInvoice = extract_fn(str(path))
-        normalized: NormalizedInvoice = to_normalized(
-            ex,
-            direction=effective_direction,
-            our_gst_registered=client.tax_registered,
-            base_currency=client.base_currency,
-            fx_rate=ex.fx_rate,
-        )
-
-        reconciled, rec_note = reconcile(ex)
+        if extract_fn is extract_file:
+            normalized = normalize_path_two_phase(
+                path,
+                direction=effective_direction,
+                our_gst_registered=client.tax_registered,
+                base_currency=client.base_currency,
+                client_name=client.client_name,
+                client_uen=client.client_uen,
+                client_country="SG",
+            )
+            reconciled = normalized.reconciled
+            rec_note = normalized.reconcile_note or "ok"
+        else:
+            ex: ExtractedInvoice = extract_fn(str(path))
+            normalized = to_normalized(
+                ex,
+                direction=effective_direction,
+                our_gst_registered=client.tax_registered,
+                base_currency=client.base_currency,
+                fx_rate=ex.fx_rate,
+            )
+            reconciled, rec_note = reconcile(ex)
 
         # ------------------------------------------------------------------ #
         # Self-referential / ambiguous direction guard.

@@ -304,7 +304,7 @@ Source: [Xero Accounting API — Tax Rates](https://developer.xero.com/documenta
 
 ### 7.2 AI-Account / Autocount / SQL Acc short codes (QBS Ledger)
 
-From the on-disk header templates (`/Users/davidkitdave/Desktop/LocalTest/header template/`),
+From the on-disk header templates (`~/Desktop/LocalTest/header template/`),
 `Tax Code` is a short alpha code. Observed values:
 
 | Short code | Meaning | Seen in template |
@@ -450,7 +450,7 @@ Flag a line as **low-confidence / needs review** when:
 ### On-disk evidence used
 - `BillTemplate (3).csv` (local test data, not committed) — Xero purchase import; telco bills split into `Standard-Rated Purchases` (9%) and `Zero-Rated Purchases` (0%) lines.
 - Source telco bill PDFs (local test data, not committed) — INV-0001, INV-0002 pattern.
-- `/Users/davidkitdave/Desktop/LocalTest/header template/Xero Template.xlsx` — Purchase & Sales sheets, both with `*TaxType` column.
-- `/Users/davidkitdave/Desktop/LocalTest/header template/AI-Account Template/Expenses Bill Import Template (1).csv` — `Tax Code` values `TX`, `NT`.
-- `/Users/davidkitdave/Desktop/LocalTest/header template/AI-Account Template/Sales Invoice Import Template (1).csv` — `Tax Code` value `SR`.
-- `/Users/davidkitdave/Desktop/LocalTest/header template/Autocount Template/` & `SQL Header/` — AutoCount and SQL Acc import templates (per-company GST code tables).
+- `~/Desktop/LocalTest/header template/Xero Template.xlsx` — Purchase & Sales sheets, both with `*TaxType` column.
+- `~/Desktop/LocalTest/header template/AI-Account Template/Expenses Bill Import Template (1).csv` — `Tax Code` values `TX`, `NT`.
+- `~/Desktop/LocalTest/header template/AI-Account Template/Sales Invoice Import Template (1).csv` — `Tax Code` value `SR`.
+- `~/Desktop/LocalTest/header template/Autocount Template/` & `SQL Header/` — AutoCount and SQL Acc import templates (per-company GST code tables).

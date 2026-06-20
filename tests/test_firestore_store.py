@@ -12,7 +12,6 @@ that supports exactly the call shapes the production code makes:
 
 from __future__ import annotations
 
-import pytest
 
 from invoice_processing.export.client_context import (
     ClientContext,
@@ -484,6 +483,26 @@ class TestFirestoreClientStoreWrite:
         ctx = store.get("new-client-1")
         assert ctx is not None
         assert ctx.status == "active"
+
+    def test_processing_log_append_and_list(self):
+        store = self._store()
+        store.save_profile(WRITE_PROFILE)
+        store.append_processing_log(
+            client_id="new-client-1",
+            file_id="F123",
+            entry={
+                "filename": "soa.pdf",
+                "doc_type": "statement_of_account",
+                "extraction_path": "legacy",
+                "delivered_at": "2026-06-16T10:00:00+00:00",
+                "row_count": 5,
+                "fy": "2025",
+            },
+        )
+        entries = store.list_processing_log("new-client-1", limit=5)
+        assert len(entries) == 1
+        assert entries[0]["file_id"] == "F123"
+        assert entries[0]["extraction_path"] == "legacy"
 
     def test_save_profile_channel_id_indexed(self):
         # channel_id in the profile dict → get_by_channel works after save_profile

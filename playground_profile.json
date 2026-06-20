@@ -1,0 +1,83 @@
+{
+  "client_id": "jbi-plus-auto",
+  "client_name": "JBI PLUS AUTO SDN BHD",
+  "client_uen": "202401012345 (1234567-X)",
+  "region": "MALAYSIA",
+  "software": "qbs",
+  "base_currency": "MYR",
+  "tax_registered": true,
+  "fye_month": 12,
+  "coa": [
+    {
+      "key": "500-010",
+      "code": "500-010",
+      "description": "Cost of Sales - Vehicle Parts & Accessories",
+      "account_type": "Cost of Sales",
+      "financial_statement": "Profit or Loss",
+      "nature": "Debit",
+      "keywords": "vehicle, parts, accessories, motor, spare, car, auto, workshop, repair"
+    },
+    {
+      "key": "500-020",
+      "code": "500-020",
+      "description": "Cost of Sales - Labour & Workshop Services",
+      "account_type": "Cost of Sales",
+      "financial_statement": "Profit or Loss",
+      "nature": "Debit",
+      "keywords": "labour, workshop, service, repair, mechanic, servicing, installation, labour charges"
+    },
+    {
+      "key": "6100",
+      "code": "6100",
+      "description": "Motor Vehicle Expenses",
+      "account_type": "Operating Expenses",
+      "financial_statement": "Profit or Loss",
+      "nature": "Debit",
+      "keywords": "motor, vehicle, petrol, diesel, fuel, road tax, insurance, parking, toll"
+    },
+    {
+      "key": "6200",
+      "code": "6200",
+      "description": "Office & Administrative Expenses",
+      "account_type": "Operating Expenses",
+      "financial_statement": "Profit or Loss",
+      "nature": "Debit",
+      "keywords": "office, stationery, printing, postage, admin, subscription, license"
+    },
+    {
+      "key": "6300",
+      "code": "6300",
+      "description": "IT & Software Expenses",
+      "account_type": "Operating Expenses",
+      "financial_statement": "Profit or Loss",
+      "nature": "Debit",
+      "keywords": "software, IT, cloud, hosting, SaaS, license, subscription"
+    },
+    {
+      "key": "7000",
+      "code": "7000",
+      "description": "Bank Charges & Interest",
+      "account_type": "Operating Expenses",
+      "financial_statement": "Profit or Loss",
+      "nature": "Debit",
+      "keywords": "bank, charges, interest, fees"
+    }
+  ],
+  "category_mapping": {
+    "vehicle_parts": "500-010",
+    "labour": "500-020",
+    "motor_expenses": "6100",
+    "office_admin": "6200",
+    "it_software": "6300",
+    "bank_charges": "7000"
+  },
+  "entity_memory": [
+    {
+      "name": "YAU LEE MOTOR",
+      "reg_no": "202301011111 (1111111-X)",
+      "mapping_code": "500-020",
+      "role": "Creditor",
+      "tax_code": "SR"
+    }
+  ]
+}

@@ -21,7 +21,7 @@ duplicate** to retire. (ADR-0001 + its 2026-06-14 addendum.)
    Make the numbers correct, each gated by the eval: COA **placement** accuracy (+ HITL),
    sales-vs-purchase/vendor robustness, multi-receipt/multi-currency split + FX,
    discount/dropped-tax reconciliation, missing invoice date/number, GST determinacy,
-   the **Akar bank accumulation fix + one-time repair**, reject unreadable uploads.
+   the **Sample Bank Client bank accumulation fix + one-time repair**, reject unreadable uploads.
    (ADR-0004/0005/0006.)
 
 ## Housekeeping (small, not a plan)
@@ -41,12 +41,12 @@ duplicate** to retire. (ADR-0001 + its 2026-06-14 addendum.)
   (ADR-0002.)
 
 ## Eval = the scoreboard (built 2026-06-14)
-- `eval/client_eval.py` — per-client invoice eval: loads each Cast Unity `Client
+- `eval/client_eval.py` — per-client invoice eval: loads each Sample Test Group `Client
   Setup.xlsx` (identity + own COA) + Sys_Config profile; scores **direction vs the
   Sales/Purchase folder** and **per-target required-header completeness** (QBS + Xero).
 - `eval/bank_eval.py` — bank statements vs `BankStatement_FY` ground truth.
 - **Baseline (48 docs, 8 clients):** classify 100%; direction **60%**; reconciliation
-  87% (Auditair 0%); invoice no./date ~92–93%; Account-Code fill 85% (blank-by-design
+  87% (Acme Client 0%); invoice no./date ~92–93%; Account-Code fill 85% (blank-by-design
   for no-COA clients — measure *placement*, Plan B Task 1).
 
 ## ADR map

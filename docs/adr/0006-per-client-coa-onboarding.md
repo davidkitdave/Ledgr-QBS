@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-06-13
-- **Deciders:** David (developer); informed by market research (Dext, AutoEntry, Hubdoc, QBO, Xero).
+- **Deciders:** Ledgr team; informed by market research (Dext, AutoEntry, Hubdoc, QBO, Xero).
 
 ## Context
 

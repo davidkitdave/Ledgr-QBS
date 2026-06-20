@@ -1,0 +1,22 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "ADK: Debug Agent",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "/Users/davidkitdave/Projects/Ledgr-QBS/.venv/bin/adk",
+      "args": [
+        "api_server",
+        "--no-reload",
+        "--port",
+        "8000",
+        "."
+      ],
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env",
+      "justMyCode": false,
+      "console": "integratedTerminal"
+    }
+  ]
+}

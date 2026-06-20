@@ -2,7 +2,7 @@
 
 > **For agentic workers:** Use superpowers:subagent-driven-development or superpowers:executing-plans. Each task is TDD: extend the eval/test (red) → fix the engine → eval/test green. Steps use `- [ ]`.
 
-**Goal:** Make the numbers the bot writes actually correct. Every task is **gated by the eval** (`eval/client_eval.py` for invoices, `eval/bank_eval.py` for bank) against Cast Unity ground truth — a fix is "done" only when the eval metric it targets improves and the suite stays green.
+**Goal:** Make the numbers the bot writes actually correct. Every task is **gated by the eval** (`eval/client_eval.py` for invoices, `eval/bank_eval.py` for bank) against Sample Test Group ground truth — a fix is "done" only when the eval metric it targets improves and the suite stays green.
 
 **Runtime (corrected — see ADR-0001 addendum 2026-06-14):** the LIVE bot is the
 `accounting_agents` ADK-2.0 graph (via `slack_runner`), whose nodes call the
@@ -16,10 +16,10 @@ contract), ADR-0006 (per-client COA, soft gate). Glossary: CONTEXT.md
 ([[Canonical Schema]], [[Completeness Contract]], [[Categorisation]], [[Review (HITL)]]).
 
 **Evidence base (live QA + 48-doc eval, 2026-06-14):** direction 60%; invoice
-no./date ~92–93%; reconciliation 87% (Auditair 0%); multi-receipt/multi-currency
+no./date ~92–93%; reconciliation 87% (Acme Client 0%); multi-receipt/multi-currency
 bundles mis-summed; no FX conversion; dividend booked as a purchase with the client
 as "vendor"; discount/dropped-tax reconcile fails; blank Xero `*InvoiceDate`/`*DueDate`;
-GST indeterminate on a clean tax invoice; Akar bank ledger corrupted by an
+GST indeterminate on a clean tax invoice; Sample Bank Client bank ledger corrupted by an
 old-formula/new-static accumulation clash; an unreadable upload accepted as "Processed."
 
 **Test commands:** `.venv/bin/pytest -q`; invoice eval
@@ -40,7 +40,7 @@ blank by design. We need "was the line put under the *correct* account?" vs the
 client's ground-truth ledger.
 
 - Files: `eval/client_eval.py` (+ a ground-truth loader); reuse `eval/ledger_eval.py` helpers.
-- [x] Load each Cast Unity client's **produced ground-truth ledger** (`<Client> -
+- [x] Load each Sample Test Group client's **produced ground-truth ledger** (`<Client> -
   Ledger_FY*.xlsx` where present) as the expected `(vendor/description → account)` map.
 - [x] For each extracted+categorised line, compare the chosen account (by description
   match, since QBS keys by description) to ground truth → **placement accuracy %**.
@@ -74,7 +74,7 @@ summed as one currency → "lines 974,470 vs doc 605,500" reconcile failure; USD
 stored at `Currency Rate = 1` → wrong SGD totals. (Memory: 1 PDF ≠ 1 doc.)
 
 - Files: `invoice_processing/extract/invoice_extractor.py`, `export/models.py`,
-  `export/exporters.py`, `tests/`, eval fixtures (the Naufal/Trip bundles).
+  `export/exporters.py`, `tests/`, eval fixtures (the Supplier Gamma/Trip bundles).
 - [x] **Split multi-doc PDFs:** detect and emit one NormalizedInvoice per
   receipt/invoice in the bundle (extractor returns a list; pipeline already handles
   multi); skip statement-of-account cover pages.
@@ -113,14 +113,14 @@ file, though the date is on the PDF (completeness contract, ADR-0005).
   confidently (don't flag); keep flagging only genuinely ambiguous cases.
 - [x] Gate: the Chubb fixture resolves SR without a flag; tax tests green.
 
-## Task 7 — Bank-ledger accumulation fix + one-time Akar repair
+## Task 7 — Bank-ledger accumulation fix + one-time Sample Bank Client repair
 
 **Why (root-caused 2026-06-14):** commit `6ca4e48` migrated the bank Balance column
-from an Excel-formula chain (OLD) to static values (NEW). Akar's `BankStatement_FY2025`
+from an Excel-formula chain (OLD) to static values (NEW). Sample Bank Client's `BankStatement_FY2025`
 has Jan–Mar in OLD formulas + Apr–May in NEW statics that don't chain; the append path
 (`accounting_agents/ledger_store.py:196` `load_workbook(BytesIO)`, default
 `data_only=False`) reads old formula cells back as **formula strings** (or `None` if
-`data_only=True`) → invalid running balance. Single-month clients (Auditair) are fine.
+`data_only=True`) → invalid running balance. Single-month clients (Acme Client) are fine.
 
 - Files: `accounting_agents/ledger_store.py` (`_load_workbook`, `_read_bank_blocks`,
   `_merge_bank_statement`), a one-time repair script, `tests/test_ledger_store.py`.
@@ -130,10 +130,10 @@ has Jan–Mar in OLD formulas + Apr–May in NEW statics that don't chain; the a
   stored Balance. Make recompute the single source of truth on every rebuild.
 - [x] **Legacy header:** detect/migrate the old 8-col layout (`Stated Balance`,
   `Check`) on read so old B/F openings aren't lost.
-- [x] **One-time repair:** a script that rebuilds Akar's `BankStatement_FY2025` into the
+- [x] **One-time repair:** a script that rebuilds Sample Bank Client's `BankStatement_FY2025` into the
   uniform static style (the live file is already corrupted; code can't retro-fix it).
 - [x] Gate: a regression test reproduces the OLD-formula→NEW-static append and asserts a
-  clean chained balance; `bank_eval` green; manual: re-drop a month onto repaired Akar.
+  clean chained balance; `bank_eval` green; manual: re-drop a month onto repaired Sample Bank Client.
 
 ## Task 8 — Reject unreadable uploads (don't claim "Processed")
 
@@ -152,7 +152,7 @@ has Jan–Mar in OLD formulas + Apr–May in NEW statics that don't chain; the a
 - [x] Eval targets: direction ≥ 0.9; completeness (date/number) ≥ 0.95; reconciliation — engine+tests verified hermetically; live eval thresholds need API keys
   up; COA placement reported; bank eval green.
 - [ ] Live smoke: re-drop the IDR/USD bundle, the dividend, the Trip/Agoda invoices, and
-  a month onto repaired Akar — confirm correct direction, FX, reconcile, and a clean
+  a month onto repaired Sample Bank Client — confirm correct direction, FX, reconcile, and a clean
   chained bank balance.
 
 ## Sequencing
@@ -181,5 +181,5 @@ All tasks implemented TDD and committed on `feat/ledgr-extraction-accuracy`
   hermetic unit tests; the eval scoreboard (Task 1) is ready to quantify the
   metrics once keys are configured.
 - **Live smoke still pending:** re-dropping the IDR/USD bundle, the dividend, the
-  Trip/Agoda invoices, and a month onto repaired Akar needs the live Slack
+  Trip/Agoda invoices, and a month onto repaired Sample Bank Client needs the live Slack
   workspace + keys (final-verification item below).

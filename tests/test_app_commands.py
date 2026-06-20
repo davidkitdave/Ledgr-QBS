@@ -6,9 +6,12 @@ No live Slack token, Firestore, or Gemini call is made.
 
 from __future__ import annotations
 
-import pytest
 
-from app.commands import LedgrCommand, parse_ledgr_command, settings_prefill
+from app.commands import (
+    ledgr_slash_command_name,
+    parse_ledgr_command,
+    settings_prefill,
+)
 from app.slack_app import handle_ledgr_command, handle_onboarding_submit
 from invoice_processing.export.client_context import ClientContext, InMemoryClientStore
 
@@ -126,6 +129,22 @@ class TestParseLedgrCommand:
     def test_parse_profile_subcommand(self):
         from app.commands import parse_ledgr_command
         assert parse_ledgr_command("profile").subcommand == "profile"
+
+
+class TestLedgrSlashCommandName:
+    def test_dev_default(self, monkeypatch):
+        monkeypatch.delenv("LEDGR_SLASH_COMMAND", raising=False)
+        monkeypatch.setenv("LEDGR_ENV", "dev")
+        assert ledgr_slash_command_name() == "/ledgr-dev"
+
+    def test_prod(self, monkeypatch):
+        monkeypatch.delenv("LEDGR_SLASH_COMMAND", raising=False)
+        monkeypatch.setenv("LEDGR_ENV", "prod")
+        assert ledgr_slash_command_name() == "/ledgr"
+
+    def test_override(self, monkeypatch):
+        monkeypatch.setenv("LEDGR_SLASH_COMMAND", "/ledgr-test")
+        assert ledgr_slash_command_name() == "/ledgr-test"
 
     def test_bogus_returns_help(self):
         cmd = parse_ledgr_command("bogus")
@@ -372,7 +391,7 @@ class TestHandleLedgrCommandProfile:
             def get_by_channel(self, cid):
                 return ClientContext(
                     client_id="CL-1",
-                    client_name="Auditair International Pte. Ltd.",
+                    client_name="Company-A",
                     accounting_software="Xero",
                     fye_month=10,
                     tax_registered=False,
@@ -390,7 +409,7 @@ class TestHandleLedgrCommandProfile:
             for blk in call.get("blocks", [])
             if isinstance(blk.get("text"), dict)
         )
-        assert "Auditair International Pte. Ltd." in joined and "Xero" in joined
+        assert "Company-A" in joined and "Xero" in joined
 
     def test_ledgr_profile_no_client_posts_guidance(self):
         from app.slack_app import handle_ledgr_command
@@ -423,7 +442,7 @@ class TestOnboardingSubmitEditPreservesClient:
         client = FakeClient()
         body = _submit_body(channel_id=channel_id, client_name=client_name)
         if id_factory is None:
-            id_factory = lambda: "should-not-be-used"
+            id_factory = lambda: "should-not-be-used"  # noqa: E731 — short sentinel; def would add noise
         handle_onboarding_submit(body, ack, client, store, id_factory)
         return store, ack, client
 

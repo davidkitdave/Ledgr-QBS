@@ -12,8 +12,7 @@ from __future__ import annotations
 
 import io
 import os
-from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -254,7 +253,7 @@ class TestHandleOnboardingSubmit:
 
     def test_onboarding_posts_profile_summary_then_coa_prompt(self):
         body = _submit_body(
-            client_name="Auditair International Pte. Ltd.",
+            client_name="Company-A",
             fye_month="10", accounting_software="Xero", gst_value="no",
             channel_id="C1",
         )

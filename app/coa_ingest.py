@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 class CoaIngestOutcome:
     client_id: Optional[str]
     n_accounts: int
-    status: str   # "active" | "no_profile" | "empty" | "error"
+    status: str   # "active" | "no_profile" | "empty" | "validation_failed" | "error"
     note: str
 
 
@@ -165,10 +165,46 @@ def coa_rows_from_file(path: str) -> list[dict]:
 
 
 def standard_coa_rows() -> list[dict]:
-    """Return the built-in standard SG SME COA as a list of row dicts."""
+    """Return the built-in standard SG SME COA as a list of row dicts.
+
+    Eval/dev only — not exposed in production onboarding.
+    """
     data_path = Path(__file__).parent / "data" / "standard_sg_sme_coa.json"
     with open(data_path, encoding="utf-8") as fh:
         return json.load(fh)
+
+
+def preview_coa_from_file(path: str) -> Optional[dict]:
+    """Parse + validate a candidate COA without persisting.
+
+    Returns ``None`` when the file is unreadable; otherwise a dict with
+    ``rows``, ``validation`` (errors / warnings), ``source`` (file
+    extension) and the convenience counts the confirm card needs. See
+    :mod:`app.coa_detect` for the classification that decides when to
+    call this.
+    """
+    from app.coa_detect import CoaPreview
+
+    ext = Path(path).suffix.lower().lstrip(".") or "xlsx"
+    try:
+        rows = coa_rows_from_file(path)
+    except Exception:  # noqa: BLE001 - best effort, caller shows error
+        logger.exception("preview_coa_from_file: parse failed for %s", path)
+        return None
+    from app.coa_validate import validate_coa
+
+    validation = validate_coa(rows)
+    preview = CoaPreview(rows=rows, validation=validation, source=ext)
+    return {
+        "rows": preview.rows,
+        "n_accounts": preview.n_accounts,
+        "n_income": preview.n_income,
+        "n_expense": preview.n_expense,
+        "sample": preview.sample(5),
+        "errors": list(validation.errors),
+        "warnings": list(validation.warnings),
+        "source": preview.source,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -193,7 +229,8 @@ def ingest_coa(
     Returns:
         CoaIngestOutcome describing what happened.
     """
-    from app.blocks import coa_saved_blocks, needs_setup_blocks
+    from app.blocks import coa_saved_blocks, coa_validation_failed_blocks, needs_setup_blocks
+    from app.coa_validate import validate_coa
 
     ctx = store.get_by_channel(channel_id)
 
@@ -213,6 +250,16 @@ def ingest_coa(
             n_accounts=0,
             status="empty",
             note="No accounts parsed from the provided rows.",
+        )
+
+    validation = validate_coa(rows)
+    if not validation.ok:
+        say_fn(blocks=coa_validation_failed_blocks(validation.errors))
+        return CoaIngestOutcome(
+            client_id=ctx.client_id,
+            n_accounts=0,
+            status="validation_failed",
+            note="; ".join(validation.errors),
         )
 
     store.save_coa(ctx.client_id, rows)

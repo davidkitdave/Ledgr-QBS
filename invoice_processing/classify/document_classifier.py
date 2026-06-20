@@ -19,7 +19,7 @@ from typing import Optional
 from google.genai import types
 from pydantic import BaseModel, Field
 
-from ..shared_libraries.genai_client import default_model, make_client
+from ..shared_libraries.genai_client import lite_model, make_client
 
 ALLOWED_DOC_TYPES = [
     "invoice",              # tax invoice / bill / proforma / telco bill (goods or services)
@@ -27,6 +27,7 @@ ALLOWED_DOC_TYPES = [
     "bank_statement",       # bank account statement listing transactions
     "credit_note",          # credit note / refund
     "statement_of_account", # SOA listing multiple invoices / balances
+    "expense_claim",        # employee/staff reimbursement claim with itemised expense lines — booked like a purchase
     "other",
 ]
 
@@ -48,6 +49,23 @@ class ClassificationResult(BaseModel):
     total_amount: Optional[float] = Field(None, description="Document grand total if visible")
     confidence: float = Field(description="0.0-1.0 confidence in doc_type")
     reason: str = Field(description="One-line justification")
+    processable: bool = Field(
+        default=True,
+        description=(
+            "False ONLY when the document has no bookable financial content at all "
+            "(e.g. a marketing flyer, blank page, or legal contract with no amounts). "
+            "A recognised-but-unlisted business document stays True."
+        ),
+    )
+    free_type: Optional[str] = Field(
+        default=None,
+        description=(
+            "The model's best free-text label for the document type, even when it does "
+            "not match a known enum value. E.g. 'delivery_order', 'purchase_order', "
+            "'quotation'. Populated whenever the model has a specific type name; None "
+            "for recognised enum types."
+        ),
+    )
 
 
 _PROMPT = """You classify financial documents for a Singapore/Malaysia bookkeeping system.
@@ -59,7 +77,11 @@ Classify the attached document into exactly ONE doc_type:
 - bank_statement: a bank account statement listing dated transactions and balances.
 - credit_note: a credit note or refund document.
 - statement_of_account: a statement listing multiple invoices/balances (an SOA), not a single bill.
-- other: anything that does not fit the above.
+- expense_claim: an employee or staff reimbursement claim with itemised expense lines (e.g.
+  travel, meals, accommodation) submitted for company reimbursement. Booked like a purchase.
+- other: use this when the document is a recognisable business document with financial content
+  but does not fit any of the above types (e.g. a delivery order, purchase order, quotation,
+  or packing list).
 
 Also read:
 - issuer_name: the business that issued/sent the document (the "From" / letterhead party).
@@ -67,7 +89,16 @@ Also read:
 - currency (ISO code) and total_amount if clearly visible.
 
 Return confidence (0..1) and a one-line reason. Be precise: a telco bill is an invoice; a
-DBS/OCBC/UOB account statement is a bank_statement; a payment slip is a receipt."""
+DBS/OCBC/UOB account statement is a bank_statement; a payment slip is a receipt.
+
+Additionally, always set:
+- free_type: your best specific free-text label for the document type, even if it does not
+  match one of the above enum values (e.g. "delivery_order", "purchase_order", "quotation",
+  "packing_list"). Use snake_case. Set to null if the document clearly matches an enum type.
+- processable: set to false ONLY when the document has absolutely no bookable financial
+  content — for example a marketing flyer, a blank page, a non-financial legal contract,
+  or a purely administrative letter with no amounts. A document that has line items, amounts,
+  or totals (even if the type is unfamiliar) must remain processable=true."""
 
 
 def mime_for(path: str | Path) -> str:
@@ -84,7 +115,7 @@ def classify_document(
 ) -> ClassificationResult:
     """Classify a single document (PDF or image bytes)."""
     client = make_client(project, location)
-    model = model or default_model()
+    model = model or lite_model()
     part = types.Part.from_bytes(data=data, mime_type=mime_type)
     resp = client.models.generate_content(
         model=model,
@@ -97,6 +128,11 @@ def classify_document(
     )
     result = ClassificationResult.model_validate_json(resp.text)
     if result.doc_type not in ALLOWED_DOC_TYPES:
+        # Preserve the model's raw label in free_type before clamping to 'other'.
+        # A recognised-but-off-enum business document stays processable=True;
+        # processable=False is preserved if the model set it (genuinely unbookable).
+        if not result.free_type:
+            result.free_type = result.doc_type
         result.doc_type = "other"
     return result
 
@@ -229,6 +265,9 @@ def resolve_direction(
     4. Self-referential guard: if the client matches BOTH sides, return
        ``'self_referential'`` rather than a spurious direction.
     """
+    # expense_claim is always purchase-side (employee submits, company reimburses).
+    if result.doc_type == "expense_claim":
+        return "purchase"
     if result.doc_type not in ("invoice", "credit_note", "statement_of_account"):
         return "n/a"
     if not client_name:

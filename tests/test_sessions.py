@@ -135,3 +135,59 @@ def test_list_and_delete_session():
     _run(svc.delete_session(app_name="acc", user_id="u", session_id="s1"))
     assert _run(svc.get_session(app_name="acc", user_id="u", session_id="s1")) is None
     assert _run(svc.get_session(app_name="acc", user_id="u", session_id="s2")) is not None
+
+
+def test_requested_tool_confirmations_round_trip():
+    """ADR-0009 smoke test: a pending ``adk_request_confirmation`` survives JSON.
+
+    Proves our JSON-Pydantic-faithful FirestoreSessionService does NOT hit the
+    "unsupported on Database/VertexAi" Tool-Confirmation limitation: an event
+    carrying ``actions.requested_tool_confirmations`` round-trips with the hint
+    AND payload intact.
+    """
+    from google.adk.tools.tool_confirmation import ToolConfirmation
+
+    db = FakeFirestore()
+    svc = FirestoreSessionService(client=db)
+    session = _run(
+        svc.create_session(app_name="acc", user_id="u", session_id="s", state={})
+    )
+
+    fc_id = "adk-confirm-1"
+    confirm_event = Event(
+        author="assistant",
+        content=types.Content(
+            parts=[
+                types.Part(
+                    function_call=types.FunctionCall(
+                        name="adk_request_confirmation",
+                        id=fc_id,
+                        args={},
+                    )
+                )
+            ]
+        ),
+        long_running_tool_ids=[fc_id],
+        actions=EventActions(
+            requested_tool_confirmations={
+                fc_id: ToolConfirmation(
+                    hint="Amend Purchase row 2: account 6090 → 6010?",
+                    payload={"op": "amend", "sheet": "Purchase", "row": 2,
+                             "updates": {"Account Code / COA": "6010"}},
+                )
+            }
+        ),
+    )
+    _run(svc.append_event(session, confirm_event))
+
+    # Simulate a bot restart: a brand-new service reading the same backing store.
+    svc2 = FirestoreSessionService(client=db)
+    got = _run(svc2.get_session(app_name="acc", user_id="u", session_id="s"))
+    assert got is not None
+    ev = got.events[0]
+    requested = ev.actions.requested_tool_confirmations
+    assert fc_id in requested
+    rehydrated = requested[fc_id]
+    assert rehydrated.hint == "Amend Purchase row 2: account 6090 → 6010?"
+    assert rehydrated.payload["op"] == "amend"
+    assert rehydrated.payload["updates"]["Account Code / COA"] == "6010"

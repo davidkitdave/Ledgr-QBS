@@ -1,0 +1,18 @@
+{
+  "client": "Company-A",
+  "client_uen": "201700001A",
+  "file_label": "Telco-A-Aug-2026.pdf",
+  "expected_direction": "purchase",
+  "from_party": {
+    "name": "Telco Provider A Pte Ltd",
+    "uen": "199100003C",
+    "role": "issuer"
+  },
+  "to_party": {
+    "name": "Company-A",
+    "uen": "201700001A",
+    "role": "recipient"
+  },
+  "expected_direction_for_client": "purchase",
+  "notes": "Telco utility bill with two summary ledger lines (SR + ZR). Direction control: telco bills are always purchase for the subscriber."
+}

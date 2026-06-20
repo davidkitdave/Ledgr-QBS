@@ -1,0 +1,18 @@
+{
+  "client": "Company-A",
+  "client_uen": "201700001A",
+  "file_label": "CON-001-contractor-invoice.pdf",
+  "expected_direction": "purchase",
+  "from_party": {
+    "name": "Contractor Beta",
+    "uen": null,
+    "role": "issuer"
+  },
+  "to_party": {
+    "name": "Company-A",
+    "uen": "201700001A",
+    "role": "recipient"
+  },
+  "expected_direction_for_client": "purchase",
+  "notes": "Canonical contractor invoice case. Pre-fix: classify_document + resolve_direction misclassified as sales because fuzzy name-match on the client collided with issuer extraction. After fix: Understand call returns purchase based on To party UEN match."
+}

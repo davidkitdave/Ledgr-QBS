@@ -39,24 +39,56 @@ def _num(x: Optional[float]) -> Optional[float]:
     return None if x is None else round(float(x), 2)
 
 
+def _doc_sign(inv: NormalizedInvoice) -> int:
+    """Return -1 for credit notes (amounts must be negative on export), +1 for all others.
+
+    Keyed on ``inv.document_kind`` (the classify doc type: "credit_note", "invoice",
+    "receipt", ...) — NOT ``inv.doc_type``, which is the direction ("purchase"/"sales").
+    """
+    return -1 if (inv.document_kind or "").strip().lower() == "credit_note" else 1
+
+
+def _line_net_amount(line: InvoiceLine, inv: NormalizedInvoice) -> float:
+    """Exportable line subtotal (sign-adjusted for credit notes).
+
+    GST-registered clients: ex-GST net. Non-registered clients absorb irrecoverable
+    input GST into the line cost (no separate tax column on export).
+    Credit notes: result is negated so amounts reduce the books rather than add to them.
+    """
+    net = float(line.net_amount or 0.0)
+    if not inv.our_gst_registered:
+        raw = round(net + float(line.gst_amount or 0.0), 2)
+    else:
+        raw = round(net, 2)
+    return round(raw * _doc_sign(inv), 2)
+
+
 def _tax_amount(line: InvoiceLine, inv: NormalizedInvoice, clf: TaxClassifier) -> float:
+    if not inv.our_gst_registered:
+        return 0.0
+    if inv.tax_visible_on_document is False:
+        return 0.0
     if line.tax_treatment != "SR":
         return 0.0
     if line.gst_amount:
-        return round(float(line.gst_amount), 2)
-    if line.net_amount:
-        return round(float(line.net_amount) * clf.rate_for_date(inv.invoice_date), 2)
+        return round(float(line.gst_amount) * _doc_sign(inv), 2)
     return 0.0
 
 
 def _invoice_total(inv: NormalizedInvoice, clf: TaxClassifier) -> float:
-    """Invoice-level grand total. Prefer the authoritative doc total carried from
-    extraction; otherwise fall back to Σ line net + Σ line tax."""
+    """Invoice-level grand total (sign-adjusted for credit notes).
+
+    Prefer the authoritative doc total carried from extraction; otherwise fall back
+    to Σ line net + Σ line tax. Credit notes: result is negated.
+    """
+    sign = _doc_sign(inv)
     if inv.doc_total is not None:
-        return round(float(inv.doc_total), 2)
+        return round(float(inv.doc_total) * sign, 2)
     net = sum((line.net_amount or 0.0) for line in inv.lines)
     tax = sum(_tax_amount(line, inv, clf) for line in inv.lines)
-    return round(net + tax, 2)
+    # tax already carries the sign via _tax_amount; net needs sign applied here
+    # (we sum raw net_amount values, so multiply by sign separately)
+    return round(net * sign + tax, 2)
 
 
 class LedgerExporter:
@@ -85,7 +117,7 @@ class LedgerExporter:
 
     def _ensure_classified(self, invoices: list[NormalizedInvoice]) -> None:
         for inv in invoices:
-            if any(l.tax_treatment is None for l in inv.lines):
+            if any(ln.tax_treatment is None for ln in inv.lines):
                 classify_invoice(inv, self.clf)
 
     def rows(self, invoices: list[NormalizedInvoice], doc_type: str) -> list[dict]:
@@ -148,9 +180,11 @@ class QbsLedgerExporter(LedgerExporter):
         ]
 
     def _purchase_row(self, inv, line):
-        net = _num(line.net_amount) or 0
+        net = _line_net_amount(line, inv)
         tax = _tax_amount(line, inv, self.clf)
-        fx = inv.fx_rate if inv.fx_rate is not None else 1.0
+        # Currency Rate: the printed rate exactly as extracted, or blank when
+        # the document prints none.  Never silently 1.0.
+        fx = inv.fx_rate if inv.fx_rate is not None else ""
         return {
             "Invoice Number": inv.invoice_number or "",
             "Invoice Date": _fmt_date(inv.invoice_date),
@@ -158,7 +192,7 @@ class QbsLedgerExporter(LedgerExporter):
             "Entity Tax ID": inv.supplier.gst_regno or "",
             "Description": line.description,
             "Source Amount": net,
-            "Currency": inv.original_currency or inv.currency,
+            "Currency": inv.currency,
             "Currency Rate": fx,
             "Sub Total": net,
             "Tax Amount": tax,
@@ -167,16 +201,18 @@ class QbsLedgerExporter(LedgerExporter):
         }
 
     def _sales_row(self, inv, line):
-        net = _num(line.net_amount) or 0
+        net = _line_net_amount(line, inv)
         tax = _tax_amount(line, inv, self.clf)
-        fx = inv.fx_rate if inv.fx_rate is not None else 1.0
+        # Currency Rate: the printed rate exactly as extracted, or blank when
+        # the document prints none.  Never silently 1.0.
+        fx = inv.fx_rate if inv.fx_rate is not None else ""
         return {
             "Invoice Date": _fmt_date(inv.invoice_date),
             "Invoice Number": inv.invoice_number or "",
             "Customer Name": inv.customer.name or "",
             "Description": line.description,
             "Source Amount": net,
-            "Currency": inv.original_currency or inv.currency,
+            "Currency": inv.currency,
             "Currency Rate": fx,
             "Amount": net,
             "Tax Amount": tax,
@@ -221,10 +257,13 @@ class XeroLedgerExporter(LedgerExporter):
         # so the invoice ties out on Xero import. Prefer the effective amount derived from
         # net_amount; the raw unit_amount is the pre-discount sticker price and over-states
         # discounted lines. Fall back to unit_amount only when net_amount is absent.
-        if line.net_amount is not None:
-            unit = line.net_amount / qty if qty else line.net_amount
+        line_net = _line_net_amount(line, inv)
+        if line.net_amount is not None or (not inv.our_gst_registered and line.gst_amount):
+            unit = line_net / qty if qty else line_net
         else:
-            unit = line.unit_amount
+            # Fallback: no net_amount; use the raw unit_amount but still apply the
+            # credit-note sign so *UnitAmount is negative on a credit note.
+            unit = (line.unit_amount * _doc_sign(inv)) if line.unit_amount is not None else line.unit_amount
         return {
             "*ContactName": party.name or "",
             "POCountry": party.country or "",
@@ -253,12 +292,31 @@ class XeroLedgerExporter(LedgerExporter):
 
 EXPORTERS = {"qbs": QbsLedgerExporter, "xero": XeroLedgerExporter}
 
+# Maps every known display/alias form (lowercased, stripped) to the canonical exporter key.
+_SOFTWARE_ALIASES: dict[str, str] = {
+    "qbs": "qbs",
+    "qbs ledger": "qbs",
+    "qbsledger": "qbs",
+    "xero": "xero",
+    "xero ledger": "xero",
+    "xeroledger": "xero",
+}
+
+
+def normalize_software_key(value: Optional[str]) -> Optional[str]:
+    """Return the canonical exporter key ("qbs" or "xero") for *value*, or None.
+
+    Accepts any casing and surrounding whitespace.  Callers decide the fallback
+    when None is returned (genuinely unrecognised software name).
+    """
+    return _SOFTWARE_ALIASES.get((value or "").strip().lower())
+
 
 def get_exporter(system: str, classifier: Optional[TaxClassifier] = None) -> LedgerExporter:
-    key = (system or "").strip().lower()
-    if "xero" in key:
+    key = normalize_software_key(system)
+    if key == "xero":
         return XeroLedgerExporter(classifier)
-    if "qbs" in key:
+    if key == "qbs":
         return QbsLedgerExporter(classifier)
     raise ValueError(f"unknown export system '{system}'; have {list(EXPORTERS)}")
 
@@ -327,6 +385,53 @@ _SHEET_INVALID = str.maketrans({c: None for c in "[]:*?/\\"})
 
 def _sheet_title(name: str) -> str:
     return (name or "Bank").translate(_SHEET_INVALID).strip()[:31] or "Bank"
+
+
+def _last4_digits(*sources: str | None) -> str:
+    """Return the last 4 numeric digits found across the given strings (left-padded).
+
+    Used to build a deterministic tab name like ``DBS - 5545 - CNH`` from
+    a free-form ``bank_name`` + structured ``account_number``. We fall back
+    across sources so an LLM that already packed the digits into ``bank_name``
+    still produces a stable title.
+    """
+    digits = "".join(c for c in "".join(s or "" for s in sources) if c.isdigit())
+    return digits[-4:].rjust(4, "0") if digits else "0000"
+
+
+def _bank_label(bank_name: str) -> str:
+    """Extract the bank-only label from a possibly-prefixed ``bank_name``.
+
+    The LLM extraction prompt sometimes returns ``"OCBC - 5001"`` or
+    ``"DBS Bank Ltd - 5545"``. We keep just the bank portion (text before the
+    first ``-``) so the structured ``account_number`` + ``currency`` are the
+    sole source of the last-4 + currency suffix appended by ``bank_sheet_title``.
+    """
+    raw = (bank_name or "").strip()
+    if " - " in raw:
+        return raw.split(" - ", 1)[0].strip()
+    if "-" in raw and not any(c.isdigit() for c in raw.split("-", 1)[0]):
+        return raw.split("-", 1)[0].strip()
+    return raw or "Bank"
+
+
+def bank_sheet_title(
+    *,
+    bank_name: str,
+    account_number: str | None,
+    currency: str,
+) -> str:
+    """Build ``"<Bank> - XXXX - CCY"`` for a bank statement's Excel tab.
+
+    Deterministic (code-owned, not LLM-owned) so multi-currency statements of
+    the same account split into distinct tabs instead of being silently merged
+    by ``SlackLedgerStore._merge_bank_statement``. Result is sanitized via
+    :func:`_sheet_title` (invalid Excel chars stripped, capped at 31 chars).
+    """
+    label = _bank_label(bank_name)
+    last4 = _last4_digits(account_number, bank_name)
+    ccy = (currency or "SGD").upper()
+    return _sheet_title(f"{label} - {last4} - {ccy}")
 
 
 def _parse_ddmmyyyy(value) -> Optional[datetime]:
@@ -464,6 +569,56 @@ class BankStatementExporter:
         return (0, min(dates)) if dates else (1, datetime.max)
 
     @classmethod
+    def _block_signature(cls, block: dict):
+        """Identity of a statement block for dedup: opening balance + its txns.
+
+        Two blocks with the same opening balance and the same ordered list of
+        ``(Date, Description, Withdrawal, Deposit)`` transactions are the SAME
+        statement re-uploaded (Balance is excluded — it is recomputed). Used to
+        collapse statements that were appended more than once (e.g. during the
+        doc_key format transition that duplicated months in the Sample Bank Client sheet).
+        """
+        def _norm(v):
+            if v is None:
+                return ""
+            s = str(v).strip()
+            if not s:
+                return ""
+            # Normalise numerics so 200 / 200.0 / "200.00" compare equal across
+            # the fresh-block vs read-back-from-xlsx round trip.
+            try:
+                return f"{float(s):.2f}"
+            except (TypeError, ValueError):
+                return s
+
+        txns = tuple(
+            (_norm(t.get("Date")), _norm(t.get("Description")),
+             _norm(t.get("Withdrawal")), _norm(t.get("Deposit")))
+            for t in block.get("transactions", [])
+        )
+        return (_norm(block.get("stated_bf")), _norm(block.get("currency")), txns)
+
+    @classmethod
+    def dedupe_blocks(cls, blocks: list[dict]) -> list[dict]:
+        """Drop blocks that are byte-for-byte duplicate statements (keep the first).
+
+        Safety net for re-merges: an identical statement appended N times yields N
+        identical blocks; this keeps one. Distinct months never collide (their txn
+        dates differ), and duplicate transactions WITHIN one statement are kept
+        (they live in the same block). Preserves input order.
+        """
+        seen: set = set()
+        unique: list[dict] = []
+        for block in blocks:
+            sig = cls._block_signature(block)
+            # A truly empty block (no bf, no txns) carries no data — keep at most one.
+            if sig in seen:
+                continue
+            seen.add(sig)
+            unique.append(block)
+        return unique
+
+    @classmethod
     def sort_blocks(cls, blocks: list[dict]) -> list[dict]:
         """Return month-blocks sorted ascending by date, txns sorted within each.
 
@@ -534,12 +689,19 @@ class BankStatementExporter:
         """Write Math_Check formulas and TOTALS SUM over the sheet.
 
         Balance holds the actual bank-stated value on every row — no formula.
-        Math_Check (col G) validates each row arithmetically:
+        Math_Check (col G) validates each row arithmetically. EVERY cell
+        reference is wrapped in ``N()`` so a non-numeric cell (a stray currency
+        code, a label, a blank) coerces to 0 instead of poisoning the whole
+        formula with ``#VALUE!`` — the robustness pattern from the reference
+        workbook. (See QA 2026-06-14: the un-coerced formula produced ``#VALUE!``
+        whenever a 'SGD' string leaked into the Balance column.)
 
         - ``BALANCE B/F`` row: first B/F of the FY gets ``✅`` (no prior row);
-          later months get ``=IF(ROUND(E_bf-E_prev,2)=0,"✅","GAP")`` — a ``GAP``
-          means the stated opening doesn't match the prior month's closing balance.
-        - txn row: ``=IF(ROUND(E-(E_prev+Deposit-Withdrawal),2)=0,"✅","❌")``.
+          later months get ``=IF(ROUND(N(E_bf)-N(E_prev),2)=0,"✅","GAP")`` — a
+          ``GAP`` means the stated opening doesn't match the prior closing balance.
+        - txn row: ``=IF(ROUND(N(E)-(N(E_prev)+N(Deposit)-N(Withdrawal)),2)=0,
+          "✅","❌ Exp: "&<expected>)`` — the expected running balance is shown on
+          a mismatch so the bookkeeper sees the discrepancy at a glance.
         - ``TOTALS`` row: ``=SUM(...)`` over the Withdrawal/Deposit txn range.
         """
         header = [c.value for c in sheet[1]] if sheet.max_row >= 1 else []
@@ -574,7 +736,7 @@ class BankStatementExporter:
                         sheet[f"{check_col}{r}"] = "✅"
                     else:
                         sheet[f"{check_col}{r}"] = (
-                            f'=IF(ROUND({bal_col}{r}-{bal_col}{prev_balance_row},2)=0,"✅","GAP")'
+                            f'=IF(ROUND(N({bal_col}{r})-N({bal_col}{prev_balance_row}),2)=0,"✅","GAP")'
                         )
                 prev_balance_row = r
                 seen_first_bf = True
@@ -585,13 +747,16 @@ class BankStatementExporter:
                     first_txn_row = r
                 last_txn_row = r
                 if check_col and bal_col and prev_balance_row is not None:
-                    arithmetic = f"{bal_col}{prev_balance_row}"
+                    # Expected running balance = prev balance + deposit − withdrawal,
+                    # every term N()-coerced so text cells become 0 (no #VALUE!).
+                    expected = f"N({bal_col}{prev_balance_row})"
                     if dep_col:
-                        arithmetic += f"+{dep_col}{r}"
+                        expected += f"+N({dep_col}{r})"
                     if wd_col:
-                        arithmetic += f"-{wd_col}{r}"
+                        expected += f"-N({wd_col}{r})"
                     sheet[f"{check_col}{r}"] = (
-                        f'=IF(ROUND({bal_col}{r}-({arithmetic}),2)=0,"✅","❌")'
+                        f'=IF(ROUND(N({bal_col}{r})-({expected}),2)=0,"✅",'
+                        f'"❌ Exp: "&ROUND({expected},2))'
                     )
                 prev_balance_row = r
 
@@ -607,13 +772,21 @@ class BankStatementExporter:
 
         Statements sharing a bank/account sheet are merged into a single continuous
         ledger (sorted by date, one chain), so a year of monthly statements for an
-        account lands as one sorted, cross-month-reconciling sheet.
+        account lands as one sorted, cross-month-reconciling sheet. Multi-currency
+        statements of the same account split into distinct sheets (one per currency).
         """
         wb = Workbook()
         # Group statements by their sheet title, preserving first-seen order.
         grouped: dict[str, list[BankStatement]] = {}
         for stmt in statements:
-            grouped.setdefault(_sheet_title(stmt.bank_name), []).append(stmt)
+            grouped.setdefault(
+                bank_sheet_title(
+                    bank_name=stmt.bank_name,
+                    account_number=stmt.account_number,
+                    currency=stmt.currency or "SGD",
+                ),
+                [],
+            ).append(stmt)
 
         for i, (title, stmts) in enumerate(grouped.items()):
             sheet = wb.active if i == 0 else wb.create_sheet()

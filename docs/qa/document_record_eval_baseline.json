@@ -1,0 +1,67 @@
+{
+  "results": [
+    {
+      "fixture": "management_fees_sample",
+      "fidelity": {
+        "fixture_id": "management_fees_sample",
+        "field_recall": 0.6,
+        "line_items_ok": true,
+        "annotations_ok": true,
+        "parties_ok": true,
+        "details": [
+          "field_recall=60%"
+        ]
+      },
+      "completeness": {
+        "completeness": 0.75,
+        "has_invoice_number": true,
+        "has_lines": true,
+        "reconciled": false
+      },
+      "document_count": 1,
+      "passed": false
+    },
+    {
+      "fixture": "vendor_invoice_sample",
+      "fidelity": {
+        "fixture_id": "vendor_invoice_sample",
+        "field_recall": 0.0,
+        "line_items_ok": true,
+        "annotations_ok": true,
+        "parties_ok": true,
+        "details": [
+          "field_recall=0%"
+        ]
+      },
+      "completeness": {
+        "completeness": 0.75,
+        "has_invoice_number": true,
+        "has_lines": true,
+        "reconciled": false
+      },
+      "document_count": 1,
+      "passed": false
+    },
+    {
+      "fixture": "expense_claim_sample",
+      "fidelity": {
+        "fixture_id": "expense_claim_sample",
+        "field_recall": 0.5,
+        "line_items_ok": true,
+        "annotations_ok": true,
+        "parties_ok": true,
+        "details": [
+          "field_recall=50%"
+        ]
+      },
+      "completeness": {
+        "completeness": 0.5,
+        "has_invoice_number": false,
+        "has_lines": true,
+        "reconciled": false
+      },
+      "document_count": 1,
+      "passed": false
+    }
+  ]
+}

@@ -14,7 +14,7 @@ What it fixes
 -------------
 Commit 6ca4e48 migrated the bank Balance column from an Excel-formula chain
 (``=E_prev + Deposit − Withdrawal``) to static numeric values.  Workbooks that
-span the migration (e.g. Akar's ``BankStatement_FY2025``) have Jan–Mar stored as
+span the migration (e.g. Sample Bank Client's ``BankStatement_FY2025``) have Jan–Mar stored as
 formula strings and Apr+ as statics.  When openpyxl reads such a workbook with
 the default ``data_only=False`` the formula cells come back as strings
 (``"=E2+D3-C3"``); if loaded with ``data_only=True`` they come back as ``None``

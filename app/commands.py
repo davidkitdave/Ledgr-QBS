@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -10,6 +11,20 @@ from typing import Optional
 class LedgrCommand:
     subcommand: str          # "settings" | "export" | "help"
     args: list[str] = field(default_factory=list)
+
+
+def ledgr_slash_command_name() -> str:
+    """Return the slash command this process registers (must match Slack app manifest).
+
+    Production (``LEDGR_ENV=prod``): ``/ledgr`` — Ledgr-QBS on Cloud Run.
+    Development (default): ``/ledgr-dev`` — avoids workspace conflict when both
+    apps are installed in QBS-AI. Override with ``LEDGR_SLASH_COMMAND``.
+    """
+    override = (os.environ.get("LEDGR_SLASH_COMMAND") or "").strip()
+    if override:
+        return override if override.startswith("/") else f"/{override}"
+    env = (os.environ.get("LEDGR_ENV") or "dev").strip().lower()
+    return "/ledgr-dev" if env == "dev" else "/ledgr"
 
 
 def parse_ledgr_command(text: str | None) -> LedgrCommand:

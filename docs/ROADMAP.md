@@ -4,7 +4,7 @@
 
 ## 0. Where we are now
 
-- **`main` (`Projects/Ledgr-QBS`) = SOURCE OF TRUTH.** Deployed and working in Slack (workspace QBS-AI, app **Ledgr**, per-client channel e.g. `#auditair-international-pte-ltd`). Commit `7b9a163` "Production ready", on **google-adk 1.30.0**, 22 test files green. A real invoice processed end-to-end → `Ledger_FY2026.xlsx` returned to the channel.
+- **`main` (`Projects/Ledgr-QBS`) = SOURCE OF TRUTH.** Deployed and working in Slack (workspace LEDGR-DEV, app **Ledgr**, per-client channel e.g. `#acme-client-test`). Commit `7b9a163` "Production ready", on **google-adk 1.30.0**, 22 test files green. A real invoice processed end-to-end → `Ledger_FY2026.xlsx` returned to the channel.
 - **Worktree (`Ledgr-QBS-adk2`, branch `adk-2.0-migration`) = ADK 2.0 spike.** Stage 1 (decouple `__init__`) + Stage 2 (bump to **google-adk 2.2.0**), 478 tests green — but branched from the *baseline* **before** `7b9a163`, so it does **not** contain production changes.
 - **Divergence is benign:** `7b9a163` did **not** touch `invoice_processing/__init__.py` or `uv.lock` (only `pyproject.toml`). So landing 2.0 later = **re-apply** the two small changes on top of `main` + `uv sync` + run the suite — not a messy merge.
 

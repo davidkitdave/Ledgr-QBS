@@ -1,0 +1,521 @@
+{
+  "eval_cases": [
+    {
+      "eval_case_id": "B3_chat_show_client_profile_trajectory",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "who am I working with?"
+          }
+        ]
+      },
+      "expected_tool_trajectory": [
+        "show_client_profile"
+      ],
+      "actual_tool_trajectory": [
+        "show_client_profile"
+      ],
+      "agent_data": {
+        "agents": {
+          "assistant": {
+            "agent_id": "assistant",
+            "instruction": "Ledgr chat assistant."
+          }
+        },
+        "turns": [
+          {
+            "turn_index": 0,
+            "events": [
+              {
+                "author": "user",
+                "content": {
+                  "role": "user",
+                  "parts": [
+                    {
+                      "text": "who am I working with?"
+                    }
+                  ]
+                }
+              },
+              {
+                "author": "assistant",
+                "content": {
+                  "parts": [
+                    {
+                      "function_call": {
+                        "name": "show_client_profile",
+                        "args": {}
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "author": "assistant",
+                "content": {
+                  "parts": [
+                    {
+                      "function_response": {
+                        "name": "show_client_profile",
+                        "response": {
+                          "status": "ok"
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "author": "assistant",
+                "content": {
+                  "role": "model",
+                  "parts": [
+                    {
+                      "text": "You are working with Test Firm (UEN 200000003C) in SINGAPORE. Their base currency is SGD, they are GST-registered, and their financial year ends in June. They are still onboarding, and I do not have their Chart of Accounts or any learned vendor/category mappings loaded yet."
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "responses": [
+        {
+          "response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "You are working with Test Firm (UEN 200000003C) in SINGAPORE. Their base currency is SGD, they are GST-registered, and their financial year ends in June. They are still onboarding, and I do not have their Chart of Accounts or any learned vendor/category mappings loaded yet."
+              }
+            ]
+          }
+        }
+      ],
+      "reference": {
+        "response": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "Test Firm"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "eval_case_id": "B4_chat_summarize_by_category_trajectory",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "total purchases this FY?"
+          }
+        ]
+      },
+      "expected_tool_trajectory": [
+        "summarize_by_category"
+      ],
+      "actual_tool_trajectory": [],
+      "agent_data": {
+        "agents": {
+          "assistant": {
+            "agent_id": "assistant",
+            "instruction": "Ledgr chat assistant."
+          }
+        },
+        "turns": [
+          {
+            "turn_index": 0,
+            "events": [
+              {
+                "author": "user",
+                "content": {
+                  "role": "user",
+                  "parts": [
+                    {
+                      "text": "total purchases this FY?"
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "reference": {
+        "response": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "2000"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "eval_case_id": "B5_chat_multi_turn_fye_then_currency",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "and the currency?"
+          }
+        ]
+      },
+      "expected_tool_trajectory": [
+        "show_client_profile"
+      ],
+      "actual_tool_trajectory": [
+        "show_client_profile",
+        "show_client_profile"
+      ],
+      "agent_data": {
+        "agents": {
+          "assistant": {
+            "agent_id": "assistant",
+            "instruction": "Ledgr chat assistant (eval trace export)."
+          }
+        },
+        "turns": [
+          {
+            "turn_index": 0,
+            "events": [
+              {
+                "author": "user",
+                "content": {
+                  "role": "user",
+                  "parts": [
+                    {
+                      "text": "what's my FYE month?"
+                    }
+                  ]
+                }
+              },
+              {
+                "author": "assistant",
+                "content": {
+                  "parts": [
+                    {
+                      "function_call": {
+                        "name": "show_client_profile",
+                        "args": {}
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "author": "assistant",
+                "content": {
+                  "parts": [
+                    {
+                      "function_response": {
+                        "name": "show_client_profile",
+                        "response": {
+                          "status": "ok"
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "author": "assistant",
+                "content": {
+                  "role": "model",
+                  "parts": [
+                    {
+                      "text": "September"
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "turn_index": 1,
+            "events": [
+              {
+                "author": "user",
+                "content": {
+                  "role": "user",
+                  "parts": [
+                    {
+                      "text": "and the currency?"
+                    }
+                  ]
+                }
+              },
+              {
+                "author": "assistant",
+                "content": {
+                  "parts": [
+                    {
+                      "function_call": {
+                        "name": "show_client_profile",
+                        "args": {}
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "author": "assistant",
+                "content": {
+                  "parts": [
+                    {
+                      "function_response": {
+                        "name": "show_client_profile",
+                        "response": {
+                          "status": "ok"
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "author": "assistant",
+                "content": {
+                  "role": "model",
+                  "parts": [
+                    {
+                      "text": "Your base currency is SGD."
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "responses": [
+        {
+          "response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "Your base currency is SGD."
+              }
+            ]
+          }
+        }
+      ],
+      "reference": {
+        "response": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "SGD"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "eval_case_id": "B6_chat_invoice_account_code_trajectory",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "Tell me why you used this account code for invoice 25-D15 and 25-D12"
+          }
+        ]
+      },
+      "expected_tool_trajectory": [
+        "lookup_row",
+        "explain_categorization",
+        "lookup_row",
+        "explain_categorization"
+      ],
+      "actual_tool_trajectory": [
+        "lookup_row",
+        "explain_categorization",
+        "lookup_row",
+        "explain_categorization"
+      ],
+      "agent_data": {
+        "agents": {
+          "assistant": {
+            "agent_id": "assistant",
+            "instruction": "Ledgr chat assistant."
+          }
+        },
+        "turns": [
+          {
+            "turn_index": 0,
+            "events": [
+              {
+                "author": "user",
+                "content": {
+                  "role": "user",
+                  "parts": [
+                    {
+                      "text": "Tell me why you used this account code for invoice 25-D15 and 25-D12"
+                    }
+                  ]
+                }
+              },
+              {
+                "author": "assistant",
+                "content": {
+                  "parts": [
+                    {
+                      "function_call": {
+                        "name": "lookup_row",
+                        "args": {
+                          "query": "25-D15"
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "author": "assistant",
+                "content": {
+                  "parts": [
+                    {
+                      "function_response": {
+                        "name": "lookup_row",
+                        "response": {
+                          "status": "ok"
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "author": "assistant",
+                "content": {
+                  "parts": [
+                    {
+                      "function_call": {
+                        "name": "explain_categorization",
+                        "args": {
+                          "row_index": "0"
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "author": "assistant",
+                "content": {
+                  "parts": [
+                    {
+                      "function_response": {
+                        "name": "explain_categorization",
+                        "response": {
+                          "status": "ok"
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "author": "assistant",
+                "content": {
+                  "parts": [
+                    {
+                      "function_call": {
+                        "name": "lookup_row",
+                        "args": {
+                          "query": "25-D12"
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "author": "assistant",
+                "content": {
+                  "parts": [
+                    {
+                      "function_response": {
+                        "name": "lookup_row",
+                        "response": {
+                          "status": "ok"
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "author": "assistant",
+                "content": {
+                  "parts": [
+                    {
+                      "function_call": {
+                        "name": "explain_categorization",
+                        "args": {
+                          "row_index": "1"
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "author": "assistant",
+                "content": {
+                  "parts": [
+                    {
+                      "function_response": {
+                        "name": "explain_categorization",
+                        "response": {
+                          "status": "ok"
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "author": "assistant",
+                "content": {
+                  "role": "model",
+                  "parts": [
+                    {
+                      "text": "For invoice 25-D15, with description \"Consulting fees\" from vendor \"Person-1\", the categorization was unresolved. This means there was no deterministic match, and the line would have been flagged for review or required an LLM fallback.\n\nSimilarly, for invoice 25-D12, with description \"Advisory\" from vendor \"Person-1\", the categorization was also unresolved. This line would also have been flagged for review or required an LLM fallback."
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "responses": [
+        {
+          "response": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "For invoice 25-D15, with description \"Consulting fees\" from vendor \"Person-1\", the categorization was unresolved. This means there was no deterministic match, and the line would have been flagged for review or required an LLM fallback.\n\nSimilarly, for invoice 25-D12, with description \"Advisory\" from vendor \"Person-1\", the categorization was also unresolved. This line would also have been flagged for review or required an LLM fallback."
+              }
+            ]
+          }
+        }
+      ],
+      "reference": {
+        "response": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "6-3000 Professional Fees"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}
