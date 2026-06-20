@@ -18,6 +18,7 @@ venv/
 # Tooling / local state
 .omc/
 .claude/settings.local.json
+.claude/worktrees/
 .adk/
 **/.adk/
 .DS_Store
@@ -26,6 +27,8 @@ venv/
 # Agent output / scratch
 invoice_processing/data/agent_output/
 invoice_processing/data/alf_output/
+# Generated eval results + QA screenshots (build output — never commit)
+artifacts/grade_results/
 
 # Local eval data (real invoices — never commit, see no-real-client-data rule)
 tests/eval_invoices/
