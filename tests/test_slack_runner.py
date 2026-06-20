@@ -6931,7 +6931,6 @@ def test_batch_mode_skips_per_doc_status_post():
             thread_ts=None,
             defer_slack_delivery=True,
             batch_mode=True,
-            client_store=_seeded_client_store(db, channel_id="C-batch-mode"),
         )
     )
 
