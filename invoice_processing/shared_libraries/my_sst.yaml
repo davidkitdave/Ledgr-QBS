@@ -21,6 +21,11 @@
 # arithmetic check. No 300-line rule spaghetti.
 
 tax_system: SST
+home_country: MY
+registration_threshold:
+  amount: 500000
+  currency: MYR
+  label: "MY SST registration (Service Tax Act 2018)"
 
 # Service Tax band by time of supply. Currently 8% flat since 2018-09-01.
 rate_by_date:

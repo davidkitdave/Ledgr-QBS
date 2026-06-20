@@ -576,24 +576,21 @@ async def classify_node(ctx) -> Event:
 
 def _resolve_direction_from_extract(
     extract: Optional[dict],
-    fallback: str = "purchase",
+    fallback: str = "unknown",
 ) -> str:
     """Read ``direction_for_client`` from the Understand extract.
 
     Per the Batch Direction plan, the Understand call owns the direction
     decision. Returns the resolved direction string (``"purchase"`` /
-    ``"sales"`` / ``"self_referential"``) or the provided ``fallback`` if the
-    extract is missing or the model returned ``"unknown"``. The
-    ``"unknown"`` case is also returned as-is so the caller can escalate to
-    HITL rather than silently picking a direction.
+    ``"sales"`` / ``"self_referential"``) or ``"unknown"`` when the extract is
+    missing or the model returned ``"unknown"``. Never silently assumes
+    ``"purchase"`` — callers escalate unknown/self_referential to HITL.
     """
     if not extract:
         return fallback
     direction = extract.get("direction_for_client")
     if direction in ("purchase", "sales", "self_referential"):
         return direction
-    # Either the field is missing (older extract) or it is "unknown". Pass
-    # "unknown" through so the HITL gate can surface it; otherwise fall back.
     if direction == "unknown":
         return "unknown"
     return fallback
@@ -652,7 +649,7 @@ async def extract_invoice_document_node(ctx) -> Event:
     if result.extraction_path == "understand" and result.ledger_extract:
         resolved = _resolve_direction_from_extract(
             result.ledger_extract,
-            fallback=ctx.state.get(DIRECTION_KEY) or "purchase",
+            fallback=ctx.state.get(DIRECTION_KEY) or "unknown",
         )
         if resolved == "unknown":
             resolved = _retry_resolve_direction_llm(ctx, result.ledger_extract)
@@ -872,6 +869,17 @@ def _normalize_bundle(ctx, bundle: ExtractedInvoiceBundle) -> list[NormalizedInv
             inv.reconciled = False
             review_note = (
                 "needs review: direction unknown — could not determine whether "
+                "client is issuer or bill-to; defaulted to purchase for routing"
+            )
+            inv.reconcile_note = (
+                f"{inv.reconcile_note}; {review_note}"
+                if inv.reconcile_note
+                else review_note
+            )
+        elif direction in ("auto", None) or direction not in ("purchase", "sales"):
+            inv.reconciled = False
+            review_note = (
+                "needs review: direction not confirmed — could not determine whether "
                 "client is issuer or bill-to; defaulted to purchase for routing"
             )
             inv.reconcile_note = (

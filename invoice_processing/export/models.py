@@ -12,6 +12,11 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Optional
 
+_HOME_COUNTRY_EQUIVALENTS: dict[str, set[str]] = {
+    "SG": {"SG", "SGP", "SINGAPORE"},
+    "MY": {"MY", "MYS", "MALAYSIA", "MSIA", "M'SIA"},
+}
+
 
 @dataclass
 class PartyInfo:
@@ -29,9 +34,26 @@ class PartyInfo:
 
     @property
     def is_overseas(self) -> Optional[bool]:
+        """Whether this party is outside Singapore (legacy default home country).
+
+        Prefer :meth:`is_overseas_for` with the client's home country so MY
+        clients do not treat SG suppliers as domestic.
+        """
+        return self.is_overseas_for("SG")
+
+    def is_overseas_for(self, home_country: str) -> Optional[bool]:
+        """True when ``country`` is outside the client's home jurisdiction."""
         if not self.country:
             return None
-        return self.country.strip().upper() not in ("SG", "SINGAPORE")
+        if not home_country:
+            return None
+        party = self.country.strip().upper()
+        home = home_country.strip().upper()
+        home_codes = _HOME_COUNTRY_EQUIVALENTS.get(home, {home})
+        party_codes = _HOME_COUNTRY_EQUIVALENTS.get(party, {party})
+        if party_codes & home_codes:
+            return False
+        return True
 
 
 @dataclass

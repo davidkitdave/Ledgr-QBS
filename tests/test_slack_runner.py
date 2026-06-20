@@ -7553,8 +7553,8 @@ def test_resolve_direction_from_extract_understand_verdict():
     ) == "self_referential"
     # Unknown passes through (caller escalates to HITL).
     assert _resolve_direction_from_extract({"direction_for_client": "unknown"}) == "unknown"
-    # Missing → fallback.
-    assert _resolve_direction_from_extract(None) == "purchase"
+    # Missing → unknown (HITL), never silent purchase.
+    assert _resolve_direction_from_extract(None) == "unknown"
     assert _resolve_direction_from_extract({}, fallback="sales") == "sales"
 
 

@@ -66,6 +66,10 @@ from invoice_processing.export.models import InvoiceLine, NormalizedInvoice
 
 from . import config
 from .jurisdiction import (
+    REGION_MALAYSIA,
+    REGION_SINGAPORE,
+    _norm_region,
+    registration_threshold_for_region,
     resolve_jurisdiction,
     write_to_state,
 )
@@ -169,17 +173,9 @@ _SIGNATURE_COLS: tuple[str, ...] = (
     "Description", "Source Amount", "Account Code / COA", "Tax Amount",
 )
 
-#: SGD threshold for mandatory GST registration (s.40B GST Act, Singapore).
-#: Per-jurisdiction thresholds live in the YAML reference; this constant is
-#: the SG default used when no profile + no env override is present. The
-#: chat agent now resolves the active threshold via :func:`_tax_registration_threshold`.
-GST_THRESHOLD_SGD = 1_000_000.0
-
-#: MYR threshold for mandatory SST registration (Service Tax Act 2018,
-#: Service Tax Regulations 2018 — RM500,000 threshold for taxable services
-#: providers). Used when the active jurisdiction is MALAYSIA and no profile
-#: threshold override is present.
-SST_THRESHOLD_MYR = 500_000.0
+#: Legacy re-exports — canonical values live in jurisdiction YAML ``registration_threshold``.
+GST_THRESHOLD_SGD, _, _ = registration_threshold_for_region(REGION_SINGAPORE)
+SST_THRESHOLD_MYR, _, _ = registration_threshold_for_region(REGION_MALAYSIA)
 
 
 def _tax_registration_threshold(state: dict) -> tuple[float, str, str]:
@@ -191,17 +187,24 @@ def _tax_registration_threshold(state: dict) -> tuple[float, str, str]:
 
     Order of precedence:
     1. Env override ``LEDGR_TAX_REGISTRATION_THRESHOLD_<REGION>`` (most explicit).
-    2. Per-region hard-coded defaults (SG: 1M SGD, MY: 500K MYR).
+    2. Per-region ``registration_threshold`` from the jurisdiction YAML.
     3. SG / 1M SGD (legacy fallback — never silently for a non-SG client).
     """
-    region = (state.get("client_region") or state.get("region") or "").strip().upper()
-    if region in ("SINGAPORE", "SG", "SGP"):
-        threshold = float(os.environ.get("LEDGR_TAX_REGISTRATION_THRESHOLD_SG", GST_THRESHOLD_SGD))
-        return threshold, "SGD", "SG GST registration (s.40B GST Act)"
-    if region in ("MALAYSIA", "MY", "MYS", "MSIA"):
-        threshold = float(os.environ.get("LEDGR_TAX_REGISTRATION_THRESHOLD_MY", SST_THRESHOLD_MYR))
-        return threshold, "MYR", "MY SST registration (Service Tax Act 2018)"
-    return float(GST_THRESHOLD_SGD), "SGD", "SG GST registration (s.40B GST Act, fallback)"
+    region = _norm_region(state.get("client_region") or state.get("region") or "")
+    if region == REGION_SINGAPORE:
+        amount, currency, label = registration_threshold_for_region(REGION_SINGAPORE)
+        threshold = float(
+            os.environ.get("LEDGR_TAX_REGISTRATION_THRESHOLD_SG", amount)
+        )
+        return threshold, currency, label
+    if region == REGION_MALAYSIA:
+        amount, currency, label = registration_threshold_for_region(REGION_MALAYSIA)
+        threshold = float(
+            os.environ.get("LEDGR_TAX_REGISTRATION_THRESHOLD_MY", amount)
+        )
+        return threshold, currency, label
+    amount, currency, label = registration_threshold_for_region(REGION_SINGAPORE)
+    return float(amount), currency, f"{label} (fallback)"
 
 
 def _normalize_row_for_tools(row: dict) -> dict:

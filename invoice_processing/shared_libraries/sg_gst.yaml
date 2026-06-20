@@ -1,4 +1,10 @@
 # Singapore GST taxonomy — drives per-line tax-code classification and target-system mapping.
+tax_system: GST
+home_country: SG
+registration_threshold:
+  amount: 1000000
+  currency: SGD
+  label: "SG GST registration (s.40B GST Act)"
 # Source: docs/research/sg-gst-tax-codes.md (IRAS General Guide for Businesses 17th Ed.;
 # List of International Services, GST Act s.21(3)). Rate by time-of-supply; code STRING by treatment.
 

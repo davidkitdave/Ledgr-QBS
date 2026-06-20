@@ -29,14 +29,17 @@ from accounting_agents.jurisdiction import (
     JURISDICTION_AMBIGUOUS,
     JURISDICTION_CROSS_BORDER,
     REGION_MALAYSIA,
+    REGION_REGISTRY,
     REGION_SINGAPORE,
     TAX_JURISDICTION_KEY,
     TAX_SYSTEM_GST,
     TAX_SYSTEM_HINT_KEY,
     TAX_SYSTEM_OUT_OF_SCOPE,
     TAX_SYSTEM_SST,
+    registration_threshold_for_region,
     resolve_jurisdiction,
     resolution_from_state,
+    supported_regions,
     write_to_state,
 )
 from invoice_processing.export.models import InvoiceLine, NormalizedInvoice, PartyInfo
@@ -143,6 +146,125 @@ class TestResolveJurisdiction:
         ]:
             res = resolve_jurisdiction({"region": raw, "base_currency": expected[:2] + ("GD" if expected == "SINGAPORE" else "YR")})
             assert res.jurisdiction.region == expected, f"{raw} should normalise to {expected}"
+
+
+# --------------------------------------------------------------------------- #
+# WS1 characterization — SG/MY must match pre-refactor branches exactly
+# --------------------------------------------------------------------------- #
+class TestResolveJurisdictionCharacterization:
+    """Explicit snapshots of every supported resolve_jurisdiction branch."""
+
+    def test_registry_covers_sg_and_my(self):
+        assert set(supported_regions()) == {REGION_SINGAPORE, REGION_MALAYSIA}
+        assert REGION_REGISTRY[REGION_SINGAPORE]["yaml"] == "sg_gst.yaml"
+        assert REGION_REGISTRY[REGION_MALAYSIA]["yaml"] == "my_sst.yaml"
+
+    def test_sg_domestic_full_rule(self):
+        res = resolve_jurisdiction(
+            {"region": "SINGAPORE", "base_currency": "SGD", "supplier_country": "SG"}
+        )
+        j = res.jurisdiction
+        assert j.code == REGION_SINGAPORE
+        assert j.region == REGION_SINGAPORE
+        assert j.tax_system == TAX_SYSTEM_GST
+        assert j.reference_yaml == "sg_gst.yaml"
+        assert j.standard_rate == pytest.approx(0.09)
+        assert j.rate_band_label == "9% GST"
+        assert j.cross_border is False
+        assert j.flag_for_human is False
+        assert res.client_currency == "SGD"
+
+    def test_my_domestic_full_rule(self):
+        res = resolve_jurisdiction(
+            {"region": "MALAYSIA", "base_currency": "MYR", "supplier_country": "MY"}
+        )
+        j = res.jurisdiction
+        assert j.code == REGION_MALAYSIA
+        assert j.region == REGION_MALAYSIA
+        assert j.tax_system == TAX_SYSTEM_SST
+        assert j.reference_yaml == "my_sst.yaml"
+        assert j.standard_rate == pytest.approx(0.08)
+        assert j.rate_band_label == "8% SST"
+        assert j.cross_border is False
+        assert j.flag_for_human is False
+        assert res.client_currency == "MYR"
+
+    def test_sg_cross_border_auto_book_notes(self):
+        res = resolve_jurisdiction(
+            {"region": "SINGAPORE", "base_currency": "SGD", "supplier_country": "MY"}
+        )
+        j = res.jurisdiction
+        assert j.code == JURISDICTION_CROSS_BORDER
+        assert j.tax_system == TAX_SYSTEM_OUT_OF_SCOPE
+        assert j.reference_yaml == "sg_gst.yaml"
+        assert j.standard_rate is None
+        assert j.cross_border is True
+        assert j.flag_for_human is False
+        assert "Foreign counterparty" in (j.notes or "")
+        assert "not claimable" in (j.notes or "")
+
+    def test_sg_cross_border_partial_exempt_flags(self):
+        res = resolve_jurisdiction(
+            {
+                "region": "SINGAPORE",
+                "base_currency": "SGD",
+                "supplier_country": "MY",
+                "partial_exempt": True,
+            }
+        )
+        assert res.jurisdiction.flag_for_human is True
+        assert "reverse-charge" in (res.jurisdiction.notes or "").lower()
+
+    def test_my_cross_border_auto_book_notes(self):
+        res = resolve_jurisdiction(
+            {"region": "MALAYSIA", "base_currency": "MYR", "supplier_country": "SG"}
+        )
+        j = res.jurisdiction
+        assert j.code == JURISDICTION_CROSS_BORDER
+        assert j.tax_system == TAX_SYSTEM_OUT_OF_SCOPE
+        assert j.reference_yaml == "my_sst.yaml"
+        assert j.flag_for_human is False
+        assert "SST" in (j.notes or "")
+
+    def test_ambiguous_no_region_no_sgd_fallback(self):
+        """C10: missing region + currency must not silently default to SGD."""
+        res = resolve_jurisdiction({})
+        assert res.jurisdiction.code == JURISDICTION_AMBIGUOUS
+        assert res.client_currency is None
+        assert res.jurisdiction.flag_for_human is True
+
+    def test_registration_threshold_from_yaml(self):
+        """C7: thresholds live in jurisdiction YAML, not Python constants."""
+        sg_amount, sg_cur, sg_label = registration_threshold_for_region(REGION_SINGAPORE)
+        assert sg_amount == pytest.approx(1_000_000.0)
+        assert sg_cur == "SGD"
+        assert "GST" in sg_label
+
+        my_amount, my_cur, my_label = registration_threshold_for_region(REGION_MALAYSIA)
+        assert my_amount == pytest.approx(500_000.0)
+        assert my_cur == "MYR"
+        assert "SST" in my_label
+
+
+# --------------------------------------------------------------------------- #
+# C4 — is_overseas relative to client home country
+# --------------------------------------------------------------------------- #
+class TestPartyIsOverseasFor:
+    def test_sg_supplier_domestic_for_sg_client(self):
+        party = PartyInfo(country="SG")
+        assert party.is_overseas_for("SG") is False
+
+    def test_sg_supplier_overseas_for_my_client(self):
+        party = PartyInfo(country="SG")
+        assert party.is_overseas_for("MY") is True
+
+    def test_my_supplier_domestic_for_my_client(self):
+        party = PartyInfo(country="MY")
+        assert party.is_overseas_for("MY") is False
+
+    def test_my_supplier_overseas_for_sg_client(self):
+        party = PartyInfo(country="MY")
+        assert party.is_overseas_for("SG") is True
 
 
 # --------------------------------------------------------------------------- #

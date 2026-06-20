@@ -520,6 +520,20 @@ class TestGetTaxClassifierFactory:
         code = clf.tax_code("SR", "purchase", "qbs")
         assert code == "TX", f"Default TaxClassifier() must give SG code 'TX', got {code!r}"
 
+    def test_my_classifier_sg_supplier_is_overseas(self):
+        """C4: MY taxonomy treats SG suppliers as overseas, not domestic."""
+        clf = get_tax_classifier("my_sst.yaml")
+        line, inv = _purchase(
+            desc="Consulting",
+            gst=None,
+            gst_regno=None,
+            is_overseas=False,
+        )
+        inv.supplier.country = "SG"
+        result = clf.classify_line(line, inv)
+        assert result.tax_treatment == "OS"
+        assert result.tax_flagged is True
+
 
 class TestGetTaxClassifierIntegration:
     """Integration: an exporter built with the MY classifier produces MY SST tax codes.

@@ -88,10 +88,14 @@ class TaxClassifier:
     def __init__(self, taxonomy: Optional[dict] = None):
         self.tax = taxonomy if taxonomy is not None else _load_taxonomy()
         self._signals = {k: [s.lower() for s in v] for k, v in self.tax["signals"].items()}
+        self._home_country = str(self.tax.get("home_country") or "SG").strip().upper()
         self._threshold = self.tax["review"]["confidence_threshold"]
         self._rate_tol = self.tax["review"]["rate_tolerance"]
 
     # -- rate by time-of-supply -------------------------------------------------
+    def _party_is_overseas(self, party) -> Optional[bool]:
+        return party.is_overseas_for(self._home_country)
+
     def rate_for_date(self, d: Optional[date]) -> float:
         """Standard GST rate applicable on the invoice date (defaults to latest)."""
         bands = self.tax["rate_by_date"]
@@ -118,7 +122,7 @@ class TaxClassifier:
         # charge review. ADR-0015 SG-GST decision table, F6 row.
         if (
             inv.doc_type == "purchase"
-            and inv.supplier.is_overseas
+            and self._party_is_overseas(inv.supplier)
             and inv.tax_visible_on_document is False
         ):
             line.tax_treatment = "OS"
@@ -239,7 +243,7 @@ class TaxClassifier:
             # GST shown but no reg no. visible -> suspicious, flag.
             return "SR", 0.5, True, "SR(?): GST shown but no supplier GST reg no."
         # 4. Overseas supplier, no GST line -> out-of-scope, flag for reverse charge.
-        if supplier.is_overseas and (not gst or gst == 0):
+        if self._party_is_overseas(supplier) and (not gst or gst == 0):
             return "OS", 0.55, True, "OS: overseas supplier, no GST — review Reverse Charge"
         # 5. Explicit standard-rate wording, no GST amount captured -> SR, no flag.
         # Handles clean tax invoices where the GST amount wasn't extracted separately
@@ -306,7 +310,7 @@ class TaxClassifier:
                 return "SR", 0.95, False, f"SR: explicit tax_keyword '{line.tax_keyword}'"
 
         # 2. Export / international service -> zero-rated (verify §21(3) fit).
-        if self._matches(desc, "zero_rated") or customer.is_overseas:
+        if self._matches(desc, "zero_rated") or self._party_is_overseas(customer):
             conf = 0.85 if self._matches(desc, "zero_rated") else 0.6
             flag = conf < self._threshold
             return "ZR", conf, flag, "ZR: export/international-service or overseas customer"
