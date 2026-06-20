@@ -1,0 +1,58 @@
+software_name: AutoCount
+system: autocount
+purchase_cols:
+  - Doc No
+  - Doc Date
+  - Creditor Code
+  - Creditor Name
+  - Description
+  - Amount
+  - Tax
+  - Tax Code
+  - Acc No
+  - Currency
+sales_cols:
+  - Doc No
+  - Doc Date
+  - Debtor Code
+  - Debtor Name
+  - Description
+  - Amount
+  - Tax
+  - Tax Code
+  - Acc No
+  - Currency
+required_purchase:
+  - Doc No
+  - Doc Date
+  - Creditor Code
+  - Tax Code
+  - Acc No
+required_sales:
+  - Doc No
+  - Doc Date
+  - Debtor Code
+  - Tax Code
+  - Acc No
+purchase_fields:
+  Doc No: invoice_number
+  Doc Date: invoice_date
+  Creditor Code: creditor_code
+  Creditor Name: vendor_name
+  Description: description
+  Amount: sub_total
+  Tax: tax_amount
+  Tax Code: tax_code
+  Acc No: account_code
+  Currency: currency
+sales_fields:
+  Doc No: invoice_number
+  Doc Date: invoice_date
+  Debtor Code: debtor_code
+  Debtor Name: customer_name
+  Description: description
+  Amount: sub_total
+  Tax: tax_amount
+  Tax Code: tax_code
+  Acc No: account_code
+  Currency: currency

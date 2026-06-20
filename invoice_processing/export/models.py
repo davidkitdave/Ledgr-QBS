@@ -26,6 +26,7 @@ class PartyInfo:
     country: Optional[str] = None          # "SG" or an overseas country/None if unknown
     gst_regno: Optional[str] = None        # GST registration number / UEN if shown
     email: Optional[str] = None
+    vendor_code: Optional[str] = None      # creditor code for purchases (from entity memory)
 
     @property
     def gst_registered(self) -> bool:

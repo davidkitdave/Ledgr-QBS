@@ -389,7 +389,7 @@ _MONTHS = [
     (9, "September"), (10, "October"), (11, "November"), (12, "December"),
 ]
 
-_SOFTWARE_OPTIONS = ["QBS Ledger", "Xero"]
+_SOFTWARE_OPTIONS = ["QBS Ledger", "Xero", "AutoCount", "SQL Account"]
 
 
 def welcome_blocks() -> list:

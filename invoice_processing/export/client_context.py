@@ -38,8 +38,6 @@ from typing import Optional, Protocol
 
 from openpyxl import load_workbook
 
-from accounting_agents.jurisdiction import REGION_REGISTRY, _norm_region
-
 
 # --------------------------------------------------------------------------- #
 # Dataclasses
@@ -65,6 +63,7 @@ class EntityMemoryEntry:
     mapping_code: Optional[str] = None        # account code/name
     role: Optional[str] = None
     tax_code: Optional[str] = None
+    creditor_code: Optional[str] = None       # ERP creditor/vendor code (purchases)
 
 
 @dataclass
@@ -85,6 +84,7 @@ class ClientContext:
     coa: list[CoaAccount] = field(default_factory=list)
     category_mapping: dict[str, Optional[str]] = field(default_factory=dict)  # category -> account_code | null
     entity_memory: list[EntityMemoryEntry] = field(default_factory=list)
+    tax_codes: list[dict] = field(default_factory=list)                       # client ERP tax-code master
     sys_config: dict[str, str] = field(default_factory=dict)                  # kept for back-compat; not populated from Firestore
 
     def to_state(self) -> dict:
@@ -119,9 +119,11 @@ class ClientContext:
                     "mapping_code": e.mapping_code,
                     "role": e.role,
                     "tax_code": e.tax_code,
+                    "creditor_code": e.creditor_code,
                 }
                 for e in self.entity_memory
             ],
+            "tax_codes": list(self.tax_codes),
         }
 
 
@@ -240,6 +242,7 @@ def load_client_setup(xlsx_path: str | Path, client_id: Optional[str] = None) ->
                 i_map = _header_index(header, "Mapping Code")
                 i_role = _header_index(header, "Role (Debtor / Creditor)", "Role")
                 i_tax = _header_index(header, "Tax Code")
+                i_cred = _header_index(header, "Creditor Code", "Vendor Code")
                 for row in rows[1:]:
                     if _row_is_empty(row):
                         continue
@@ -256,7 +259,33 @@ def load_client_setup(xlsx_path: str | Path, client_id: Optional[str] = None) ->
                         mapping_code=_s(cell(i_map)),
                         role=_s(cell(i_role)),
                         tax_code=_s(cell(i_tax)),
+                        creditor_code=_s(cell(i_cred)),
                     ))
+
+        # --- Tax_Codes (optional) ---
+        if "Tax_Codes" in sheets:
+            rows = list(wb["Tax_Codes"].iter_rows(values_only=True))
+            if rows:
+                header = rows[0]
+                i_code = _header_index(header, "Code") or 0
+                i_desc = _header_index(header, "Description")
+                i_treat = _header_index(header, "Treatment")
+                for row in rows[1:]:
+                    if _row_is_empty(row):
+                        continue
+                    code = _s(row[i_code] if i_code < len(row) else None)
+                    if not code:
+                        continue
+                    entry = {"code": code}
+                    if i_desc is not None and i_desc < len(row):
+                        desc = _s(row[i_desc])
+                        if desc:
+                            entry["description"] = desc
+                    if i_treat is not None and i_treat < len(row):
+                        treat = _s(row[i_treat])
+                        if treat:
+                            entry["treatment"] = treat
+                    ctx.tax_codes.append(entry)
 
         return ctx
     finally:
@@ -289,8 +318,16 @@ def entity_memory_from_state(state: dict) -> list[EntityMemoryEntry]:
             mapping_code=d.get("mapping_code"),
             role=d.get("role"),
             tax_code=d.get("tax_code"),
+            creditor_code=d.get("creditor_code"),
         ))
     return out
+
+
+def tax_codes_from_state(state: dict) -> list[dict]:
+    raw = state.get("tax_codes") or []
+    if isinstance(raw, dict):
+        return [{"code": code, "description": desc} for code, desc in raw.items()]
+    return [dict(entry) for entry in raw]
 
 
 def category_mapping_from_state(state: dict) -> dict[str, Optional[str]]:
@@ -309,8 +346,14 @@ def _profile_tax_registered(profile: dict) -> Optional[bool]:
     return None
 
 
+def _jurisdiction_helpers():
+    from accounting_agents.jurisdiction import REGION_REGISTRY, _norm_region
+    return REGION_REGISTRY, _norm_region
+
+
 def _profile_region_and_currency(profile: dict) -> tuple[str, str]:
     """Resolve region + base_currency from a profile dict (Firestore/onboarding)."""
+    REGION_REGISTRY, _norm_region = _jurisdiction_helpers()
     raw_region = profile.get("region")
     if raw_region:
         region = _norm_region(raw_region)
@@ -334,6 +377,7 @@ def _profile_region_and_currency(profile: dict) -> tuple[str, str]:
 
 def _state_region_and_currency(state: dict) -> tuple[str, str]:
     """Resolve region + base_currency from session state."""
+    REGION_REGISTRY, _norm_region = _jurisdiction_helpers()
     raw_region = state.get("region") or state.get("client_region") or ""
     region = _norm_region(raw_region) if raw_region else ""
     if not region:
@@ -374,6 +418,7 @@ def client_context_from_state(state: dict) -> ClientContext:
         coa=coa_from_state(state),
         category_mapping=category_mapping_from_state(state),
         entity_memory=entity_memory_from_state(state),
+        tax_codes=tax_codes_from_state(state),
     )
 
 
@@ -484,8 +529,9 @@ class InMemoryClientStore:
 
     def add_correction(self, *, client_id: str, vendor: str,
                        account_code: Optional[str] = None,
-                       tax_code: Optional[str] = None) -> None:
-        """Upsert a per-client vendor -> {account_code, tax_code} Correction.
+                       tax_code: Optional[str] = None,
+                       creditor_code: Optional[str] = None) -> None:
+        """Upsert a per-client vendor -> {account_code, tax_code, creditor_code} Correction.
 
         Mirrors :meth:`FirestoreClientStore.add_correction` for the in-process
         store so tests / local dev can exercise the HITL learning hook
@@ -503,9 +549,14 @@ class InMemoryClientStore:
                     e.mapping_code = account_code
                 if tax_code:
                     e.tax_code = tax_code
+                if creditor_code:
+                    e.creditor_code = creditor_code
                 return
         ctx.entity_memory.append(EntityMemoryEntry(
-            name=vendor, mapping_code=account_code, tax_code=tax_code,
+            name=vendor,
+            mapping_code=account_code,
+            tax_code=tax_code,
+            creditor_code=creditor_code,
         ))
 
     # ---------------------------------------------------------------------- #
@@ -760,6 +811,7 @@ class FirestoreClientStore:
             status=data.get("status"),
             # category_mapping is a map field on the client doc (spec §1), not a subcollection.
             category_mapping=dict(data.get("category_mapping") or {}),
+            tax_codes=list(data.get("tax_codes") or []),
             # sys_config kept as empty dict for back-compat; profile fields are now explicit above.
             sys_config={},
         )
@@ -788,6 +840,7 @@ class FirestoreClientStore:
                 mapping_code=d.get("mapping_code"),
                 role=d.get("role"),
                 tax_code=d.get("tax_code"),
+                creditor_code=d.get("creditor_code"),
             ))
 
         return ctx
@@ -887,8 +940,9 @@ class FirestoreClientStore:
 
     def add_correction(self, *, client_id: str, vendor: str,
                        account_code: Optional[str] = None,
-                       tax_code: Optional[str] = None) -> None:
-        """Upsert a per-client vendor -> {account_code, tax_code} Correction.
+                       tax_code: Optional[str] = None,
+                       creditor_code: Optional[str] = None) -> None:
+        """Upsert a per-client vendor -> {account_code, tax_code, creditor_code} Correction.
 
         ADR-0004: when a human edits an extracted invoice's account_code or
         tax_code, that mapping is persisted as a Correction under
@@ -911,6 +965,8 @@ class FirestoreClientStore:
             patch["mapping_code"] = account_code
         if tax_code:
             patch["tax_code"] = tax_code
+        if creditor_code:
+            patch["creditor_code"] = creditor_code
         ref.set(patch, merge=True)
 
     # ---------------------------------------------------------------------- #

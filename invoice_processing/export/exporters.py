@@ -18,13 +18,22 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
+import yaml
 from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
 
+from .code_resolver import (
+    resolve_creditor_code,
+    resolve_rate_for_line,
+    resolve_tax_code,
+)
+from .client_context import EntityMemoryEntry
 from .models import BankStatement, InvoiceLine, NormalizedInvoice
 from .tax_classifier import TaxClassifier, classify_invoice
+
+_ERP_PROFILES_DIR = Path(__file__).resolve().parent.parent / "shared_libraries" / "erp_profiles"
 
 
 def _fmt_date(d) -> str:
@@ -290,7 +299,126 @@ class XeroLedgerExporter(LedgerExporter):
         return row
 
 
-EXPORTERS = {"qbs": QbsLedgerExporter, "xero": XeroLedgerExporter}
+def _load_erp_profile(profile_name: str) -> dict[str, Any]:
+    path = _ERP_PROFILES_DIR / profile_name
+    with open(path, encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+class ProfileLedgerExporter(LedgerExporter):
+    """Generic exporter driven by a declarative ERP profile YAML."""
+
+    def __init__(
+        self,
+        profile: dict[str, Any],
+        classifier: Optional[TaxClassifier] = None,
+    ):
+        super().__init__(classifier)
+        self._profile = profile
+        self.system = profile["system"]
+        self.software_name = profile["software_name"]
+        self.purchase_cols = list(profile["purchase_cols"])
+        self.sales_cols = list(profile["sales_cols"])
+        self._purchase_fields = dict(profile.get("purchase_fields") or {})
+        self._sales_fields = dict(profile.get("sales_fields") or {})
+        self._client_tax_codes: list[dict] | dict[str, str] | None = None
+        self._entity_memory: list[EntityMemoryEntry] = []
+
+    def configure_client_context(
+        self,
+        *,
+        tax_codes: list[dict] | dict[str, str] | None = None,
+        entity_memory: list[EntityMemoryEntry] | None = None,
+    ) -> None:
+        self._client_tax_codes = tax_codes
+        self._entity_memory = list(entity_memory or [])
+
+    def required_fields(self, doc_type: str) -> list[str]:
+        key = "required_sales" if doc_type == "sales" else "required_purchase"
+        return list(self._profile.get(key) or [])
+
+    def _field_map(self, doc_type: str) -> dict[str, str]:
+        return self._sales_fields if doc_type == "sales" else self._purchase_fields
+
+    def _row_context(
+        self,
+        inv: NormalizedInvoice,
+        line: InvoiceLine,
+        doc_type: str,
+    ) -> dict[str, Any]:
+        rate = resolve_rate_for_line(self.clf, line, inv)
+        tax_code = resolve_tax_code(
+            line.tax_treatment,
+            rate=rate,
+            doc_type=doc_type,
+            software=self.system,
+            client_tax_codes=self._client_tax_codes,
+            classifier=self.clf,
+        )
+        party = inv.counterparty
+        creditor_code = ""
+        debtor_code = ""
+        if doc_type == "purchase":
+            creditor_code = (
+                party.vendor_code
+                or resolve_creditor_code(party.name, party.gst_regno, self._entity_memory)
+            )
+        else:
+            debtor_code = (
+                party.vendor_code
+                or resolve_creditor_code(party.name, party.gst_regno, self._entity_memory)
+            )
+        net = _line_net_amount(line, inv)
+        tax = _tax_amount(line, inv, self.clf)
+        fx = inv.fx_rate if inv.fx_rate is not None else ""
+        return {
+            "invoice_number": inv.invoice_number or "",
+            "invoice_date": _fmt_date(inv.invoice_date),
+            "due_date": _fmt_date(inv.due_date or inv.invoice_date),
+            "vendor_name": inv.supplier.name or "",
+            "customer_name": inv.customer.name or "",
+            "entity_tax_id": party.gst_regno or "",
+            "description": line.description,
+            "sub_total": net,
+            "tax_amount": tax,
+            "total_amount": round(net + tax, 2),
+            "account_code": line.account_code or "",
+            "tax_code": tax_code,
+            "creditor_code": creditor_code,
+            "debtor_code": debtor_code,
+            "currency": inv.currency,
+            "currency_rate": fx,
+        }
+
+    def _profile_row(self, inv: NormalizedInvoice, line: InvoiceLine, doc_type: str) -> dict:
+        context = self._row_context(inv, line, doc_type)
+        field_map = self._field_map(doc_type)
+        cols = self.sales_cols if doc_type == "sales" else self.purchase_cols
+        return {col: context.get(field_map.get(col, ""), "") for col in cols}
+
+    def _purchase_row(self, inv, line):
+        return self._profile_row(inv, line, "purchase")
+
+    def _sales_row(self, inv, line):
+        return self._profile_row(inv, line, "sales")
+
+
+class AutoCountExporter(ProfileLedgerExporter):
+    def __init__(self, classifier: Optional[TaxClassifier] = None):
+        super().__init__(_load_erp_profile("autocount.yaml"), classifier)
+
+
+class SqlAccountExporter(ProfileLedgerExporter):
+    def __init__(self, classifier: Optional[TaxClassifier] = None):
+        super().__init__(_load_erp_profile("sql_account.yaml"), classifier)
+
+
+EXPORTERS = {
+    "qbs": QbsLedgerExporter,
+    "xero": XeroLedgerExporter,
+    "autocount": AutoCountExporter,
+    "sql_account": SqlAccountExporter,
+}
 
 # Maps every known display/alias form (lowercased, stripped) to the canonical exporter key.
 _SOFTWARE_ALIASES: dict[str, str] = {
@@ -300,6 +428,10 @@ _SOFTWARE_ALIASES: dict[str, str] = {
     "xero": "xero",
     "xero ledger": "xero",
     "xeroledger": "xero",
+    "autocount": "autocount",
+    "sql account": "sql_account",
+    "sql_account": "sql_account",
+    "sqlaccount": "sql_account",
 }
 
 
@@ -314,11 +446,9 @@ def normalize_software_key(value: Optional[str]) -> Optional[str]:
 
 def get_exporter(system: str, classifier: Optional[TaxClassifier] = None) -> LedgerExporter:
     key = normalize_software_key(system)
-    if key == "xero":
-        return XeroLedgerExporter(classifier)
-    if key == "qbs":
-        return QbsLedgerExporter(classifier)
-    raise ValueError(f"unknown export system '{system}'; have {list(EXPORTERS)}")
+    if key is None:
+        raise ValueError(f"unknown export system '{system}'; have {list(EXPORTERS)}")
+    return EXPORTERS[key](classifier)
 
 
 # Map exporter column headers to readable snake_case names for review notes.
@@ -331,6 +461,11 @@ _FIELD_LABELS = {
     "Invoice Number": "invoice_number", "Invoice Date": "invoice_date",
     "Sub Total": "sub_total", "Total Amount": "total", "Amount": "amount", "Total": "total",
     "Account Code / COA": "account_code",
+    "Tax Code": "tax_code",
+    "Creditor Code": "creditor_code",
+    "Debtor Code": "debtor_code",
+    "Acc No": "account_code",
+    "Account Code": "account_code",
 }
 
 
@@ -378,6 +513,44 @@ def validate_required_fields(
             for i in empty_lines:
                 missing.append(f"{label} (line {i})")
     return missing
+
+
+def collect_export_unmapped_summary(
+    batches: list[dict],
+    exporter: LedgerExporter,
+) -> dict:
+    """Collect export rows with blank required tax/creditor columns."""
+    details: list[dict] = []
+    for batch in batches:
+        sheet = batch.get("sheet") or "Purchase"
+        row_doc_type = "sales" if sheet == "Sales" else "purchase"
+        required = exporter.required_fields(row_doc_type)
+        for idx, row in enumerate(batch.get("rows") or [], start=1):
+            missing = [col for col in required if _is_empty(row.get(col, ""))]
+            if missing:
+                details.append(
+                    {
+                        "sheet": sheet,
+                        "row": idx,
+                        "missing": missing,
+                        "invoice_number": row.get("Doc No")
+                        or row.get("Invoice Number")
+                        or row.get("*InvoiceNumber")
+                        or "",
+                    }
+                )
+    return {"count": len(details), "details": details}
+
+
+def format_unmapped_export_note(summary: dict | None) -> str:
+    """Human-readable note for approval / delivery cards."""
+    if not summary:
+        return ""
+    count = int(summary.get("count") or 0)
+    if count <= 0:
+        return ""
+    noun = "row" if count == 1 else "rows"
+    return f"{count} {noun} need creditor or tax codes before ERP import"
 
 
 _SHEET_INVALID = str.maketrans({c: None for c in "[]:*?/\\"})

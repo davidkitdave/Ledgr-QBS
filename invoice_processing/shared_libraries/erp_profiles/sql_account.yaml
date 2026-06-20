@@ -1,0 +1,54 @@
+software_name: SQL Account
+system: sql_account
+purchase_cols:
+  - Doc No
+  - Doc Date
+  - Creditor Code
+  - Description
+  - Amount
+  - Tax Amount
+  - Tax Code
+  - Account Code
+  - Currency
+sales_cols:
+  - Doc No
+  - Doc Date
+  - Debtor Code
+  - Description
+  - Amount
+  - Tax Amount
+  - Tax Code
+  - Account Code
+  - Currency
+required_purchase:
+  - Doc No
+  - Doc Date
+  - Creditor Code
+  - Tax Code
+  - Account Code
+required_sales:
+  - Doc No
+  - Doc Date
+  - Debtor Code
+  - Tax Code
+  - Account Code
+purchase_fields:
+  Doc No: invoice_number
+  Doc Date: invoice_date
+  Creditor Code: creditor_code
+  Description: description
+  Amount: sub_total
+  Tax Amount: tax_amount
+  Tax Code: tax_code
+  Account Code: account_code
+  Currency: currency
+sales_fields:
+  Doc No: invoice_number
+  Doc Date: invoice_date
+  Debtor Code: debtor_code
+  Description: description
+  Amount: sub_total
+  Tax Amount: tax_amount
+  Tax Code: tax_code
+  Account Code: account_code
+  Currency: currency

@@ -51,9 +51,12 @@ from invoice_processing.export.client_context import (
     category_mapping_from_state,
     coa_from_state,
     entity_memory_from_state,
+    tax_codes_from_state,
 )
 from invoice_processing.export.exporters import (
     bank_sheet_title,
+    collect_export_unmapped_summary,
+    format_unmapped_export_note,
     get_bank_exporter,
     get_exporter,
     normalize_software_key,
@@ -1774,6 +1777,37 @@ def _needs_review(state: dict) -> tuple[bool, list[str]]:
     return (bool(reasons), reasons)
 
 
+def _preview_export_unmapped(state: dict) -> dict:
+    """Build export rows early (pre-route) to flag blank tax/creditor codes."""
+    doc_type = (state.get(DOC_TYPE_KEY) or "").strip().lower()
+    if doc_type == "bank_statement":
+        return {"count": 0, "details": []}
+
+    software = state.get("software")
+    _software_key = normalize_software_key(software)
+    if _software_key is None:
+        _software_key = "qbs"
+
+    _rates = state.get(JURISDICTION_RATES_KEY) or {}
+    _ref_yaml = _rates.get("reference_yaml") or state.get(TAX_JURISDICTION_KEY) or None
+    classifier = get_tax_classifier(_ref_yaml)
+    exporter = get_exporter(_software_key, classifier=classifier)
+    if hasattr(exporter, "configure_client_context"):
+        exporter.configure_client_context(
+            tax_codes=tax_codes_from_state(state),
+            entity_memory=entity_memory_from_state(state),
+        )
+
+    direction = state.get(DIRECTION_KEY) or "purchase"
+    default_sheet = "Sales" if direction == "sales" else "Purchase"
+    batches: list[dict] = []
+    for inv in _normalized_from_state(state):
+        row_doc_type = "sales" if default_sheet == "Sales" else "purchase"
+        rows = exporter.rows([inv], row_doc_type)
+        batches.append({"sheet": default_sheet, "rows": rows})
+    return collect_export_unmapped_summary(batches, exporter)
+
+
 def _approval_interrupt_id(state: dict) -> str:
     """Stable interrupt id correlating the pause with the Slack drop.
 
@@ -1788,14 +1822,18 @@ def _approval_interrupt_id(state: dict) -> str:
     return f"{channel}:{file_id}"
 
 
-def _approval_summary(reasons: list[str]) -> str:
+def _approval_summary(reasons: list[str], *, export_unmapped: dict | None = None) -> str:
     """Human-readable summary of why the document needs approval."""
     header = (
         "Please review the proposed accounting entries — the following need a "
         "human decision before they are added to the ledger:"
     )
     bullets = "\n".join(f"  • {r}" for r in reasons)
-    return f"{header}\n{bullets}"
+    summary = f"{header}\n{bullets}"
+    unmapped_note = format_unmapped_export_note(export_unmapped)
+    if unmapped_note:
+        summary = f"{summary}\n\n  • {unmapped_note}"
+    return summary
 
 
 def _read_preview_from_state(state: dict, *, max_fields: int = 8) -> str:
@@ -1871,7 +1909,13 @@ async def approval_gate(ctx):
             " — review before posting."
         ]
 
-    summary = _approval_summary(reasons)
+    export_unmapped = _preview_export_unmapped(ctx.state)
+    ctx.state["export_unmapped_summary"] = export_unmapped
+
+    summary = _approval_summary(
+        reasons,
+        export_unmapped=export_unmapped,
+    )
     read_preview = _read_preview_from_state(ctx.state)
     if read_preview:
         summary = f"{read_preview}\n\n{summary}"
@@ -1945,6 +1989,7 @@ async def consolidate_node(ctx) -> Event:
             )
     else:
         kind = "invoice"
+        export_unmapped = {}
         # Guard: get_exporter raises ValueError for None/unknown; default to "qbs"
         # so the pipeline completes in the playground (no client profile seeded yet
         # at consolidate time) and in any other no-software scenario.
@@ -1967,6 +2012,11 @@ async def consolidate_node(ctx) -> Event:
         _ref_yaml = _rates.get("reference_yaml") or state.get(TAX_JURISDICTION_KEY) or None
         classifier = get_tax_classifier(_ref_yaml)
         exporter = get_exporter(software, classifier=classifier)
+        if hasattr(exporter, "configure_client_context"):
+            exporter.configure_client_context(
+                tax_codes=tax_codes_from_state(state),
+                entity_memory=entity_memory_from_state(state),
+            )
         invoices = _normalized_from_state(state)
         for idx, (inv, route) in enumerate(zip(invoices, routes)):
             sheet = route.get("sheet") or "Purchase"
@@ -1979,6 +2029,8 @@ async def consolidate_node(ctx) -> Event:
                     "rows": rows,
                 }
             )
+        export_unmapped = collect_export_unmapped_summary(batches, exporter)
+        state["export_unmapped_summary"] = export_unmapped
 
     payload = {
         "client_id": client_id,
@@ -1996,6 +2048,7 @@ async def consolidate_node(ctx) -> Event:
         # directly (deliver_node never ran).  Used to gate the confident-path note.
         "delivered": bool(state.get("delivered")),
         "batches": batches,
+        "export_unmapped_summary": export_unmapped if kind == "invoice" else {},
     }
     state[LEDGER_ROWS_KEY] = payload
     state["consolidated_count"] = len(batches)
@@ -2199,7 +2252,11 @@ def compose_confident_note(
     parts = [p for p in [total_str, coded_str] if p]
     detail = " — " + ", ".join(parts) if parts else ""
 
-    return f"Posted this {doc_label} — {line_str}{detail}."
+    note = f"Posted this {doc_label} — {line_str}{detail}."
+    unmapped_note = format_unmapped_export_note(payload.get("export_unmapped_summary"))
+    if unmapped_note:
+        note = f"{note} {unmapped_note}."
+    return note
 
 
 @node

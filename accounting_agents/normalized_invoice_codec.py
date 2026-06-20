@@ -68,6 +68,7 @@ def _party_from_dict(d: Optional[dict[str, Any]]) -> PartyInfo:
         country=d.get("country"),
         gst_regno=d.get("gst_regno"),
         email=d.get("email"),
+        vendor_code=d.get("vendor_code"),
     )
 
 
