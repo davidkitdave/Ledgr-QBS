@@ -69,6 +69,14 @@ class TestResolveJurisdiction:
         assert res.jurisdiction.rate_band_label == "8% SST"
         assert res.jurisdiction.flag_for_human is False
 
+    def test_malaysia_pre_2024_flat_6pct_service_tax(self):
+        """Regime 1: flat 6% service tax before 2024-03-01."""
+        from accounting_agents.jurisdiction import _current_standard_rate
+
+        rate, label = _current_standard_rate("my_sst.yaml", on=date(2023, 6, 1))
+        assert rate == pytest.approx(0.06)
+        assert "6%" in label
+
     def test_cross_border_sg_client_my_supplier_auto_books(self):
         """SG client + MY supplier → CROSS_BORDER, auto-book (flag_for_human=False)."""
         res = resolve_jurisdiction(

@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 from datetime import date
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import yaml
 
@@ -82,6 +82,29 @@ def get_tax_classifier(reference_yaml: Optional[str] = None) -> "TaxClassifier":
     return TaxClassifier(taxonomy=_load_taxonomy(yaml_name))
 
 
+def _band_end(band: dict[str, Any]) -> date:
+    raw = band.get("to")
+    return date.fromisoformat(raw) if raw else date.max
+
+
+def _bands_active_on(bands: list[dict[str, Any]], d: date) -> list[dict[str, Any]]:
+    active: list[dict[str, Any]] = []
+    for band in bands:
+        frm = date.fromisoformat(band["from"])
+        if frm <= d <= _band_end(band):
+            active.append(band)
+    return active
+
+
+def _is_standard_scope(scope: Any) -> bool:
+    s = str(scope or "").strip().lower()
+    return s in ("standard", "all", "")
+
+
+def _is_carve_out_scope(scope: Any) -> bool:
+    return "carve" in str(scope or "").lower()
+
+
 class TaxClassifier:
     """Classifies invoice lines to canonical SG GST treatments and maps to a target system."""
 
@@ -91,22 +114,176 @@ class TaxClassifier:
         self._home_country = str(self.tax.get("home_country") or "SG").strip().upper()
         self._threshold = self.tax["review"]["confidence_threshold"]
         self._rate_tol = self.tax["review"]["rate_tolerance"]
+        self._rate_keyword_set = self.rate_keyword_strings()
 
     # -- rate by time-of-supply -------------------------------------------------
     def _party_is_overseas(self, party) -> Optional[bool]:
         return party.is_overseas_for(self._home_country)
 
-    def rate_for_date(self, d: Optional[date]) -> float:
-        """Standard GST rate applicable on the invoice date (defaults to latest)."""
-        bands = self.tax["rate_by_date"]
+    def collect_all_rates(self) -> set[float]:
+        """Every numeric rate band declared in the taxonomy YAML."""
+        rates: set[float] = set()
+        for band in self.tax.get("rate_by_date") or []:
+            rates.add(float(band["rate"]))
+        for band in self.tax.get("sales_tax") or []:
+            rates.add(float(band["rate"]))
+        for band in self.tax.get("imported_service_tax") or []:
+            rates.add(float(band["rate"]))
+        return rates
+
+    def rate_keyword_strings(self) -> frozenset[str]:
+        """Percent strings (e.g. ``8%``) built from YAML rate bands — not hardcoded."""
+        return frozenset(f"{int(round(r * 100))}%" for r in self.collect_all_rates())
+
+    def sales_tax_rates(self) -> list[float]:
+        return [float(b["rate"]) for b in self.tax.get("sales_tax") or []]
+
+    def _service_rates_for_date(self, d: Optional[date]) -> list[float]:
+        ref = d or date.today()
+        bands = _bands_active_on(self.tax.get("rate_by_date") or [], ref)
+        return sorted({float(b["rate"]) for b in bands})
+
+    def _is_dual_service_rate_period(self, d: Optional[date]) -> bool:
+        return len(self._service_rates_for_date(d)) > 1
+
+    def _carve_out_rate_for_date(self, d: Optional[date]) -> Optional[float]:
+        ref = d or date.today()
+        carve = [
+            float(b["rate"])
+            for b in _bands_active_on(self.tax.get("rate_by_date") or [], ref)
+            if _is_carve_out_scope(b.get("scope"))
+        ]
+        return max(carve) if carve else None
+
+    def standard_rate_for_date(self, d: Optional[date]) -> float:
+        """Standard (non-carve-out) service/GST rate on the invoice date."""
+        bands = self.tax.get("rate_by_date") or []
         if d is None:
-            return bands[-1]["rate"]
-        for band in bands:
-            frm = date.fromisoformat(band["from"])
-            to = date.fromisoformat(band["to"]) if band["to"] else date.max
-            if frm <= d <= to:
-                return band["rate"]
-        return bands[-1]["rate"]
+            active = bands
+        else:
+            active = _bands_active_on(bands, d)
+        if not active:
+            return float(bands[-1]["rate"])
+        standard = [b for b in active if _is_standard_scope(b.get("scope"))]
+        pool = standard if standard else active
+        return max(float(b["rate"]) for b in pool)
+
+    def rate_for_date(self, d: Optional[date]) -> float:
+        """Standard rate applicable on the invoice date (defaults to latest)."""
+        return self.standard_rate_for_date(d)
+
+    def imported_rate_for_date(self, d: Optional[date]) -> float:
+        bands = self.tax.get("imported_service_tax") or []
+        if not bands:
+            return self.standard_rate_for_date(d)
+        ref = d or date.today()
+        active = _bands_active_on(bands, ref)
+        if active:
+            return float(active[-1]["rate"])
+        return float(bands[-1]["rate"])
+
+    def allowed_rates_for_treatment(
+        self,
+        treatment: str,
+        line: InvoiceLine,
+        inv: NormalizedInvoice,
+    ) -> list[float]:
+        """Rates that reconcile for a given treatment on this line."""
+        d = inv.invoice_date
+        if treatment == "SSR":
+            return self.sales_tax_rates()
+        if treatment == "IM":
+            return [self.imported_rate_for_date(d)]
+        if treatment == "SR":
+            rates = [self.standard_rate_for_date(d)]
+            carve = self._carve_out_rate_for_date(d)
+            if carve and (
+                self._matches(line.description or "", "carve_out")
+                or not self._is_dual_service_rate_period(d)
+            ):
+                rates.append(carve)
+            return sorted(set(rates))
+        return []
+
+    def _rate_match_error(self, line: InvoiceLine, rate: float) -> float:
+        """Fractional |gst - net*rate| / max(|net|, 1)."""
+        if not line.gst_amount or not line.net_amount:
+            return float("inf")
+        expected = line.net_amount * rate
+        denom = max(abs(line.net_amount), 1.0)
+        return abs(line.gst_amount - expected) / denom
+
+    def _best_rate_match(
+        self,
+        line: InvoiceLine,
+        rates: list[float],
+    ) -> Optional[tuple[float, float]]:
+        """Return (rate, error) for the closest rate within tolerance, else None."""
+        best_rate: Optional[float] = None
+        best_err = float("inf")
+        for rate in rates:
+            err = self._rate_match_error(line, rate)
+            if err <= self._rate_tol and err < best_err:
+                best_rate = rate
+                best_err = err
+        if best_rate is None:
+            return None
+        return best_rate, best_err
+
+    def _gst_matches_any_rate(self, line: InvoiceLine, rates: list[float]) -> bool:
+        if not rates:
+            return True
+        return self._best_rate_match(line, rates) is not None
+
+    def _reconcile_tax_line(
+        self,
+        line: InvoiceLine,
+        inv: NormalizedInvoice,
+    ) -> Optional[tuple[str, float, str]]:
+        """If gst/net matches a known band, return (treatment, rate, reason)."""
+        if not line.gst_amount or not line.net_amount:
+            return None
+        desc = line.description or ""
+        candidates: list[tuple[str, float, float]] = []
+
+        for rate in self.sales_tax_rates():
+            match = self._best_rate_match(line, [rate])
+            if match:
+                candidates.append(("SSR", rate, match[1]))
+
+        carve = self._carve_out_rate_for_date(inv.invoice_date)
+        dual = self._is_dual_service_rate_period(inv.invoice_date)
+        if carve and self._matches(desc, "carve_out"):
+            match = self._best_rate_match(line, [carve])
+            if match:
+                candidates.append(("SR", carve, match[1]))
+
+        std = self.standard_rate_for_date(inv.invoice_date)
+        match = self._best_rate_match(line, [std])
+        if match:
+            candidates.append(("SR", std, match[1]))
+
+        if not dual:
+            for rate in self._service_rates_for_date(inv.invoice_date):
+                match = self._best_rate_match(line, [rate])
+                if match:
+                    candidates.append(("SR", rate, match[1]))
+
+        if not candidates:
+            return None
+        treatment, rate, err = min(candidates, key=lambda c: c[2])
+        if treatment == "SSR":
+            return (treatment, rate, f"SSR: tax reconciles to sales tax {rate:.0%}")
+        if rate == carve and self._matches(desc, "carve_out"):
+            return (treatment, rate, f"SR: tax reconciles to carve-out rate {rate:.0%}")
+        return (treatment, rate, f"SR: tax reconciles to standard rate {rate:.0%}")
+
+    def _sr_tax_keyword_match(self, kw: str) -> bool:
+        if kw == "g" or kw == "gst" or kw.startswith("sr") or kw.startswith("tx"):
+            return True
+        if "standard" in kw:
+            return True
+        return any(rk in kw for rk in self._rate_keyword_set)
 
     # -- signal matching --------------------------------------------------------
     def _matches(self, text: str, key: str) -> bool:
@@ -143,14 +320,16 @@ class TaxClassifier:
         else:
             code, conf, flag, reason = self._classify_purchase(line, inv)
 
-        # Arithmetic check: if a positive GST is shown, confirm gst ~= net * rate.
-        if line.gst_amount and line.net_amount and code in ("SR",):
-            rate = self.rate_for_date(inv.invoice_date)
-            expected = line.net_amount * rate
-            denom = max(abs(line.net_amount), 1.0)
-            if abs(line.gst_amount - expected) / denom > self._rate_tol:
+        # Arithmetic check: positive tax must reconcile to an allowed band.
+        if line.gst_amount and line.net_amount and code in ("SR", "SSR", "IM"):
+            allowed = self.allowed_rates_for_treatment(code, line, inv)
+            if allowed and not self._gst_matches_any_rate(line, allowed):
                 flag = True
-                reason = f"{reason}; GST {line.gst_amount} != net*{rate} ({expected:.2f})"
+                actual = line.gst_amount / line.net_amount
+                reason = (
+                    f"{reason}; tax {line.gst_amount} != net*{allowed} "
+                    f"(actual {actual:.2%})"
+                )
 
         line.tax_treatment = code
         line.tax_confidence = conf
@@ -210,8 +389,8 @@ class TaxClassifier:
                 if flag:
                     reason += f"; but gst_amount={line.gst_amount} > 0 — review"
                 return "NT", 0.95, flag, reason
-            # SR: bare "g" (GST standard-rated), "gst", starts-with "sr"/"tx", or rate%.
-            if kw == "g" or kw == "gst" or kw.startswith("sr") or kw.startswith("tx") or "9%" in kw or "8%" in kw or "7%" in kw or "standard" in kw:
+            # SR: bare "g" (GST standard-rated), "gst", starts-with "sr"/"tx", or YAML rate%.
+            if self._sr_tax_keyword_match(kw):
                 return "SR", 0.95, False, f"SR: explicit tax_keyword '{line.tax_keyword}'"
 
         # 1. Explicit zero-rated / international service (telco IDD, freight, export).
@@ -223,8 +402,12 @@ class TaxClassifier:
         # 6 (explicit no-tax wording).
         if self._matches(desc, "no_tax"):
             return "NT", 0.85, False, "NT: no-tax/out-of-scope signal"
-        # 2. Positive GST amount + supplier GST-registered -> standard-rated input.
+        # 2. Positive GST amount — reconcile to a known SST/GST band when possible.
         if gst and gst > 0:
+            reconciled = self._reconcile_tax_line(line, inv)
+            if reconciled:
+                treatment, _rate, reason = reconciled
+                return treatment, 0.85, False, reason
             if supplier.gst_registered:
                 return "SR", 0.92, False, "SR: GST line + supplier GST-registered"
             # GST shown + explicit standard-rate wording on the invoice -> SR, no flag.
@@ -305,8 +488,8 @@ class TaxClassifier:
                 if flag:
                     reason += f"; but gst_amount={line.gst_amount} > 0 — review"
                 return "NT", 0.95, flag, reason
-            # SR: bare "g" (GST standard-rated), "gst", starts-with "sr"/"tx", or rate%.
-            if kw == "g" or kw == "gst" or kw.startswith("sr") or kw.startswith("tx") or "9%" in kw or "8%" in kw or "7%" in kw or "standard" in kw:
+            # SR: bare "g" (GST standard-rated), "gst", starts-with "sr"/"tx", or YAML rate%.
+            if self._sr_tax_keyword_match(kw):
                 return "SR", 0.95, False, f"SR: explicit tax_keyword '{line.tax_keyword}'"
 
         # 2. Export / international service -> zero-rated (verify §21(3) fit).
@@ -324,11 +507,41 @@ class TaxClassifier:
         return "SR", 0.9, False, "SR: local standard-rated supply"
 
     # -- target-system code string ---------------------------------------------
-    def tax_code(self, treatment: str, doc_type: str, system: str) -> str:
-        """Map a canonical treatment to the target system's tax-code string."""
+    def tax_code(
+        self,
+        treatment: str,
+        doc_type: str,
+        system: str,
+        *,
+        rate: Optional[float] = None,
+    ) -> str:
+        """Map a canonical treatment to the target system's tax-code string.
+
+        ``code_map`` values may be a flat string or a rate-keyed sub-map
+        (AutoCount ``SV-6`` / ``SV-8``).
+        """
+        if not treatment:
+            return ""
         direction = "sales" if doc_type == "sales" else "purchase"
-        table = self.tax["code_map"][system][direction]
-        return table.get(treatment, "")
+        code_maps = self.tax.get("code_map") or {}
+        system_map = code_maps.get(system) or {}
+        table = system_map.get(direction) or {}
+        entry = table.get(treatment)
+        if entry is None:
+            return ""
+        if isinstance(entry, dict):
+            if rate is not None:
+                key = f"{rate:.2f}"
+                if key in entry:
+                    return str(entry[key])
+                pct_key = str(int(round(rate * 100)))
+                if pct_key in entry:
+                    return str(entry[pct_key])
+            default = entry.get("default")
+            if default:
+                return str(default)
+            return ""
+        return str(entry)
 
 
 def classify_invoice(inv: NormalizedInvoice, classifier: Optional[TaxClassifier] = None) -> NormalizedInvoice:

@@ -1,40 +1,46 @@
 # Malaysia SST (Sales Tax & Service Tax) reference data.
 #
-# Used as:
-#   1. LLM tax-reasoning context — the per-region rate bands + code_map are
-#      surfaced to the tax agent as part of its instructions so the LLM can
-#      validate the math (e.g. 4.81 ≈ 8% of 60.19) and pick the right
-#      treatment label (SR/SSR/ST/ZR/ES/NT).
-#   2. Python rate-guard validation — tax_node reads `rate_by_date` to compare
-#      the LLM's per-line tax_confidence + arithmetic to a numerical tolerance.
+# Rate truth (verified 2026-06-20 against RMCD/MOF + Big-4 advisories):
+#   * Service Tax — 6% flat 2018-09-01→2024-02-29; from 2024-03-01 dual 8%
+#     standard + 6% carve-out (F&B core prep, telecom, parking, logistics);
+#     2025-07-01 scope expansion (PU(A) 172/2025) keeps same 6%/8% bands.
+#   * Sales Tax — 10% standard goods (default), 5% essential/reduced goods.
+#   * Imported taxable services (reverse charge, treatment IM) — 6% pre-2024-03,
+#     8% from 2024-03-01.
 #
-# Per JPJ / KPDN / RMCD guidance (consolidated):
-#   * Service Tax (Act 738) — flat 8% on prescribed taxable services.
-#     Effective rate 8% from 01-09-2018 (replaced GST); 6% was the prior
-#     pre-2018 transitional band (kept for very old invoices).
-#   * Sales Tax (Act 2018) — variable 5%/10%/non-standard on manufactured
-#     goods.  Sales Tax is rarely seen on a service-style receipt.
-#   * Tourism Tax — flat RM10/room/night on hotel stays.
-#
-# This file deliberately stays SLIM (rates + code_map) — the LLM does the
-# per-line treatment reasoning from the document; Python only does the
-# arithmetic check. No 300-line rule spaghetti.
+# Used for LLM tax context, Python rate guards, and ERP code_map seeds (WS5).
 
 tax_system: SST
 home_country: MY
+
 registration_threshold:
   amount: 500000
   currency: MYR
   label: "MY SST registration (Service Tax Act 2018)"
+  rental_or_leasing: 1000000
+  financial_services: 1000000
+  construction: 1500000
+  private_healthcare: 1500000
 
-# Service Tax band by time of supply. Currently 8% flat since 2018-09-01.
+# Service tax bands by time of supply. Concurrent bands share a date range.
 rate_by_date:
-  - { from: "2018-09-01", to: null, rate: 0.08 }
+  # Regime 1 — flat 6%
+  - { from: "2018-09-01", to: "2024-02-29", rate: 0.06, scope: all }
+  # Regime 2 — 8% standard + 6% carve-out
+  - { from: "2024-03-01", to: "2025-06-30", rate: 0.08, scope: standard }
+  - { from: "2024-03-01", to: "2025-06-30", rate: 0.06, scope: carve_out }
+  # Regime 3 — 2025-07-01 expansion, same bands
+  - { from: "2025-07-01", to: null, rate: 0.08, scope: standard }
+  - { from: "2025-07-01", to: null, rate: 0.06, scope: carve_out }
 
-# Canonical treatments for Malaysia. Kept distinct from SG's vocabulary to
-# preserve audit clarity; the LLM agent maps doc-language ("Service Tax 8%",
-# "SST", "(SR)") to these codes. Cross-border (import/reverse-charge) flows
-# back to "OS" or "EXEMPT" depending on direction.
+sales_tax:
+  - { rate: 0.10, scope: standard, default: true }
+  - { rate: 0.05, scope: reduced }
+
+imported_service_tax:
+  - { from: "2018-09-01", to: "2024-02-29", rate: 0.06 }
+  - { from: "2024-03-01", to: null, rate: 0.08 }
+
 treatments:
   SR: { name: "Standard-Rated (Service Tax)", claimable: true,  zero_rate: false }
   SSR: { name: "Sales Tax (goods)",            claimable: true,  zero_rate: false }
@@ -44,20 +50,47 @@ treatments:
   IM: { name: "Imported / Reverse Charge",     claimable: null,  zero_rate: true  }
   NT: { name: "No-Tax",                        claimable: false, zero_rate: true  }
 
-# Canonical treatment -> target-system tax-code string, by direction.
-# QBS / AutoCount / SQL Acc short codes for Malaysia per client setup.
+# Canonical treatment → ERP tax-code. qbs = QBS Ledger app (NOT AutoCount/SQL).
 code_map:
   qbs:
-    purchase: { SR: "SR", SSR: "SR", ZR: "ZR", ES: "ES", OS: "OS", IM: "IM", NT: "NT" }
-    sales:    { SR: "SR", SSR: "SR", ZR: "ZR", ES: "ES", OS: "OS", NT: "NT" }
+    purchase: { SR: "SR", SSR: "SSR", ZR: "ZR", ES: "ES", OS: "OS", IM: "IM", NT: "NT" }
+    sales:    { SR: "SR", SSR: "SSR", ZR: "ZR", ES: "ES", OS: "OS", NT: "NT" }
   xero:
     purchase: { SR: "SR", SSR: "SR", ZR: "ZR", ES: "No Tax", OS: "No Tax", IM: "No Tax", NT: "No Tax" }
     sales:    { SR: "SR", SSR: "SR", ZR: "ZR", ES: "No Tax", OS: "No Tax", NT: "No Tax" }
+  sql_account:
+    purchase:
+      SR: "SV"
+      SSR: "ST5"
+      ZR: "ZR"
+      ES: "SVE"
+      OS: "OS"
+      IM: "IMSV"
+      NT: "NT"
+    sales:
+      SR: "SV"
+      SSR: "ST5"
+      ZR: "ZR"
+      ES: "SVE"
+      OS: "OS"
+      NT: "NT"
+  autocount:
+    purchase:
+      SR: { "0.06": "SV-6", "0.08": "SV-8" }
+      IM: { "0.06": "IMSV-6", "0.08": "IMSV-8" }
+      SSR: { "0.05": "S-5", "0.10": "S-10" }
+      ES: { "0.06": "ESV-6", "0.08": "ESV-8" }
+      ZR: "ZR"
+      OS: "OS"
+      NT: "NT"
+    sales:
+      SR: { "0.06": "SV-6", "0.08": "SV-8" }
+      SSR: { "0.05": "S-5", "0.10": "S-10" }
+      ZR: "ZR"
+      ES: "ESV-8"
+      OS: "OS"
+      NT: "NT"
 
-# Signal lexicons (lowercased substring match) used by the LLM tax prompt —
-# the LLM uses these substrings to pick the right treatment when the
-# document has explicit tax wording. PYTHON MUST NOT use these directly;
-# they're a hint set for the LLM.
 signals:
   zero_rated:
     - zero-rated
@@ -75,19 +108,36 @@ signals:
     - out of scope
     - "(nt)"
     - "(os)"
+  carve_out:
+    - telecom
+    - mobile plan
+    - parking
+    - logistics
+    - freight
+    - warehousing
+    - food preparation
+    - catering
+    - restaurant
+    - f&b
   service_tax:
     - service tax
-    - sst 8%
     - sst
-    - 8% service tax
     - "(sr)"
     - service tax 8%
+    - service tax 6%
   sales_tax:
     - sales tax
     - 10% sales tax
     - 5% sales tax
+  standard_rated:
+    - standard-rated
+    - standard rated
+    - "(sr)"
+    - sst 8%
+    - sst 6%
+    - service tax 8%
+    - service tax 6%
 
-# Confidence + tolerance for Python rate guards.
 review:
   confidence_threshold: 0.8
   rate_tolerance: 0.01

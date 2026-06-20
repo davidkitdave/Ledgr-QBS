@@ -34,6 +34,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any, Optional
 
@@ -221,17 +222,30 @@ def clear_jurisdiction_cache() -> None:
     _YAML_CACHE.clear()
 
 
-def _current_standard_rate(yaml_name: Optional[str]) -> tuple[Optional[float], Optional[str]]:
-    """Pick the current (latest) standard rate from the YAML's ``rate_by_date`` bands."""
+def _current_standard_rate(
+    yaml_name: Optional[str],
+    on: Optional[date] = None,
+) -> tuple[Optional[float], Optional[str]]:
+    """Pick the standard (non-carve-out) rate from ``rate_by_date`` bands."""
     if not yaml_name:
         return None, None
     data = _load_reference(yaml_name)
     bands = data.get("rate_by_date") or []
     if not bands:
         return None, None
-    last = bands[-1]
-    rate = last.get("rate")
-    label = f"{int(rate * 100)}% {data.get('tax_system', '')}".strip()
+    from invoice_processing.export.tax_classifier import (
+        _bands_active_on,
+        _is_standard_scope,
+    )
+
+    ref_date = on or date.today()
+    active = _bands_active_on(bands, ref_date)
+    if not active:
+        active = bands
+    standard = [b for b in active if _is_standard_scope(b.get("scope"))]
+    pool = standard if standard else active
+    rate = max(float(b["rate"]) for b in pool)
+    label = f"{int(round(rate * 100))}% {data.get('tax_system', '')}".strip()
     return rate, label
 
 

@@ -86,6 +86,66 @@ class TaxDecisionResult(BaseModel):
 # --------------------------------------------------------------------------- #
 # LLM prompt construction
 # --------------------------------------------------------------------------- #
+def _rate_narrative_from_yaml(
+    reference_yaml: Optional[str],
+    *,
+    standard_rate: Optional[float],
+    rate_band_label: Optional[str],
+) -> str:
+    """Build rate guidance for the LLM prompt from jurisdiction YAML."""
+    if not reference_yaml:
+        if rate_band_label and standard_rate is not None:
+            return f"{rate_band_label} (rate = {standard_rate:.4f})"
+        return "(no standard rate — cross-border / ambiguous)"
+
+    from .jurisdiction import _load_reference
+
+    data = _load_reference(reference_yaml) or {}
+    parts: list[str] = []
+    if rate_band_label and standard_rate is not None:
+        parts.append(f"Standard band: {rate_band_label} (rate = {standard_rate:.4f})")
+
+    service_rates = sorted({float(b["rate"]) for b in data.get("rate_by_date") or []})
+    if len(service_rates) > 1:
+        svc = ", ".join(f"{int(round(r * 100))}%" for r in service_rates)
+        parts.append(f"Service tax rates in ruleset: {svc}")
+
+    sales = data.get("sales_tax") or []
+    if sales:
+        st = ", ".join(f"{int(round(float(b['rate']) * 100))}%" for b in sales)
+        parts.append(f"Sales tax on goods (SSR): {st}")
+
+    imported = data.get("imported_service_tax") or []
+    if imported:
+        im_rates = sorted({float(b["rate"]) for b in imported})
+        im = ", ".join(f"{int(round(r * 100))}%" for r in im_rates)
+        parts.append(f"Imported/reverse-charge services (IM): {im}")
+
+    return "; ".join(parts) if parts else rate_band_label or "(see reference table)"
+
+
+def _tax_rules_block(
+    *,
+    tax_jurisdiction: str,
+    reference_yaml: Optional[str],
+    standard_rate: Optional[float],
+    rate_band_label: Optional[str],
+) -> str:
+    narrative = _rate_narrative_from_yaml(
+        reference_yaml,
+        standard_rate=standard_rate,
+        rate_band_label=rate_band_label,
+    )
+    if tax_jurisdiction == "MALAYSIA":
+        return (
+            f"Apply Malaysia SST from the reference table — {narrative}. "
+            "Do NOT assume Singapore 9% GST."
+        )
+    if tax_jurisdiction == "SINGAPORE":
+        return f"Apply Singapore GST — {narrative}."
+    return narrative
+
+
 def _tax_prompt(
     inv: NormalizedInvoice,
     *,
@@ -108,7 +168,11 @@ def _tax_prompt(
     * Apply the local rate band to verify arithmetic.
     * NEVER assume Singapore 9% GST when tax_jurisdiction is MALAYSIA.
     """
-    rate_line = f"{rate_band_label} (rate = {standard_rate:.4f})" if standard_rate else "(no standard rate — cross-border / ambiguous)"
+    rate_line = _rate_narrative_from_yaml(
+        reference_yaml,
+        standard_rate=standard_rate,
+        rate_band_label=rate_band_label,
+    )
     party_lines = []
     if supplier_country:
         party_lines.append(f"- Supplier country: {supplier_country}")
@@ -149,10 +213,14 @@ def _tax_prompt(
         f"as appropriate and lower confidence (< 0.6) — we cannot make a "
         f"confident decision without human review.\n"
         f"- Otherwise apply the local rate band: lines with positive gst and "
-        f"math reconciling to standard_rate (within 1%) → SR; explicit zero-rated "
+        f"math reconciling to an allowed rate (within 1%) → SR or SSR; explicit zero-rated "
         f"or 0% wording → ZR; explicit exempt → ES; otherwise NT.\n"
-        f"- Do NOT assume Singapore 9% GST when tax_jurisdiction is MALAYSIA. "
-        f"The standard rate for MY is 8% SST.\n\n"
+        f"- {_tax_rules_block(
+            tax_jurisdiction=tax_jurisdiction,
+            reference_yaml=reference_yaml,
+            standard_rate=standard_rate,
+            rate_band_label=rate_band_label,
+        )}\n\n"
         f"# Output (strict JSON)\n"
         f"Return ONE decision per line in the lines block (use the same "
         f"zero-based index). Set tax_confidence in [0, 1]. tax_reason is "
@@ -197,6 +265,35 @@ def _call_llm(prompt: str, *, model: Optional[str], timeout: float = 30.0) -> Op
 # --------------------------------------------------------------------------- #
 # Python rate-guard (the ONLY thing Python does for tax after the LLM)
 # --------------------------------------------------------------------------- #
+def _validate_rate_allowed(
+    line: InvoiceLine,
+    *,
+    allowed_rates: list[float],
+    tolerance: float,
+    jurisdiction_code: str,
+) -> tuple[Optional[str], bool]:
+    """Rate guard: pass when gst matches any allowed YAML band within tolerance."""
+    if not allowed_rates:
+        return None, False
+    if not line.gst_amount or line.gst_amount <= 0:
+        return None, False
+    if not line.net_amount:
+        return None, False
+    denom = max(abs(line.net_amount), 1.0)
+    best_err = min(
+        abs(line.gst_amount - line.net_amount * rate) / denom for rate in allowed_rates
+    )
+    if best_err <= tolerance:
+        return None, False
+    actual = line.gst_amount / line.net_amount
+    allowed_txt = ", ".join(f"{r:.0%}" for r in allowed_rates)
+    suffix = (
+        f"({jurisdiction_code} rate guard: gst {line.gst_amount:.2f} "
+        f"at {actual:.2%} not in allowed bands {allowed_txt})"
+    )
+    return suffix, True
+
+
 def _validate_rate(
     line: InvoiceLine,
     *,
@@ -213,19 +310,12 @@ def _validate_rate(
     """
     if expected_rate is None:
         return None, False
-    if not line.gst_amount or line.gst_amount <= 0:
-        return None, False
-    if not line.net_amount:
-        return None, False
-    expected = line.net_amount * expected_rate
-    denom = max(abs(line.net_amount), 1.0)
-    if abs(line.gst_amount - expected) / denom > tolerance:
-        suffix = (
-            f"({jurisdiction_code} rate guard: gst {line.gst_amount:.2f} "
-            f"vs expected {expected:.2f} at {expected_rate:.0%})"
-        )
-        return suffix, True
-    return None, False
+    return _validate_rate_allowed(
+        line,
+        allowed_rates=[expected_rate],
+        tolerance=tolerance,
+        jurisdiction_code=jurisdiction_code,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -337,6 +427,14 @@ def reason_one_invoice(
     # Apply LLM decisions + Python rate guard.
     flagged = 0
     by_index = {d.line_index: d for d in decision.decisions}
+    clf = None
+    if rule.reference_yaml:
+        from invoice_processing.export.tax_classifier import TaxClassifier
+
+        from .jurisdiction import _load_reference
+
+        clf = TaxClassifier(taxonomy=_load_reference(rule.reference_yaml) or {})
+
     for i, line in enumerate(inv.lines):
         d = by_index.get(i)
         if d is None:
@@ -348,9 +446,13 @@ def reason_one_invoice(
         line.tax_treatment = d.tax_treatment
         line.tax_confidence = float(d.tax_confidence)
         line.tax_reason = d.tax_reason
-        suffix, rate_flag = _validate_rate(
+        if clf and d.tax_treatment in ("SR", "SSR", "IM"):
+            allowed = clf.allowed_rates_for_treatment(d.tax_treatment, line, inv)
+        else:
+            allowed = [standard_rate] if standard_rate is not None else []
+        suffix, rate_flag = _validate_rate_allowed(
             line,
-            expected_rate=standard_rate,
+            allowed_rates=[r for r in allowed if r is not None],
             tolerance=rate_tol,
             jurisdiction_code=rule.code,
         )
@@ -390,6 +492,14 @@ def _fallback_classify(
     from invoice_processing.export.tax_classifier import TaxClassifier
 
     flagged = 0
+    clf = None
+    if rule.reference_yaml:
+        from invoice_processing.export.tax_classifier import TaxClassifier
+
+        from .jurisdiction import _load_reference
+
+        clf = TaxClassifier(taxonomy=_load_reference(rule.reference_yaml) or {})
+
     if rule.region == "SINGAPORE" or rule.code == "SINGAPORE":
         # Use existing SG classifier — preserves C6-C8 golden behaviour.
         clf = TaxClassifier()
@@ -417,15 +527,28 @@ def _fallback_classify(
             line.tax_reason = "NT (fallback): no tax amount on line"
             continue
         if standard_rate and line.net_amount:
-            expected = line.net_amount * standard_rate
-            denom = max(abs(line.net_amount), 1.0)
-            if abs(gst - expected) / denom <= rate_tolerance:
-                line.tax_treatment = "SR"
+            allowed = (
+                clf.allowed_rates_for_treatment("SR", line, inv)
+                if clf
+                else [standard_rate]
+            )
+            if _validate_rate_allowed(
+                line,
+                allowed_rates=allowed,
+                tolerance=rate_tolerance,
+                jurisdiction_code=rule.code,
+            )[1]:
+                pass  # fall through to unresolved
+            else:
+                reconciled = clf._reconcile_tax_line(line, inv) if clf else None
+                treatment = reconciled[0] if reconciled else "SR"
+                rate_note = reconciled[2] if reconciled else (
+                    "SR (fallback): tax reconciles within tolerance"
+                )
+                line.tax_treatment = treatment
                 line.tax_confidence = 0.9
                 line.tax_flagged = False
-                line.tax_reason = (
-                    f"SR (fallback): tax reconciles to {standard_rate:.0%} within tolerance"
-                )
+                line.tax_reason = rate_note
                 continue
         line.tax_treatment = None
         line.tax_confidence = 0.5

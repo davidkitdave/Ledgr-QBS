@@ -429,6 +429,81 @@ class TestExistingRulesUnchanged:
 
 
 # ===========================================================================
+# WS2 — Malaysia SST multi-rate bands (service 6%/8%, sales 5%/10%)
+# ===========================================================================
+
+class TestMySstMultiRate:
+  def test_service_invoice_2024_03_plus_8pct_not_flagged(self):
+    clf = get_tax_classifier("my_sst.yaml")
+    inv = NormalizedInvoice(
+      doc_type="purchase",
+      invoice_date=date(2024, 6, 1),
+      our_gst_registered=True,
+      tax_visible_on_document=True,
+      supplier=PartyInfo(gst_regno="202301011111", country="MY"),
+    )
+    inv.lines.append(
+      InvoiceLine(description="Workshop labour", net_amount=100.0, gst_amount=8.0)
+    )
+    clf.classify_line(inv.lines[0], inv)
+    line = inv.lines[0]
+    assert line.tax_treatment == "SR"
+    assert line.tax_flagged is False
+
+  def test_carve_out_telecom_6pct_not_flagged(self):
+    clf = get_tax_classifier("my_sst.yaml")
+    inv = NormalizedInvoice(
+      doc_type="purchase",
+      invoice_date=date(2024, 6, 1),
+      our_gst_registered=True,
+      tax_visible_on_document=True,
+      supplier=PartyInfo(gst_regno="202301011111", country="MY"),
+    )
+    inv.lines.append(
+      InvoiceLine(
+        description="Mobile telecom monthly plan",
+        net_amount=100.0,
+        gst_amount=6.0,
+      )
+    )
+    clf.classify_line(inv.lines[0], inv)
+    line = inv.lines[0]
+    assert line.tax_treatment == "SR"
+    assert line.tax_flagged is False
+
+  def test_sales_tax_goods_5_and_10_pct_not_flagged(self):
+    clf = get_tax_classifier("my_sst.yaml")
+    for gst, desc in ((5.0, "Essential groceries"), (10.0, "Standard goods supply")):
+      inv = NormalizedInvoice(
+        doc_type="purchase",
+        invoice_date=date(2024, 6, 1),
+        our_gst_registered=True,
+        tax_visible_on_document=True,
+        supplier=PartyInfo(gst_regno="202301011111", country="MY"),
+      )
+      inv.lines.append(
+        InvoiceLine(description=desc, net_amount=100.0, gst_amount=gst)
+      )
+      clf.classify_line(inv.lines[0], inv)
+      line = inv.lines[0]
+      assert line.tax_treatment == "SSR"
+      assert line.tax_flagged is False, f"{desc} gst={gst}"
+
+  def test_autocount_rate_keyed_sr_code(self):
+    clf = get_tax_classifier("my_sst.yaml")
+    assert clf.tax_code("SR", "purchase", "autocount", rate=0.08) == "SV-8"
+    assert clf.tax_code("SR", "purchase", "autocount", rate=0.06) == "SV-6"
+
+  def test_sql_account_flat_codes_no_svz(self):
+    clf = get_tax_classifier("my_sst.yaml")
+    assert clf.tax_code("SR", "purchase", "sql_account") == "SV"
+    assert clf.tax_code("IM", "purchase", "sql_account") == "IMSV"
+    assert clf.tax_code("SSR", "purchase", "sql_account") == "ST5"
+    table = clf.tax["code_map"]["sql_account"]["purchase"]
+    assert "SVZ" not in table
+
+
+# ===========================================================================
 # classify_invoice convenience wrapper
 # ===========================================================================
 
