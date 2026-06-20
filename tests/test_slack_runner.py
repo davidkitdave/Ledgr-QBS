@@ -6906,6 +6906,9 @@ def test_batch_mode_skips_per_doc_status_post():
     # Build a no-op runner + store and assert that even with batch_mode=True
     # the per-doc _post_status is never invoked (status_ts short-circuits).
     db = FakeFirestore()
+    client_store = _seeded_client_store(
+        db, channel_id="C-batch-mode", client_id="batch-mode"
+    )
     store = SlackLedgerStore(FakeFirestore(), opener=fake_slack.opener())
     runner = _FakeRunner([_node_event("classify_node", text="done")], _ledger_payload())
 
@@ -6924,6 +6927,7 @@ def test_batch_mode_skips_per_doc_status_post():
             app_name="acc",
             download_fn=lambda *a, **k: b"%PDF batch",
             source_filename="batch_doc.pdf",
+            client_store=client_store,
             thread_ts=None,
             defer_slack_delivery=True,
             batch_mode=True,
