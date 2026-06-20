@@ -197,10 +197,7 @@ class TaxClassifier:
         if treatment == "SR":
             rates = [self.standard_rate_for_date(d)]
             carve = self._carve_out_rate_for_date(d)
-            if carve and (
-                self._matches(line.description or "", "carve_out")
-                or not self._is_dual_service_rate_period(d)
-            ):
+            if carve:
                 rates.append(carve)
             return sorted(set(rates))
         return []
@@ -253,7 +250,7 @@ class TaxClassifier:
 
         carve = self._carve_out_rate_for_date(inv.invoice_date)
         dual = self._is_dual_service_rate_period(inv.invoice_date)
-        if carve and self._matches(desc, "carve_out"):
+        if carve:
             match = self._best_rate_match(line, [carve])
             if match:
                 candidates.append(("SR", carve, match[1]))
@@ -274,7 +271,7 @@ class TaxClassifier:
         treatment, rate, err = min(candidates, key=lambda c: c[2])
         if treatment == "SSR":
             return (treatment, rate, f"SSR: tax reconciles to sales tax {rate:.0%}")
-        if rate == carve and self._matches(desc, "carve_out"):
+        if rate == carve:
             return (treatment, rate, f"SR: tax reconciles to carve-out rate {rate:.0%}")
         return (treatment, rate, f"SR: tax reconciles to standard rate {rate:.0%}")
 
