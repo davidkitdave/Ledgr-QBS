@@ -169,17 +169,17 @@ class TestAutoCountExportRows:
         exporter = AutoCountExporter(classifier=MY_CLF)
         exporter.configure_client_context(entity_memory=memory)
         rows = exporter.rows([inv], "purchase")
-        assert rows[0]["Tax Code"] == "SV-8"
-        assert rows[0]["Creditor Code"] == "C-ACME"
+        assert rows[0]["TaxType"] == "SV-8"
+        assert rows[0]["CreditorCode"] == "C-ACME"
 
     def test_unmapped_vendor_blank_creditor_in_summary(self):
         inv = _purchase_inv(inv_date=date(2024, 6, 1), vendor="Unknown Vendor")
         exporter = AutoCountExporter(classifier=MY_CLF)
         rows = exporter.rows([inv], "purchase")
-        assert rows[0]["Creditor Code"] == ""
+        assert rows[0]["CreditorCode"] == ""
         summary = collect_export_unmapped_summary(
             [{"sheet": "Purchase", "rows": rows}],
             exporter,
         )
         assert summary["count"] >= 1
-        assert any("Creditor Code" in d.get("missing", []) for d in summary["details"])
+        assert any("CreditorCode" in d.get("missing", []) for d in summary["details"])

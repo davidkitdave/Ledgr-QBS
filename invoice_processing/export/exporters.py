@@ -306,7 +306,17 @@ def _load_erp_profile(profile_name: str) -> dict[str, Any]:
 
 
 class ProfileLedgerExporter(LedgerExporter):
-    """Generic exporter driven by a declarative ERP profile YAML."""
+    """Generic exporter driven by a declarative ERP profile YAML.
+
+    Profile schema extensions supported here:
+    - ``purchase_sheet`` / ``sales_sheet``: worksheet names (default "Purchase"/"Sales").
+    - ``purchase_constants`` / ``sales_constants``: column→value pairs applied after
+      field mapping so fixed ERP values (DocNo=<<New>>, JournalType, _QTY, _UOM …)
+      are always present regardless of the invoice data.
+    - ``_row_context`` now carries ``supplier_invoice_no``, ``unit_price``, ``qty``,
+      ``uom``, ``source_file_id``, ``ai_status``, ``ai_note`` for ERP columns that
+      need them.
+    """
 
     def __init__(
         self,
@@ -321,6 +331,10 @@ class ProfileLedgerExporter(LedgerExporter):
         self.sales_cols = list(profile["sales_cols"])
         self._purchase_fields = dict(profile.get("purchase_fields") or {})
         self._sales_fields = dict(profile.get("sales_fields") or {})
+        self._purchase_constants: dict[str, Any] = dict(profile.get("purchase_constants") or {})
+        self._sales_constants: dict[str, Any] = dict(profile.get("sales_constants") or {})
+        self._purchase_sheet: str = profile.get("purchase_sheet") or "Purchase"
+        self._sales_sheet: str = profile.get("sales_sheet") or "Sales"
         self._client_tax_codes: list[dict] | dict[str, str] | None = None
         self._entity_memory: list[EntityMemoryEntry] = []
 
@@ -339,6 +353,9 @@ class ProfileLedgerExporter(LedgerExporter):
 
     def _field_map(self, doc_type: str) -> dict[str, str]:
         return self._sales_fields if doc_type == "sales" else self._purchase_fields
+
+    def _constants(self, doc_type: str) -> dict[str, Any]:
+        return self._sales_constants if doc_type == "sales" else self._purchase_constants
 
     def _row_context(
         self,
@@ -371,6 +388,12 @@ class ProfileLedgerExporter(LedgerExporter):
         net = _line_net_amount(line, inv)
         tax = _tax_amount(line, inv, self.clf)
         fx = inv.fx_rate if inv.fx_rate is not None else ""
+        qty = line.quantity if line.quantity is not None else 1
+        unit_price = round(net / qty, 2) if qty else net
+        # Provenance fields: populated when available on the invoice metadata
+        source_file_id: str = getattr(inv, "source_file_id", None) or ""
+        ai_status: str = getattr(inv, "ai_status", None) or ""
+        ai_note: str = getattr(inv, "ai_note", None) or ""
         return {
             "invoice_number": inv.invoice_number or "",
             "invoice_date": _fmt_date(inv.invoice_date),
@@ -388,19 +411,61 @@ class ProfileLedgerExporter(LedgerExporter):
             "debtor_code": debtor_code,
             "currency": inv.currency,
             "currency_rate": fx,
+            # New fields for real ERP column layouts
+            "supplier_invoice_no": inv.invoice_number or "",
+            "unit_price": unit_price,
+            "qty": qty,
+            "uom": "UNIT",
+            "source_file_id": source_file_id,
+            "ai_status": ai_status,
+            "ai_note": ai_note,
         }
 
     def _profile_row(self, inv: NormalizedInvoice, line: InvoiceLine, doc_type: str) -> dict:
         context = self._row_context(inv, line, doc_type)
         field_map = self._field_map(doc_type)
         cols = self.sales_cols if doc_type == "sales" else self.purchase_cols
-        return {col: context.get(field_map.get(col, ""), "") for col in cols}
+        row = {col: context.get(field_map.get(col, ""), "") for col in cols}
+        # Apply per-doc-type constants last (override field-mapped values)
+        for col, val in self._constants(doc_type).items():
+            if col in row:
+                row[col] = val
+        return row
 
     def _purchase_row(self, inv, line):
         return self._profile_row(inv, line, "purchase")
 
     def _sales_row(self, inv, line):
         return self._profile_row(inv, line, "sales")
+
+    def write_workbook(
+        self,
+        path: str | Path,
+        purchases: Optional[list[NormalizedInvoice]] = None,
+        sales: Optional[list[NormalizedInvoice]] = None,
+    ) -> Path:
+        """Write a workbook with per-doc-type sheet names from the profile.
+
+        Overrides the base class to use ``_purchase_sheet`` / ``_sales_sheet``
+        from the profile YAML instead of the hardcoded "Purchase"/"Sales" titles,
+        so AutoCount gets "AP Invoice"/"AR Invoice" and SQL Account gets
+        "SLPH_Invoice_Cash_Debit_Credit".
+        """
+        purchases, sales = purchases or [], sales or []
+        wb = Workbook()
+        for i, (title, cols, invs, doc) in enumerate([
+            (self._purchase_sheet, self.purchase_cols, purchases, "purchase"),
+            (self._sales_sheet, self.sales_cols, sales, "sales"),
+        ]):
+            sheet = wb.active if i == 0 else wb.create_sheet(title)
+            sheet.title = title
+            sheet.append(cols)
+            for row in self.rows(invs, doc):
+                sheet.append([row.get(c, "") for c in cols])
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        wb.save(path)
+        return path
 
 
 class AutoCountExporter(ProfileLedgerExporter):
@@ -436,8 +501,9 @@ _SOFTWARE_ALIASES: dict[str, str] = {
 
 
 def normalize_software_key(value: Optional[str]) -> Optional[str]:
-    """Return the canonical exporter key ("qbs" or "xero") for *value*, or None.
+    """Return the canonical exporter key for *value*, or None.
 
+    Recognised keys: ``"qbs"``, ``"xero"``, ``"autocount"``, ``"sql_account"``.
     Accepts any casing and surrounding whitespace.  Callers decide the fallback
     when None is returned (genuinely unrecognised software name).
     """

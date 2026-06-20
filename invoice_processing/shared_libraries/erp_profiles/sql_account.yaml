@@ -1,54 +1,90 @@
 software_name: SQL Account
 system: sql_account
+
+# Both purchase and sales use the same sheet name in SQL Account
+purchase_sheet: "SLPH_Invoice_Cash_Debit_Credit"
+sales_sheet: "SLPH_Invoice_Cash_Debit_Credit"
+
+# Columns emitted: REQUIRED (yellow) + core tax. Native SQL Account import
+# columns only — full template header is row 6 of the SLPH_Invoice_Cash_Debit_Credit
+# sheet; we emit the required subset plus _TAX/_TAXAMT/_AMOUNT.
 purchase_cols:
-  - Doc No
-  - Doc Date
-  - Creditor Code
-  - Description
-  - Amount
-  - Tax Amount
-  - Tax Code
-  - Account Code
-  - Currency
+  - DOCNO(20)
+  - DOCDATE
+  - CODE(10)
+  - DESCRIPTION(200)
+  - _ACCOUNT(10)
+  - _DESCRIPTION(200)
+  - _QTY
+  - _UOM(10)
+  - _UNITPRICE
+  - _TAX(10)
+  - _TAXAMT
+  - _AMOUNT
+
 sales_cols:
-  - Doc No
-  - Doc Date
-  - Debtor Code
-  - Description
-  - Amount
-  - Tax Amount
-  - Tax Code
-  - Account Code
-  - Currency
+  - DOCNO(20)
+  - DOCDATE
+  - CODE(10)
+  - DESCRIPTION(200)
+  - _ACCOUNT(10)
+  - _DESCRIPTION(200)
+  - _QTY
+  - _UOM(10)
+  - _UNITPRICE
+  - _TAX(10)
+  - _TAXAMT
+  - _AMOUNT
+
+# Constant values applied after field mapping (same for both doc types)
+purchase_constants:
+  _QTY: 1
+  _UOM(10): "UNIT"
+
+sales_constants:
+  _QTY: 1
+  _UOM(10): "UNIT"
+
 required_purchase:
-  - Doc No
-  - Doc Date
-  - Creditor Code
-  - Tax Code
-  - Account Code
+  - DOCNO(20)
+  - DOCDATE
+  - CODE(10)
+  - _ACCOUNT(10)
+  - _DESCRIPTION(200)
+  - _QTY
+  - _UOM(10)
+  - _UNITPRICE
+
 required_sales:
-  - Doc No
-  - Doc Date
-  - Debtor Code
-  - Tax Code
-  - Account Code
+  - DOCNO(20)
+  - DOCDATE
+  - CODE(10)
+  - _ACCOUNT(10)
+  - _DESCRIPTION(200)
+  - _QTY
+  - _UOM(10)
+  - _UNITPRICE
+
 purchase_fields:
-  Doc No: invoice_number
-  Doc Date: invoice_date
-  Creditor Code: creditor_code
-  Description: description
-  Amount: sub_total
-  Tax Amount: tax_amount
-  Tax Code: tax_code
-  Account Code: account_code
-  Currency: currency
+  DOCNO(20): invoice_number
+  DOCDATE: invoice_date
+  CODE(10): creditor_code
+  DESCRIPTION(200): description
+  _ACCOUNT(10): account_code
+  _DESCRIPTION(200): description
+  _UNITPRICE: unit_price
+  _TAX(10): tax_code
+  _TAXAMT: tax_amount
+  _AMOUNT: unit_price
+
 sales_fields:
-  Doc No: invoice_number
-  Doc Date: invoice_date
-  Debtor Code: debtor_code
-  Description: description
-  Amount: sub_total
-  Tax Amount: tax_amount
-  Tax Code: tax_code
-  Account Code: account_code
-  Currency: currency
+  DOCNO(20): invoice_number
+  DOCDATE: invoice_date
+  CODE(10): debtor_code
+  DESCRIPTION(200): description
+  _ACCOUNT(10): account_code
+  _DESCRIPTION(200): description
+  _UNITPRICE: unit_price
+  _TAX(10): tax_code
+  _TAXAMT: tax_amount
+  _AMOUNT: unit_price

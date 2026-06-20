@@ -1,58 +1,107 @@
 software_name: AutoCount
 system: autocount
+
+# Sheet names per doc type (AutoCount imports AP and AR as separate operations)
+purchase_sheet: "AP Invoice"
+sales_sheet: "AR Invoice"
+
+# AP Invoice columns — exact field row from Import-AP-Invoice.xls row 2, cols 1..21
 purchase_cols:
-  - Doc No
-  - Doc Date
-  - Creditor Code
-  - Creditor Name
+  - DocNo
+  - DocDate
+  - CreditorCode
+  - SupplierInvoiceNo
+  - JournalType
+  - DisplayTerm
+  - PurchaseAgent
   - Description
+  - CurrencyRate
+  - RefNo2
+  - Note
+  - InclusiveTax
+  - AccNo
+  - ToAccountRate
+  - DetailDescription
+  - ProjNo
+  - DeptNo
+  - TaxType
+  - TaxableAmt
+  - TaxAdjustment
   - Amount
-  - Tax
-  - Tax Code
-  - Acc No
-  - Currency
+
+# AR Invoice columns — exact field row from Import-AR-Invoice.xls row 2, cols 1..21
 sales_cols:
-  - Doc No
-  - Doc Date
-  - Debtor Code
-  - Debtor Name
+  - DocNo
+  - DocDate
+  - DebtorCode
+  - JournalType
+  - DisplayTerm
+  - SalesAgent
   - Description
+  - CurrencyCode
+  - CurrencyRate
+  - RefNo2
+  - Note
+  - InclusiveTax
+  - AccNo
+  - ToAccountRate
+  - DetailDescription
+  - ProjNo
+  - DeptNo
+  - TaxType
+  - TaxableAmt
+  - TaxAdjustment
   - Amount
-  - Tax
-  - Tax Code
-  - Acc No
-  - Currency
+
+# Constant values applied after field mapping (per doc type)
+purchase_constants:
+  DocNo: "<<New>>"
+  JournalType: "PURCHASE"
+  InclusiveTax: "F"
+
+sales_constants:
+  DocNo: "<<New>>"
+  JournalType: "SALES"
+  InclusiveTax: "F"
+
 required_purchase:
-  - Doc No
-  - Doc Date
-  - Creditor Code
-  - Tax Code
-  - Acc No
+  - DocNo
+  - DocDate
+  - CreditorCode
+  - JournalType
+  - InclusiveTax
+  - AccNo
+  - Amount
+
 required_sales:
-  - Doc No
-  - Doc Date
-  - Debtor Code
-  - Tax Code
-  - Acc No
+  - DocNo
+  - DocDate
+  - DebtorCode
+  - JournalType
+  - InclusiveTax
+  - AccNo
+  - Amount
+
 purchase_fields:
-  Doc No: invoice_number
-  Doc Date: invoice_date
-  Creditor Code: creditor_code
-  Creditor Name: vendor_name
+  DocDate: invoice_date
+  CreditorCode: creditor_code
+  SupplierInvoiceNo: supplier_invoice_no
   Description: description
-  Amount: sub_total
-  Tax: tax_amount
-  Tax Code: tax_code
-  Acc No: account_code
-  Currency: currency
+  CurrencyRate: currency_rate
+  AccNo: account_code
+  DetailDescription: description
+  TaxType: tax_code
+  TaxableAmt: unit_price
+  Amount: unit_price
+
 sales_fields:
-  Doc No: invoice_number
-  Doc Date: invoice_date
-  Debtor Code: debtor_code
-  Debtor Name: customer_name
+  DocDate: invoice_date
+  DebtorCode: debtor_code
   Description: description
-  Amount: sub_total
-  Tax: tax_amount
-  Tax Code: tax_code
-  Acc No: account_code
-  Currency: currency
+  CurrencyCode: currency
+  CurrencyRate: currency_rate
+  AccNo: account_code
+  DetailDescription: description
+  TaxType: tax_code
+  TaxableAmt: unit_price
+  Amount: unit_price

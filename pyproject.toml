@@ -50,6 +50,7 @@ dev = [
     "agent-starter-pack>=0.14.1",
     "pytest>=9.0.3",
     "google-adk[eval]>=2.0.0,<3.0.0",
+    "xlrd>=2.0.1",  # read legacy .xls ERP import templates in golden-format tests
 ]
 
 [tool.pytest.ini_options]
