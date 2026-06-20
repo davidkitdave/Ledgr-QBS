@@ -40,6 +40,8 @@ from typing import Any, Optional
 
 import yaml
 
+from invoice_processing.export.tax_classifier import _bands_active_on, _is_standard_scope
+
 logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
@@ -233,11 +235,6 @@ def _current_standard_rate(
     bands = data.get("rate_by_date") or []
     if not bands:
         return None, None
-    from invoice_processing.export.tax_classifier import (
-        _bands_active_on,
-        _is_standard_scope,
-    )
-
     ref_date = on or date.today()
     active = _bands_active_on(bands, ref_date)
     if not active:
