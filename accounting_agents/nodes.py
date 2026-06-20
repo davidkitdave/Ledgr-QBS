@@ -243,6 +243,14 @@ REVIEW_VERDICT_CLARIFY = "user_clarify"
 REVIEW_MAX_REVIEWS = 2
 REVIEW_MAX_REEXTRACTS = 1
 
+#: WS4 — one totals-focused reconcile re-read before HITL when unreconciled is the
+#: only tripped signal (``review_extraction_node`` + ``approval_gate``).
+RECONCILE_REEXTRACT_ATTEMPTED_KEY = "reconcile_reextract_attempted"
+RECONCILE_REREAD_HINT = (
+    "Re-read the document focusing on invoice totals, subtotals, tax amounts, "
+    "and line sums — ensure they reconcile."
+)
+
 #: Lever 2 (ADR-0017 §3) — soft-signal prefixes.
 #: A reason whose string starts with one of these is classified as SOFT and may
 #: be cleared by the LLM-as-judge critic without human escalation.
@@ -1079,6 +1087,16 @@ def _is_soft_only(reasons: list[str]) -> bool:
     )
 
 
+def _is_unreconciled_only_detect_reasons(reasons: list[str]) -> bool:
+    """True when every ``detect_struggle`` reason is unreconciled (WS4)."""
+    return bool(reasons) and all(r.startswith("unreconciled:") for r in reasons)
+
+
+def _is_reconcile_only_needs_review_reasons(reasons: list[str]) -> bool:
+    """True when ``_needs_review`` reasons are only not-reconciled (WS4)."""
+    return bool(reasons) and all(": not reconciled (" in r for r in reasons)
+
+
 def detect_struggle(state: dict) -> tuple[bool, list[str]]:
     """Pure, deterministic struggle detector — NO LLM, NO network.
 
@@ -1474,6 +1492,20 @@ async def review_extraction_node(ctx):
         ctx.state[REVIEW_VERDICT_KEY] = REVIEW_VERDICT_OK
         return
 
+    # WS4: unreconciled-only → one totals-focused re-extract before critic/HITL.
+    if (
+        _is_unreconciled_only_detect_reasons(reasons)
+        and not ctx.state.get(RECONCILE_REEXTRACT_ATTEMPTED_KEY)
+    ):
+        pdf_bytes, mime_type = await _load_pdf_bytes(ctx)
+        _reextract_with_hint(ctx, RECONCILE_REREAD_HINT, pdf_bytes, mime_type)
+        ctx.state[RECONCILE_REEXTRACT_ATTEMPTED_KEY] = True
+        tripped, reasons = detect_struggle(ctx.state)
+        ctx.state[REVIEW_REASON_KEY] = reasons
+        if not tripped:
+            ctx.state[REVIEW_VERDICT_KEY] = REVIEW_VERDICT_OK
+            return
+
     # Lever 2 (ADR-0017 §3): when EVERY tripped reason is soft, run the critic.
     # On REVIEW_VERDICT_OK the doc falls through with no human pause.
     # Any hard signal bypasses this branch entirely — the critic cannot clear
@@ -1814,6 +1846,18 @@ async def approval_gate(ctx):
     invoices = _normalized_from_state(ctx.state)
     needs_review, reasons = _needs_review(ctx.state)
     is_multi = len(invoices) > 1
+
+    # WS4: reconcile-only at the terminal gate → one totals re-read before HITL.
+    if (
+        needs_review
+        and not is_multi
+        and _is_reconcile_only_needs_review_reasons(reasons)
+        and not ctx.state.get(RECONCILE_REEXTRACT_ATTEMPTED_KEY)
+    ):
+        pdf_bytes, mime_type = await _load_pdf_bytes(ctx)
+        _reextract_with_hint(ctx, RECONCILE_REREAD_HINT, pdf_bytes, mime_type)
+        ctx.state[RECONCILE_REEXTRACT_ATTEMPTED_KEY] = True
+        needs_review, reasons = _needs_review(ctx.state)
 
     if not needs_review and not is_multi:
         ctx.state[APPROVAL_STATUS_KEY] = "auto_approved"

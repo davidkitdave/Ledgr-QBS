@@ -74,9 +74,58 @@ async def _drive(node_coro_gen):
     return yielded
 
 
+def _still_unreconciled_extract_result():
+    """Re-extract stub that keeps the doc unreconciled (default for legacy tests)."""
+    from tests.test_nodes import _legacy_result_from_ex_bundle
+
+    return _legacy_result_from_ex_bundle(
+        ExtractedInvoiceBundle(
+            invoices=[
+                ExtractedInvoice(
+                    doc_type="invoice",
+                    invoice_number="INV-1",
+                    invoice_date="2025-01-15",
+                    currency="SGD",
+                    issuer_name="Acme Supplier",
+                    bill_to_name="Client",
+                    lines=[ExtractedLine(description="Goods", net_amount=100.0, gst_amount=9.0)],
+                    subtotal=100.0,
+                    gst_total=9.0,
+                    total=120.0,
+                )
+            ]
+        )
+    )
+
+
+def _reconciled_extract_result():
+    """Re-extract stub that produces a fully reconciled invoice (WS4 success path)."""
+    from tests.test_nodes import _legacy_result_from_ex_bundle
+
+    return _legacy_result_from_ex_bundle(
+        ExtractedInvoiceBundle(
+            invoices=[
+                ExtractedInvoice(
+                    doc_type="invoice",
+                    invoice_number="INV-1",
+                    invoice_date="2025-01-15",
+                    currency="SGD",
+                    issuer_name="Acme Supplier",
+                    bill_to_name="Client",
+                    lines=[ExtractedLine(description="Goods", net_amount=100.0, gst_amount=9.0)],
+                    subtotal=100.0,
+                    gst_total=9.0,
+                    total=109.0,
+                )
+            ]
+        )
+    )
+
+
 @pytest.fixture(autouse=True)
 def _restore_seams():
     saved = {n: getattr(nodes, n) for n in ("REVIEWER_FN", "EXTRACT_INVOICE_DOCUMENT_FN")}
+    nodes.EXTRACT_INVOICE_DOCUMENT_FN = lambda data, mime, **kw: _still_unreconciled_extract_result()
     yield
     for n, fn in saved.items():
         setattr(nodes, n, fn)
@@ -263,3 +312,151 @@ def test_all_review_state_keys_written_on_trip():
     assert nodes.REVIEW_VERDICT_KEY in ctx.state
     assert nodes.REVIEW_REASON_KEY in ctx.state
     assert "review_attempts" in ctx.state
+
+
+# --------------------------------------------------------------------------- #
+# WS4 — self-healing reconcile re-read (unreconciled-only)
+# --------------------------------------------------------------------------- #
+
+
+def test_unreconciled_only_auto_retry_proceeds_when_reconciled():
+    """Unreconciled-only → one totals re-extract; if reconciled, no HITL."""
+    reviewer_calls = {"n": 0}
+    extract_calls = {"n": 0, "hints": []}
+
+    def fake_reviewer(state, reasons, *, model):
+        reviewer_calls["n"] += 1
+        return {"verdict": nodes.REVIEW_VERDICT_OK}
+
+    def fake_extract(data, mime, **kw):
+        extract_calls["n"] += 1
+        extract_calls["hints"].append(kw.get("hint"))
+        return _reconciled_extract_result()
+
+    nodes.REVIEWER_FN = fake_reviewer
+    nodes.EXTRACT_INVOICE_DOCUMENT_FN = fake_extract
+    inv = _clean_invoice(reconciled=False, reconcile_note="totals off by $10")
+    ctx = FakeContext(_state([inv]))
+
+    yielded = asyncio.run(_drive(nodes.review_extraction_node._func(ctx)))
+
+    assert extract_calls["n"] == 1
+    assert extract_calls["hints"] == [nodes.RECONCILE_REREAD_HINT]
+    assert ctx.state[nodes.RECONCILE_REEXTRACT_ATTEMPTED_KEY] is True
+    assert reviewer_calls["n"] == 0, "No critic call when reconcile re-read fixes totals"
+    assert yielded == []
+    assert ctx.state[nodes.REVIEW_VERDICT_KEY] == nodes.REVIEW_VERDICT_OK
+
+
+def test_unreconciled_only_still_unreconciled_after_retry_escalates():
+    """Unreconciled-only → one retry still bad → escalate as today."""
+    reviewer_calls = {"n": 0}
+    extract_calls = {"n": 0}
+
+    def fake_reviewer(state, reasons, *, model):
+        reviewer_calls["n"] += 1
+        return {"verdict": nodes.REVIEW_VERDICT_OK}
+
+    def fake_extract(data, mime, **kw):
+        extract_calls["n"] += 1
+        return _still_unreconciled_extract_result()
+
+    nodes.REVIEWER_FN = fake_reviewer
+    nodes.EXTRACT_INVOICE_DOCUMENT_FN = fake_extract
+    inv = _clean_invoice(reconciled=False, reconcile_note="totals off by $10")
+    ctx = FakeContext(_state([inv]))
+
+    yielded = asyncio.run(_drive(nodes.review_extraction_node._func(ctx)))
+
+    assert extract_calls["n"] == 1
+    assert ctx.state[nodes.RECONCILE_REEXTRACT_ATTEMPTED_KEY] is True
+    assert reviewer_calls["n"] >= 1
+    assert len(yielded) == 1
+    assert ctx.state[nodes.REVIEW_VERDICT_KEY] == nodes.REVIEW_VERDICT_CLARIFY
+
+
+def test_mixed_unreconciled_and_soft_no_auto_reconcile_retry():
+    """Mixed signals (unreconciled + low confidence) → no WS4 auto-retry."""
+    extract_calls = {"n": 0}
+
+    def fake_extract(data, mime, **kw):
+        extract_calls["n"] += 1
+        return _reconciled_extract_result()
+
+    nodes.REVIEWER_FN = lambda state, reasons, *, model: {"verdict": nodes.REVIEW_VERDICT_OK}
+    nodes.EXTRACT_INVOICE_DOCUMENT_FN = fake_extract
+    inv = _clean_invoice(reconciled=False, reconcile_note="totals off by $10")
+    ctx = FakeContext(_state([inv], confidence=0.50))
+
+    asyncio.run(_drive(nodes.review_extraction_node._func(ctx)))
+
+    assert extract_calls["n"] == 0
+    assert nodes.RECONCILE_REEXTRACT_ATTEMPTED_KEY not in ctx.state
+
+
+def test_approval_gate_unreconciled_only_auto_retry_proceeds_when_reconciled():
+    """approval_gate: reconcile-only reasons → one re-extract then auto-approve."""
+    extract_calls = {"n": 0, "hints": []}
+
+    def fake_extract(data, mime, **kw):
+        extract_calls["n"] += 1
+        extract_calls["hints"].append(kw.get("hint"))
+        return _reconciled_extract_result()
+
+    nodes.EXTRACT_INVOICE_DOCUMENT_FN = fake_extract
+    inv = _clean_invoice(reconciled=False, reconcile_note="totals off by $10")
+    ctx = FakeContext(_state([inv]))
+
+    async def _run_gate():
+        events = []
+        async for event in nodes.approval_gate(ctx):
+            events.append(event)
+        return events
+
+    events = asyncio.run(_run_gate())
+
+    assert extract_calls["n"] == 1
+    assert extract_calls["hints"] == [nodes.RECONCILE_REREAD_HINT]
+    assert ctx.state[nodes.RECONCILE_REEXTRACT_ATTEMPTED_KEY] is True
+    assert events == []
+    assert ctx.state[nodes.APPROVAL_STATUS_KEY] == "auto_approved"
+
+
+def test_approval_gate_mixed_unreconciled_and_tax_flagged_no_auto_retry():
+    """Mixed unreconciled + tax_flagged → escalate immediately, no WS4 retry."""
+    from google.adk.events import RequestInput
+
+    extract_calls = {"n": 0}
+
+    def fake_extract(data, mime, **kw):
+        extract_calls["n"] += 1
+        return _reconciled_extract_result()
+
+    nodes.EXTRACT_INVOICE_DOCUMENT_FN = fake_extract
+    inv = _clean_invoice(
+        reconciled=False,
+        reconcile_note="totals off by $10",
+        lines=[
+            InvoiceLine(
+                description="Goods",
+                net_amount=100.0,
+                gst_amount=9.0,
+                tax_flagged=True,
+                tax_reason="rate mismatch",
+            )
+        ],
+    )
+    ctx = FakeContext(_state([inv]))
+
+    async def _run_gate():
+        events = []
+        async for event in nodes.approval_gate(ctx):
+            events.append(event)
+        return events
+
+    events = asyncio.run(_run_gate())
+
+    assert extract_calls["n"] == 0
+    assert nodes.RECONCILE_REEXTRACT_ATTEMPTED_KEY not in ctx.state
+    assert len(events) == 1
+    assert isinstance(events[0], RequestInput)

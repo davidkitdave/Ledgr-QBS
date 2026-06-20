@@ -59,8 +59,10 @@ def _build_app() -> App:
 
 
 def _tripped_state(channel: str) -> dict:
-    # An unreconciled invoice trips detect_struggle. A low tax_confidence line
-    # ALSO trips the terminal approval_gate, so both pauses can fire.
+    # An unreconciled invoice trips detect_struggle. Low classify confidence is
+    # mixed in so WS4 (unreconciled-only auto re-read) does NOT fire — these
+    # roundtrips intentionally exercise the mid-flow review HITL pause. A low
+    # tax_confidence line ALSO trips the terminal approval_gate.
     inv = NormalizedInvoice(
         invoice_number="INV-LO",
         invoice_date=__import__("datetime").date(2025, 1, 15),
@@ -77,7 +79,7 @@ def _tripped_state(channel: str) -> dict:
         "tax_registered": True,
         nodes.ARTIFACT_NAME_KEY: nodes.ARTIFACT_NAME_FMT.format(file_id="F1"),
         nodes.DOC_TYPE_KEY: "invoice",
-        nodes.CLASSIFY_CONFIDENCE_KEY: 0.95,
+        nodes.CLASSIFY_CONFIDENCE_KEY: 0.50,
         nodes.NORMALIZED_KEY: [nodes._inv_to_dict(inv)],
     }
 
@@ -397,7 +399,9 @@ def test_driver_full_pass_both_interrupts_side_effects_once():
 
     def _count_classify(data, mime, *, model):
         counters["classify"] += 1
-        return ClassificationResult(doc_type="invoice", confidence=0.95, reason="test")
+        # Mixed signal (low confidence + unreconciled) so WS4 reconcile re-read
+        # does not consume an extra extract before the review HITL pause.
+        return ClassificationResult(doc_type="invoice", confidence=0.50, reason="test")
 
     def _count_extract(*a, **k):
         counters["extract"] += 1
@@ -441,9 +445,9 @@ def test_driver_full_pass_both_interrupts_side_effects_once():
         assert got.state.get("review_clarify_action") == "confirm_as_is"
         assert got.state.get("delivered") is True
 
-        # The make-or-break invariant: side-effecting nodes ran EXACTLY ONCE
-        # across the two resumes (ctx.run_node fast-forwards checkpointed nodes).
-        assert counters["extract"] == 1
+        # Side-effecting nodes: initial extract plus one WS4 reconcile re-read at
+        # the terminal gate when totals are still the only flag after review.
+        assert counters["extract"] == 2
         assert counters["consolidate"] == 1
         assert counters["classify"] == 1
     finally:

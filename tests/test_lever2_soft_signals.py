@@ -79,6 +79,35 @@ async def _drive(node_coro_gen):
 @pytest.fixture(autouse=True)
 def _restore_seams():
     saved = {n: getattr(nodes, n) for n in ("REVIEWER_FN", "EXTRACT_INVOICE_DOCUMENT_FN")}
+
+    def _still_unreconciled_extract(data, mime, **kw):
+        from invoice_processing.extract.invoice_extractor import (
+            ExtractedInvoice,
+            ExtractedInvoiceBundle,
+            ExtractedLine,
+        )
+        from tests.test_nodes import _legacy_result_from_ex_bundle
+
+        return _legacy_result_from_ex_bundle(
+            ExtractedInvoiceBundle(
+                invoices=[
+                    ExtractedInvoice(
+                        doc_type="invoice",
+                        invoice_number="INV-1",
+                        invoice_date="2025-01-15",
+                        currency="SGD",
+                        issuer_name="Acme Supplier",
+                        bill_to_name="Client",
+                        lines=[ExtractedLine(description="Goods", net_amount=100.0, gst_amount=9.0)],
+                        subtotal=100.0,
+                        gst_total=9.0,
+                        total=120.0,
+                    )
+                ]
+            )
+        )
+
+    nodes.EXTRACT_INVOICE_DOCUMENT_FN = _still_unreconciled_extract
     yield
     for n, fn in saved.items():
         setattr(nodes, n, fn)
