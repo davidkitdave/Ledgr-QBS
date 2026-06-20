@@ -53,3 +53,26 @@ Non-obvious gotchas:
   live runtime. It injects every LLM step as a keyword-only callable, so it runs
   the full classify→extract→categorize→tax→route→workbook flow either live (real
   Gemini, with the `.env` above) or with deterministic stubs (unit tests, no creds).
+
+### Live Slack test from the VM (no Cloud Run, no real GCP)
+
+A full human→bot→Slack roundtrip is reproducible locally:
+
+1. Run a Firestore emulator (Java is present): download
+   `cloud-firestore-emulator-*.jar` and `java -jar … --host=127.0.0.1 --port=8090`,
+   then `export FIRESTORE_EMULATOR_HOST=127.0.0.1:8090` so `firestore.Client()`
+   uses it without GCP credentials.
+2. Seed a per-channel client profile + COA into the emulator via
+   `FirestoreClientStore.save_profile/set_channel/save_coa` (the modal-driven
+   `/ledgr settings` onboarding can't be automated). Set `status="active"` and use
+   `app/data/standard_sg_sme_coa.json` for the COA.
+3. Start Socket Mode: `python -m accounting_agents.slack_runner` (needs
+   `SLACK_BOT_TOKEN` + `SLACK_APP_TOKEN`). It prints "⚡️ Bolt app is running!".
+4. The dev Slack app (`ledgr-dev` in workspace `QBS-AI`) is in **Socket Mode**, so
+   the running instance is the workspace's sole event consumer. A plain channel
+   message triggers the Q&A agent (`answer_question`); a file upload triggers the
+   document pipeline. The bot lacks `channels:join` scope — invite it at channel
+   creation instead of self-join.
+5. **Caveat:** while a Socket-Mode instance runs here, it intercepts events for the
+   whole workspace (including real client channels) using only the local emulator
+   state — stop it after testing so it doesn't shadow production usage.
