@@ -33,16 +33,23 @@ Non-obvious gotchas:
 - `app.main:app` is the live entrypoint (`build_fastapi_app` from
   `accounting_agents/slack_runner.py`). The `README.md` "Running the Agent" section
   is stale (it describes the retired `adk web invoice_processing` flow).
-- `/healthz` returns HTTP 503 with `{"missing": ["SLACK_BOT_TOKEN", ...]}` until
-  Slack creds are set — this is expected, not a failure. `/openapi.json` returns 200.
-- `POST /slack/events` 500s without GCP Application Default Credentials: the lazy
-  handler builds a Firestore session service via `google.auth.default()`. Full
-  Slack/Firestore handling needs ADC + Slack tokens (`SLACK_BOT_TOKEN`,
-  `SLACK_SIGNING_SECRET`/`SLACK_APP_TOKEN`) and `GOOGLE_API_KEY` (AI Studio) for
-  Gemini. None are present by default, so only the deterministic engine and the
-  unit suite run offline.
+- **Gemini backend selection (most important gotcha):**
+  `invoice_processing/shared_libraries/genai_client.make_client()` defaults to
+  **Vertex AI** when `GOOGLE_GENAI_USE_VERTEXAI` is unset, so live engine calls
+  fail with a "default credentials were not found" (ADC) error. For dev, create a
+  `.env` (gitignored) with `GOOGLE_GENAI_USE_VERTEXAI=FALSE` so it uses AI Studio
+  via `GOOGLE_API_KEY` (the documented `cp .env.example .env` step). The FastAPI
+  app and unit tests already get this because importing `accounting_agents.config`
+  sets the flag FALSE, but standalone engine modules do not — they need the `.env`.
+- `/healthz` returns 200 `{"ok":true}` only when `SLACK_BOT_TOKEN` and
+  `SLACK_SIGNING_SECRET` are set; otherwise HTTP 503 with the missing list
+  (expected, not a failure). `/openapi.json` returns 200 regardless.
+- `POST /slack/events` 500s without GCP Application Default Credentials even with
+  Slack tokens present: the lazy handler builds a Firestore session service via
+  `google.auth.default()`. The full Slack message roundtrip therefore needs GCP
+  ADC (service-account JSON via `GOOGLE_APPLICATION_CREDENTIALS`, or
+  `gcloud auth application-default login`) in addition to the Slack tokens.
 - `invoice_processing/pipeline.py` is the hermetic engine/eval harness, NOT the
-  live runtime. It injects every LLM step as a keyword-only callable, so it (and
-  the unit tests) run end-to-end with deterministic stubs and zero network/LLM
-  calls — the right way to demo the core classify→extract→categorize→tax→route→
-  workbook flow without creds.
+  live runtime. It injects every LLM step as a keyword-only callable, so it runs
+  the full classify→extract→categorize→tax→route→workbook flow either live (real
+  Gemini, with the `.env` above) or with deterministic stubs (unit tests, no creds).
