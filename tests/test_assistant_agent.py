@@ -629,8 +629,12 @@ def _qbs_ledger_rows() -> list[dict]:
 
 def _write_ctx(rows=None, *, tax_registered=True) -> _WriteToolContext:
     return _WriteToolContext(
-        {LEDGER_DATA_KEY: rows if rows is not None else _qbs_ledger_rows(),
-         "tax_registered": tax_registered}
+        {
+            LEDGER_DATA_KEY: rows if rows is not None else _qbs_ledger_rows(),
+            "tax_registered": tax_registered,
+            "region": "SINGAPORE",
+            "base_currency": "SGD",
+        }
     )
 
 

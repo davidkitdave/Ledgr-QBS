@@ -36,8 +36,9 @@ class PartyInfo:
     def is_overseas(self) -> Optional[bool]:
         """Whether this party is outside Singapore (legacy default home country).
 
-        Prefer :meth:`is_overseas_for` with the client's home country so MY
-        clients do not treat SG suppliers as domestic.
+        .. deprecated::
+            Prefer :meth:`is_overseas_for` with the client's home country so MY
+            clients do not treat SG suppliers as domestic.
         """
         return self.is_overseas_for("SG")
 

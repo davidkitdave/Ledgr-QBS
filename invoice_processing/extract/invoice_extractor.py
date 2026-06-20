@@ -418,6 +418,38 @@ def reconcile(
     return True, "reconciled"
 
 
+def direction_needs_review(direction: object) -> bool:
+    """True when sales/purchase side is not confirmed and needs HITL."""
+    return direction in ("unknown", "auto", "self_referential", None) or (
+        direction not in ("purchase", "sales")
+    )
+
+
+def append_direction_review_note(inv: NormalizedInvoice, direction: object) -> None:
+    """Flag invoices whose sales/purchase side is not confirmed (C8 HITL)."""
+    if direction == "self_referential":
+        review_note = (
+            "needs review: self-referential document — issuer and bill-to "
+            "both match client; not booked as a purchase"
+        )
+    elif direction == "unknown":
+        review_note = (
+            "needs review: direction unknown — could not determine whether "
+            "client is issuer or bill-to; defaulted to purchase for routing"
+        )
+    else:
+        review_note = (
+            "needs review: direction not confirmed — could not determine whether "
+            "client is issuer or bill-to; defaulted to purchase for routing"
+        )
+    inv.reconciled = False
+    inv.reconcile_note = (
+        f"{inv.reconcile_note}; {review_note}"
+        if inv.reconcile_note
+        else review_note
+    )
+
+
 def to_normalized(
     ex: ExtractedInvoice,
     *,

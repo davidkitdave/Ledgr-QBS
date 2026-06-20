@@ -68,6 +68,8 @@ from .jurisdiction import (
     JURISDICTION_RATES_KEY,
     SUPPLIER_COUNTRY_KEY,
     TAX_JURISDICTION_KEY,
+    _norm_region,
+    _resolve_client_currency,
     resolution_from_state as _resolution_from_state,
     resolve_jurisdiction as _resolve_jurisdiction_fn,
     write_to_state as _write_jurisdiction_to_state,
@@ -94,6 +96,8 @@ from invoice_processing.extract.process_invoice_document import (
 from invoice_processing.extract.invoice_extractor import (
     ExtractedInvoiceBundle,
     _is_soa_summary_invoice,
+    append_direction_review_note,
+    direction_needs_review,
     extract_invoice_bundle,
     reconcile,
     to_normalized,
@@ -621,6 +625,13 @@ def _apply_invoice_process_result(ctx, result: InvoiceProcessResult) -> None:
     )
 
 
+def _base_currency_from_state(state: dict) -> str:
+    """Registry-aware client currency for extract/normalize — no silent SGD default."""
+    region = _norm_region(state.get("client_region") or state.get("region") or "")
+    resolved = _resolve_client_currency(state, region)
+    return resolved or ""
+
+
 @node
 async def extract_invoice_document_node(ctx) -> Event:
     """Understand or legacy extraction — single orchestrated invoice lane step."""
@@ -630,9 +641,9 @@ async def extract_invoice_document_node(ctx) -> Event:
         data,
         mime_type,
         doc_type=ctx.state.get(DOC_TYPE_KEY) or "invoice",
-        direction=ctx.state.get(DIRECTION_KEY) or "purchase",
+        direction=ctx.state.get(DIRECTION_KEY) or "auto",
         our_gst_registered=bool(ctx.state.get("tax_registered", True)),
-        base_currency=ctx.state.get("base_currency") or "SGD",
+        base_currency=_base_currency_from_state(ctx.state),
         client_name=ctx.state.get("client_name"),
         client_uen=ctx.state.get("client_uen"),
         hint=review_hint or None,
@@ -820,7 +831,7 @@ def _normalize_bundle(ctx, bundle: ExtractedInvoiceBundle) -> list[NormalizedInv
     # routed without a confirmed side (unknown case).
     effective_direction = direction if direction in ("purchase", "sales") else "purchase"
     our_gst = bool(ctx.state.get("tax_registered", True))
-    base_currency: str = ctx.state.get("base_currency") or "SGD"
+    base_currency = _base_currency_from_state(ctx.state)
 
     normalized: list[NormalizedInvoice] = []
     for ex in bundle.invoices:
@@ -854,39 +865,8 @@ def _normalize_bundle(ctx, bundle: ExtractedInvoiceBundle) -> list[NormalizedInv
         if not inv.needs_fx_review:
             inv.reconciled = ok
         # Self-referential / ambiguous direction guard (mirrors pipeline.py).
-        if direction == "self_referential":
-            inv.reconciled = False
-            review_note = (
-                "needs review: self-referential document — issuer and bill-to "
-                "both match client; not booked as a purchase"
-            )
-            inv.reconcile_note = (
-                f"{inv.reconcile_note}; {review_note}"
-                if inv.reconcile_note
-                else review_note
-            )
-        elif direction == "unknown":
-            inv.reconciled = False
-            review_note = (
-                "needs review: direction unknown — could not determine whether "
-                "client is issuer or bill-to; defaulted to purchase for routing"
-            )
-            inv.reconcile_note = (
-                f"{inv.reconcile_note}; {review_note}"
-                if inv.reconcile_note
-                else review_note
-            )
-        elif direction in ("auto", None) or direction not in ("purchase", "sales"):
-            inv.reconciled = False
-            review_note = (
-                "needs review: direction not confirmed — could not determine whether "
-                "client is issuer or bill-to; defaulted to purchase for routing"
-            )
-            inv.reconcile_note = (
-                f"{inv.reconcile_note}; {review_note}"
-                if inv.reconcile_note
-                else review_note
-            )
+        if direction_needs_review(direction):
+            append_direction_review_note(inv, direction)
         normalized.append(inv)
     return normalized
 
@@ -1167,7 +1147,11 @@ def detect_struggle(state: dict) -> tuple[bool, list[str]]:
             )
             if not totals_ok:
                 reasons.append(f"unreconciled: {label} ({note})")
-            elif "direction unknown" in note or "self-referential" in note:
+            elif (
+                "direction unknown" in note
+                or "self-referential" in note
+                or "direction not confirmed" in note
+            ):
                 primary = doc_records[idx] if idx < len(doc_records) else None
                 if not (primary and _is_telco_bill(primary)):
                     reasons.append(f"direction_uncertain: {label}")
@@ -1411,9 +1395,9 @@ def _reextract_with_hint(ctx, hint: str, pdf_bytes: bytes, mime_type: str = "app
         pdf_bytes,
         mime_type,
         doc_type=ctx.state.get(DOC_TYPE_KEY) or "invoice",
-        direction=ctx.state.get(DIRECTION_KEY) or "purchase",
+        direction=ctx.state.get(DIRECTION_KEY) or "auto",
         our_gst_registered=bool(ctx.state.get("tax_registered", True)),
-        base_currency=ctx.state.get("base_currency") or "SGD",
+        base_currency=_base_currency_from_state(ctx.state),
         client_name=ctx.state.get("client_name"),
         client_uen=ctx.state.get("client_uen"),
         hint=hint,

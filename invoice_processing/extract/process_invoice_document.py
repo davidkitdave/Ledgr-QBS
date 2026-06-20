@@ -15,7 +15,7 @@ from .book import BOOK_FROM_CAPTURE_FN, BookingProposal, booking_to_extracted_in
 from .document_extractor import extract_document_bundle
 from .document_normalizer import normalize_document_bundle
 from .document_record import DocumentRecordBundle
-from .invoice_extractor import to_normalized
+from .invoice_extractor import append_direction_review_note, direction_needs_review, to_normalized
 from .ledger_extract import (
     DocumentLedgerExtract,
     extract_document_ledger,
@@ -81,12 +81,19 @@ def _process_capture_book(
             effective_direction = proposal.direction_for_client
         elif not direction and proposal.direction_for_client != "unknown":
             effective_direction = proposal.direction_for_client
+        structural_direction = (
+            effective_direction
+            if effective_direction in ("purchase", "sales")
+            else "purchase"
+        )
         inv = to_normalized(
             ex,
-            direction=effective_direction or "purchase",
+            direction=structural_direction,
             our_gst_registered=our_gst_registered,
             base_currency=base_currency,
         )
+        if direction_needs_review(effective_direction):
+            append_direction_review_note(inv, effective_direction)
         inv.invoice_date = inv.invoice_date or _parse_iso_date(proposal.document_date)
         inv.tax_visible_on_document = proposal.tax_visible_on_document
         inv.direction_reason = proposal.direction_reason

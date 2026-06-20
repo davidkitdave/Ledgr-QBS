@@ -128,7 +128,7 @@ def test_explain_categorization_unresolved():
 
 
 def test_explain_tax_treatment_sr_purchase_registered():
-    ctx = _ctx(tax_registered=True)
+    ctx = _ctx(tax_registered=True, region="SINGAPORE", base_currency="SGD")
     raw = explain_tax_treatment(
         ctx,
         line_description="Office supplies",
@@ -145,7 +145,7 @@ def test_explain_tax_treatment_sr_purchase_registered():
 
 
 def test_explain_tax_treatment_nt_master_gate():
-    ctx = _ctx(tax_registered=False)
+    ctx = _ctx(tax_registered=False, region="SINGAPORE", base_currency="SGD")
     raw = explain_tax_treatment(
         ctx,
         line_description="Office supplies with GST shown",
@@ -162,7 +162,7 @@ def test_explain_tax_treatment_nt_master_gate():
 
 
 def test_explain_tax_treatment_zr_zero_rated():
-    ctx = _ctx(tax_registered=True)
+    ctx = _ctx(tax_registered=True, region="SINGAPORE", base_currency="SGD")
     raw = explain_tax_treatment(
         ctx,
         line_description="International freight",
@@ -178,7 +178,7 @@ def test_explain_tax_treatment_zr_zero_rated():
 
 
 def test_explain_tax_uses_canonical_field_names():
-    ctx = _ctx(tax_registered=True)
+    ctx = _ctx(tax_registered=True, region="SINGAPORE", base_currency="SGD")
     clf = TaxClassifier()
     line = InvoiceLine(description="Telco IDD", tax_keyword="ZR", net_amount=50.0, gst_amount=0.0)
     inv = NormalizedInvoice(

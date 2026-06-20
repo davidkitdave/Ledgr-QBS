@@ -69,6 +69,7 @@ from .jurisdiction import (
     REGION_MALAYSIA,
     REGION_SINGAPORE,
     _norm_region,
+    _resolve_client_currency,
     registration_threshold_for_region,
     resolve_jurisdiction,
     write_to_state,
@@ -176,6 +177,19 @@ _SIGNATURE_COLS: tuple[str, ...] = (
 #: Legacy re-exports — canonical values live in jurisdiction YAML ``registration_threshold``.
 GST_THRESHOLD_SGD, _, _ = registration_threshold_for_region(REGION_SINGAPORE)
 SST_THRESHOLD_MYR, _, _ = registration_threshold_for_region(REGION_MALAYSIA)
+
+
+def _build_resolver_state(state: dict) -> dict:
+    """Build jurisdiction resolver input — derive currency from registry, never default SG."""
+    resolver_state = dict(state)
+    region = _norm_region(
+        resolver_state.get("client_region") or resolver_state.get("region") or ""
+    )
+    if region and not resolver_state.get("base_currency"):
+        currency = _resolve_client_currency(resolver_state, region)
+        if currency:
+            resolver_state["base_currency"] = currency
+    return resolver_state
 
 
 def _tax_registration_threshold(state: dict) -> tuple[float, str, str]:
@@ -1082,12 +1096,8 @@ def explain_tax_treatment(
         lines=[line],
     )
     # Resolve jurisdiction from state (NOT hardcoded SG) so the LLM tax
-    # reasoner picks the right rate band. Returns SINGAPORE for SG clients,
-    # MALAYSIA for MY clients, CROSS_BORDER / AMBIGUOUS for mismatched pairs.
-    resolver_state = dict(state)
-    if "region" not in resolver_state and "client_region" not in resolver_state:
-        resolver_state["region"] = "SINGAPORE"
-        resolver_state["base_currency"] = resolver_state.get("base_currency") or "SGD"
+    # reasoner picks the right rate band.
+    resolver_state = _build_resolver_state(state)
     resolution = resolve_jurisdiction(resolver_state)
     write_to_state(resolver_state, resolution)
     outcome = _reason_one_invoice(inv, state=resolver_state, jurisdiction_resolution=resolution)
@@ -1556,18 +1566,8 @@ def _reclassify_tax_for_row(
         invoice_date=inv_date,
         our_gst_registered=registered,
     )
-    # Resolve jurisdiction from state. For SG clients, use the existing
-    # SG-only TaxClassifier (preserves §0.5-C behaviour). For non-SG
-    # jurisdictions (MY / cross-border), delegate to the LLM tax reasoner
-    # which has the proper multi-country reference YAML.
-    #
-    # Legacy callers (tests + older chat paths) do not always set ``region``
-    # in state. Default to SG in that case so the §0.5-C re-classification
-    # continues to use the existing SG rules — preserves C6-C8 golden cases.
-    resolver_state = _state_to_dict(state)
-    if "region" not in resolver_state and "client_region" not in resolver_state:
-        resolver_state["region"] = "SINGAPORE"
-        resolver_state["base_currency"] = resolver_state.get("base_currency") or "SGD"
+    # Resolve jurisdiction from session state — no silent SG/SGD injection (C10).
+    resolver_state = _build_resolver_state(_state_to_dict(state))
     resolution = resolve_jurisdiction(resolver_state)
     write_to_state(resolver_state, resolution)
     if resolution.jurisdiction.code == "SINGAPORE":

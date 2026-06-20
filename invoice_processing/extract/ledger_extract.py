@@ -32,6 +32,8 @@ from .invoice_extractor import (
     ExtractedInvoice,
     ExtractedLine,
     _append_hint,
+    append_direction_review_note,
+    direction_needs_review,
     mime_for,
     reconcile,
     to_normalized,
@@ -482,13 +484,20 @@ def ledger_extract_to_normalized(
     elif extract.direction_for_client not in ("unknown", "") and not direction:
         # No direction supplied at all (Understand call owns it now).
         effective_direction = extract.direction_for_client
+    structural_direction = (
+        effective_direction
+        if effective_direction in ("purchase", "sales")
+        else "purchase"
+    )
     inv = to_normalized(
         ledger_extract_to_extracted_invoice(extract),
-        direction=effective_direction,
+        direction=structural_direction,
         our_gst_registered=our_gst_registered,
         client_country=client_country,
         base_currency=base_currency,
     )
+    if direction_needs_review(effective_direction):
+        append_direction_review_note(inv, effective_direction)
     inv.tax_visible_on_document = extract.tax_visible_on_document
     return inv
 

@@ -1000,6 +1000,45 @@ def test_extract_node_unknown_direction_flagged_for_review():
     assert "unknown" in note.lower()
 
 
+def test_extract_node_passes_auto_direction_not_purchase(monkeypatch):
+    """C8: extract must not silently default direction to purchase."""
+    captured: dict = {}
+
+    def _capture_extract(data, mime, **kw):
+        captured.update(kw)
+        return _legacy_result_from_ex_bundle(
+            ExtractedInvoiceBundle(invoices=[_ex_invoice("INV-AUTO")])
+        )
+
+    nodes.EXTRACT_INVOICE_DOCUMENT_FN = _capture_extract
+    state = _base_state(**{nodes.DIRECTION_KEY: "auto"})
+    del state["base_currency"]
+    ctx = FakeContext(state)
+    asyncio.run(nodes.extract_invoice_document_node._func(ctx))
+
+    assert captured.get("direction") == "auto"
+    assert captured.get("base_currency") == "SGD"
+
+
+def test_extract_node_my_region_derives_myr_without_state_currency(monkeypatch):
+    """C10: base_currency derives from REGION_REGISTRY when omitted from state."""
+    captured: dict = {}
+
+    def _capture_extract(data, mime, **kw):
+        captured.update(kw)
+        return _legacy_result_from_ex_bundle(
+            ExtractedInvoiceBundle(invoices=[_ex_invoice("INV-MY")])
+        )
+
+    nodes.EXTRACT_INVOICE_DOCUMENT_FN = _capture_extract
+    state = _base_state(**{"region": "MALAYSIA", "base_currency": None})
+    del state["base_currency"]
+    ctx = FakeContext(state)
+    asyncio.run(nodes.extract_invoice_document_node._func(ctx))
+
+    assert captured.get("base_currency") == "MYR"
+
+
 def test_extract_node_clean_purchase_unaffected():
     """A normal purchase (direction='purchase') must NOT be flagged for review
     by the guard — the guard must only fire on self_referential / unknown."""
