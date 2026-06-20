@@ -205,8 +205,11 @@ jobs:
         run: |
           PARITY_OK=true
           check_flag() {
+            if [[ "${1:-}" == "--" ]]; then
+              shift
+            fi
             local flag="$1"
-            if ! grep -q "$flag" scripts/deploy-prod.sh; then
+            if ! grep -Fq -- "$flag" scripts/deploy-prod.sh; then
               echo "::error::Parity failure: '$flag' found in deploy.yml but not in scripts/deploy-prod.sh"
               PARITY_OK=false
             fi
