@@ -206,27 +206,27 @@ jobs:
           PARITY_OK=true
           check_flag() {
             local flag="$1"
-            if ! grep -q "$flag" scripts/deploy-prod.sh; then
+            if ! grep -qF -- "$flag" scripts/deploy-prod.sh; then
               echo "::error::Parity failure: '$flag' found in deploy.yml but not in scripts/deploy-prod.sh"
               PARITY_OK=false
             fi
           }
           # These are the flags this workflow passes; each must exist in deploy-prod.sh.
-          check_flag -- "--allow-unauthenticated"
-          check_flag -- "--min-instances"
-          check_flag -- "--max-instances"
-          check_flag -- "SLACK_CLIENT_SECRET=SLACK_CLIENT_SECRET:latest"
-          check_flag -- "SLACK_SIGNING_SECRET=SLACK_SIGNING_SECRET:latest"
-          check_flag -- "LEDGR_ENV=prod"
-          check_flag -- "SLACK_CLIENT_ID="
-          check_flag -- "SLACK_BASE_URL="
-          check_flag -- "GOOGLE_GENAI_USE_VERTEXAI=TRUE"
-          check_flag -- "GOOGLE_CLOUD_PROJECT="
-          check_flag -- "GOOGLE_CLOUD_LOCATION="
-          check_flag -- "FIRESTORE_PROJECT="
-          check_flag -- "LEDGR_MODEL_LITE="
-          check_flag -- "LEDGR_MODEL_STD="
-          check_flag -- "ledgr-runtime@"
+          check_flag "--allow-unauthenticated"
+          check_flag "--min-instances"
+          check_flag "--max-instances"
+          check_flag "SLACK_CLIENT_SECRET=SLACK_CLIENT_SECRET:latest"
+          check_flag "SLACK_SIGNING_SECRET=SLACK_SIGNING_SECRET:latest"
+          check_flag "LEDGR_ENV=prod"
+          check_flag "SLACK_CLIENT_ID="
+          check_flag "SLACK_BASE_URL="
+          check_flag "GOOGLE_GENAI_USE_VERTEXAI=TRUE"
+          check_flag "GOOGLE_CLOUD_PROJECT="
+          check_flag "GOOGLE_CLOUD_LOCATION="
+          check_flag "FIRESTORE_PROJECT="
+          check_flag "LEDGR_MODEL_LITE="
+          check_flag "LEDGR_MODEL_STD="
+          check_flag "ledgr-runtime@"
           if [[ "$PARITY_OK" != "true" ]]; then
             echo "::error::deploy.yml is missing flags that exist in scripts/deploy-prod.sh. Fix before deploying."
             exit 1
