@@ -48,8 +48,13 @@ class _FakeToolContext:
         self.state = state
 
 
-def _ctx(rows: list[dict]) -> _FakeToolContext:
-    return _FakeToolContext({LEDGER_DATA_KEY: rows})
+def _ctx(rows: list[dict], *, region: str = "SINGAPORE") -> _FakeToolContext:
+    currency = "SGD" if region == "SINGAPORE" else "MYR"
+    return _FakeToolContext({
+        LEDGER_DATA_KEY: rows,
+        "region": region,
+        "base_currency": currency,
+    })
 
 
 def _empty_ctx() -> _FakeToolContext:
@@ -263,6 +268,13 @@ class TestGstThresholdCheck:
         result = gst_threshold_check(_ctx(rows))
         data = json.loads(result)
         assert data["taxable_turnover"] == pytest.approx(800_000.0)
+
+    def test_unknown_region_fails_loud(self):
+        ctx = _FakeToolContext({LEDGER_DATA_KEY: [{"Source Amount": 100.0, "Tax Rate": "SR"}]})
+        result = gst_threshold_check(ctx)
+        data = json.loads(result)
+        assert data["status"] == "unknown_region"
+        assert "region" in data["message"].lower()
 
 
 # --------------------------------------------------------------------------- #

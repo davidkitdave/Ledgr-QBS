@@ -196,13 +196,12 @@ def _tax_registration_threshold(state: dict) -> tuple[float, str, str]:
     """Return (threshold_amount, currency, label) for the active jurisdiction.
 
     Reads region from ``state["region"]`` (canonical) or ``state["client_region"]``
-    (legacy). Falls back to SG / SGD / 1_000_000 when no region is present so
-    legacy SG clients see no behaviour change.
+    (legacy). When region is missing or unsupported, returns ``(0, "", "")`` so
+    callers fail loud — never silently default to SG (C10).
 
     Order of precedence:
     1. Env override ``LEDGR_TAX_REGISTRATION_THRESHOLD_<REGION>`` (most explicit).
     2. Per-region ``registration_threshold`` from the jurisdiction YAML.
-    3. SG / 1M SGD (legacy fallback — never silently for a non-SG client).
     """
     region = _norm_region(state.get("client_region") or state.get("region") or "")
     if region == REGION_SINGAPORE:
@@ -217,8 +216,7 @@ def _tax_registration_threshold(state: dict) -> tuple[float, str, str]:
             os.environ.get("LEDGR_TAX_REGISTRATION_THRESHOLD_MY", amount)
         )
         return threshold, currency, label
-    amount, currency, label = registration_threshold_for_region(REGION_SINGAPORE)
-    return float(amount), currency, f"{label} (fallback)"
+    return 0.0, "", ""
 
 
 def _normalize_row_for_tools(row: dict) -> dict:
@@ -748,6 +746,17 @@ def gst_threshold_check(tool_context: ToolContext) -> str:
     threshold, currency, label = _tax_registration_threshold(
         getattr(tool_context, "state", {}) or {}
     )
+    if not threshold or not currency:
+        return json.dumps(
+            {
+                "status": "unknown_region",
+                "message": (
+                    "Client tax region is not set or unsupported; "
+                    "cannot compare turnover to a registration threshold."
+                ),
+            },
+            ensure_ascii=False,
+        )
 
     taxable = 0.0
     for row in rows:

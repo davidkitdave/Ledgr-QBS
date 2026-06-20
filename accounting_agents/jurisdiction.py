@@ -22,9 +22,10 @@ Per ADK best practices (Sessions/State, Function tools, Dynamic workflows docs):
 * Keep Python guards thin (math, tolerance, HITL flag). LLM is the brain.
 
 New jurisdictions are added by:
-1. Adding a ``JurisdictionRule`` entry below.
-2. Adding a per-jurisdiction reference YAML under
-   ``invoice_processing/shared_libraries/{region_code}.yaml`` (rates + code_map).
+1. Adding a row to ``REGION_REGISTRY`` (currency, yaml, tax_system,
+   cross_border_flag_policy).
+2. Dropping a per-jurisdiction reference YAML under
+   ``invoice_processing/shared_libraries/{yaml_name}`` (rates + code_map).
 3. Optionally adding jurisdiction-specific signal lexicons in the YAML.
 """
 
