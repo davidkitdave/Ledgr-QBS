@@ -277,14 +277,21 @@ jobs:
             --set-env-vars "LEDGR_ENV=prod,SLACK_CLIENT_ID=${SLACK_CLIENT_ID},SLACK_BASE_URL=${SLACK_BASE_URL},GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=${PROJECT},GOOGLE_CLOUD_LOCATION=${REGION},FIRESTORE_PROJECT=${PROJECT},LEDGR_MODEL_LITE=${LEDGR_MODEL_LITE},LEDGR_MODEL_STD=${LEDGR_MODEL_STD}" \
             --quiet
 
-          # Resolve the tagged RC URL for the smoke test.
-          RC_URL="$(gcloud run services describe "$SERVICE" \
-            --region "$REGION" \
-            --project "$PROJECT" \
-            --format="value(status.traffic.filter(tag:rc-${SHORT_SHA}).url)" \
-            2>/dev/null || true)"
+          # Resolve the tagged RC URL for the smoke test. The gcloud --format list
+          # filter is unreliable, so describe as JSON and pick the tag's url via jq.
+          # Retry a few times for traffic-config propagation after the deploy.
+          RC_URL=""
+          for attempt in 1 2 3 4 5 6; do
+            RC_URL="$(gcloud run services describe "$SERVICE" \
+              --region "$REGION" --project "$PROJECT" --format=json 2>/dev/null \
+              | jq -r --arg t "rc-${SHORT_SHA}" '.status.traffic[]? | select(.tag==$t) | .url' \
+              | head -n1)"
+            [ -n "$RC_URL" ] && break
+            echo "  RC tagged URL not resolved yet (attempt ${attempt}); retrying in 5s..."
+            sleep 5
+          done
           echo "rc_url=${RC_URL}" >> "$GITHUB_OUTPUT"
-          echo "RC revision deployed (no traffic). Tagged URL: ${RC_URL}"
+          echo "RC revision deployed (no traffic). Tagged URL: ${RC_URL:-<unresolved>}"
 
       # -----------------------------------------------------------------------
       # Smoke test: hit /readyz on the RC tagged URL.
