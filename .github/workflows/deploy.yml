@@ -5,7 +5,7 @@
 #   2. build-push   — docker build → SHA-tagged image → Artifact Registry
 #   3. deploy-rc    — gcloud run deploy --no-traffic --tag rc-<short-sha> (full flag set
 #                     from scripts/deploy-prod.sh — that file is the single source of truth)
-#   4. smoke        — curl /readyz on the RC tagged URL (non-200 fails the job)
+#   4. smoke        — curl /healthz on the RC tagged URL (non-200 fails the job)
 #   5. promote      — traffic shift gated on the "production" GitHub Environment
 #                     (requires human approval via Environment required-reviewers)
 #   6. rollback     — workflow_dispatch job: shift traffic back to the prior named revision
@@ -294,13 +294,16 @@ jobs:
           echo "RC revision deployed (no traffic). Tagged URL: ${RC_URL:-<unresolved>}"
 
       # -----------------------------------------------------------------------
-      # Smoke test: hit /readyz on the RC tagged URL.
-      # /readyz (added by Step 6a) checks that the Bolt handler and lifespan
-      # have initialised — a meaningful gate beyond the static /healthz.
-      # Non-200 response fails this job; no traffic is ever shifted to a
-      # revision that fails smoke.
+      # Smoke test: hit /healthz on the RC tagged URL.
+      # The SERVED app (accounting_agents.slack_runner.build_fastapi_app, behind
+      # app.main:app in the Dockerfile) exposes /healthz, which validates the
+      # required Slack config is present — 503 if missing, 200 otherwise. That is
+      # a meaningful readiness gate, not a static probe. (There is no /readyz on
+      # the served app; the lazy-init handler has no better readiness signal.)
+      # Non-200 fails this job; no traffic is ever shifted to a revision that
+      # fails smoke.
       # -----------------------------------------------------------------------
-      - name: Smoke test RC — GET /readyz
+      - name: Smoke test RC — GET /healthz
         env:
           RC_URL: ${{ steps.deploy-rc.outputs.rc_url }}
         run: |
@@ -308,11 +311,11 @@ jobs:
             echo "::error::RC_URL is empty — cannot resolve tagged URL for smoke test."
             exit 1
           fi
-          echo "Smoke testing: ${RC_URL}/readyz"
+          echo "Smoke testing: ${RC_URL}/healthz"
           # Retry up to 5 times with 10-second back-off to allow Cold Start.
           for attempt in 1 2 3 4 5; do
             STATUS="$(curl --silent --output /dev/null --write-out '%{http_code}' \
-              --max-time 30 "${RC_URL}/readyz" || true)"
+              --max-time 30 "${RC_URL}/healthz" || true)"
             echo "  attempt ${attempt}: HTTP ${STATUS}"
             if [[ "$STATUS" == "200" ]]; then
               echo "Smoke test passed (HTTP 200)."
@@ -320,7 +323,7 @@ jobs:
             fi
             sleep 10
           done
-          echo "::error::Smoke test failed — /readyz returned ${STATUS} after 5 attempts. No traffic will be shifted."
+          echo "::error::Smoke test failed — /healthz returned ${STATUS} after 5 attempts. No traffic will be shifted."
           exit 1
 
   # ---------------------------------------------------------------------------

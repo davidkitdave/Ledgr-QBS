@@ -91,11 +91,14 @@ from commit `abc1234`" is an exact, auditable statement.
    `GOOGLE_GENAI_USE_VERTEXAI=TRUE`, `LEDGR_MODEL_LITE`, `LEDGR_MODEL_STD`.
    A CI parity assertion checks that the flag set matches `deploy-prod.sh` at
    build time.
-5. **Smoke test the RC** — hit the RC's tagged URL. `/healthz`
-   (`accounting_agents/fast_api_app.py:69`) is a static liveness probe; a new
-   `/readyz` endpoint asserts that the Bolt handler and app lifespan have
-   initialised, providing a meaningful smoke gate. No real Slack traffic is sent
-   to the RC revision.
+5. **Smoke test the RC** — hit `/healthz` on the RC's tagged URL. The SERVED app
+   is `accounting_agents.slack_runner.build_fastapi_app` (behind `app.main:app` in
+   the Dockerfile), whose `/healthz` is not a static probe: it returns 503 when the
+   required Slack config (HTTP **and** OAuth) is missing and 200 otherwise — a
+   meaningful readiness gate. (An earlier draft pointed the smoke at a `/readyz`
+   added to the non-served `accounting_agents/fast_api_app.py`; that endpoint is
+   never deployed, so the smoke uses the served `/healthz` instead.) No real Slack
+   traffic is sent to the RC revision.
 6. **Manual promote** — a GitHub **Environment `production`** with required
    reviewers gates the traffic shift. A human approves before any traffic moves.
 7. **Traffic shift** — `gcloud run services update-traffic ledgr
