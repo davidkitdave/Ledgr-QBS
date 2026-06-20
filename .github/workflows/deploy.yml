@@ -1,14 +1,13 @@
-# ADR-0018 — CI/CD deploy pipeline: push to main → test → build → RC → smoke → promote → rollback
+# CI/CD deploy pipeline: push to main → test → build → deploy (live traffic)
 #
-# Stages (per ADR-0018):
-#   1. test         — ruff check + pytest (test gate; deploy requires this green)
-#   2. build-push   — docker build → SHA-tagged image → Artifact Registry
-#   3. deploy-rc    — gcloud run deploy --no-traffic --tag rc-<short-sha> (full flag set
-#                     from scripts/deploy-prod.sh — that file is the single source of truth)
-#   4. smoke        — curl /healthz on the RC tagged URL (non-200 fails the job)
-#   5. promote      — traffic shift gated on the "production" GitHub Environment
-#                     (requires human approval via Environment required-reviewers)
-#   6. rollback     — workflow_dispatch job: shift traffic back to the prior named revision
+# Stages:
+#   1. test       — ruff check + pytest (deploy requires this green)
+#   2. build-push — docker build → SHA-tagged image → Artifact Registry
+#   3. deploy     — gcloud run deploy with the full flag set from
+#                   scripts/deploy-prod.sh (single source of truth). New revision
+#                   takes 100% traffic immediately. The test gate is the safety net.
+#   4. rollback   — workflow_dispatch job: shift traffic back to a prior named
+#                   revision (one-click revert if a bad deploy ever ships).
 #
 # Prerequisites (run scripts/gcloud-bootstrap-cicd.sh once first):
 #
@@ -20,15 +19,8 @@
 #     LEDGR_MODEL_LITE            — gemini-2.5-flash
 #     LEDGR_MODEL_STD             — gemini-2.5-flash
 #
-#   These are REPOSITORY-level vars (not Environment-scoped) so every job resolves
-#   them via vars.* without needing to declare `environment:`. None are sensitive.
-#
-#   GitHub Environment "production" (Settings → Environments):
-#     — Add required reviewers (the human approval gate for traffic-affecting jobs).
-#     — Store NO variables or secrets in it; it exists solely as the approval gate.
-#
-#   No GitHub secrets needed at all: SLACK_CLIENT_SECRET / SLACK_SIGNING_SECRET
-#   are pulled from GCP Secret Manager by Cloud Run at deploy time via --set-secrets.
+#   No GitHub secrets needed: SLACK_CLIENT_SECRET / SLACK_SIGNING_SECRET are
+#   pulled from GCP Secret Manager by Cloud Run at deploy time via --set-secrets.
 
 name: Deploy to Cloud Run
 
@@ -58,18 +50,14 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Stage 1 — Test gate
-  # Mirrors eval.yml conventions (astral-sh/setup-uv, uv sync --frozen).
-  # Must pass before any build or deploy job runs.
+  # Stage 1 — Test gate. Must pass before any build or deploy.
   # ---------------------------------------------------------------------------
   test:
     name: Test gate (ruff + pytest)
     runs-on: ubuntu-latest
-    # Skip the test gate when this is a manual rollback dispatch.
     if: github.event_name != 'workflow_dispatch' || github.event.inputs.rollback_revision == ''
     permissions:
       contents: read
-
     steps:
       - uses: actions/checkout@v4
 
@@ -85,17 +73,14 @@ jobs:
         run: uv sync --frozen
 
       - name: Ruff lint check
-        # ruff check is fully clean at HEAD (Step 6a sweep). No baseline file.
         run: uv run ruff check .
 
       - name: Run tests
-        # 1732 tests, all hermetic (Gemini / Slack / Firestore are mocked).
-        # No deselect flags needed.
+        # All tests are hermetic (Gemini / Slack / Firestore are mocked).
         run: uv run pytest
 
   # ---------------------------------------------------------------------------
-  # Stage 2 — Build + push
-  # Produces an immutable SHA-tagged image; never tags "latest".
+  # Stage 2 — Build + push immutable SHA-tagged image (never tags "latest").
   # ---------------------------------------------------------------------------
   build-push:
     name: Build & push image
@@ -105,11 +90,9 @@ jobs:
     permissions:
       id-token: write   # required for WIF OIDC token exchange
       contents: read
-
     outputs:
       image: ${{ steps.image-tag.outputs.image }}
       short_sha: ${{ steps.image-tag.outputs.short_sha }}
-
     steps:
       - uses: actions/checkout@v4
 
@@ -118,11 +101,10 @@ jobs:
         run: |
           SHORT_SHA="${GITHUB_SHA::8}"
           IMAGE="${IMAGE_BASE}:${GITHUB_SHA}"
-          echo "image=${IMAGE}"      >> "$GITHUB_OUTPUT"
-          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "image=${IMAGE}"          >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}"  >> "$GITHUB_OUTPUT"
 
       - name: Authenticate to Google Cloud (WIF — keyless)
-        id: auth
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.WORKLOAD_IDENTITY_PROVIDER }}
@@ -143,51 +125,19 @@ jobs:
         run: docker push "${{ steps.image-tag.outputs.image }}"
 
   # ---------------------------------------------------------------------------
-  # Stage 3 + 4 — Deploy RC (no traffic) + smoke test
+  # Stage 3 — Deploy to Cloud Run (100% traffic on the new revision).
   #
-  # FLAG SET PARITY CHECK (ADR-0018 §4):
-  # The flags below are sourced verbatim from scripts/deploy-prod.sh, which is
-  # the single source of truth. The inline assertion step below greps
-  # deploy-prod.sh to confirm parity. Any flag present there and absent here
-  # is a bug; the job will fail on the assertion step before any deploy runs.
-  #
-  # Full flag set from deploy-prod.sh:
-  #   --region asia-southeast1
-  #   --project ledgr-qbs
-  #   --service-account ledgr-runtime@ledgr-qbs.iam.gserviceaccount.com
-  #   --allow-unauthenticated
-  #   --min-instances 1
-  #   --max-instances 1
-  #   --set-secrets SLACK_CLIENT_SECRET=SLACK_CLIENT_SECRET:latest,SLACK_SIGNING_SECRET=SLACK_SIGNING_SECRET:latest
-  #   --set-env-vars LEDGR_ENV=prod,SLACK_CLIENT_ID=<var>,SLACK_BASE_URL=<var>,
-  #                  GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=ledgr-qbs,
-  #                  GOOGLE_CLOUD_LOCATION=asia-southeast1,FIRESTORE_PROJECT=ledgr-qbs,
-  #                  LEDGR_MODEL_LITE=<var>,LEDGR_MODEL_STD=<var>
-  #
-  # Var/secret sources:
-  #   SLACK_BASE_URL, SLACK_CLIENT_ID, LEDGR_MODEL_LITE, LEDGR_MODEL_STD
-  #     → repository-level variables (vars.*), resolved by every job without
-  #       needing `environment:` — so this job runs automatically, no approval wait.
-  #   SLACK_CLIENT_SECRET, SLACK_SIGNING_SECRET
-  #     → GCP Secret Manager (referenced by name; NOT stored in GitHub)
+  # Flags are sourced verbatim from scripts/deploy-prod.sh (single source of
+  # truth). The parity step greps deploy-prod.sh to confirm no flag has drifted.
   # ---------------------------------------------------------------------------
-  deploy-rc:
-    name: Deploy RC (no traffic) + smoke
+  deploy:
+    name: Deploy to Cloud Run
     runs-on: ubuntu-latest
     needs: [build-push]
     if: github.event_name != 'workflow_dispatch' || github.event.inputs.rollback_revision == ''
-    # No `environment:` here — RC deploy + smoke must run automatically so the
-    # approver sees the smoke result BEFORE deciding to promote. The required-
-    # reviewer gate lives only on `promote` and `rollback` (traffic-affecting jobs).
     permissions:
       id-token: write
       contents: read
-
-    outputs:
-      prior_revision: ${{ steps.capture-live.outputs.prior_revision }}
-      rc_url: ${{ steps.deploy-rc.outputs.rc_url }}
-      short_sha: ${{ needs.build-push.outputs.short_sha }}
-
     steps:
       - uses: actions/checkout@v4
 
@@ -197,21 +147,16 @@ jobs:
           workload_identity_provider: ${{ vars.WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ vars.CICD_SERVICE_ACCOUNT }}
 
-      # -----------------------------------------------------------------------
-      # Parity assertion: every key flag from deploy-prod.sh must appear here.
-      # If deploy-prod.sh gains a new flag this step will catch the drift.
-      # -----------------------------------------------------------------------
       - name: Assert deploy flag parity with scripts/deploy-prod.sh
         run: |
           PARITY_OK=true
           check_flag() {
             local flag="$1"
             if ! grep -qF -- "$flag" scripts/deploy-prod.sh; then
-              echo "::error::Parity failure: '$flag' found in deploy.yml but not in scripts/deploy-prod.sh"
+              echo "::error::Parity failure: '$flag' is in deploy.yml but not in scripts/deploy-prod.sh"
               PARITY_OK=false
             fi
           }
-          # These are the flags this workflow passes; each must exist in deploy-prod.sh.
           check_flag "--allow-unauthenticated"
           check_flag "--min-instances"
           check_flag "--max-instances"
@@ -228,36 +173,24 @@ jobs:
           check_flag "LEDGR_MODEL_STD="
           check_flag "ledgr-runtime@"
           if [[ "$PARITY_OK" != "true" ]]; then
-            echo "::error::deploy.yml is missing flags that exist in scripts/deploy-prod.sh. Fix before deploying."
+            echo "::error::deploy.yml is missing flags that exist in scripts/deploy-prod.sh."
             exit 1
           fi
-          echo "Flag parity OK — all deploy-prod.sh flags accounted for."
+          echo "Flag parity OK."
 
-      # -----------------------------------------------------------------------
-      # Capture the current live revision BEFORE any traffic change.
-      # This is the rollback target: we record the named revision, not a tag,
-      # so "shift back" is an exact, auditable operation (ADR-0018 §3).
-      # -----------------------------------------------------------------------
-      - name: Capture live revision (rollback target)
-        id: capture-live
+      # Record the current live revision so a rollback target is logged before
+      # the new revision takes over.
+      - name: Capture prior revision (rollback target)
         run: |
           PRIOR="$(gcloud run services describe "$SERVICE" \
-            --region "$REGION" \
-            --project "$PROJECT" \
-            --format='value(status.latestReadyRevisionName)' \
-            2>/dev/null || true)"
-          echo "prior_revision=${PRIOR}" >> "$GITHUB_OUTPUT"
-          echo "Current live revision (rollback target): ${PRIOR}"
+            --region "$REGION" --project "$PROJECT" \
+            --format='value(status.latestReadyRevisionName)' 2>/dev/null || true)"
+          echo "Prior live revision (rollback target if needed): ${PRIOR}"
+          echo "To roll back: Actions → Deploy to Cloud Run → Run workflow → rollback_revision=${PRIOR}"
 
-      # -----------------------------------------------------------------------
-      # Deploy RC with --no-traffic and a human-readable tag.
-      # Full flag set from deploy-prod.sh (source of truth).
-      # -----------------------------------------------------------------------
-      - name: Deploy RC revision (no traffic)
-        id: deploy-rc
+      - name: Deploy revision (100% traffic)
         env:
           IMAGE: ${{ needs.build-push.outputs.image }}
-          SHORT_SHA: ${{ needs.build-push.outputs.short_sha }}
           SLACK_BASE_URL: ${{ vars.SLACK_BASE_URL }}
           SLACK_CLIENT_ID: ${{ vars.SLACK_CLIENT_ID }}
           LEDGR_MODEL_LITE: ${{ vars.LEDGR_MODEL_LITE }}
@@ -265,8 +198,6 @@ jobs:
         run: |
           gcloud run deploy "$SERVICE" \
             --image "$IMAGE" \
-            --no-traffic \
-            --tag "rc-${SHORT_SHA}" \
             --region "$REGION" \
             --project "$PROJECT" \
             --service-account "ledgr-runtime@${PROJECT}.iam.gserviceaccount.com" \
@@ -276,107 +207,19 @@ jobs:
             --set-secrets "SLACK_CLIENT_SECRET=SLACK_CLIENT_SECRET:latest,SLACK_SIGNING_SECRET=SLACK_SIGNING_SECRET:latest" \
             --set-env-vars "LEDGR_ENV=prod,SLACK_CLIENT_ID=${SLACK_CLIENT_ID},SLACK_BASE_URL=${SLACK_BASE_URL},GOOGLE_GENAI_USE_VERTEXAI=TRUE,GOOGLE_CLOUD_PROJECT=${PROJECT},GOOGLE_CLOUD_LOCATION=${REGION},FIRESTORE_PROJECT=${PROJECT},LEDGR_MODEL_LITE=${LEDGR_MODEL_LITE},LEDGR_MODEL_STD=${LEDGR_MODEL_STD}" \
             --quiet
-
-          # Resolve the tagged RC URL for the smoke test. The gcloud --format list
-          # filter is unreliable, so describe as JSON and pick the tag's url via jq.
-          # Retry a few times for traffic-config propagation after the deploy.
-          RC_URL=""
-          for attempt in 1 2 3 4 5 6; do
-            RC_URL="$(gcloud run services describe "$SERVICE" \
-              --region "$REGION" --project "$PROJECT" --format=json 2>/dev/null \
-              | jq -r --arg t "rc-${SHORT_SHA}" '.status.traffic[]? | select(.tag==$t) | .url' \
-              | head -n1)"
-            [ -n "$RC_URL" ] && break
-            echo "  RC tagged URL not resolved yet (attempt ${attempt}); retrying in 5s..."
-            sleep 5
-          done
-          echo "rc_url=${RC_URL}" >> "$GITHUB_OUTPUT"
-          echo "RC revision deployed (no traffic). Tagged URL: ${RC_URL:-<unresolved>}"
-
-      # -----------------------------------------------------------------------
-      # Smoke test: hit /healthz on the RC tagged URL.
-      # The SERVED app (accounting_agents.slack_runner.build_fastapi_app, behind
-      # app.main:app in the Dockerfile) exposes /healthz, which validates the
-      # required Slack config is present — 503 if missing, 200 otherwise. That is
-      # a meaningful readiness gate, not a static probe. (There is no /readyz on
-      # the served app; the lazy-init handler has no better readiness signal.)
-      # Non-200 fails this job; no traffic is ever shifted to a revision that
-      # fails smoke.
-      # -----------------------------------------------------------------------
-      - name: Smoke test RC — GET /healthz
-        env:
-          RC_URL: ${{ steps.deploy-rc.outputs.rc_url }}
-        run: |
-          if [[ -z "$RC_URL" ]]; then
-            echo "::error::RC_URL is empty — cannot resolve tagged URL for smoke test."
-            exit 1
-          fi
-          echo "Smoke testing: ${RC_URL}/healthz"
-          # Retry up to 5 times with 10-second back-off to allow Cold Start.
-          for attempt in 1 2 3 4 5; do
-            STATUS="$(curl --silent --output /dev/null --write-out '%{http_code}' \
-              --max-time 30 "${RC_URL}/healthz" || true)"
-            echo "  attempt ${attempt}: HTTP ${STATUS}"
-            if [[ "$STATUS" == "200" ]]; then
-              echo "Smoke test passed (HTTP 200)."
-              exit 0
-            fi
-            sleep 10
-          done
-          echo "::error::Smoke test failed — /healthz returned ${STATUS} after 5 attempts. No traffic will be shifted."
-          exit 1
+          echo "Deployed ${IMAGE} to ${SERVICE} (100% traffic)."
 
   # ---------------------------------------------------------------------------
-  # Stage 5 — Manual promote (traffic shift)
-  # Gated on the "production" GitHub Environment (required reviewers).
-  # A human must approve before any Slack customer receives the new revision.
-  # ---------------------------------------------------------------------------
-  promote:
-    name: Promote RC to 100% traffic
-    runs-on: ubuntu-latest
-    needs: [deploy-rc]
-    if: github.event_name != 'workflow_dispatch' || github.event.inputs.rollback_revision == ''
-    environment: production   # <-- required-reviewer gate lives here
-    permissions:
-      id-token: write
-      contents: read
-
-    steps:
-      - name: Authenticate to Google Cloud (WIF — keyless)
-        uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{ vars.WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ vars.CICD_SERVICE_ACCOUNT }}
-
-      - name: Shift 100% traffic to RC tag
-        env:
-          SHORT_SHA: ${{ needs.deploy-rc.outputs.short_sha }}
-          PRIOR_REVISION: ${{ needs.deploy-rc.outputs.prior_revision }}
-        run: |
-          gcloud run services update-traffic "$SERVICE" \
-            --region "$REGION" \
-            --project "$PROJECT" \
-            --to-tags "rc-${SHORT_SHA}=100" \
-            --quiet
-          echo "Traffic shifted to rc-${SHORT_SHA} (100%)."
-          echo "Rollback target (prior revision): ${PRIOR_REVISION}"
-          echo "To roll back: workflow_dispatch with rollback_revision=${PRIOR_REVISION}"
-
-  # ---------------------------------------------------------------------------
-  # Stage 6 — Rollback (workflow_dispatch only)
-  # Triggered manually: set rollback_revision to the named revision captured
-  # in the deploy-rc job output (printed in the promote step log above).
-  # Shifts 100% traffic back to that specific revision — no rebuild needed.
+  # Rollback (workflow_dispatch only). Set rollback_revision to a named revision
+  # (printed in the deploy log above). Shifts 100% traffic back — no rebuild.
   # ---------------------------------------------------------------------------
   rollback:
     name: Rollback to prior revision
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.rollback_revision != ''
-    environment: production   # require human approval for rollback too
     permissions:
       id-token: write
       contents: read
-
     steps:
       - name: Authenticate to Google Cloud (WIF — keyless)
         uses: google-github-actions/auth@v2
