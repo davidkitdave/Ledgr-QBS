@@ -89,6 +89,10 @@ from .jurisdiction import (
     resolve_jurisdiction as _resolve_jurisdiction_fn,
     write_to_state as _write_jurisdiction_to_state,
 )
+from .observability.sentry_trends import (
+    emit_account_flagged_from_state,
+    emit_from_struggle_state,
+)
 from .tax_reasoning import reason_one_invoice as _reason_one_invoice
 
 from .normalized_invoice_codec import (
@@ -986,6 +990,7 @@ async def categorize_node(ctx) -> Event:
     ctx.state[NORMALIZED_KEY] = _guard_state_payload(
         NORMALIZED_KEY, [_inv_to_dict(i) for i in invoices]
     )
+    emit_account_flagged_from_state(ctx.state)
     return Event(output={"count": len(invoices)})
 
 
@@ -1365,6 +1370,10 @@ def detect_struggle(state: dict) -> tuple[bool, list[str]]:
     # with state dicts written before Lever 3 was deployed).
     if state.get(CLASSIFY_PROCESSABLE_KEY) is False:
         reasons.append("processable_false")
+
+    # WS-6.4 — trend observability before familiarity may suppress return value.
+    if reasons or any(not inv.reconciled for inv in invoices):
+        emit_from_struggle_state(state, reasons)
 
     # Lever 4 (ADR-0017 §6) — familiarity gate: if ALL remaining signals are
     # SOFT and the client has seen this doc shape >= FAMILIARITY_THRESHOLD

@@ -6645,7 +6645,10 @@ def build_fastapi_app():
     ``from __future__ import annotations`` (PEP 563 stringifies all annotations;
     FastAPI resolves them against the module globals at decoration time).
     """
+    from accounting_agents.observability.sentry_trends import init_sentry_if_configured
     from fastapi import FastAPI
+
+    init_sentry_if_configured()
     from slack_bolt.adapter.fastapi.async_handler import AsyncSlackRequestHandler
 
     # All heavyweight objects are deferred to first request. Imports happen
