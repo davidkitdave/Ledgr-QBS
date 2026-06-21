@@ -1931,6 +1931,81 @@ def test_consolidate_node_multi_invoice_doc_keys_include_page_range():
     assert len(set(keys)) == 2
 
 
+def _multi_invoice_pdf_state(*, file_id: str) -> dict:
+    """Two invoices from one PDF — distinct page_range + invoice_number."""
+    from datetime import date as _date
+
+    from invoice_processing.export.models import InvoiceLine, NormalizedInvoice
+
+    inv_a = NormalizedInvoice(
+        invoice_number="INV-200",
+        invoice_date=_date(2025, 6, 1),
+        page_range=(1, 1),
+        source_file_id=file_id,
+        lines=[InvoiceLine(description="A", net_amount=200.0, account_code="6000")],
+    )
+    inv_b = NormalizedInvoice(
+        invoice_number="INV-060",
+        invoice_date=_date(2025, 6, 2),
+        page_range=(2, 2),
+        source_file_id=file_id,
+        lines=[InvoiceLine(description="B", net_amount=60.0, account_code="6001")],
+    )
+    return _base_state(
+        file_id=file_id,
+        software="qbs",
+        **{
+            nodes.DIRECTION_KEY: "purchase",
+            nodes.NORMALIZED_KEY: [nodes._inv_to_dict(inv_a), nodes._inv_to_dict(inv_b)],
+            nodes.ROUTES_KEY: [
+                {"fy": 2025, "workbook": "Ledger_FY2025.xlsx", "sheet": "Purchase"},
+                {"fy": 2025, "workbook": "Ledger_FY2025.xlsx", "sheet": "Purchase"},
+            ],
+        },
+    )
+
+
+def test_consolidate_node_redrop_keys_stable_across_file_id_rotation():
+    """WS-5.4 — re-drop through consolidate_node: keys ignore rotated Slack file_id."""
+    from tests.test_ledger_store import FakeSlackClient, _make_store
+
+    def _consolidate(file_id: str) -> tuple[dict, list[str]]:
+        ctx = FakeContext(_multi_invoice_pdf_state(file_id=file_id))
+        asyncio.run(nodes.consolidate_node._func(ctx))
+        payload = ctx.state[nodes.LEDGER_ROWS_KEY]
+        return payload, [b["doc_key"] for b in payload["batches"]]
+
+    payload_first, keys_first = _consolidate("F-drop-1")
+    payload_redrop, keys_redrop = _consolidate("F-drop-2-rotated")
+
+    assert keys_first == keys_redrop == ["Purchase:INV-200:1-1", "Purchase:INV-060:2-2"]
+
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+    result1 = store.append_rows(
+        client_id="c1",
+        fy="2025",
+        slack_client=slack,
+        channel_id="C1",
+        software="qbs",
+        kind="invoice",
+        batches=payload_first["batches"],
+    )
+    assert result1["appended"] == 2
+
+    result2 = store.append_rows(
+        client_id="c1",
+        fy="2025",
+        slack_client=slack,
+        channel_id="C1",
+        software="qbs",
+        kind="invoice",
+        batches=payload_redrop["batches"],
+    )
+    assert result2["appended"] == 0
+    assert result2["deduped"] == 2
+
+
 def test_consolidate_node_qbs_ledger_display_no_warning(caplog):
     """'QBS Ledger' display value must NOT log an 'unknown software' warning."""
     import logging
