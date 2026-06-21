@@ -452,3 +452,121 @@ class TestJBICreditorResolution:
         assert rows[0]["CreditorCode"] == "400-A0001", (
             f"Expected '400-A0001', got {rows[0]['CreditorCode']!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# MAP1 regression: Amount / _AMOUNT = line net (sub_total), not unit price
+# (WS-1.1 — see plan 2026-06-21-intelligent-extraction-implementation.md).
+# ---------------------------------------------------------------------------
+
+def _make_qty_line_purchase_inv(
+    *,
+    quantity: float = 3.0,
+    net: float = 300.0,
+    unit_price: float = 100.0,
+    gst: float = 24.0,
+) -> NormalizedInvoice:
+    """Build a 1-line purchase invoice with the given quantity.
+
+    Defaults model a real qty>1 line: 3 units @ 100 each → net 300, gst 24 (8% SST).
+    """
+    inv = NormalizedInvoice(
+        doc_type="purchase",
+        invoice_number="INV-QTY-001",
+        invoice_date=date(2024, 6, 1),
+        our_gst_registered=True,
+        currency="MYR",
+        supplier=PartyInfo(
+            name="GENERIC AUTO PARTS SDN BHD",
+            country="MY",
+            vendor_code="400-A0099",
+        ),
+    )
+    inv.lines.append(
+        InvoiceLine(
+            description="Auto part",
+            quantity=quantity,
+            net_amount=net,
+            gst_amount=gst,
+            tax_treatment="SR",
+            account_code="510-000",
+        )
+    )
+    return inv
+
+
+class TestMAP1AmountIsLineNetNotUnitPrice:
+    """MAP1 regression (WS-1.1).
+
+    With `InclusiveTax=F` (always emitted), the AutoCount `Amount` column and the
+    SQL Account `_AMOUNT` column are the **tax-exclusive line net** — the value
+    posted to the GL `AccNo` / `_ACCOUNT(10)`. Mapping them to `unit_price` (= net
+    ÷ qty) understated the ledger by the qty factor for any qty>1 line. JBI lines
+    are mostly qty=1 so the bug was masked; this test guards the fix.
+    """
+
+    def test_autocount_amount_equals_line_net_for_qty_gt_1(self):
+        """AutoCount `Amount` (and `TaxableAmt` if present) = line net for qty=3."""
+        inv = _make_qty_line_purchase_inv(quantity=3.0, net=300.0, unit_price=100.0)
+        exporter = AutoCountExporter(classifier=MY_CLF)
+        rows = exporter.rows([inv], "purchase")
+        assert rows, "No rows generated"
+        row = rows[0]
+        # The fix: Amount = sub_total = 300, NOT unit_price = 100.
+        assert row["Amount"] == 300.0, (
+            f"AutoCount Amount must be the line net (sub_total) for qty>1. "
+            f"Expected 300.0, got {row['Amount']!r}. This is MAP1 — see WS-1.1."
+        )
+        # InclusiveTax must remain F (we only changed the field-map, not the constant).
+        assert row["InclusiveTax"] == "F"
+
+    def test_sql_account_amount_equals_line_net_for_qty_gt_1(self):
+        """SQL `_AMOUNT` = line net; `_QTY` preserves per-line quantity; `_UNITPRICE` preserved."""
+        inv = _make_qty_line_purchase_inv(quantity=3.0, net=300.0, unit_price=100.0)
+        exporter = SqlAccountExporter(classifier=MY_CLF)
+        rows = exporter.rows([inv], "purchase")
+        assert rows, "No rows generated"
+        row = rows[0]
+        assert row["_AMOUNT"] == 300.0, (
+            f"SQL _AMOUNT must be the line net (sub_total) for qty>1. "
+            f"Expected 300.0, got {row['_AMOUNT']!r}. This is MAP1 — see WS-1.1."
+        )
+        # SQL bonus: _QTY and _UNITPRICE now preserve per-line values.
+        assert row["_QTY"] == 3.0, (
+            f"SQL _QTY must preserve per-line quantity. Expected 3.0, got {row['_QTY']!r}"
+        )
+        assert row["_UNITPRICE"] == 100.0, (
+            f"SQL _UNITPRICE must preserve per-line unit price. Expected 100.0, "
+            f"got {row['_UNITPRICE']!r}"
+        )
+
+    def test_sql_account_defaults_to_qty_1_when_line_quantity_missing(self):
+        """Lines without a quantity must still post `_QTY=1` (SQL REQUIRED constraint)."""
+        inv = NormalizedInvoice(
+            doc_type="purchase",
+            invoice_number="INV-NOQTY-001",
+            invoice_date=date(2024, 6, 1),
+            our_gst_registered=True,
+            currency="MYR",
+            supplier=PartyInfo(
+                name="GENERIC SUPPLIER",
+                country="MY",
+                vendor_code="400-A0098",
+            ),
+        )
+        inv.lines.append(
+            InvoiceLine(
+                description="Service",
+                # no quantity
+                net_amount=200.0,
+                gst_amount=16.0,
+                tax_treatment="SR",
+                account_code="510-000",
+            )
+        )
+        exporter = SqlAccountExporter(classifier=MY_CLF)
+        rows = exporter.rows([inv], "purchase")
+        assert rows[0]["_QTY"] == 1, (
+            f"SQL _QTY must default to 1 when line.quantity is None. "
+            f"Got {rows[0]['_QTY']!r}"
+        )

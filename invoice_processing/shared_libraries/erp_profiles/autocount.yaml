@@ -92,7 +92,7 @@ purchase_fields:
   DetailDescription: description
   TaxType: tax_code
   TaxableAmt: unit_price
-  Amount: unit_price
+  Amount: sub_total
 
 sales_fields:
   DocDate: invoice_date
@@ -104,4 +104,4 @@ sales_fields:
   DetailDescription: description
   TaxType: tax_code
   TaxableAmt: unit_price
-  Amount: unit_price
+  Amount: sub_total

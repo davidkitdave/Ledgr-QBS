@@ -37,12 +37,13 @@ sales_cols:
   - _AMOUNT
 
 # Constant values applied after field mapping (same for both doc types)
+# Note: _QTY is intentionally NOT a constant — it must be sourced from the per-line
+# `qty` context key so qty>1 lines post the correct quantity (see WS-1.1 in the
+# 2026-06-21 plan). Lines without a quantity fall back to 1 in `_row_context`.
 purchase_constants:
-  _QTY: 1
   _UOM(10): "UNIT"
 
 sales_constants:
-  _QTY: 1
   _UOM(10): "UNIT"
 
 required_purchase:
@@ -73,9 +74,10 @@ purchase_fields:
   _ACCOUNT(10): account_code
   _DESCRIPTION(200): description
   _UNITPRICE: unit_price
+  _QTY: qty
   _TAX(10): tax_code
   _TAXAMT: tax_amount
-  _AMOUNT: unit_price
+  _AMOUNT: sub_total
 
 sales_fields:
   DOCNO(20): invoice_number
@@ -85,6 +87,7 @@ sales_fields:
   _ACCOUNT(10): account_code
   _DESCRIPTION(200): description
   _UNITPRICE: unit_price
+  _QTY: qty
   _TAX(10): tax_code
   _TAXAMT: tax_amount
-  _AMOUNT: unit_price
+  _AMOUNT: sub_total
