@@ -15,7 +15,7 @@ are hardcoded — everything comes from the client's Client Setup (passed in / r
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from .client_context import (
@@ -91,6 +91,7 @@ class AccountResolution:
     flagged: bool
     tax_code: Optional[str] = None
     flag_reason: Optional[str] = None
+    alternative_codes: list[str] = field(default_factory=list)
 
 
 def _norm(s: Optional[str]) -> str:
@@ -443,6 +444,10 @@ def categorize_invoice(
                 flag_reason = logprob_reason or llm_reason or "llm_coa"
             else:
                 flag_reason = None
+            alt_codes = [
+                c for c in (m.get("alternative_codes") or [])
+                if c and c in by_key and c != key
+            ]
             if key:
                 acc = by_key.get(key)
                 resolutions[idx] = AccountResolution(
@@ -452,6 +457,7 @@ def categorize_invoice(
                     source="llm_coa",
                     flagged=flagged,
                     flag_reason=flag_reason,
+                    alternative_codes=alt_codes,
                 )
             else:
                 resolutions[idx] = AccountResolution(
@@ -461,12 +467,14 @@ def categorize_invoice(
                     source="llm_coa",
                     flagged=True,
                     flag_reason=flag_reason or "unmapped",
+                    alternative_codes=alt_codes,
                 )
 
     for line, res in zip(inv.lines, resolutions):
         line.account_code = res.account_code or res.account_name or ""
         line.account_flagged = res.flagged
         line.account_flag_reason = res.flag_reason if res.flagged else None
+        line.account_alternative_codes = list(res.alternative_codes) if res.flagged else []
 
     return inv
 

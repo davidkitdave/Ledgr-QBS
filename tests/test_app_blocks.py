@@ -590,6 +590,29 @@ class TestInvoiceEditModal:
             "acct_1", "tax_1", "amt_1",
         ]
 
+    def test_flagged_line_shows_alternatives_and_unmapped(self):
+        """WS-3.5: flagged lines get alternative_codes + UNMAPPED, not full COA."""
+        view = invoice_edit_modal(
+            op_id="OP1",
+            lines=[{
+                "description": "Supplies",
+                "account_code": "6001",
+                "account_flagged": True,
+                "account_alternative_codes": ["6200", "6001"],
+                "tax_treatment": "SR",
+                "net_amount": 50.0,
+            }],
+            coa_options=[
+                ("6001", "6001 — Office Expenses"),
+                ("6200", "6200 — Travel"),
+                ("6999", "6999 — Misc"),
+            ],
+        )
+        acct_block = next(b for b in view["blocks"] if b.get("block_id") == "acct_0")
+        values = [o["value"] for o in acct_block["element"]["options"]]
+        assert values == ["6001", "6200", ""]
+        assert "6999" not in values
+
 
 # --------------------------------------------------------------------------- #
 # Job summary line for a batch drop (Task 9 / ADR-0007)

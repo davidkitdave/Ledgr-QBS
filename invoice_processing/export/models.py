@@ -74,6 +74,7 @@ class InvoiceLine:
     account_code: Optional[str] = None     # COA code from categorization (later phase)
     account_flagged: bool = False          # low-confidence / unresolved COA pick (WS-3.4)
     account_flag_reason: Optional[str] = None  # e.g. low_avg_logprobs, unresolved
+    account_alternative_codes: list[str] = field(default_factory=list)  # LLM runner-ups (WS-3.5)
     item_code: Optional[str] = None
     tax_keyword: Optional[str] = None      # explicit per-line tax wording from extraction (e.g. "SR","ZR","9%","0%","exempt") — a hint for the tax classifier
 

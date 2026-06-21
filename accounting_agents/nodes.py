@@ -1787,6 +1787,10 @@ async def apply_decision_node(ctx, node_input=None) -> Event:
                     for field in EDITABLE_LINE_FIELDS:
                         if e.get(field) is not None:
                             lines[i][field] = e[field]
+                    if e.get("account_code") is not None:
+                        lines[i]["account_flagged"] = False
+                        lines[i]["account_flag_reason"] = None
+                        lines[i]["account_alternative_codes"] = []
             ctx.state[NORMALIZED_KEY] = _guard_state_payload(NORMALIZED_KEY, invoices)
     return Event(output={"decision": choice})
 
@@ -1867,6 +1871,11 @@ def _needs_review(state: dict) -> tuple[bool, list[str]]:
         for line in inv.lines:
             if jurisdiction_ambiguous:
                 continue
+            if line.account_flagged:
+                reasons.append(
+                    f"{label}: line '{line.description}' flagged for account review"
+                    + (f" ({line.account_flag_reason})" if line.account_flag_reason else "")
+                )
             if line.tax_flagged:
                 reasons.append(
                     f"{label}: line '{line.description}' flagged for tax review"

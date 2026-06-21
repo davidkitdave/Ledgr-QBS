@@ -222,6 +222,27 @@ def test_llm_source_and_flagged_high_confidence(monkeypatch):
     assert result[0]["flagged"] is False
 
 
+def test_categorize_invoice_propagates_alternative_codes_on_flagged_line(monkeypatch):
+    """WS-3.5: flagged LLM pick copies alternative_codes onto InvoiceLine."""
+    canned = _canned_result(
+        0, "6001", 0.99, alternative_codes=["6200", "6001", "9999"]
+    )
+    _stub_make_client(monkeypatch, canned, avg_logprobs=-2.0, margin=1.5)
+
+    inv = _inv_unresolved()
+    result = categorize_invoice(
+        inv,
+        coa=SAMPLE_COA,
+        category_mapping={},
+        entity_memory=[],
+        use_llm=True,
+    )
+
+    line = result.lines[0]
+    assert line.account_flagged is True
+    assert line.account_alternative_codes == ["6200"]
+
+
 def test_categorize_invoice_propagates_account_flagged_from_logprob_gate(monkeypatch):
     """WS-3.4: weak logprobs → line.account_flagged=True with reason on InvoiceLine."""
     canned = _canned_result(0, "6001", 0.99)

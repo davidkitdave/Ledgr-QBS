@@ -796,6 +796,32 @@ def test_apply_decision_node_applies_line_edits():
     assert ctx.state[nodes.APPROVAL_STATUS_KEY] == "edit"
 
 
+def test_apply_decision_node_edit_clears_account_flagged():
+    """WS-3.5: human account pick via Edit clears account_flagged metadata."""
+    state = _base_state()
+    state[nodes.NORMALIZED_KEY] = [{
+        "invoice_number": "INV-1", "lines": [{
+            "description": "Supplies",
+            "account_code": "6001",
+            "account_flagged": True,
+            "account_flag_reason": "narrow_margin",
+            "account_alternative_codes": ["6200", "6001"],
+            "tax_treatment": "SR",
+            "net_amount": 100.0,
+        }],
+    }]
+    ctx = FakeContext(state)
+    decision = {"decision": "edit", "edits": {"lines": [
+        {"index": 0, "account_code": "6200"},
+    ]}}
+    asyncio.run(nodes.apply_decision_node._func(ctx, decision))
+    line = ctx.state[nodes.NORMALIZED_KEY][0]["lines"][0]
+    assert line["account_code"] == "6200"
+    assert line["account_flagged"] is False
+    assert line["account_flag_reason"] is None
+    assert line["account_alternative_codes"] == []
+
+
 def test_apply_decision_node_edit_does_not_silently_drop_canonical_fields():
     """REGRESSION (live-QA 2026-06): an Edit DTO that writes ``tax_treatment``
     and ``net_amount`` lands on the SAME keys the exporter later reads from
@@ -1304,6 +1330,62 @@ def test_single_entity_flagged_still_emits_card():
     assert len(events) == 1, f"Flagged single invoice must yield 1 RequestInput, got {events!r}"
     assert isinstance(events[0], RequestInput)
     assert ctx.state.get(APPROVAL_STATUS_KEY) != "auto_approved"
+
+
+def test_needs_review_account_flagged_triggers_hitl():
+    """WS-3.5: account_flagged lines must pause at approval_gate."""
+    from accounting_agents.nodes import _needs_review
+    from invoice_processing.export.models import InvoiceLine, NormalizedInvoice
+
+    inv = NormalizedInvoice(
+        invoice_number="INV-COA",
+        reconciled=True,
+        lines=[InvoiceLine(
+            description="Office supplies",
+            account_code="6001",
+            account_flagged=True,
+            account_flag_reason="narrow_margin",
+            account_alternative_codes=["6200"],
+            tax_confidence=0.99,
+            tax_flagged=False,
+        )],
+    )
+    state = _base_state()
+    state[nodes.NORMALIZED_KEY] = [nodes._inv_to_dict(inv)]
+    needs_review, reasons = _needs_review(state)
+    assert needs_review is True
+    assert any("account review" in r for r in reasons)
+    assert any("narrow_margin" in r for r in reasons)
+
+
+def test_single_entity_account_flagged_emits_approval_card():
+    """WS-3.5: account_flagged single invoice yields RequestInput for Slack HITL."""
+    from google.adk.events import RequestInput
+
+    from accounting_agents.nodes import APPROVAL_STATUS_KEY
+    from invoice_processing.export.models import InvoiceLine, NormalizedInvoice
+
+    inv = NormalizedInvoice(
+        invoice_number="INV-COA-FLAG",
+        reconciled=True,
+        lines=[InvoiceLine(
+            description="Travel",
+            account_code="",
+            account_flagged=True,
+            account_flag_reason="unmapped",
+            account_alternative_codes=["6200", "6001"],
+            tax_confidence=0.99,
+            tax_flagged=False,
+        )],
+    )
+    state = _base_state()
+    state[nodes.NORMALIZED_KEY] = [nodes._inv_to_dict(inv)]
+    events, ctx = asyncio.run(_collect_gate_events(state))
+
+    assert len(events) == 1
+    assert isinstance(events[0], RequestInput)
+    assert ctx.state.get(APPROVAL_STATUS_KEY) != "auto_approved"
+    assert any("account review" in r for r in (ctx.state.get("approval_message") or "").split("\n"))
 
 
 # =========================================================================== #

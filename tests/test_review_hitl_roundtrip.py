@@ -357,6 +357,11 @@ def _driver_state(channel: str) -> dict:
         # a stub workflow that may not invoke it.
         nodes.TAX_JURISDICTION_KEY: "SINGAPORE",
         nodes.ARTIFACT_NAME_KEY: nodes.ARTIFACT_NAME_FMT.format(file_id="F1"),
+        # Minimal COA so categorize_node resolves "Goods" lines without account_flagged
+        # (WS-3.5: flagged COA now pauses at the terminal approval_gate).
+        "coa": [
+            {"code": "6100", "description": "Office Expenses", "keywords": "goods,office"},
+        ],
     }
 
 

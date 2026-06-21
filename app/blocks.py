@@ -2057,6 +2057,46 @@ def coa_prompt_blocks() -> list:
     ]
 
 
+_UNMAPPED_ACCT_OPTION = {
+    "text": {"type": "plain_text", "text": "UNMAPPED — assign later"},
+    "value": "",
+}
+
+
+def _line_account_select_options(
+    ln: dict,
+    coa_options: list[tuple[str, str]],
+) -> list[dict]:
+    """Build static_select options for one invoice line (WS-3.5).
+
+    Flagged lines show LLM ``account_alternative_codes`` plus an UNMAPPED
+    abstention option. Other lines use the full client COA list.
+    """
+    by_code = {code: lbl for code, lbl in coa_options}
+    if ln.get("account_flagged"):
+        seen: set[str] = set()
+        options: list[dict] = []
+        current = (ln.get("account_code") or "").strip()
+        if current and current not in seen:
+            lbl = by_code.get(current, current)
+            options.append({"text": {"type": "plain_text", "text": lbl[:75]}, "value": current})
+            seen.add(current)
+        for code in ln.get("account_alternative_codes") or []:
+            if not code or code in seen:
+                continue
+            seen.add(code)
+            lbl = by_code.get(code, code)
+            options.append({"text": {"type": "plain_text", "text": lbl[:75]}, "value": code})
+        options.append(dict(_UNMAPPED_ACCT_OPTION))
+        return options
+    if not coa_options:
+        return []
+    return [
+        {"text": {"type": "plain_text", "text": lbl[:75]}, "value": code}
+        for code, lbl in coa_options
+    ]
+
+
 def invoice_edit_modal(op_id: str, lines: list[dict], coa_options: list[tuple[str, str]]) -> dict:
     """Modal to correct each flagged line's account code / tax treatment / net amount.
 
@@ -2068,8 +2108,6 @@ def invoice_edit_modal(op_id: str, lines: list[dict], coa_options: list[tuple[st
     extractor's actual output and a round-tripped edit lands on the canonical
     keys the exporter writes from.
     """
-    coa = [{"text": {"type": "plain_text", "text": lbl[:75]}, "value": code}
-           for code, lbl in coa_options]
     tax_opts = [{"text": {"type": "plain_text", "text": t}, "value": t}
                 for t in ("SR", "ZR", "ES", "TX", "OS")]
     blocks: list = []
@@ -2083,12 +2121,13 @@ def invoice_edit_modal(op_id: str, lines: list[dict], coa_options: list[tuple[st
         # Slack rejects a static_select with empty options, which would make the
         # whole modal fail to open. When the client has no COA, omit the
         # account-code block entirely — tax and amount stay editable.
-        if coa:
-            acct_initial = next((o for o in coa if o["value"] == ln.get("account_code")), None)
+        line_coa = _line_account_select_options(ln, coa_options)
+        if line_coa:
+            acct_initial = next((o for o in line_coa if o["value"] == ln.get("account_code")), None)
             blocks.append({
                 "type": "input", "block_id": f"acct_{i}", "optional": True,
                 "label": {"type": "plain_text", "text": "Account code"},
-                "element": {"type": "static_select", "action_id": "v", "options": coa,
+                "element": {"type": "static_select", "action_id": "v", "options": line_coa,
                             **({"initial_option": acct_initial} if acct_initial else {})},
             })
         tax_initial = next((o for o in tax_opts if o["value"] == ln.get("tax_treatment")), None)
