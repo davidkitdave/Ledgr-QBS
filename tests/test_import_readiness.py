@@ -261,6 +261,7 @@ class TestReadinessRegressionQbsXero:
 
 from invoice_processing.export.exporters import (  # noqa: E402
     compute_doc_flag_breakdown,
+    format_extraction_doc_count_note,
     format_flag_breakdown_note,
 )
 
@@ -388,3 +389,21 @@ class TestFormatFlagBreakdownNote:
                         "missing_creditor": 0, "missing_invoice_number": 0},
         })
         assert note == "✗ not reconciled"
+
+
+class TestFormatExtractionDocCountNote:
+    """WS-2.4 — G3 doc-count line for the delivery card."""
+
+    def test_plural_documents_and_pages(self):
+        assert format_extraction_doc_count_note(2, 5) == (
+            "Extracted 2 documents from 5 pages"
+        )
+
+    def test_singular_document_and_page(self):
+        assert format_extraction_doc_count_note(1, 1) == (
+            "Extracted 1 document from 1 page"
+        )
+
+    def test_invalid_counts_return_empty(self):
+        assert format_extraction_doc_count_note(0, 5) == ""
+        assert format_extraction_doc_count_note(2, 0) == ""

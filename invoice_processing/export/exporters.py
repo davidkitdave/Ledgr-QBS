@@ -845,6 +845,19 @@ def format_flag_breakdown_note(breakdown: dict | None) -> str:
     return "✗ " + " · ".join(parts)
 
 
+def format_extraction_doc_count_note(doc_count: int, page_count: int) -> str:
+    """G3 delivery-card line: extracted N documents from M pages (WS-2.4).
+
+    Returns ``""`` when counts are missing or invalid so older sessions without
+    extraction metadata stay silent instead of showing a broken line.
+    """
+    if doc_count < 1 or page_count < 1:
+        return ""
+    doc_word = "document" if doc_count == 1 else "documents"
+    page_word = "page" if page_count == 1 else "pages"
+    return f"Extracted {doc_count} {doc_word} from {page_count} {page_word}"
+
+
 def collect_import_readiness(
     batches: list[dict],
     exporter: LedgerExporter,

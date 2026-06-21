@@ -71,8 +71,11 @@ def count_input_pages(data: bytes, mime_type: str) -> int:
     if mime_type == "application/pdf":
         import pdfplumber
 
-        with pdfplumber.open(io.BytesIO(data)) as pdf:
-            return len(pdf.pages) or 1
+        try:
+            with pdfplumber.open(io.BytesIO(data)) as pdf:
+                return len(pdf.pages) or 1
+        except Exception:
+            return 1
     return 1
 
 

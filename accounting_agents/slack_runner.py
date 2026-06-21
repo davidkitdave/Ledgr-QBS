@@ -94,6 +94,7 @@ from app.blocks import (
 )
 from app.slack_app import _SeenEvents
 from invoice_processing.export.client_context import FirestoreClientStore
+from invoice_processing.export.exporters import format_extraction_doc_count_note
 
 def _strip_slack_mentions(text: str) -> str:
     import re
@@ -1020,6 +1021,26 @@ def _record_processing_log(
         )
 
 
+def _extraction_doc_count_blocks(
+    payload: dict,
+    *,
+    file_label: str | None = None,
+) -> list[dict]:
+    """WS-2.4 — G3 doc-count context block when extraction metadata exists."""
+    if (payload.get("kind") or "invoice") != "invoice":
+        return []
+    doc_count = payload.get("extracted_doc_count")
+    page_count = payload.get("input_page_count")
+    if doc_count is None or page_count is None:
+        return []
+    note = format_extraction_doc_count_note(int(doc_count), int(page_count))
+    if not note:
+        return []
+    if file_label:
+        note = f"📄 *{file_label}* — {note}"
+    return [confident_note_block(note)]
+
+
 def _post_delivery_card(
     slack_client: Any,
     channel_id: str,
@@ -1064,6 +1085,7 @@ def _post_delivery_card(
         if preview_blocks
         else [{"type": "section", "text": {"type": "mrkdwn", "text": summary}}]
     )
+    blocks.extend(_extraction_doc_count_blocks(payload))
     # Confident-path note (ADR-0017 Lever 1): only fires on the clean no-pause
     # delivery path.  ``payload["delivered"]`` is True only when deliver_node ran
     # (the clean path); the HITL-approve path bypasses deliver_node so the key is
@@ -1195,6 +1217,17 @@ def _build_batch_aggregate_blocks(
         if not item_payload:
             continue
         try:
+            _label = (
+                item_payload.get("workbook_label")
+                or item_payload.get("source_file")
+                or None
+            )
+            blocks.extend(
+                _extraction_doc_count_blocks(
+                    item_payload,
+                    file_label=_label if len(deferred_items) > 1 else None,
+                )
+            )
             if item_doc_type in ("expense_claim", "other") and item_payload.get("delivered"):
                 free_type = item_payload.get("free_type") or None
                 note = nodes.compose_confident_note(

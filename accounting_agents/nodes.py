@@ -634,6 +634,9 @@ def _apply_invoice_process_result(ctx, result: InvoiceProcessResult) -> None:
         ctx.state[DOCUMENT_RECORDS_KEY] = _guard_state_payload(DOCUMENT_RECORDS_KEY, [])
     if result.skipped_pages is not None:
         ctx.state["skipped_pages"] = result.skipped_pages
+    if result.input_page_count is not None:
+        ctx.state["input_page_count"] = result.input_page_count
+    ctx.state["normalized_invoice_count"] = len(result.normalized)
     if result.document_read_notes:
         ctx.state["document_read_notes"] = result.document_read_notes
     if result.booking_proposals is not None:
@@ -2152,6 +2155,11 @@ async def consolidate_node(ctx) -> Event:
         "export_unmapped_summary": export_unmapped if kind == "invoice" else {},
         "import_readiness": import_readiness if kind == "invoice" else {},
     }
+    if kind == "invoice":
+        payload["extracted_doc_count"] = len(invoices)
+        page_count = state.get("input_page_count")
+        if page_count is not None:
+            payload["input_page_count"] = int(page_count)
     state[LEDGER_ROWS_KEY] = payload
     state["consolidated_count"] = len(batches)
     return Event(output={"consolidated": len(batches), "fy": fy, "kind": kind})

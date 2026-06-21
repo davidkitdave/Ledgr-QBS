@@ -48,6 +48,7 @@ class InvoiceProcessResult:
     skipped_pages: Optional[list[int]] = None
     document_read_notes: Optional[str] = None
     booking_proposals: Optional[list[dict]] = None
+    input_page_count: Optional[int] = None
 
 
 def _parse_iso_date(value: Optional[str]) -> Optional[date]:
@@ -123,6 +124,7 @@ def process_invoice_document(
     model: Optional[str] = None,
 ) -> InvoiceProcessResult:
     """Classify-routed extraction: capture→book→verify, understand, or legacy."""
+    input_page_count = count_input_pages(data, mime_type)
     if should_use_legacy_extract(doc_type):
         bundle: DocumentRecordBundle = EXTRACT_DOCUMENT_FN(
             data, mime_type, model=model, hint=hint
@@ -145,6 +147,7 @@ def process_invoice_document(
             ],
             skipped_pages=bundle.skipped_pages,
             document_read_notes=bundle.notes,
+            input_page_count=input_page_count,
         )
 
     if use_capture_book_pipeline():
@@ -171,6 +174,7 @@ def process_invoice_document(
             skipped_pages=bundle.skipped_pages,
             document_read_notes=bundle.notes,
             booking_proposals=proposals,
+            input_page_count=input_page_count,
         )
 
     bundle = EXTRACT_LEDGER_FN(
@@ -197,7 +201,7 @@ def process_invoice_document(
             inv.reconcile_note = note
         normalized.append(inv)
 
-    total_pages = count_input_pages(data, mime_type)
+    total_pages = input_page_count
     page_ok, page_detail = validate_bundle_page_coverage(bundle, total_pages=total_pages)
     if not page_ok:
         apply_segmentation_uncertain_flag(normalized, page_detail)
@@ -208,4 +212,5 @@ def process_invoice_document(
         skipped_pages=bundle.skipped_pages,
         document_read_notes=bundle.notes,
         ledger_extract=bundle.model_dump(),
+        input_page_count=input_page_count,
     )
