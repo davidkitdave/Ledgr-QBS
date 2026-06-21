@@ -770,11 +770,15 @@ def extracted_document_to_normalized(
 
 
 def validate_extracted_document(doc: ExtractedDocument) -> tuple[bool, str]:
-    """Math gate for one faithful document."""
+    """Math gate for one faithful document (G1 + G4 per-currency tolerance)."""
     if not doc.lines:
         return False, "no lines extracted"
     ex = extracted_document_to_extracted_invoice(doc)
-    return reconcile(ex, tax_visible_on_document=doc.tax_visible_on_document)
+    return reconcile(
+        ex,
+        tax_visible_on_document=doc.tax_visible_on_document,
+        currency=doc.currency,
+    )
 
 
 def bundle_page_ranges(bundle: ExtractedDocumentBundle) -> list[tuple[int, int]]:

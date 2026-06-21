@@ -375,6 +375,24 @@ def _has_currency_conflict(
     return len(seen) > 1
 
 
+_G4_TOLERANCE_CENTS: dict[str, int] = {
+    "SGD": 2,
+    "MYR": 2,
+    "USD": 2,
+}
+
+
+def g4_tolerance_cents(currency: Optional[str]) -> int:
+    """G4 gate: per-currency reconcile tolerance in integer cents."""
+    code = (currency or "").strip().upper()
+    return _G4_TOLERANCE_CENTS.get(code, 2)
+
+
+def g4_tolerance_abs(currency: Optional[str]) -> float:
+    """G4 tolerance as major currency units (e.g. 0.02 for 2 cents)."""
+    return g4_tolerance_cents(currency) / 100.0
+
+
 def reconcile(
     ex: ExtractedInvoice,
     *,
@@ -382,12 +400,14 @@ def reconcile(
     tol_rel: float = 0.01,
     tax_visible_on_document: Optional[bool] = None,
     subtotal_in_capture: Optional[bool] = None,
+    currency: Optional[str] = None,
 ) -> tuple[bool, str]:
     """Check that ledger lines tie out to document totals (footer-first).
 
-    When ``subtotal_in_capture`` is False, skip subtotal-only checks (fixes false
-    alarms when the capture has no Sub Total row). When
-    ``tax_visible_on_document`` is False, skip GST checks.
+    When ``currency`` is set, comparisons use G4 integer-cent tolerance
+    (``g4_tolerance_cents``) to avoid float drift. When ``subtotal_in_capture``
+    is False, skip subtotal-only checks (fixes false alarms when the capture has
+    no Sub Total row). When ``tax_visible_on_document`` is False, skip GST checks.
     """
     net_sum = sum(ln.net_amount or 0.0 for ln in ex.lines)
     gst_sum = sum(ln.gst_amount or 0.0 for ln in ex.lines)
@@ -397,6 +417,15 @@ def reconcile(
 
     def _check(label: str, computed: float, reference: Optional[float]) -> None:
         if reference is None:
+            return
+        if currency is not None:
+            cents_tol = g4_tolerance_cents(currency)
+            diff_cents = abs(round(computed * 100) - round(reference * 100))
+            if diff_cents > cents_tol:
+                mismatches.append(
+                    f"{label}: lines={computed:.2f} vs doc={reference:.2f} "
+                    f"(diff={computed - reference:+.2f}, tol={cents_tol}c)"
+                )
             return
         tol = max(tol_abs, tol_rel * abs(reference))
         if abs(computed - reference) > tol:

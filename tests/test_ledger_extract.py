@@ -257,3 +257,44 @@ def test_extracted_document_mapper_single_doc():
     inv = extracted_document_to_normalized(doc, direction="purchase", base_currency="MYR")
     assert inv.invoice_number == "INV-42"
     assert inv.doc_total == 60.0
+
+
+def test_validate_extracted_document_g4_tolerance_within_two_cents():
+    """G4: MYR docs within 2-cent integer tolerance reconcile."""
+    doc = ExtractedDocument(
+        doc_type="invoice",
+        page_range=[1, 1],
+        vendor="Vendor-A",
+        reference="INV-1",
+        date="2026-06-01",
+        currency="MYR",
+        lines=[ExtractedDocumentLine(description="Parts", net_amount=100.0, gst_amount=0.0)],
+        subtotal=100.0,
+        tax_total=0.0,
+        grand_total=100.02,
+        direction_for_client="purchase",
+        tax_visible_on_document=False,
+    )
+    ok, detail = validate_extracted_document(doc)
+    assert ok, detail
+
+
+def test_validate_extracted_document_g4_tolerance_flags_three_cent_gap():
+    """G4: gaps beyond 2 cents fail reconcile."""
+    doc = ExtractedDocument(
+        doc_type="invoice",
+        page_range=[1, 1],
+        vendor="Vendor-A",
+        reference="INV-1",
+        date="2026-06-01",
+        currency="MYR",
+        lines=[ExtractedDocumentLine(description="Parts", net_amount=100.0, gst_amount=0.0)],
+        subtotal=100.0,
+        tax_total=0.0,
+        grand_total=100.03,
+        direction_for_client="purchase",
+        tax_visible_on_document=False,
+    )
+    ok, detail = validate_extracted_document(doc)
+    assert not ok
+    assert "total" in detail.lower()

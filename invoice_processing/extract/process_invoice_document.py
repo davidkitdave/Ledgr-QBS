@@ -188,6 +188,8 @@ def process_invoice_document(
         if not ok:
             inv.reconciled = False
             inv.reconcile_note = note
+        elif inv.reconciled:
+            inv.reconcile_note = note
         normalized.append(inv)
 
     return InvoiceProcessResult(
