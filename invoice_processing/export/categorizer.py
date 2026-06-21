@@ -212,6 +212,64 @@ def resolve_account(
 # --------------------------------------------------------------------------- #
 # LLM COA match (one batched structured-output call for all unresolved lines)
 # --------------------------------------------------------------------------- #
+
+COA_CATEGORIZE_STATIC_INSTRUCTION = (
+    "You are an accounting assistant categorizing invoice/receipt lines to a client's "
+    "Chart of Accounts (COA). For each line, pick the single best-matching COA account by "
+    "its exact `account_code` key from the COA list provided in the user message.\n\n"
+    f"When no COA account is a reasonable fit (e.g. salary, payroll, items outside the "
+    f"client's COA scope), choose `{UNMAPPED_ACCOUNT_CODE}` — abstaining is the CORRECT "
+    "answer. Do NOT force-fit a real account code when nothing fits.\n\n"
+    "Prefer Profit & Loss expense accounts for purchase costs. Return reasoning and a "
+    "confidence in [0,1]. Optionally list up to a few plausible alternative_codes "
+    "(client COA keys only, never UNMAPPED).\n\n"
+    "IMPORTANT — your task is ONLY to assign an account_code from the COA list. "
+    "Do NOT choose or infer a tax treatment or GST code (SR/ZR/ES/OS etc.); that is "
+    "decided separately by a deterministic master gate and is outside your scope.\n\n"
+    "You MUST return the JSON results object for every line provided. "
+    "Never reply empty or omit the results array.\n\n"
+    f"Valid account_code values: client COA keys plus `{UNMAPPED_ACCOUNT_CODE}`."
+)
+
+
+def _build_coa_categorize_static_instruction() -> str:
+    """Invariant COA categorization rules (WS-6.2 cacheable prefix)."""
+    return COA_CATEGORIZE_STATIC_INSTRUCTION
+
+
+def _build_coa_categorize_dynamic_content(
+    *,
+    coa_for_prompt: list[dict],
+    lines_for_prompt: list[dict],
+    tax_registered: Optional[bool],
+    client_region: str,
+    client_currency: str,
+) -> str:
+    """Per-call COA JSON, lines, and client tax/region context."""
+    if tax_registered is True:
+        gst_ctx = "yes"
+    elif tax_registered is False:
+        gst_ctx = "no"
+    else:
+        gst_ctx = "unknown"
+
+    region_block = ""
+    if client_region or client_currency:
+        region_block = (
+            f"Client region: {client_region or 'unknown'}\n"
+            f"Client base currency: {client_currency or 'unknown'}\n\n"
+        )
+
+    return (
+        f"{region_block}"
+        f"Client GST-registered: {gst_ctx}\n\n"
+        "COA (choose account_code from these only):\n"
+        f"{json.dumps(coa_for_prompt, ensure_ascii=False)}\n\n"
+        "Lines to categorize:\n"
+        f"{json.dumps(lines_for_prompt, ensure_ascii=False)}\n"
+    )
+
+
 def _llm_match_lines(
     unresolved: list[tuple[int, str, str]],   # (line_index, description, vendor)
     coa: list[CoaAccount],
@@ -233,6 +291,10 @@ def _llm_match_lines(
     """
     from google.genai import types
 
+    from ..shared_libraries.context_cache_config import (
+        log_context_cache_usage,
+        resolve_coa_cached_content,
+    )
     from ..shared_libraries.genai_client import lite_model, make_client
 
     coa_for_prompt = [
@@ -278,57 +340,43 @@ def _llm_match_lines(
         "required": ["results"],
     }
 
-    if tax_registered is True:
-        gst_ctx = "yes"
-    elif tax_registered is False:
-        gst_ctx = "no"
-    else:
-        gst_ctx = "unknown"
-
-    region_ctx = (
-        f"\nClient region: {client_region or 'unknown'}\n"
-        f"Client base currency: {client_currency or 'unknown'}\n"
-        if client_region or client_currency
-        else ""
+    static_instruction = _build_coa_categorize_static_instruction()
+    dynamic_content = _build_coa_categorize_dynamic_content(
+        coa_for_prompt=coa_for_prompt,
+        lines_for_prompt=lines_for_prompt,
+        tax_registered=tax_registered,
+        client_region=client_region,
+        client_currency=client_currency,
     )
-
-    prompt = (
-        "You are an accounting assistant categorizing invoice/receipt lines to a client's "
-        "Chart of Accounts (COA). For each line, pick the single best-matching COA account by "
-        "its exact `account_code` key from the list below.\n\n"
-        f"When no COA account is a reasonable fit (e.g. salary, payroll, items outside the "
-        f"client's COA scope), choose `{UNMAPPED_ACCOUNT_CODE}` — abstaining is the CORRECT "
-        "answer. Do NOT force-fit a real account code when nothing fits.\n\n"
-        "Prefer Profit & Loss expense accounts for purchase costs. Return reasoning and a "
-        "confidence in [0,1]. Optionally list up to a few plausible alternative_codes "
-        "(client COA keys only, never UNMAPPED).\n\n"
-        "IMPORTANT — your task is ONLY to assign an account_code from the COA list below. "
-        "Do NOT choose or infer a tax treatment or GST code (SR/ZR/ES/OS etc.); that is "
-        "decided separately by a deterministic master gate and is outside your scope."
-        f"{region_ctx}\n"
-        f"Client GST-registered: {gst_ctx}\n\n"
-        "You MUST return the JSON results object for every line provided. "
-        "Never reply empty or omit the results array.\n\n"
-        f"Valid account_code values: client COA keys plus `{UNMAPPED_ACCOUNT_CODE}`.\n\n"
-        "COA (choose account_code from these only):\n"
-        f"{json.dumps(coa_for_prompt, ensure_ascii=False)}\n\n"
-        "Lines to categorize:\n"
-        f"{json.dumps(lines_for_prompt, ensure_ascii=False)}\n"
-    )
+    coa_json = json.dumps(coa_for_prompt, ensure_ascii=False)
 
     try:
         client = make_client()
-        resp = client.models.generate_content(
-            model=model or lite_model(),
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=response_schema,
-                temperature=0,
-                response_logprobs=True,
-                logprobs=5,
-            ),
+        resolved_model = model or lite_model()
+        cached_content_name = resolve_coa_cached_content(
+            client,
+            model=resolved_model,
+            coa_json=coa_json,
+            static_instruction=static_instruction,
         )
+        gen_config_kwargs: dict = {
+            "response_mime_type": "application/json",
+            "response_schema": response_schema,
+            "temperature": 0,
+            "response_logprobs": True,
+            "logprobs": 5,
+        }
+        if cached_content_name:
+            gen_config_kwargs["cached_content"] = cached_content_name
+        else:
+            gen_config_kwargs["system_instruction"] = static_instruction
+
+        resp = client.models.generate_content(
+            model=resolved_model,
+            contents=dynamic_content,
+            config=types.GenerateContentConfig(**gen_config_kwargs),
+        )
+        log_context_cache_usage(resp, lane="coa")
         data = json.loads(resp.text or "{}")
     except Exception:
         return {}

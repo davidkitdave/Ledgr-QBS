@@ -83,6 +83,9 @@ from invoice_processing.export.client_context import (
     FirestoreClientStore,
     make_load_client_by_channel_callback,
 )
+from invoice_processing.shared_libraries.context_cache_config import (
+    ledgr_context_cache_config,
+)
 
 from . import config  # ensures AI Studio env is set before any ADK model init
 from . import nodes
@@ -502,6 +505,7 @@ document_app = App(
     name="accounting_agents_document",
     root_agent=document_workflow,
     resumability_config=ResumabilityConfig(is_resumable=True),
+    context_cache_config=ledgr_context_cache_config(),
 )
 
 #: Standalone chat-lane App: a root ``LlmAgent`` with no ``mode`` so it sees
@@ -513,6 +517,7 @@ assistant_app = App(
     name="accounting_agents_assistant",
     root_agent=assistant_agent,
     plugins=[LedgrReflectRetryPlugin(max_retries=2)],
+    context_cache_config=ledgr_context_cache_config(),
 )
 
 __all__ = [

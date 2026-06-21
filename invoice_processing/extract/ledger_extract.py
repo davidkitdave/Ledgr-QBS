@@ -30,6 +30,7 @@ from google.genai import types
 from pydantic import BaseModel, Field
 
 from ..export.models import NormalizedInvoice
+from ..shared_libraries.context_cache_config import log_context_cache_usage
 from ..shared_libraries.genai_client import lite_model, make_client
 from .invoice_extractor import (
     ExtractedInvoice,
@@ -495,16 +496,7 @@ def should_use_legacy_extract(doc_type: str) -> bool:
     return use_legacy_soa()
 
 
-def _build_faithful_extract_prompt(
-    client_name: Optional[str], client_uen: Optional[str]
-) -> str:
-    """Faithful multi-document extraction prompt (WS-2.1, spec §1).
-
-    One call per file returns ``documents[]`` — each element is transcribed
-    verbatim (lines + printed totals + tax groupings). No bookkeeper
-    summarization; segmentation and doc_type are decided in-call.
-    """
-    base = """You are transcribing financial documents faithfully into structured JSON.
+FAITHFUL_EXTRACT_STATIC_INSTRUCTION = """You are transcribing financial documents faithfully into structured JSON.
 
 Your job is to READ and COPY what is printed — not to summarize for bookkeeping.
 
@@ -544,20 +536,36 @@ Arithmetic:
 
 Examples use placeholders only (Vendor-A, Buyer-B, Person-1) — no real names."""
 
-    if client_name or client_uen:
-        bits: list[str] = []
-        if client_name:
-            bits.append(f"name = {client_name}")
-        if client_uen:
-            bits.append(f"UEN = {client_uen}")
-        ctx = " · ".join(bits)
-        base += f"""
 
-Client context: {ctx}.
+def _build_faithful_extract_static_instruction() -> str:
+    """Invariant faithful-extraction rules (WS-6.2 cacheable prefix)."""
+    return FAITHFUL_EXTRACT_STATIC_INSTRUCTION
+
+
+def _build_faithful_extract_dynamic_prompt(
+    client_name: Optional[str], client_uen: Optional[str]
+) -> str:
+    """Per-call client context appended to the PDF user turn."""
+    if not client_name and not client_uen:
+        return "Transcribe the uploaded document(s) into the JSON schema."
+    bits: list[str] = []
+    if client_name:
+        bits.append(f"name = {client_name}")
+    if client_uen:
+        bits.append(f"UEN = {client_uen}")
+    ctx = " · ".join(bits)
+    return f"""Client context: {ctx}.
 Match the client by name OR UEN against vendor/buyer/letterhead/claimant blocks.
 Return "unknown" when the client does not appear on the document."""
 
-    return base
+
+def _build_faithful_extract_prompt(
+    client_name: Optional[str], client_uen: Optional[str]
+) -> str:
+    """Full faithful prompt (static + dynamic) — backward-compatible helper."""
+    static = _build_faithful_extract_static_instruction()
+    dynamic = _build_faithful_extract_dynamic_prompt(client_name, client_uen)
+    return f"{static}\n\n{dynamic}"
 
 
 def extract_document_ledger(
@@ -580,16 +588,22 @@ def extract_document_ledger(
     client = make_client(project, location)
     model = model or lite_model()
     part = types.Part.from_bytes(data=data, mime_type=mime_type)
-    prompt = _build_faithful_extract_prompt(client_name, client_uen)
+    static_instruction = _build_faithful_extract_static_instruction()
+    dynamic_prompt = _append_hint(
+        _build_faithful_extract_dynamic_prompt(client_name, client_uen),
+        hint,
+    )
     resp = client.models.generate_content(
         model=model,
-        contents=[part, _append_hint(prompt, hint)],
+        contents=[part, dynamic_prompt],
         config=types.GenerateContentConfig(
+            system_instruction=static_instruction,
             temperature=0,
             response_mime_type="application/json",
             response_schema=ExtractedDocumentBundle,
         ),
     )
+    log_context_cache_usage(resp, lane="extract")
     return ExtractedDocumentBundle.model_validate_json(resp.text)
 
 

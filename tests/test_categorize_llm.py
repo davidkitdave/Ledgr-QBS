@@ -622,7 +622,9 @@ def _capture_prompt_client(monkeypatch) -> list[str]:
     captured: list[str] = []
 
     def fake_generate(model=None, contents=None, config=None, **_kw):
-        captured.append(contents or "")
+        static = getattr(config, "system_instruction", None) if config else None
+        parts = [p for p in (static, contents) if p]
+        captured.append("\n".join(str(p) for p in parts))
         return SimpleNamespace(text=json.dumps({"results": []}))
 
     fake_client = SimpleNamespace(models=SimpleNamespace(generate_content=fake_generate))
