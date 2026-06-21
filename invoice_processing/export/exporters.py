@@ -41,6 +41,92 @@ _ERP_PROFILES_DIR = Path(__file__).resolve().parent.parent / "shared_libraries" 
 ACCOUNT_FLAGGED_PREVIEW_MARKER = " ⚠️"
 
 
+@dataclass(frozen=True)
+class PreviewColumn:
+    """Spec for one column in a ledger preview data_table."""
+
+    header: str    # shown in the data_table column header
+    row_key: str   # dict key on each exporter row (ERP column name)
+    cell_type: str  # "raw_text" or "raw_number"
+
+
+# Logical context keys whose values are numeric in exporter row dicts.
+_NUMERIC_CONTEXT_KEYS = frozenset({
+    "sub_total",
+    "tax_amount",
+    "unit_price",
+    "qty",
+    "quantity",
+    "unit_amount",
+    "total_amount",
+    "total",
+    "currency_rate",
+    "source_amount",
+    "discount",
+})
+
+_ERP_PROFILE_FILES: dict[str, str] = {
+    "autocount": "autocount.yaml",
+    "sql_account": "sql_account.yaml",
+}
+
+
+def _load_erp_profile(profile_name: str) -> dict[str, Any]:
+    path = _ERP_PROFILES_DIR / profile_name
+    with open(path, encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def load_erp_profile_for_system(system: str) -> dict[str, Any] | None:
+    """Load the declarative ERP profile YAML for *system*, or ``None``."""
+    profile_file = _ERP_PROFILE_FILES.get(system)
+    if not profile_file:
+        return None
+    return _load_erp_profile(profile_file)
+
+
+def preview_columns_from_profile(profile: dict, sheet: str) -> list[PreviewColumn]:
+    """Derive Slack preview columns from an ERP profile (same source as Excel export).
+
+    Uses ``purchase_cols`` / ``sales_cols`` for column order and header labels, and
+    ``purchase_fields`` / ``sales_fields`` to infer numeric vs text cells.  Each
+    ``PreviewColumn.row_key`` is the ERP column name emitted by
+    :class:`ProfileLedgerExporter` row dicts.
+    """
+    if sheet == "Purchase":
+        cols = list(profile.get("purchase_cols") or [])
+        field_map = dict(profile.get("purchase_fields") or {})
+    elif sheet == "Sales":
+        cols = list(profile.get("sales_cols") or [])
+        field_map = dict(profile.get("sales_fields") or {})
+    else:
+        return []
+
+    out: list[PreviewColumn] = []
+    for col in cols:
+        ctx_key = field_map.get(col, "")
+        cell_type = "raw_number" if ctx_key in _NUMERIC_CONTEXT_KEYS else "raw_text"
+        out.append(PreviewColumn(header=col, row_key=col, cell_type=cell_type))
+    return out
+
+
+def preview_columns_from_logical_fields(
+    cols: list[str],
+    logical_fields: dict[str, str],
+    *,
+    header_overrides: dict[str, str] | None = None,
+) -> list[PreviewColumn]:
+    """Build preview columns from an exporter's column list + logical-field map."""
+    overrides = header_overrides or {}
+    out: list[PreviewColumn] = []
+    for col in cols:
+        ctx_key = logical_fields.get(col, "")
+        cell_type = "raw_number" if ctx_key in _NUMERIC_CONTEXT_KEYS else "raw_text"
+        header = overrides.get(col, col)
+        out.append(PreviewColumn(header=header, row_key=col, cell_type=cell_type))
+    return out
+
+
 def _fmt_date(d) -> str:
     if d is None:
         return ""
@@ -460,12 +546,6 @@ class XeroLedgerExporter(LedgerExporter):
         row = self._xero_common(inv, line)
         row["*Description"] = line.description
         return row
-
-
-def _load_erp_profile(profile_name: str) -> dict[str, Any]:
-    path = _ERP_PROFILES_DIR / profile_name
-    with open(path, encoding="utf-8") as f:
-        return yaml.safe_load(f)
 
 
 class ProfileLedgerExporter(LedgerExporter):

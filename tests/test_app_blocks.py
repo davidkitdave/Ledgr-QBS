@@ -1539,9 +1539,19 @@ from app.blocks import software_label
 
 class TestPreviewColumnSpecAutoCountSQL:
 
-    def test_autocount_purchase_first_col_row_key_is_docdate(self):
+    def test_autocount_purchase_first_col_matches_profile(self):
+        from invoice_processing.export.exporters import load_erp_profile_for_system
+
+        profile = load_erp_profile_for_system("autocount")
         spec = preview_column_spec(software="AutoCount", sheet="Purchase")
-        assert spec[0].row_key == "DocDate"
+        assert spec[0].row_key == profile["purchase_cols"][0]
+
+    def test_autocount_purchase_row_keys_match_profile_cols(self):
+        from invoice_processing.export.exporters import load_erp_profile_for_system
+
+        profile = load_erp_profile_for_system("autocount")
+        spec = preview_column_spec(software="AutoCount", sheet="Purchase")
+        assert [c.row_key for c in spec] == profile["purchase_cols"]
 
     def test_autocount_purchase_has_creditor_col(self):
         spec = preview_column_spec(software="AutoCount", sheet="Purchase")
@@ -1558,6 +1568,20 @@ class TestPreviewColumnSpecAutoCountSQL:
         row_keys = [c.row_key for c in spec]
         assert "CurrencyCode" in row_keys
 
+    def test_autocount_sales_row_keys_match_profile_cols(self):
+        from invoice_processing.export.exporters import load_erp_profile_for_system
+
+        profile = load_erp_profile_for_system("autocount")
+        spec = preview_column_spec(software="AutoCount", sheet="Sales")
+        assert [c.row_key for c in spec] == profile["sales_cols"]
+
+    def test_sql_account_purchase_row_keys_match_profile_cols(self):
+        from invoice_processing.export.exporters import load_erp_profile_for_system
+
+        profile = load_erp_profile_for_system("sql_account")
+        spec = preview_column_spec(software="SQL Account", sheet="Purchase")
+        assert [c.row_key for c in spec] == profile["purchase_cols"]
+
     def test_sql_account_purchase_has_code10_col(self):
         spec = preview_column_spec(software="SQL Account", sheet="Purchase")
         row_keys = [c.row_key for c in spec]
@@ -1571,6 +1595,16 @@ class TestPreviewColumnSpecAutoCountSQL:
     def test_sql_account_purchase_first_col_row_key_is_docno(self):
         spec = preview_column_spec(software="SQL Account", sheet="Purchase")
         assert spec[0].row_key == "DOCNO(20)"
+
+    def test_profile_numeric_cols_use_raw_number(self):
+        from invoice_processing.export.exporters import load_erp_profile_for_system
+
+        profile = load_erp_profile_for_system("sql_account")
+        spec = preview_column_spec(software="SQL Account", sheet="Purchase")
+        by_key = {c.row_key: c.cell_type for c in spec}
+        assert by_key["_TAXAMT"] == "raw_number"
+        assert by_key["_AMOUNT"] == "raw_number"
+        assert by_key["CODE(10)"] == "raw_text"
 
     def test_autocount_and_sql_bank_sheet_returns_bank_cols(self):
         # Bank sheets always return the 6-col bank spec, regardless of software.

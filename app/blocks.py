@@ -3,19 +3,14 @@
 from __future__ import annotations
 
 import urllib.parse
-from dataclasses import dataclass
 
 from app.native_blocks_compat import supports_native_blocks
 from accounting_agents.jurisdiction import supported_regions
-
-
-@dataclass(frozen=True)
-class PreviewColumn:
-    """Spec for one column in a ledger preview data_table."""
-
-    header: str    # shown in the data_table column header
-    row_key: str   # dict key on each exporter row
-    cell_type: str  # "raw_text" or "raw_number"
+from invoice_processing.export.exporters import (
+    PreviewColumn,
+    load_erp_profile_for_system,
+    preview_columns_from_profile,
+)
 
 
 def _normalize_software(software: str) -> str | None:
@@ -111,51 +106,6 @@ _BANK_COLS: list[PreviewColumn] = [
     PreviewColumn("Currency",    "Currency",    "raw_text"),
 ]
 
-_AUTOCOUNT_PURCHASE_COLS: list[PreviewColumn] = [
-    PreviewColumn("Doc Date",       "DocDate",          "raw_text"),
-    PreviewColumn("Supplier Inv #", "SupplierInvoiceNo","raw_text"),
-    PreviewColumn("Creditor",       "CreditorCode",     "raw_text"),
-    PreviewColumn("Description",    "Description",      "raw_text"),
-    PreviewColumn("Acc No",         "AccNo",            "raw_text"),
-    PreviewColumn("Tax",            "TaxType",          "raw_text"),
-    PreviewColumn("Taxable Amt",    "TaxableAmt",       "raw_number"),
-    PreviewColumn("Amount",         "Amount",           "raw_number"),
-]
-
-_AUTOCOUNT_SALES_COLS: list[PreviewColumn] = [
-    PreviewColumn("Doc Date",    "DocDate",     "raw_text"),
-    PreviewColumn("Debtor",      "DebtorCode",  "raw_text"),
-    PreviewColumn("Description", "Description", "raw_text"),
-    PreviewColumn("Acc No",      "AccNo",       "raw_text"),
-    PreviewColumn("Tax",         "TaxType",     "raw_text"),
-    PreviewColumn("Taxable Amt", "TaxableAmt",  "raw_number"),
-    PreviewColumn("Amount",      "Amount",      "raw_number"),
-    PreviewColumn("Currency",    "CurrencyCode","raw_text"),
-]
-
-_SQL_PURCHASE_COLS: list[PreviewColumn] = [
-    PreviewColumn("Doc No",      "DOCNO(20)",        "raw_text"),
-    PreviewColumn("Doc Date",    "DOCDATE",          "raw_text"),
-    PreviewColumn("Creditor",    "CODE(10)",         "raw_text"),
-    PreviewColumn("Description", "DESCRIPTION(200)", "raw_text"),
-    PreviewColumn("Account",     "_ACCOUNT(10)",     "raw_text"),
-    PreviewColumn("Tax",         "_TAX(10)",         "raw_text"),
-    PreviewColumn("Tax Amt",     "_TAXAMT",          "raw_number"),
-    PreviewColumn("Amount",      "_AMOUNT",          "raw_number"),
-]
-
-_SQL_SALES_COLS: list[PreviewColumn] = [
-    PreviewColumn("Doc No",      "DOCNO(20)",        "raw_text"),
-    PreviewColumn("Doc Date",    "DOCDATE",          "raw_text"),
-    PreviewColumn("Debtor",      "CODE(10)",         "raw_text"),
-    PreviewColumn("Description", "DESCRIPTION(200)", "raw_text"),
-    PreviewColumn("Account",     "_ACCOUNT(10)",     "raw_text"),
-    PreviewColumn("Tax",         "_TAX(10)",         "raw_text"),
-    PreviewColumn("Tax Amt",     "_TAXAMT",          "raw_number"),
-    PreviewColumn("Amount",      "_AMOUNT",          "raw_number"),
-]
-
-
 def preview_column_spec(*, software: str, sheet: str) -> list[PreviewColumn]:
     """Return the curated preview columns for a (software, sheet) combination.
 
@@ -170,10 +120,11 @@ def preview_column_spec(*, software: str, sheet: str) -> list[PreviewColumn]:
         return []
     if norm == "xero":
         return _XERO_PURCHASE_COLS if sheet == "Purchase" else _XERO_SALES_COLS
-    if norm == "autocount":
-        return _AUTOCOUNT_PURCHASE_COLS if sheet == "Purchase" else _AUTOCOUNT_SALES_COLS
-    if norm == "sql_account":
-        return _SQL_PURCHASE_COLS if sheet == "Purchase" else _SQL_SALES_COLS
+    if norm in ("autocount", "sql_account"):
+        profile = load_erp_profile_for_system(norm)
+        if profile is not None:
+            return preview_columns_from_profile(profile, sheet)
+        return []
     # qbs_ledger (default)
     return _QBS_PURCHASE_COLS if sheet == "Purchase" else _QBS_SALES_COLS
 
