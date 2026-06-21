@@ -1537,6 +1537,22 @@ def test_normalized_invoice_codec_round_trip_preserves_document_kind():
     assert rebuilt.document_kind == "credit_note"
 
 
+def test_apply_invoice_process_result_stamps_document_kind():
+    """Live extract path must copy classify doc_type onto each NormalizedInvoice."""
+    from invoice_processing.extract.process_invoice_document import InvoiceProcessResult
+    from invoice_processing.export.models import NormalizedInvoice
+
+    class _Ctx:
+        state = {nodes.DOC_TYPE_KEY: "credit_note"}
+
+    inv = NormalizedInvoice(doc_type="purchase", invoice_number="CN-1")
+    result = InvoiceProcessResult(normalized=[inv], extraction_path="understand")
+    nodes._apply_invoice_process_result(_Ctx(), result)
+    stored = _Ctx.state[nodes.NORMALIZED_KEY][0]
+    assert stored["document_kind"] == "credit_note"
+    assert nodes._dict_to_inv(stored).document_kind == "credit_note"
+
+
 def test_normalized_invoice_codec_date_serialized_as_iso_string():
     """The on-the-wire dict shape must use ISO date strings (Firestore-safe)."""
     from datetime import date as _date

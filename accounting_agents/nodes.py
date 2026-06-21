@@ -619,6 +619,11 @@ def _apply_invoice_process_result(ctx, result: InvoiceProcessResult) -> None:
         ctx.state[BOOKING_PROPOSALS_KEY] = _guard_state_payload(
             BOOKING_PROPOSALS_KEY, result.booking_proposals
         )
+    # Stamp classify doc kind (credit_note, invoice, …) so exporters can flip
+    # credit-note signs. to_normalized only sets direction (purchase/sales).
+    doc_kind = ctx.state.get(DOC_TYPE_KEY)
+    for inv in result.normalized:
+        inv.document_kind = doc_kind
     ctx.state[NORMALIZED_KEY] = _guard_state_payload(
         NORMALIZED_KEY, [_inv_to_dict(i) for i in result.normalized]
     )

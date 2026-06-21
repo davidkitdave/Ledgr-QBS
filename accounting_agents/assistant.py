@@ -257,9 +257,9 @@ def _normalize_row_for_tools(row: dict) -> dict:
         acct = out.get("*AccountCode")
         if acct is not None:
             out["Account Code / COA"] = acct
-    # Date.
+    # Date — QBS uses "Invoice Date"; Xero uses "*InvoiceDate".
     if not out.get("Date") and not out.get("date"):
-        d = out.get("*InvoiceDate")
+        d = out.get("Invoice Date") or out.get("*InvoiceDate")
         if d is not None:
             out["Date"] = d
     # Vendor / contact (Xero *ContactName).

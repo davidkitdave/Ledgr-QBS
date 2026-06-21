@@ -1500,8 +1500,15 @@ class SlackLedgerStore:
                         continue
 
                     col_map = self._header_col_map(ws)
-                    date_col = col_map.get("Date")
-                    inv_col = col_map.get("Invoice Number")
+                    date_col = (
+                        col_map.get("Invoice Date")
+                        or col_map.get("*InvoiceDate")
+                        or col_map.get("Date")
+                    )
+                    inv_col = (
+                        col_map.get("Invoice Number")
+                        or col_map.get("*InvoiceNumber")
+                    )
 
                     # Collect matching row numbers in ascending order, then delete bottom-up.
                     matching_rows: list[int] = []

@@ -1907,6 +1907,32 @@ def _make_invoice_workbook_with_months() -> bytes:
     return buf.getvalue()
 
 
+def _make_qbs_exporter_workbook_with_months() -> bytes:
+    """Same months as _make_invoice_workbook_with_months but QBS export headers."""
+    from openpyxl import Workbook as _WB
+    wb = _WB()
+    ws_p = wb.active
+    ws_p.title = "Purchase"
+    ws_p.append([
+        "Invoice Number", "Invoice Date", "Vendor Name", "Description",
+        "Source Amount", "Account Code / COA",
+    ])
+    ws_p.append(["INV-P1", "05/09/2025", "AWS", "AWS Sep", 100.0, "6090"])
+    ws_p.append(["INV-P2", "20/09/2025", "Zoom", "Zoom Sep", 50.0, "6090"])
+    ws_p.append(["INV-P3", "03/10/2025", "AWS", "AWS Oct", 120.0, "6090"])
+    ws_s = wb.create_sheet("Sales")
+    ws_s.append([
+        "Invoice Date", "Invoice Number", "Customer Name", "Description",
+        "Source Amount", "Account Code / COA",
+    ])
+    ws_s.append(["10/09/2025", "INV-S1", "Client", "Consulting Sep", 500.0, "4000"])
+    ws_s.append(["15/10/2025", "INV-S2", "Client", "Consulting Oct", 600.0, "4000"])
+    import io
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 def _store_with_workbook(xlsx_bytes: bytes, *, client_id: str = "c1", fy: str = "2026") -> tuple:
     """Return (slack, store) with the given workbook already uploaded + pointer seeded."""
     slack = FakeSlackClient()
@@ -1961,6 +1987,30 @@ def test_remove_rows_for_month_removes_matching_rows():
     # Only Oct row remains in Sales.
     assert len([r for r in s_rows if r[0] is not None]) == 1
     assert s_rows[0][2] == "Consulting Oct"
+
+
+def test_remove_rows_for_month_qbs_exporter_headers():
+    """Regression: real QBS workbooks use 'Invoice Date', not 'Date'."""
+    xlsx = _make_qbs_exporter_workbook_with_months()
+    slack, store = _store_with_workbook(xlsx)
+    result = store.remove_rows_for_month(
+        "c1", "2026", slack, "C1", year=2025, month=9,
+    )
+    assert result["sheets"]["Purchase"] == 2
+    assert result["sheets"]["Sales"] == 1
+    rows = store.read_rows("c1", "2026", slack, "C1")
+    sep_rows = [
+        r for r in rows
+        if r.get("_sheet") in ("Purchase", "Sales")
+        and "09/2025" in str(r.get("Invoice Date") or r.get("Date") or "")
+    ]
+    assert sep_rows == []
+    oct_rows = [
+        r for r in rows
+        if r.get("_sheet") in ("Purchase", "Sales")
+        and "10/2025" in str(r.get("Invoice Date") or r.get("Date") or "")
+    ]
+    assert len(oct_rows) == 2
 
 
 def test_remove_rows_for_month_leaves_other_months_intact():
