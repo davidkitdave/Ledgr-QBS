@@ -33,7 +33,8 @@ code_map:
     purchase: { SR: "TX", ZR: "ZR", ES: "ES", OS: "NT", IM: "IM", NT: "NT" }
     sales:    { SR: "SR", ZR: "ZR", ES: "ES", OS: "OS", NT: "NT" }
 
-# Signal lexicons (lowercased substring match) used by the rules-first classifier.
+# Signal lexicons (lowercased substring match). Tie-break hints only — the classifier
+# uses these only when no printed tax_keyword and no GST arithmetic reconcile match.
 signals:
   # GST Act s.21(3) international services + export -> Zero-Rated (ZR).
   zero_rated:

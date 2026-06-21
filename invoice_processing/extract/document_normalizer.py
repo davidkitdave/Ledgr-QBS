@@ -173,81 +173,14 @@ def _is_reimbursement_claim(record: DocumentRecord) -> bool:
     return False
 
 
-def _line_currency_iso(line) -> Optional[str]:
-    if not line.currency:
-        return None
-    return (_symbol_to_iso(line.currency) or line.currency).upper()
-
-
-def _line_to_extracted(item) -> ExtractedLine:
-    net = item.net_amount
-    if net is None and item.quantity is not None and item.unit_amount is not None:
-        net = round(item.quantity * item.unit_amount, 2)
-    return ExtractedLine(
-        description=item.description,
-        quantity=item.quantity,
-        unit_amount=item.unit_amount,
-        net_amount=net,
-        gst_amount=None,
-        tax_label=item.tax_label,
-    )
-
-
 def _apply_reimbursement_ledger(record: DocumentRecord, ex: ExtractedInvoice) -> ExtractedInvoice:
-    """Book reimbursement claims in payout currency — one payable to the employee."""
-    if _is_telco_bill(record):
+    """Pass through verbatim lines; map claimant to issuer on expense claims only."""
+    if not _is_reimbursement_claim(record):
         return ex
-
-    doc_cur = (ex.currency or "").upper()
-    currencies = _currencies_on_record(record, ex.currency)
-    updates: dict = {}
-
-    if _is_reimbursement_claim(record):
-        claimant = _claimant_name(record)
-        if claimant:
-            updates["issuer_name"] = claimant
-
-    payout_cur, payout_total = _payout_from_record(record)
-    if _is_reimbursement_claim(record) and payout_cur and payout_total is not None:
-        desc = _find_field(record.labeled_fields, "Purpose") or "Expense reimbursement"
-        lines = [ExtractedLine(description=desc, quantity=1.0, net_amount=payout_total)]
-        updates.update({
-            "currency": payout_cur,
-            "lines": lines,
-            "subtotal": payout_total,
-            "total": payout_total,
-            "gst_total": 0.0,
-        })
-        return ex.model_copy(update=updates)
-
-    if len(currencies) <= 1:
-        return ex.model_copy(update=updates) if updates else ex
-
-    payout_items = [
-        item for item in record.line_items
-        if doc_cur and _line_currency_iso(item) == doc_cur
-    ]
-    if payout_items:
-        lines = [_line_to_extracted(item) for item in payout_items]
-        subtotal = sum(ln.net_amount or 0.0 for ln in lines)
-        total = ex.total if ex.total is not None else subtotal
-        updates.update({"lines": lines, "subtotal": subtotal, "total": total})
-    elif ex.total is not None:
-        desc = "Expense reimbursement"
-        for item in record.line_items:
-            d = (item.description or "").lower()
-            if any(k in d for k in ("total", "reimburse", "claim", "summary")):
-                desc = item.description
-                break
-        lines = [ExtractedLine(description=desc, quantity=1.0, net_amount=ex.total)]
-        updates.update({
-            "lines": lines,
-            "subtotal": ex.total,
-            "total": ex.total,
-            "gst_total": ex.gst_total or 0.0,
-        })
-
-    return ex.model_copy(update=updates) if updates else ex
+    claimant = _claimant_name(record)
+    if claimant:
+        return ex.model_copy(update={"issuer_name": claimant})
+    return ex
 
 
 def _collect_line_currencies(record: DocumentRecord) -> list[str]:

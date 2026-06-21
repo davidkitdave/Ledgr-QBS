@@ -80,9 +80,8 @@ class ExtractedInvoice(BaseModel):
         description=(
             "Country of the issuer / supplier as a 2-letter code (SG / MY / US / etc.). "
             "Infer from any country indicator on the document: country code in address, "
-            "country prefix on phone, \"Made in <country>\", tax reg no. country prefix "
-            "(MY SST numbers start with country code, SG GST with \"M\"), or explicit "
-            "country text. CRITICAL for multi-jurisdiction tax routing — the previous "
+            "country prefix on phone, \"Made in <country>\", tax registration number format, "
+            "or explicit country text. CRITICAL for multi-jurisdiction tax routing — the previous "
             "extractor left this null which caused an MY receipt to be wrongly routed "
             "through Singapore GST rules. Always return a 2-letter code when any "
             "country indicator is visible; null only when truly absent."
@@ -172,8 +171,7 @@ Document-level fields:
 - issuer_name = the supplier/seller (letterhead/"From"); bill_to_name = who it is addressed to.
 - issuer_country = 2-letter country code of the issuer (SG / MY / US / ...). Infer from any
   country indicator on the doc: country code in address, country prefix on phone, "Made in
-  <country>", tax-reg-no country prefix (MY SST numbers prefix with country code; SG GST
-  with "M"), explicit country text. CRITICAL for multi-jurisdiction tax routing — the
+  <country>", tax registration number format, explicit country text. CRITICAL for multi-jurisdiction tax routing — the
   previous extractor left this null on an MY receipt which caused it to be wrongly
   processed under SG GST. Always return a 2-letter code when any country indicator is
   visible; null only when truly absent.

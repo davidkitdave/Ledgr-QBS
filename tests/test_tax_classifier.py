@@ -126,7 +126,7 @@ class TestChubbRegression:
         assert result.tax_confidence >= 0.8
 
     def test_gst_9pct_no_gst_amount_still_resolves_sr_no_flag(self):
-        """Explicit '9%' wording with no gst_amount captured → still SR, not flagged."""
+        """Explicit '9%' wording with no gst_amount captured → SR tie-break, flagged."""
         line, inv = _purchase(
             desc="Software licence GST 9%",
             net=200.0,
@@ -136,8 +136,8 @@ class TestChubbRegression:
         result = CLF.classify_line(line, inv)
 
         assert result.tax_treatment == "SR"
-        assert not result.tax_flagged, f"Reason: {result.tax_reason}"
-        assert result.tax_confidence >= 0.8
+        assert result.tax_flagged, f"Lexicon tie-break must flag. Reason: {result.tax_reason}"
+        assert result.tax_confidence < 0.8
 
     def test_explicit_sr_signal_sales_invoice_no_flag(self):
         """Sales invoice: explicit standard-rated signal in description → SR, not flagged."""
@@ -260,7 +260,7 @@ class TestAmbiguousCasesStillFlag:
             )
 
     def test_zero_rated_wording_does_not_become_sr(self):
-        """ZR signal in description must not be overridden by the new SR rule."""
+        """ZR lexicon tie-break must not lose to standard-rated lexicon tie-break."""
         line, inv = _purchase(
             desc="International freight export GST 9%",  # both signals present
             net=1000.0,
@@ -269,14 +269,14 @@ class TestAmbiguousCasesStillFlag:
         )
         result = CLF.classify_line(line, inv)
 
-        # ZR signal (international freight / export) must win over standard-rated wording
         assert result.tax_treatment == "ZR", (
-            f"ZR signal must take priority over standard-rated wording. "
+            f"ZR tie-break must take priority over standard-rated wording. "
             f"Got {result.tax_treatment}. Reason: {result.tax_reason}"
         )
+        assert result.tax_flagged
 
     def test_exempt_wording_does_not_become_sr(self):
-        """Exempt signal in description must not be overridden by the new SR rule."""
+        """Exempt lexicon tie-break must not be overridden by standard-rated tie-break."""
         line, inv = _purchase(
             desc="Residential rent (exempt) standard-rated",
             net=2000.0,
@@ -286,8 +286,9 @@ class TestAmbiguousCasesStillFlag:
         result = CLF.classify_line(line, inv)
 
         assert result.tax_treatment == "ES", (
-            f"ES signal must take priority. Got {result.tax_treatment}. Reason: {result.tax_reason}"
+            f"ES tie-break must take priority. Got {result.tax_treatment}. Reason: {result.tax_reason}"
         )
+        assert result.tax_flagged
 
 
 # ===========================================================================
@@ -307,13 +308,15 @@ class TestExistingRulesUnchanged:
         line, inv = _purchase(desc="IDD international call", gst=0.0, gst_regno="M12345678X")
         result = CLF.classify_line(line, inv)
         assert result.tax_treatment == "ZR"
-        assert not result.tax_flagged
+        assert result.tax_flagged
+        assert result.tax_confidence < 0.8
 
     def test_exempt_interest_income(self):
         line, inv = _purchase(desc="Bank interest income", gst=None, gst_regno="M12345678X")
         result = CLF.classify_line(line, inv)
         assert result.tax_treatment == "ES"
-        assert not result.tax_flagged
+        assert result.tax_flagged
+        assert result.tax_confidence < 0.8
 
     def test_nt_unregistered_no_gst(self):
         line, inv = _purchase(desc="Hawker food stall", gst=None, gst_regno=None, is_overseas=False)

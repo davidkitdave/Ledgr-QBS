@@ -112,7 +112,7 @@ class TestNormalizeDocumentRecord:
         inv = normalize_document_record(rec, direction="purchase", base_currency="SGD")
         assert str(inv.invoice_date) == "2025-11-19"
 
-    def test_mixed_currency_expense_claim_books_usd_payout(self):
+    def test_mixed_currency_expense_claim_keeps_verbatim_lines(self):
         rec = DocumentRecord(
             doc_kind_guess="expense claim",
             labeled_fields=[
@@ -130,12 +130,10 @@ class TestNormalizeDocumentRecord:
         inv = normalize_document_record(rec, direction="purchase", base_currency="SGD")
         assert inv.invoice_number == "AAI-25-040"
         assert inv.supplier.name == "Supplier Gamma"
-        assert inv.needs_fx_review is False
-        assert inv.reconciled is True
         assert inv.currency == "USD"
-        assert inv.doc_total == pytest.approx(311.79)
-        assert len(inv.lines) == 1
-        assert inv.lines[0].net_amount == pytest.approx(311.79)
+        assert len(inv.lines) == 3
+        assert inv.lines[0].description == "Receipt A"
+        assert inv.lines[2].net_amount == pytest.approx(311.79)
 
     def test_unresolved_mixed_currency_still_flagged(self):
         rec = DocumentRecord(

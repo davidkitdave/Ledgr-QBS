@@ -287,6 +287,19 @@ class TaxClassifier:
         t = (text or "").lower()
         return any(sig in t for sig in self._signals.get(key, []))
 
+    def _lexicon_tiebreak(self, desc: str) -> Optional[tuple[str, float, bool, str]]:
+        """YAML description keywords — soft hint only when no printed tax signal won."""
+        conf = 0.55
+        if self._matches(desc, "zero_rated"):
+            return "ZR", conf, True, "ZR(?): description keyword hint — no printed tax signal"
+        if self._matches(desc, "exempt"):
+            return "ES", conf, True, "ES(?): description keyword hint — no printed tax signal"
+        if self._matches(desc, "no_tax"):
+            return "NT", conf, True, "NT(?): description keyword hint — no printed tax signal"
+        if self._matches(desc, "standard_rated"):
+            return "SR", conf, True, "SR(?): description keyword hint — no printed tax signal"
+        return None
+
     # -- per-line classification ------------------------------------------------
     def classify_line(self, line: InvoiceLine, inv: NormalizedInvoice) -> InvoiceLine:
         # Overseas supplier with no GST line on the document -> out-of-scope
@@ -390,16 +403,7 @@ class TaxClassifier:
             if self._sr_tax_keyword_match(kw):
                 return "SR", 0.95, False, f"SR: explicit tax_keyword '{line.tax_keyword}'"
 
-        # 1. Explicit zero-rated / international service (telco IDD, freight, export).
-        if self._matches(desc, "zero_rated"):
-            return "ZR", 0.95, False, "ZR: zero-rated/international-service signal"
-        # 3 (checked before generic SR): explicit exempt.
-        if self._matches(desc, "exempt"):
-            return "ES", 0.9, False, "ES: exempt-supply signal"
-        # 6 (explicit no-tax wording).
-        if self._matches(desc, "no_tax"):
-            return "NT", 0.85, False, "NT: no-tax/out-of-scope signal"
-        # 2. Positive GST amount — reconcile to a known SST/GST band when possible.
+        # 1. Positive GST amount — reconcile to a known SST/GST band when possible.
         if gst and gst > 0:
             reconciled = self._reconcile_tax_line(line, inv)
             if reconciled:
@@ -407,13 +411,7 @@ class TaxClassifier:
                 return treatment, 0.85, False, reason
             if supplier.gst_registered:
                 return "SR", 0.92, False, "SR: GST line + supplier GST-registered"
-            # GST shown + explicit standard-rate wording on the invoice -> SR, no flag.
-            # (Covers clean tax invoices like Chubb where reg no. wasn't captured from PDF.)
-            if self._matches(desc, "standard_rated"):
-                return "SR", 0.88, False, "SR: GST line + explicit standard-rate signal in description"
             # GST shown + amount reconciles to the standard rate for the invoice date -> SR, no flag.
-            # The reg no. may simply not have been extracted from the PDF; a correctly-calculated
-            # GST amount is strong independent evidence of standard-rated treatment.
             if line.net_amount:
                 rate = self.rate_for_date(inv.invoice_date)
                 expected = line.net_amount * rate
@@ -422,20 +420,17 @@ class TaxClassifier:
                     return "SR", 0.85, False, f"SR: GST line reconciles to standard rate {rate}"
             # GST shown but no reg no. visible -> suspicious, flag.
             return "SR", 0.5, True, "SR(?): GST shown but no supplier GST reg no."
-        # 4. Overseas supplier, no GST line -> out-of-scope, flag for reverse charge.
+        # 2. Overseas supplier, no GST line -> out-of-scope, flag for reverse charge.
         if self._party_is_overseas(supplier) and (not gst or gst == 0):
             return "OS", 0.55, True, "OS: overseas supplier, no GST — review Reverse Charge"
-        # 5. Explicit standard-rate wording, no GST amount captured -> SR, no flag.
-        # Handles clean tax invoices where the GST amount wasn't extracted separately
-        # but the invoice explicitly states a standard-rate treatment (e.g. "GST 9%",
-        # "(SR)", "standard-rated"). ZR/ES/NT signals already won above; reaching here
-        # means no conflicting signal, so the explicit SR wording is authoritative.
-        if self._matches(desc, "standard_rated"):
-            return "SR", 0.85, False, "SR: explicit standard-rate signal in description"
-        # 6. Supplier not GST-registered / no GST -> no tax.
+        # 3. YAML lexicon tie-break only — no printed tax_keyword and no GST reconcile.
+        tiebreak = self._lexicon_tiebreak(desc)
+        if tiebreak:
+            return tiebreak
+        # 4. Supplier not GST-registered / no GST -> no tax.
         if not supplier.gst_registered and (not gst or gst == 0):
             return "NT", 0.95, False, "NT: supplier not GST-registered / no GST line"
-        # 7. Indeterminate -> null treatment, flagged for human review.
+        # 5. Indeterminate -> null treatment, flagged for human review.
         return None, 0.4, True, "Unresolved: indeterminate tax treatment — needs human review"
 
     def _classify_sales(self, line: InvoiceLine, inv: NormalizedInvoice):
@@ -489,18 +484,25 @@ class TaxClassifier:
             if self._sr_tax_keyword_match(kw):
                 return "SR", 0.95, False, f"SR: explicit tax_keyword '{line.tax_keyword}'"
 
-        # 2. Export / international service -> zero-rated (verify §21(3) fit).
-        if self._matches(desc, "zero_rated") or self._party_is_overseas(customer):
-            conf = 0.85 if self._matches(desc, "zero_rated") else 0.6
-            flag = conf < self._threshold
-            return "ZR", conf, flag, "ZR: export/international-service or overseas customer"
-        # 3. Exempt supply.
-        if self._matches(desc, "exempt"):
-            return "ES", 0.9, False, "ES: exempt-supply signal"
-        # 4. Explicit out-of-scope.
-        if self._matches(desc, "no_tax"):
-            return "OS", 0.8, False, "OS: out-of-scope signal"
-        # 1. Default local sale -> standard-rated.
+        # 1. Overseas customer -> zero-rated (verify §21(3) fit).
+        if self._party_is_overseas(customer):
+            return "ZR", 0.6, True, "ZR: overseas customer"
+        # 2. Positive GST line — printed amount is authoritative.
+        gst = line.gst_amount
+        if gst and gst > 0:
+            reconciled = self._reconcile_tax_line(line, inv)
+            if reconciled:
+                treatment, _rate, reason = reconciled
+                return treatment, 0.85, False, reason
+            return "SR", 0.9, False, "SR: local standard-rated supply with GST line"
+        # 3. YAML lexicon tie-break only — no printed tax_keyword and no GST amount.
+        tiebreak = self._lexicon_tiebreak(desc)
+        if tiebreak:
+            code, conf, flag, reason = tiebreak
+            if code == "NT":
+                return "OS", conf, flag, "OS(?): description keyword hint — no printed tax signal"
+            return code, conf, flag, reason
+        # 4. Default local sale -> standard-rated.
         return "SR", 0.9, False, "SR: local standard-rated supply"
 
     # -- target-system code string ---------------------------------------------
