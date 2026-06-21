@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 LEDGR_CONTEXT_CACHE_MIN_TOKENS = int(os.getenv("LEDGR_CONTEXT_CACHE_MIN_TOKENS", "2048"))
 LEDGR_CONTEXT_CACHE_TTL_SECONDS = int(os.getenv("LEDGR_CONTEXT_CACHE_TTL_SECONDS", "1800"))
-LEDGR_CONTEXT_CACHE_INTERVALS = int(os.getenv("LEDGR_CONTEXT_CACHE_INTERVALS", "5"))
+LEDGR_CONTEXT_CACHE_INTERVALS = int(os.getenv("LEDGR_CONTEXT_CACHE_INTERVALS", "10"))
 
 
 def ledgr_context_cache_config() -> ContextCacheConfig:
@@ -47,21 +47,32 @@ def coa_cache_fingerprint(coa_json: str, model: str) -> str:
     return digest
 
 
-def log_context_cache_usage(resp: Any, *, lane: str) -> None:
-    """Log cached vs total prompt tokens from ``usage_metadata`` when present."""
+def cached_token_discount(resp: Any) -> int:
+    """Return tokens served from cache on this call (0 when cache is cold)."""
     usage = getattr(resp, "usage_metadata", None)
     if usage is None:
-        return
+        return 0
+    cached = getattr(usage, "cached_content_token_count", None)
+    return int(cached or 0)
+
+
+def log_context_cache_usage(resp: Any, *, lane: str) -> int:
+    """Log cached vs total prompt tokens; return cached-token discount for this call."""
+    usage = getattr(resp, "usage_metadata", None)
+    if usage is None:
+        return 0
     cached = getattr(usage, "cached_content_token_count", None)
     prompt = getattr(usage, "prompt_token_count", None)
+    discount = int(cached or 0)
     if cached is None and prompt is None:
-        return
+        return discount
     logger.info(
         "context_cache lane=%s cached_content_token_count=%s prompt_token_count=%s",
         lane,
         cached,
         prompt,
     )
+    return discount
 
 
 @dataclass

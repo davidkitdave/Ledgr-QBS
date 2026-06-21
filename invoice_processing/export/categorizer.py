@@ -216,7 +216,8 @@ def resolve_account(
 COA_CATEGORIZE_STATIC_INSTRUCTION = (
     "You are an accounting assistant categorizing invoice/receipt lines to a client's "
     "Chart of Accounts (COA). For each line, pick the single best-matching COA account by "
-    "its exact `account_code` key from the COA list provided in the user message.\n\n"
+    "its exact `account_code` key from the client's COA (cached prefix when present, "
+    "otherwise the COA block in the user message).\n\n"
     f"When no COA account is a reasonable fit (e.g. salary, payroll, items outside the "
     f"client's COA scope), choose `{UNMAPPED_ACCOUNT_CODE}` — abstaining is the CORRECT "
     "answer. Do NOT force-fit a real account code when nothing fits.\n\n"
@@ -244,8 +245,13 @@ def _build_coa_categorize_dynamic_content(
     tax_registered: Optional[bool],
     client_region: str,
     client_currency: str,
+    include_coa: bool = True,
 ) -> str:
-    """Per-call COA JSON, lines, and client tax/region context."""
+    """Per-call payload: region/GST context, optional COA JSON, and lines.
+
+    When an explicit ``cached_content`` entry already holds the COA prefix,
+    ``include_coa=False`` omits the COA JSON to avoid duplication.
+    """
     if tax_registered is True:
         gst_ctx = "yes"
     elif tax_registered is False:
@@ -260,11 +266,17 @@ def _build_coa_categorize_dynamic_content(
             f"Client base currency: {client_currency or 'unknown'}\n\n"
         )
 
+    coa_block = ""
+    if include_coa:
+        coa_block = (
+            "COA (choose account_code from these only):\n"
+            f"{json.dumps(coa_for_prompt, ensure_ascii=False)}\n\n"
+        )
+
     return (
         f"{region_block}"
         f"Client GST-registered: {gst_ctx}\n\n"
-        "COA (choose account_code from these only):\n"
-        f"{json.dumps(coa_for_prompt, ensure_ascii=False)}\n\n"
+        f"{coa_block}"
         "Lines to categorize:\n"
         f"{json.dumps(lines_for_prompt, ensure_ascii=False)}\n"
     )
@@ -341,13 +353,6 @@ def _llm_match_lines(
     }
 
     static_instruction = _build_coa_categorize_static_instruction()
-    dynamic_content = _build_coa_categorize_dynamic_content(
-        coa_for_prompt=coa_for_prompt,
-        lines_for_prompt=lines_for_prompt,
-        tax_registered=tax_registered,
-        client_region=client_region,
-        client_currency=client_currency,
-    )
     coa_json = json.dumps(coa_for_prompt, ensure_ascii=False)
 
     try:
@@ -358,6 +363,14 @@ def _llm_match_lines(
             model=resolved_model,
             coa_json=coa_json,
             static_instruction=static_instruction,
+        )
+        dynamic_content = _build_coa_categorize_dynamic_content(
+            coa_for_prompt=coa_for_prompt,
+            lines_for_prompt=lines_for_prompt,
+            tax_registered=tax_registered,
+            client_region=client_region,
+            client_currency=client_currency,
+            include_coa=cached_content_name is None,
         )
         gen_config_kwargs: dict = {
             "response_mime_type": "application/json",
