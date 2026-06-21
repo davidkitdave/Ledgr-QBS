@@ -222,6 +222,62 @@ def test_llm_source_and_flagged_high_confidence(monkeypatch):
     assert result[0]["flagged"] is False
 
 
+def test_categorize_invoice_propagates_account_flagged_from_logprob_gate(monkeypatch):
+    """WS-3.4: weak logprobs → line.account_flagged=True with reason on InvoiceLine."""
+    canned = _canned_result(0, "6001", 0.99)
+    _stub_make_client(monkeypatch, canned, avg_logprobs=-2.0, margin=1.5)
+
+    inv = _inv_unresolved()
+    result = categorize_invoice(
+        inv,
+        coa=SAMPLE_COA,
+        category_mapping={},
+        entity_memory=[],
+        use_llm=True,
+    )
+
+    line = result.lines[0]
+    assert line.account_code in ("6001", "Office Expenses")
+    assert line.account_flagged is True
+    assert "low_avg_logprobs" in (line.account_flag_reason or "")
+
+
+def test_categorize_invoice_confident_llm_pick_not_account_flagged(monkeypatch):
+    """WS-3.4: strong logprobs → account_flagged=False on InvoiceLine."""
+    canned = _canned_result(0, "6001", 0.85)
+    _stub_make_client(monkeypatch, canned)
+
+    inv = _inv_unresolved()
+    result = categorize_invoice(
+        inv,
+        coa=SAMPLE_COA,
+        category_mapping={},
+        entity_memory=[],
+        use_llm=True,
+    )
+
+    assert result.lines[0].account_flagged is False
+    assert result.lines[0].account_flag_reason is None
+
+
+def test_entity_memory_resolution_not_account_flagged():
+    """Deterministic entity-memory hit must not set account_flagged."""
+    mem = [_entity("Acme Supplier", "6001")]
+    inv = NormalizedInvoice(
+        doc_type="purchase",
+        supplier=PartyInfo(name="Acme Supplier"),
+        lines=[InvoiceLine(description="Office supplies")],
+    )
+    result = categorize_invoice(
+        inv,
+        coa=SAMPLE_COA,
+        category_mapping={},
+        entity_memory=mem,
+        use_llm=False,
+    )
+    assert result.lines[0].account_flagged is False
+
+
 # --------------------------------------------------------------------------- #
 # Test (b): WS-3.3 logprob gate — self-reported confidence is advisory only
 # --------------------------------------------------------------------------- #

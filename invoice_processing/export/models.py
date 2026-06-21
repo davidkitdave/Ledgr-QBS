@@ -72,6 +72,8 @@ class InvoiceLine:
     net_amount: Optional[float] = None     # line amount, ex-tax
     gst_amount: Optional[float] = None     # GST on this line (0 for ZR/ES/OS)
     account_code: Optional[str] = None     # COA code from categorization (later phase)
+    account_flagged: bool = False          # low-confidence / unresolved COA pick (WS-3.4)
+    account_flag_reason: Optional[str] = None  # e.g. low_avg_logprobs, unresolved
     item_code: Optional[str] = None
     tax_keyword: Optional[str] = None      # explicit per-line tax wording from extraction (e.g. "SR","ZR","9%","0%","exempt") — a hint for the tax classifier
 

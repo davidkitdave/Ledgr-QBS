@@ -1456,6 +1456,58 @@ def test_delivery_posts_ledger_preview_data_table(monkeypatch):
     assert data_row[7]["value"] == 1234.50
 
 
+def test_delivery_preview_marks_flagged_account_code(monkeypatch):
+    """WS-3.4: flagged COA pick shows ⚠️ on the account column in the data_table."""
+    state = {
+        nodes.LEDGER_ROWS_KEY: {
+            "client_id": "c1",
+            "fy": "2025",
+            "kind": "invoice",
+            "software": "qbs",
+            "client_name": "Acme",
+            "batches": [
+                {
+                    "sheet": "Purchase",
+                    "doc_key": "Purchase:INV-042",
+                    "rows": [
+                        {
+                            "Invoice Date": "2025-09-15",
+                            "Invoice Number": "INV-042",
+                            "Vendor Name": "Acme Trading",
+                            "Description": "Ambiguous charge",
+                            "Account Code / COA": "6090",
+                            "_account_flagged": True,
+                            "_account_flag_reason": "narrow_margin",
+                            "Sub Total": 100.0,
+                            "Tax Amount": 9.0,
+                            "Total Amount": 109.0,
+                        }
+                    ],
+                }
+            ],
+        },
+        nodes.DELIVER_SUMMARY_KEY: "Added 1 line to your FY2025 ledger.",
+    }
+    posts = _run_delivery_with_state(state, monkeypatch)
+    data_table_posts = [
+        p for p in posts
+        if any(b.get("type") == "data_table" for b in (p.get("blocks") or []))
+    ]
+    table_block = next(b for b in data_table_posts[0]["blocks"] if b["type"] == "data_table")
+    account_cell = table_block["rows"][1][4]
+    assert "6090" in account_cell["text"]
+    assert "⚠️" in account_cell["text"]
+    context_posts = [
+        el["text"]
+        for p in posts
+        for b in (p.get("blocks") or [])
+        if b.get("type") == "context"
+        for el in b.get("elements") or []
+        if el.get("type") == "mrkdwn"
+    ]
+    assert any("low-confidence account code" in t for t in context_posts)
+
+
 def test_delivery_two_batches_posts_two_preview_messages(monkeypatch):
     """Purchase + Sales batches appear as two data_tables in one delivery card."""
     state = {

@@ -56,8 +56,10 @@ from invoice_processing.export.client_context import (
 )
 from invoice_processing.export.exporters import (
     bank_sheet_title,
+    collect_account_flagged_summary,
     collect_export_unmapped_summary,
     collect_import_readiness,
+    format_account_flagged_note,
     format_import_readiness_note,
     format_unmapped_export_note,
     get_bank_exporter,
@@ -2070,6 +2072,7 @@ async def consolidate_node(ctx) -> Event:
     batches: list[dict] = []
     export_unmapped: dict = {}
     import_readiness: dict = {}
+    account_flagged_summary: dict = {}
 
     if doc_type == "bank_statement":
         kind = "bank"
@@ -2138,6 +2141,8 @@ async def consolidate_node(ctx) -> Event:
             )
         export_unmapped = collect_export_unmapped_summary(batches, exporter)
         state["export_unmapped_summary"] = export_unmapped
+        account_flagged_summary = collect_account_flagged_summary(batches)
+        state["account_flagged_summary"] = account_flagged_summary
         import_readiness = collect_import_readiness(batches, exporter, unmapped=export_unmapped)
         state["import_readiness"] = import_readiness
 
@@ -2159,6 +2164,7 @@ async def consolidate_node(ctx) -> Event:
         "batches": batches,
         "export_unmapped_summary": export_unmapped if kind == "invoice" else {},
         "import_readiness": import_readiness if kind == "invoice" else {},
+        "account_flagged_summary": account_flagged_summary if kind == "invoice" else {},
     }
     if kind == "invoice":
         payload["extracted_doc_count"] = len(invoices)
@@ -2410,6 +2416,12 @@ def compose_confident_note(
     readiness_note = format_import_readiness_note(payload.get("import_readiness"))
     if readiness_note:
         note = f"{note} {readiness_note}"
+    flagged_note = format_account_flagged_note(
+        payload.get("account_flagged_summary")
+        or collect_account_flagged_summary(batches)
+    )
+    if flagged_note and not readiness_note:
+        note = f"{note} {flagged_note}"
     return note
 
 

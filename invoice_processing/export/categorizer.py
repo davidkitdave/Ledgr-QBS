@@ -90,6 +90,7 @@ class AccountResolution:
     source: str
     flagged: bool
     tax_code: Optional[str] = None
+    flag_reason: Optional[str] = None
 
 
 def _norm(s: Optional[str]) -> str:
@@ -202,7 +203,9 @@ def resolve_account(
                 )
 
     # 4) Unresolved --------------------------------------------------------- #
-    return AccountResolution(None, None, 0.0, "unresolved", flagged=True)
+    return AccountResolution(
+        None, None, 0.0, "unresolved", flagged=True, flag_reason="unresolved"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -434,6 +437,12 @@ def categorize_invoice(
             key = m.get("account_code")
             conf = m.get("confidence", 0.0)
             flagged = m.get("flagged", True)
+            logprob_reason = (m.get("logprob_flag_reason") or "").strip()
+            llm_reason = (m.get("reason") or "").strip()
+            if flagged:
+                flag_reason = logprob_reason or llm_reason or "llm_coa"
+            else:
+                flag_reason = None
             if key:
                 acc = by_key.get(key)
                 resolutions[idx] = AccountResolution(
@@ -442,6 +451,7 @@ def categorize_invoice(
                     confidence=conf,
                     source="llm_coa",
                     flagged=flagged,
+                    flag_reason=flag_reason,
                 )
             else:
                 resolutions[idx] = AccountResolution(
@@ -450,10 +460,13 @@ def categorize_invoice(
                     confidence=conf,
                     source="llm_coa",
                     flagged=True,
+                    flag_reason=flag_reason or "unmapped",
                 )
 
     for line, res in zip(inv.lines, resolutions):
         line.account_code = res.account_code or res.account_name or ""
+        line.account_flagged = res.flagged
+        line.account_flag_reason = res.flag_reason if res.flagged else None
 
     return inv
 

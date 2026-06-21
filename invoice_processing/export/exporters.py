@@ -37,6 +37,9 @@ from .tax_classifier import TaxClassifier, classify_invoice
 
 _ERP_PROFILES_DIR = Path(__file__).resolve().parent.parent / "shared_libraries" / "erp_profiles"
 
+# Preview-only marker for low-confidence COA picks on Slack delivery cards (WS-3.4).
+ACCOUNT_FLAGGED_PREVIEW_MARKER = " ⚠️"
+
 
 def _fmt_date(d) -> str:
     if d is None:
@@ -167,7 +170,17 @@ class LedgerExporter:
         """Attach client COA keys for zero-tolerance export validation."""
         self._coa_keys = coa_keys
 
-    def _sanitize_row_account_code(self, row: dict, doc_type: str) -> dict:
+    def _sanitize_row_account_code(
+        self,
+        row: dict,
+        doc_type: str,
+        *,
+        line: InvoiceLine | None = None,
+    ) -> dict:
+        if line and line.account_flagged:
+            row["_account_flagged"] = True
+            if line.account_flag_reason:
+                row["_account_flag_reason"] = line.account_flag_reason
         if not self._coa_keys:
             return row
         col = self.column_for_field("account_code", doc_type)
@@ -175,6 +188,9 @@ class LedgerExporter:
             return row
         validated = validate_export_account_code(row.get(col, ""), coa_keys=self._coa_keys)
         row[col] = validated.account_code
+        if validated.flagged:
+            row["_account_flagged"] = True
+            row["_account_flag_reason"] = validated.reason or row.get("_account_flag_reason")
         return row
 
     def required_fields(self, doc_type: str) -> list[str]:
@@ -222,7 +238,11 @@ class LedgerExporter:
         out = []
         for inv in invoices:
             for line in inv.lines:
-                out.append(self._sanitize_row_account_code(builder(inv, line), doc_type))
+                out.append(
+                    self._sanitize_row_account_code(
+                        builder(inv, line), doc_type, line=line
+                    )
+                )
         return out
 
     def write_workbook(
@@ -771,6 +791,65 @@ def collect_export_unmapped_summary(
     return {"count": len(details), "details": details}
 
 
+def collect_account_flagged_summary(batches: list[dict]) -> dict:
+    """Count export rows carrying ``_account_flagged`` metadata (WS-3.4)."""
+    details: list[dict] = []
+    for batch in batches:
+        sheet = batch.get("sheet") or "Purchase"
+        for idx, row in enumerate(batch.get("rows") or [], start=1):
+            if not isinstance(row, dict) or not row.get("_account_flagged"):
+                continue
+            details.append(
+                {
+                    "sheet": sheet,
+                    "row": idx,
+                    "reason": row.get("_account_flag_reason") or "low_confidence",
+                }
+            )
+    return {"count": len(details), "details": details}
+
+
+def format_account_flagged_note(summary: dict | None) -> str:
+    """Human-readable note when COA resolution flagged account codes."""
+    if not summary:
+        return ""
+    count = int(summary.get("count") or 0)
+    if count <= 0:
+        return ""
+    noun = "line has" if count == 1 else "lines have"
+    return f"⚠️ {count} {noun} a low-confidence account code — review before import."
+
+
+def _account_code_column(exporter: LedgerExporter, doc_type: str) -> str | None:
+    col = exporter.column_for_field("account_code", doc_type)
+    if col:
+        return col
+    # Legacy QBS/Xero fallbacks when column_for_field is unavailable.
+    return "Account Code / COA" if doc_type == "purchase" else "Account Code / COA"
+
+
+def decorate_preview_account_flags(
+    rows: list[dict],
+    exporter: LedgerExporter,
+    doc_type: str,
+) -> list[dict]:
+    """Return shallow row copies with flagged account codes marked for Slack preview."""
+    account_col = _account_code_column(exporter, doc_type)
+    if not account_col:
+        return list(rows)
+    decorated: list[dict] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            decorated.append(row)
+            continue
+        copy = dict(row)
+        code = (copy.get(account_col) or "").strip()
+        if copy.get("_account_flagged") and code:
+            copy[account_col] = f"{code}{ACCOUNT_FLAGGED_PREVIEW_MARKER}"
+        decorated.append(copy)
+    return decorated
+
+
 def format_unmapped_export_note(summary: dict | None) -> str:
     """Human-readable note for approval / delivery cards."""
     if not summary:
@@ -818,14 +897,19 @@ def compute_doc_flag_breakdown(
         # (These exporters don't expose column_for_field for all required fields,
         # but the required_fields() list still drives the unmapped summary.)
         legacy = {"blank_account": 0, "missing_tax": 0, "missing_creditor": 0,
-                  "missing_invoice_number": 0}
+                  "missing_invoice_number": 0, "low_confidence_account": 0}
         n_total = 0
         for batch in batches:
             sheet = batch.get("sheet") or "Purchase"
             row_doc_type = "sales" if sheet == "Sales" else "purchase"
             required = exporter.required_fields(row_doc_type)
+            account_col = exporter.column_for_field("account_code", row_doc_type)
             for row in batch.get("rows") or []:
                 n_total += 1
+                if row.get("_account_flagged"):
+                    acct_val = (row.get(account_col or "Account Code / COA") or "").strip()
+                    if acct_val:
+                        legacy["low_confidence_account"] += 1
                 for col in required:
                     if _is_empty(row.get(col, "")):
                         # Map legacy column names to per-reason buckets.
@@ -838,7 +922,7 @@ def compute_doc_flag_breakdown(
         }
 
     reasons = {"blank_account": 0, "missing_tax": 0, "missing_creditor": 0,
-               "missing_invoice_number": 0}
+               "missing_invoice_number": 0, "low_confidence_account": 0}
     n_total = 0
 
     for batch in batches:
@@ -856,6 +940,8 @@ def compute_doc_flag_breakdown(
             # multiple reasons (e.g. blank account + blank tax).
             if account_col and _is_empty(row.get(account_col, "")):
                 reasons["blank_account"] += 1
+            elif row.get("_account_flagged") and account_col and not _is_empty(row.get(account_col, "")):
+                reasons["low_confidence_account"] += 1
             if tax_col and _is_empty(row.get(tax_col, "")):
                 reasons["missing_tax"] += 1
             if (creditor_col and _is_empty(row.get(creditor_col, ""))) or \
@@ -869,6 +955,7 @@ def compute_doc_flag_breakdown(
         reasons["blank_account"] == 0
         and reasons["missing_tax"] == 0
         and reasons["missing_creditor"] == 0
+        and reasons["low_confidence_account"] == 0
     )
     return {
         "reconciles": reconciles,
@@ -902,6 +989,9 @@ def format_flag_breakdown_note(breakdown: dict | None) -> str:
     if reasons.get("missing_invoice_number"):
         n = reasons["missing_invoice_number"]
         parts.append(f"{n} missing invoice number{'s' if n != 1 else ''}")
+    if reasons.get("low_confidence_account"):
+        n = reasons["low_confidence_account"]
+        parts.append(f"{n} low-confidence account{'s' if n != 1 else ''}")
     if not parts:
         return "✗ not reconciled"
     return "✗ " + " · ".join(parts)
@@ -944,6 +1034,7 @@ def collect_import_readiness(
     tax_codes: set[str] = set()
     party_codes: set[str] = set()
     account_codes: set[str] = set()
+    account_flagged_count = 0
 
     for batch in batches:
         sheet = batch.get("sheet") or "Purchase"
@@ -955,6 +1046,8 @@ def collect_import_readiness(
         account_col = exporter.column_for_field("account_code", row_doc_type)
 
         for row in batch.get("rows") or []:
+            if row.get("_account_flagged"):
+                account_flagged_count += 1
             if tax_col:
                 v = (row.get(tax_col) or "").strip()
                 if v:
@@ -977,6 +1070,7 @@ def collect_import_readiness(
         "tax_codes": sorted(tax_codes),
         "party_codes": sorted(party_codes),
         "account_codes": sorted(account_codes),
+        "account_flagged_count": account_flagged_count,
         "unmapped": unmapped or {},
     }
 
@@ -1019,8 +1113,16 @@ def format_import_readiness_note(readiness: dict | None) -> str:
     if account_codes:
         parts.append(f"accounts {_fmt_list(account_codes)}")
 
+    flagged_count = int(readiness.get("account_flagged_count") or 0)
+
     if not parts:
-        return ""
+        if flagged_count <= 0:
+            return ""
+        noun = "line has" if flagged_count == 1 else "lines have"
+        return (
+            f"{software} import — ⚠️ {flagged_count} {noun} a low-confidence "
+            "account code (marked ⚠️ in the preview)."
+        )
 
     codes_str = " · ".join(parts)
     note = (
@@ -1034,6 +1136,12 @@ def format_import_readiness_note(readiness: dict | None) -> str:
     if unmapped_count > 0:
         noun = "row needs" if unmapped_count == 1 else "rows need"
         note = f"{note} ⚠️ {unmapped_count} {noun} a creditor code first (see above)."
+    if flagged_count > 0:
+        noun = "line has" if flagged_count == 1 else "lines have"
+        note = (
+            f"{note} ⚠️ {flagged_count} {noun} a low-confidence account code "
+            "(marked ⚠️ in the preview)."
+        )
     return note
 
 

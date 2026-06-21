@@ -94,7 +94,13 @@ from app.blocks import (
 )
 from app.slack_app import _SeenEvents
 from invoice_processing.export.client_context import FirestoreClientStore
-from invoice_processing.export.exporters import format_extraction_doc_count_note
+from invoice_processing.export.exporters import (
+    collect_account_flagged_summary,
+    decorate_preview_account_flags,
+    format_account_flagged_note,
+    format_extraction_doc_count_note,
+    get_exporter,
+)
 from invoice_processing.extract.partial_failure import format_partial_failure_note
 
 def _strip_slack_mentions(text: str) -> str:
@@ -1068,15 +1074,30 @@ def _post_delivery_card(
         fy_int = 0
     software = str(payload.get("software") or "qbs_ledger")
     preview_blocks: list[dict] = []
+    try:
+        preview_exporter = get_exporter(software)
+    except Exception:  # noqa: BLE001 — preview decoration is cosmetic
+        preview_exporter = None
     for batch in batches:
         batch_rows = batch.get("rows") or []
         if not batch_rows:
             continue
         sheet = str(batch.get("sheet") or "Purchase")
+        row_doc_type = "sales" if sheet == "Sales" else "purchase"
+        preview_rows = batch_rows
+        if preview_exporter is not None:
+            try:
+                preview_rows = decorate_preview_account_flags(
+                    batch_rows, preview_exporter, row_doc_type
+                )
+            except Exception:  # noqa: BLE001 — preview decoration is cosmetic
+                logger.warning(
+                    "account-flag preview decoration failed (non-fatal)", exc_info=True
+                )
         try:
             preview_blocks.extend(
                 ledger_preview_data_table(
-                    rows=batch_rows,
+                    rows=preview_rows,
                     workbook_name=workbook_name,
                     fy=fy_int,
                     sheet=sheet,
@@ -1125,6 +1146,19 @@ def _post_delivery_card(
                     blocks.append(confident_note_block(rnote))
         except Exception:  # noqa: BLE001 — readiness note is cosmetic
             logger.warning("import readiness note build failed (non-fatal)", exc_info=True)
+    # WS-3.4 — surface low-confidence COA picks on QBS/Xero deliveries (profile
+    # ERPs embed the same warning inside format_import_readiness_note).
+    try:
+        from invoice_processing.export.exporters import normalize_software_key as _nsk
+
+        if _nsk(software) not in ("autocount", "sql_account"):
+            flagged_note = format_account_flagged_note(
+                collect_account_flagged_summary(batches)
+            )
+            if flagged_note:
+                blocks.append(confident_note_block(flagged_note))
+    except Exception:  # noqa: BLE001 — cosmetic
+        logger.warning("account-flagged delivery note failed (non-fatal)", exc_info=True)
     kwargs: dict = {"channel": channel_id, "text": summary, "blocks": blocks}
     if thread_ts:
         kwargs["thread_ts"] = thread_ts
@@ -1193,9 +1227,21 @@ def _build_batch_aggregate_blocks(
             fy_int = int(grp["fy"])
         except (TypeError, ValueError):
             fy_int = 0
+        sheet = str(grp.get("sheet") or "Purchase")
+        row_doc_type = "sales" if sheet == "Sales" else "purchase"
+        preview_rows = grp["rows"]
+        try:
+            batch_exporter = get_exporter(str(grp.get("software") or ""))
+            preview_rows = decorate_preview_account_flags(
+                grp["rows"], batch_exporter, row_doc_type
+            )
+        except Exception:  # noqa: BLE001 — preview decoration is cosmetic
+            logger.warning(
+                "batch account-flag preview decoration failed (non-fatal)", exc_info=True
+            )
         preview_blocks.extend(
             ledger_preview_data_table(
-                rows=grp["rows"],
+                rows=preview_rows,
                 workbook_name=grp["workbook_name"],
                 fy=fy_int,
                 sheet=grp["sheet"],
