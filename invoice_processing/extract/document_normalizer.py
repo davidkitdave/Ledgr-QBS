@@ -9,8 +9,13 @@ from __future__ import annotations
 import logging
 import os
 import re
-from typing import Optional
+from typing import Any, Optional
 
+from ..export.line_grouping import (
+    apply_line_grouping_to_lines,
+    record_matches_telco_markers,
+    telco_grouped_totals,
+)
 from ..export.models import NormalizedInvoice
 from .document_record import DocumentRecord, DocumentRecordBundle, LabeledField
 from .record_merge import merge_document_records
@@ -43,11 +48,6 @@ _KNOWN_ISO = frozenset({
     "SGD", "USD", "MYR", "IDR", "AUD", "NZD", "EUR", "GBP", "HKD", "JPY", "CNY", "THB", "PHP", "INR",
 })
 _CLAIM_REF_PATTERN = re.compile(r"\b([A-Z]{2,5}-\d{2}-\d{2,4})\b", re.I)
-_TELCO_MARKERS = ("telco", "mobile pte", "telecommunications", "broadband", "m1 ", "simba")
-_GST_BUCKET_RE = re.compile(
-    r"GST\s*@\s*(\d+(?:\.\d+)?)\s*%\s*on\s*\$?\s*([\d,]+\.?\d*)",
-    re.I,
-)
 _MAX_LINE_SUM_FALLBACK = 25
 
 
@@ -60,7 +60,7 @@ def slim_document_record_for_state(record: DocumentRecord) -> dict:
     Firestore cannot store ``list[list[str]]``.
     """
     d = record.model_dump()
-    if _is_telco_bill(record) or len(record.line_items) > _MAX_LINE_SUM_FALLBACK:
+    if record_matches_telco_markers(record) or len(record.line_items) > _MAX_LINE_SUM_FALLBACK:
         d["line_items"] = []
     # Firestore cannot persist list[list]; line_items already hold grid rows.
     d["tables"] = []
@@ -68,70 +68,8 @@ def slim_document_record_for_state(record: DocumentRecord) -> dict:
 
 
 def _is_telco_bill(record: DocumentRecord) -> bool:
-    """Telco/utility bill — ledger uses GST summary buckets, not per-line detail."""
-    parts = [record.notes or ""]
-    parts.extend(f"{f.label} {f.value}" for f in record.labeled_fields)
-    parts.extend((line.description or "") for line in record.line_items[:8])
-    blob = " ".join(parts).lower()
-    if any(m in blob for m in _TELCO_MARKERS):
-        return True
-    return any(_GST_BUCKET_RE.search(f.label or "") or _GST_BUCKET_RE.search(f.value or "")
-               for f in record.labeled_fields)
-
-
-def _telco_ledger_lines(record: DocumentRecord) -> Optional[list[ExtractedLine]]:
-    """Build SR/ZR summary lines from GST @ rate% on $net fields (Telco Provider A/Telco Provider B pattern)."""
-    seen: set[tuple[float, float]] = set()
-    buckets: list[tuple[float, float, float]] = []
-    for f in record.labeled_fields:
-        for text, gst_src in ((f.label, f.value), (f.value, f.label)):
-            m = _GST_BUCKET_RE.search(text or "")
-            if not m:
-                continue
-            rate = float(m.group(1))
-            net = _parse_amount(m.group(2))
-            if net is None:
-                continue
-            key = (rate, net)
-            if key in seen:
-                break
-            seen.add(key)
-            gst = _parse_amount(gst_src) or 0.0
-            buckets.append((rate, net, gst))
-            break
-
-    if not buckets:
-        return None
-
-    lines: list[ExtractedLine] = []
-    for rate, net, gst in buckets:
-        if net == 0 and gst == 0:
-            continue
-        if rate == 0:
-            lines.append(ExtractedLine(
-                description="Telecommunication services - zero rated",
-                net_amount=net,
-                gst_amount=0.0,
-                tax_label="ZR",
-            ))
-        else:
-            lines.append(ExtractedLine(
-                description=f"Telecommunication services - standard rated ({rate:g}%)",
-                net_amount=net,
-                gst_amount=gst,
-                tax_label="SR",
-            ))
-    return lines or None
-
-
-def _telco_current_charges(record: DocumentRecord) -> Optional[float]:
-    for f in list(record.totals) + list(record.labeled_fields):
-        nl = _norm_label(f.label)
-        if "current charges" in nl or nl == "current charges":
-            amt = _parse_amount(f.value)
-            if amt is not None:
-                return amt
-    return None
+    """Backward-compatible alias — telco detection for slim/reimbursement guards."""
+    return record_matches_telco_markers(record)
 
 
 def _norm_label(label: str) -> str:
@@ -431,7 +369,12 @@ def _lookup_fx_rate(
     return None
 
 
-def _record_to_extracted(record: DocumentRecord, *, mapper_version: str = "baseline") -> ExtractedInvoice:
+def _record_to_extracted(
+    record: DocumentRecord,
+    *,
+    mapper_version: str = "baseline",
+    erp_profile: dict[str, Any] | None = None,
+) -> ExtractedInvoice:
     """Bridge DocumentRecord → ExtractedInvoice for reconcile/to_normalized reuse."""
     enhanced = mapper_version == "enhanced"
     all_fields = list(record.labeled_fields) + list(record.totals)
@@ -458,12 +401,31 @@ def _record_to_extracted(record: DocumentRecord, *, mapper_version: str = "basel
                     break
 
     lines: list[ExtractedLine] = []
-    telco_summary = _telco_ledger_lines(record) if enhanced and _is_telco_bill(record) else None
-    if telco_summary:
-        lines = telco_summary
-        subtotal = round(sum(ln.net_amount or 0.0 for ln in lines), 2)
-        gst_total = round(sum(ln.gst_amount or 0.0 for ln in lines), 2)
-        total = _telco_current_charges(record) or round(subtotal + gst_total, 2)
+    for item in record.line_items:
+        net = item.net_amount
+        if net is None and item.quantity is not None and item.unit_amount is not None:
+            net = round(item.quantity * item.unit_amount, 2)
+        lines.append(
+            ExtractedLine(
+                description=item.description,
+                quantity=item.quantity,
+                unit_amount=item.unit_amount,
+                net_amount=net,
+                gst_amount=None,
+                tax_label=item.tax_label,
+            )
+        )
+    if total is None and enhanced and lines and len(lines) <= _MAX_LINE_SUM_FALLBACK:
+        line_sum = sum(ln.net_amount or 0.0 for ln in lines)
+        if line_sum > 0:
+            total = round(line_sum + (gst_total or 0.0), 2)
+    if len(lines) == 1 and gst_total is not None and all(ln.gst_amount is None for ln in lines):
+        lines[0].gst_amount = gst_total
+
+    pre_group_count = len(lines)
+    lines = apply_line_grouping_to_lines(record, lines, erp_profile)
+    if len(lines) != pre_group_count and record_matches_telco_markers(record):
+        subtotal, gst_total, total = telco_grouped_totals(record, lines)
         reconcile(
             ExtractedInvoice(
                 doc_type="invoice",
@@ -473,32 +435,6 @@ def _record_to_extracted(record: DocumentRecord, *, mapper_version: str = "basel
                 total=total,
             )
         )
-        logger.info(
-            "telco-summary: collapsed %d capture lines to %d ledger lines (SR/ZR buckets)",
-            len(record.line_items),
-            len(lines),
-        )
-    else:
-        for item in record.line_items:
-            net = item.net_amount
-            if net is None and item.quantity is not None and item.unit_amount is not None:
-                net = round(item.quantity * item.unit_amount, 2)
-            lines.append(
-                ExtractedLine(
-                    description=item.description,
-                    quantity=item.quantity,
-                    unit_amount=item.unit_amount,
-                    net_amount=net,
-                    gst_amount=None,
-                    tax_label=item.tax_label,
-                )
-            )
-        if total is None and enhanced and lines and len(lines) <= _MAX_LINE_SUM_FALLBACK:
-            line_sum = sum(ln.net_amount or 0.0 for ln in lines)
-            if line_sum > 0:
-                total = round(line_sum + (gst_total or 0.0), 2)
-        if len(lines) == 1 and gst_total is not None and all(ln.gst_amount is None for ln in lines):
-            lines[0].gst_amount = gst_total
 
     fx_rate = None
     fx_text = _find_field(record.labeled_fields, "Exchange Rate", "FX Rate", "Rate")
@@ -555,9 +491,10 @@ def normalize_document_record(
     client_name: Optional[str] = None,
     client_uen: Optional[str] = None,
     mapper_version: str = "enhanced",
+    erp_profile: dict[str, Any] | None = None,
 ) -> NormalizedInvoice:
     """Map one DocumentRecord to NormalizedInvoice using client context."""
-    ex = _record_to_extracted(record, mapper_version=mapper_version)
+    ex = _record_to_extracted(record, mapper_version=mapper_version, erp_profile=erp_profile)
     ok_pre, _ = reconcile(ex)
     raw_mixed = len(_currencies_on_record(record, ex.currency)) > 1
     if ok_pre:
@@ -646,6 +583,7 @@ def normalize_document_bundle(
     client_name: Optional[str] = None,
     client_uen: Optional[str] = None,
     mapper_version: str = "enhanced",
+    erp_profile: dict[str, Any] | None = None,
 ) -> list[NormalizedInvoice]:
     """Convert a DocumentRecordBundle into NormalizedInvoices."""
     bundle = merge_document_records(bundle)
@@ -667,6 +605,7 @@ def normalize_document_bundle(
                 client_name=client_name,
                 client_uen=client_uen,
                 mapper_version=mapper_version,
+                erp_profile=erp_profile,
             )
         )
     return results

@@ -91,3 +91,14 @@ sales_fields:
   _TAX(10): tax_code
   _TAXAMT: tax_amount
   _AMOUNT: sub_total
+
+# M1 — collapse capture lines only when this ERP profile declares it (WS-2.6).
+line_grouping:
+  - rule: telco_gst_buckets
+    issuer_markers:
+      - telco
+      - mobile pte
+      - telecommunications
+      - broadband
+      - m1
+      - simba

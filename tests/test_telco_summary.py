@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from invoice_processing.export.exporters import _load_erp_profile
 from invoice_processing.export.exporters import XeroLedgerExporter
 from invoice_processing.export.tax_classifier import TaxClassifier
 from invoice_processing.extract.document_normalizer import normalize_document_record
@@ -11,6 +12,8 @@ from invoice_processing.extract.document_record import (
     LabeledField,
     LineCapture,
 )
+
+_AUTOCOUNT_PROFILE = _load_erp_profile("autocount.yaml")
 
 
 def _telco_bill_a_capture() -> DocumentRecord:
@@ -47,6 +50,7 @@ class TestTelcoSummary:
             direction="purchase",
             our_gst_registered=True,
             mapper_version="enhanced",
+            erp_profile=_AUTOCOUNT_PROFILE,
         )
         assert len(inv.lines) == 2
         assert inv.lines[0].net_amount == 1164.42
@@ -61,6 +65,7 @@ class TestTelcoSummary:
             direction="purchase",
             our_gst_registered=True,
             mapper_version="enhanced",
+            erp_profile=_AUTOCOUNT_PROFILE,
         )
         tax = TaxClassifier()
         for line in inv.lines:
@@ -77,6 +82,7 @@ class TestTelcoSummary:
             direction="purchase",
             our_gst_registered=True,
             mapper_version="enhanced",
+            erp_profile=_AUTOCOUNT_PROFILE,
         )
         assert inv.lines[0].description != "Expense reimbursement"
 
@@ -85,7 +91,10 @@ class TestTelcoSummary:
         from invoice_processing.extract.document_normalizer import normalize_document_bundle
 
         invoices = normalize_document_bundle(
-            bundle, direction="purchase", our_gst_registered=True,
+            bundle,
+            direction="purchase",
+            our_gst_registered=True,
+            erp_profile=_AUTOCOUNT_PROFILE,
         )
         assert len(invoices) == 1
         assert len(invoices[0].lines) == 2
@@ -103,7 +112,7 @@ def test_slim_document_record_for_state_strips_telco_line_items():
 
 
 def test_telco_dedupes_duplicate_gst_buckets():
-    from invoice_processing.extract.document_normalizer import _telco_ledger_lines
+    from invoice_processing.export.line_grouping import telco_gst_bucket_lines
 
     record = _telco_bill_a_capture()
     dup_fields = list(record.labeled_fields) + [
@@ -111,6 +120,6 @@ def test_telco_dedupes_duplicate_gst_buckets():
         LabeledField(label="GST @ 0% on $58.93", value="$0.00"),
     ]
     record.labeled_fields = dup_fields
-    lines = _telco_ledger_lines(record)
+    lines = telco_gst_bucket_lines(record)
     assert lines is not None
     assert len(lines) == 2

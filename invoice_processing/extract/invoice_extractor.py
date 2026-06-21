@@ -137,25 +137,25 @@ class ExtractedInvoiceBundle(BaseModel):
     )
 
 
-_PROMPT = """You are extracting an invoice/receipt for a Singapore/Malaysia bookkeeping ledger.
-Produce the SMALL set of summary lines a bookkeeper would post — NOT every itemized line.
+_PROMPT = """You are transcribing an invoice/receipt faithfully for a Singapore/Malaysia bookkeeping ledger.
+
+Copy every visible charge row as printed — do NOT collapse itemized rows into bookkeeper summary
+buckets during extraction. When the document only exposes summary/total rows (e.g. a telco
+"Summary of Charges" with SR and ZR buckets and no itemized detail), transcribe those summary
+rows faithfully — one line per visible printed row.
 
 How to choose the lines:
-- PREFER the document's own summary/totals section. Telco, utility, and multi-page bills almost
-  always have a 'Summary of Charges' / 'Bill Summary' / 'Account Summary' / 'Total Charges'
-  section that breaks charges down by category and tax. Read THAT. Do NOT enumerate per-call,
-  per-message, or per-phone-number itemized lines across pages.
-- Split lines by GST tax treatment, because the ledger needs it: standard-rated (GST 9% / 'G')
-  charges as one or more SR lines; zero-rated/international (0% / 'Z') charges as ZR line(s);
-  exempt as ES. If the summary already separates GST-applicable vs zero-rated/international
-  amounts, use that split.
-- For a simple invoice/receipt with only a handful of distinct line items and no separate
-  summary, keep those line items as-is (they're already ledger-appropriate).
+- When itemized product/service rows are printed, capture EACH row verbatim.
+- When a summary/totals section is the ONLY charge breakdown (common on telco/utility bills),
+  transcribe that summary section row-by-row — do NOT enumerate hidden per-call detail from other
+  pages unless those rows are visibly printed on the document.
+- Split lines by GST tax treatment when the document prints separate buckets: standard-rated
+  (GST 9% / 'G') charges; zero-rated/international (0% / 'Z'); exempt as ES.
+- For a simple invoice/receipt with only a handful of distinct printed line items, keep each row.
 
 Per line:
-- description = the category/summary label, e.g. 'Telecommunication services - standard rated',
-  'International roaming - zero rated'.
-- net_amount = the ex-GST subtotal for that group.  IMPORTANT: discount lines must use a
+- description = the label exactly as printed on the document row.
+- net_amount = the ex-GST amount for that row.  IMPORTANT: discount lines must use a
   NEGATIVE net_amount (e.g. a Trip.com promotional discount of 84.06 → net_amount = -84.06).
   Do NOT fold discounts into other lines or into the subtotal — keep them as separate lines
   with negative net_amount so that Σ(all line net_amounts) == document subtotal.
@@ -163,7 +163,7 @@ Per line:
 - tax_label normalized to one of SR (standard/GST/9%/G), ZR (zero-rated/0%/Z/international),
   ES (exempt/E), OS (out-of-scope), or NT (no tax). If only a single-letter code (G/Z/E) is
   printed, map G→SR, Z→ZR, E→ES.
-- Leave quantity and unit_amount null for summary lines.
+- quantity and unit_amount when the document prints them; leave null when not visible.
 - Tax and service-charge lines (e.g. Agoda's "Tax and service charges", hotel service fee,
   tourism levy) must be captured as their own lines with the correct net_amount. Do NOT drop
   them — without these lines Σ(net_amounts) will not equal the document total.
@@ -199,8 +199,8 @@ Document-level fields:
 - If the document explicitly states an exchange rate to the ledger/base currency (e.g.
   'Exchange Rate: 1 USD = 1.35 SGD', 'Rate: 1.35'), return it as fx_rate (a decimal multiplier,
   e.g. 1.35). Otherwise leave fx_rate null — never invent or estimate a rate.
-- Do not invent values; if the summary is unclear, return your best ledger-level grouping and
-  ensure the line nets + GST reconcile to the document totals. Leave a field null if not visible."""
+- Do not invent values; transcribe what is printed and ensure line nets + GST reconcile to the
+  document totals. Leave a field null if not visible."""
 
 
 _BUNDLE_PROMPT = (

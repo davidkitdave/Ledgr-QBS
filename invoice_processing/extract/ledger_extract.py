@@ -65,8 +65,8 @@ the document, return "unknown".
 
 Produce:
 - A Drive-style summary_table (Category / Details pairs) for human review.
-- ledger_lines at the granularity a bookkeeper would post (not every
-  itemized row).
+- ledger_lines transcribed verbatim from visible charge rows — do NOT collapse itemized rows
+  into bookkeeper buckets during extraction.
 - doc_kind classifying the document shape (invoice / receipt /
   expense_claim / credit_note / other).
 - claimant_name when doc_kind == expense_claim (the person signing the form;
@@ -85,13 +85,12 @@ Produce:
   "GST 9%" -> "GST", "VAT 20%" -> "VAT"). Informational; the jurisdiction
   router applies the canonical rule based on the client profile + this hint.
 
-Granularity:
-- Simple invoice / receipt: usually one ledger line with the service total.
-- Telco / utility bill: exactly two summary ledger lines — one standard-rated
-  GST bucket and one zero-rated bucket from the bill summary. Do NOT emit
-  per-phone or per-call detail lines.
-- Multi-line trade invoice: one ledger line per visible item row when there
-  is no separate summary section.
+Line granularity (faithful transcription — M1):
+- Itemized invoice/receipt: one ledger line per visible printed row.
+- Telco/utility bill whose ONLY charge breakdown is a summary section: transcribe those
+  summary rows as printed (often SR + ZR buckets) — do NOT emit per-phone/per-call detail
+  from appendix pages unless those rows are visibly printed.
+- Simple single-total receipt: one line when only one charge row exists.
 
 Arithmetic:
 - document_reference is the invoice or bill number — NOT a GST registration
@@ -453,8 +452,8 @@ class DocumentLedgerExtract(BaseModel):
     ledger_lines: list[LedgerLine] = Field(
         default_factory=list,
         description=(
-            "Accounting lines to import. Simple invoice: usually 1 line. "
-            "Telco bill: exactly 2 summary lines (SR + ZR buckets)."
+            "Visible charge rows transcribed verbatim — one line per printed row. "
+            "ERP profiles may declare post-extraction grouping (M1); do not collapse here."
         ),
     )
 
