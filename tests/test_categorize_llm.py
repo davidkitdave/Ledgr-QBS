@@ -20,6 +20,7 @@ from typing import Optional
 
 
 from invoice_processing.export.categorizer import (
+    UNMAPPED_ACCOUNT_CODE,
     _llm_match_lines,
     categorize_invoice,
 )
@@ -76,8 +77,27 @@ def _patch_client(monkeypatch, text: str):
     return fake
 
 
-def _canned_result(index: int, key: Optional[str], confidence: float) -> str:
-    return json.dumps({"results": [{"index": index, "account_key": key, "reason": "stub", "confidence": confidence}]})
+def _canned_result(
+    index: int,
+    account_code: Optional[str],
+    confidence: float,
+    *,
+    reasoning: str = "stub",
+    alternative_codes: Optional[list[str]] = None,
+) -> str:
+    return json.dumps(
+        {
+            "results": [
+                {
+                    "index": index,
+                    "account_code": account_code,
+                    "reasoning": reasoning,
+                    "confidence": confidence,
+                    "alternative_codes": alternative_codes or [],
+                }
+            ]
+        }
+    )
 
 
 SAMPLE_COA = _coa(
@@ -152,8 +172,9 @@ def test_llm_source_and_flagged_high_confidence(monkeypatch):
     result = _llm_match_lines(unresolved, SAMPLE_COA, model=None)
 
     assert 0 in result
-    assert result[0]["account_key"] == "6001"
+    assert result[0]["account_code"] == "6001"
     assert result[0]["confidence"] == 0.85
+    assert result[0]["flagged"] is False
 
 
 # --------------------------------------------------------------------------- #
@@ -216,7 +237,8 @@ def test_llm_hallucinated_key_rejected(monkeypatch):
     result = _llm_match_lines(unresolved, SAMPLE_COA, model=None)
 
     # The hallucinated key must be nullified
-    assert result[0]["account_key"] is None
+    assert result[0]["account_code"] is None
+    assert result[0]["flagged"] is True
 
 
 def test_llm_hallucinated_key_line_stays_flagged(monkeypatch):
@@ -357,6 +379,86 @@ def test_no_coa_skips_llm(monkeypatch):
     )
 
     assert called == [], "LLM called with empty COA — nothing to match against"
+
+
+# --------------------------------------------------------------------------- #
+# WS-3.1: UNMAPPED sentinel + abstention
+# --------------------------------------------------------------------------- #
+
+def test_llm_unmapped_abstention_returns_none(monkeypatch):
+    canned = _canned_result(0, UNMAPPED_ACCOUNT_CODE, 0.92)
+    _stub_make_client(monkeypatch, canned)
+
+    unresolved = [(0, "Staff salary payment", "Payroll Co")]
+    result = _llm_match_lines(unresolved, SAMPLE_COA, model=None)
+
+    assert result[0]["account_code"] is None
+    assert result[0]["flagged"] is True
+
+
+def test_llm_null_account_code_abstention(monkeypatch):
+    canned = _canned_result(0, None, 0.5)
+    _stub_make_client(monkeypatch, canned)
+
+    unresolved = [(0, "Staff salary payment", "Payroll Co")]
+    result = _llm_match_lines(unresolved, SAMPLE_COA, model=None)
+
+    assert result[0]["account_code"] is None
+    assert result[0]["flagged"] is True
+
+
+def test_llm_unmapped_abstention_blank_account_code(monkeypatch):
+    canned = _canned_result(0, UNMAPPED_ACCOUNT_CODE, 0.95)
+    _stub_make_client(monkeypatch, canned)
+
+    inv = _inv_unresolved("Staff salary payment for December 2025")
+    result = categorize_invoice(
+        inv,
+        coa=SAMPLE_COA,
+        category_mapping={},
+        entity_memory=[],
+        use_llm=True,
+    )
+
+    assert result.lines[0].account_code == ""
+
+
+def test_prompt_instructs_unmapped_abstention(monkeypatch):
+    captured = _capture_prompt_client(monkeypatch)
+
+    unresolved = [(0, "Staff salary payment", "Payroll Co")]
+    _llm_match_lines(unresolved, SAMPLE_COA, model=None)
+
+    assert captured
+    prompt = captured[0]
+    assert UNMAPPED_ACCOUNT_CODE in prompt
+    assert "abstain" in prompt.lower() or "no account" in prompt.lower()
+
+
+def test_response_schema_includes_unmapped_enum(monkeypatch):
+    import invoice_processing.shared_libraries.genai_client as gc
+
+    captured_configs: list[object] = []
+
+    def fake_generate(model=None, contents=None, config=None, **_kw):
+        captured_configs.append(config)
+        return SimpleNamespace(text=json.dumps({"results": []}))
+
+    fake_client = SimpleNamespace(models=SimpleNamespace(generate_content=fake_generate))
+    monkeypatch.setattr(gc, "make_client", lambda *a, **kw: fake_client)
+
+    unresolved = [(0, "Mystery", "Vendor")]
+    _llm_match_lines(unresolved, SAMPLE_COA, model=None)
+
+    assert captured_configs
+    schema = captured_configs[0].response_schema
+    item_props = schema["properties"]["results"]["items"]["properties"]
+    enum_values = item_props["account_code"]["enum"]
+    assert UNMAPPED_ACCOUNT_CODE in enum_values
+    assert "6001" in enum_values
+    assert "6200" in enum_values
+    alt_enum = item_props["alternative_codes"]["items"]["enum"]
+    assert UNMAPPED_ACCOUNT_CODE not in alt_enum
 
 
 # --------------------------------------------------------------------------- #

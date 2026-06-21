@@ -27,6 +27,8 @@ from .client_context import (
 )
 from .models import NormalizedInvoice, PartyInfo
 
+UNMAPPED_ACCOUNT_CODE = "UNMAPPED"
+
 
 @dataclass
 class AccountResolution:
@@ -163,7 +165,7 @@ def _llm_match_lines(
     client_region: str = "",
     client_currency: str = "",
 ) -> dict[int, dict]:
-    """Return {line_index: {account_key, reason, confidence}} from one Gemini call.
+    """Return {line_index: {account_code, reason, confidence, flagged}} from one Gemini call.
 
     Returns {} on any failure so categorization never crashes.
 
@@ -183,6 +185,7 @@ def _llm_match_lines(
         if a.key
     ]
     valid_keys = {a["key"] for a in coa_for_prompt}
+    account_code_enum = sorted(valid_keys | {UNMAPPED_ACCOUNT_CODE})
     lines_for_prompt = [
         {"index": idx, "description": desc, "vendor": vendor}
         for (idx, desc, vendor) in unresolved
@@ -197,11 +200,22 @@ def _llm_match_lines(
                     "type": "object",
                     "properties": {
                         "index": {"type": "integer"},
-                        "account_key": {"type": "string", "nullable": True},
-                        "reason": {"type": "string"},
+                        "account_code": {
+                            "type": "string",
+                            "enum": account_code_enum,
+                            "nullable": True,
+                        },
+                        "reasoning": {"type": "string"},
                         "confidence": {"type": "number"},
+                        "alternative_codes": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "enum": sorted(valid_keys),
+                            },
+                        },
                     },
-                    "required": ["index", "account_key", "confidence"],
+                    "required": ["index", "account_code", "confidence", "reasoning"],
                 },
             }
         },
@@ -225,8 +239,13 @@ def _llm_match_lines(
     prompt = (
         "You are an accounting assistant categorizing invoice/receipt lines to a client's "
         "Chart of Accounts (COA). For each line, pick the single best-matching COA account by "
-        "its exact `key`, or null if no account is a reasonable fit. Prefer Profit & Loss expense "
-        "accounts for purchase costs. Return a short reason and a confidence in [0,1].\n\n"
+        "its exact `account_code` key from the list below.\n\n"
+        f"When no COA account is a reasonable fit (e.g. salary, payroll, items outside the "
+        f"client's COA scope), choose `{UNMAPPED_ACCOUNT_CODE}` — abstaining is the CORRECT "
+        "answer. Do NOT force-fit a real account code when nothing fits.\n\n"
+        "Prefer Profit & Loss expense accounts for purchase costs. Return reasoning and a "
+        "confidence in [0,1]. Optionally list up to a few plausible alternative_codes "
+        "(client COA keys only, never UNMAPPED).\n\n"
         "IMPORTANT — your task is ONLY to assign an account_code from the COA list below. "
         "Do NOT choose or infer a tax treatment or GST code (SR/ZR/ES/OS etc.); that is "
         "decided separately by a deterministic master gate and is outside your scope."
@@ -234,7 +253,8 @@ def _llm_match_lines(
         f"Client GST-registered: {gst_ctx}\n\n"
         "You MUST return the JSON results object for every line provided. "
         "Never reply empty or omit the results array.\n\n"
-        "COA (choose key from these only):\n"
+        f"Valid account_code values: client COA keys plus `{UNMAPPED_ACCOUNT_CODE}`.\n\n"
+        "COA (choose account_code from these only):\n"
         f"{json.dumps(coa_for_prompt, ensure_ascii=False)}\n\n"
         "Lines to categorize:\n"
         f"{json.dumps(lines_for_prompt, ensure_ascii=False)}\n"
@@ -261,13 +281,26 @@ def _llm_match_lines(
             idx = int(item.get("index"))
         except (TypeError, ValueError):
             continue
-        key = item.get("account_key")
-        if key is not None and key not in valid_keys:
+        key = item.get("account_code")
+        reason = item.get("reasoning") or item.get("reason") or ""
+        conf = float(item.get("confidence") or 0.0)
+        if key in (None, UNMAPPED_ACCOUNT_CODE):
+            out[idx] = {
+                "account_code": None,
+                "reason": reason,
+                "confidence": conf,
+                "flagged": True,
+                "alternative_codes": item.get("alternative_codes") or [],
+            }
+            continue
+        if key not in valid_keys:
             key = None  # hallucinated key -> treat as no match
         out[idx] = {
-            "account_key": key,
-            "reason": item.get("reason", ""),
-            "confidence": float(item.get("confidence") or 0.0),
+            "account_code": key,
+            "reason": reason,
+            "confidence": conf,
+            "flagged": key is None or conf < 0.6,
+            "alternative_codes": item.get("alternative_codes") or [],
         }
     return out
 
@@ -332,8 +365,9 @@ def categorize_invoice(
         for idx, m in matches.items():
             if idx < 0 or idx >= len(resolutions):
                 continue
-            key = m.get("account_key")
+            key = m.get("account_code")
             conf = m.get("confidence", 0.0)
+            flagged = m.get("flagged", conf < 0.6)
             if key:
                 acc = by_key.get(key)
                 resolutions[idx] = AccountResolution(
@@ -341,7 +375,7 @@ def categorize_invoice(
                     account_name=acc.description if acc else key,
                     confidence=conf,
                     source="llm_coa",
-                    flagged=conf < 0.6,
+                    flagged=flagged,
                 )
             else:
                 resolutions[idx] = AccountResolution(
