@@ -1083,6 +1083,18 @@ def _post_delivery_card(
                 blocks.append(confident_note_block(note))
         except Exception:  # noqa: BLE001 — note is cosmetic
             logger.warning("confident note build failed (non-fatal)", exc_info=True)
+    # Import-readiness checklist for AutoCount / SQL Account purchase/sales deliveries.
+    # Skipped when doc_type is expense_claim/other (compose_confident_note already
+    # embeds the readiness note inside the confident note above).
+    if doc_type not in ("expense_claim", "other"):
+        try:
+            from invoice_processing.export.exporters import normalize_software_key as _nsk
+            if _nsk(software) in ("autocount", "sql_account"):
+                rnote = nodes.format_import_readiness_note(payload.get("import_readiness"))
+                if rnote:
+                    blocks.append(confident_note_block(rnote))
+        except Exception:  # noqa: BLE001 — readiness note is cosmetic
+            logger.warning("import readiness note build failed (non-fatal)", exc_info=True)
     kwargs: dict = {"channel": channel_id, "text": summary, "blocks": blocks}
     if thread_ts:
         kwargs["thread_ts"] = thread_ts

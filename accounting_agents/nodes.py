@@ -2123,12 +2123,18 @@ def _closing_balance_from_rows(rows: list[dict]) -> Optional[float]:
 
 
 def _software_label_for_summary(software: str) -> str:
-    key = (software or "").strip().lower()
-    if "xero" in key:
+    if not (software or "").strip():
+        return ""
+    # Delegate to the canonical exporter key to stay consistent with normalize_software_key.
+    key = normalize_software_key(software)
+    if key == "xero":
         return "Xero"
-    if key:
-        return "QBS Ledger"
-    return ""
+    if key == "autocount":
+        return "AutoCount"
+    if key == "sql_account":
+        return "SQL Account"
+    # "qbs" or any unrecognised value
+    return "QBS Ledger"
 
 
 def compose_delivery_summary(payload: dict) -> str:

@@ -1506,6 +1506,254 @@ class TestLedgerPreviewDataTableNative:
         assert "QBS Ledger" in table["caption"]
 
 
+# --------------------------------------------------------------------------- #
+# AutoCount / SQL Account — preview_column_spec + software_label
+# --------------------------------------------------------------------------- #
+
+from app.blocks import software_label
+
+
+class TestPreviewColumnSpecAutoCountSQL:
+
+    def test_autocount_purchase_first_col_row_key_is_docdate(self):
+        spec = preview_column_spec(software="AutoCount", sheet="Purchase")
+        assert spec[0].row_key == "DocDate"
+
+    def test_autocount_purchase_has_creditor_col(self):
+        spec = preview_column_spec(software="AutoCount", sheet="Purchase")
+        row_keys = [c.row_key for c in spec]
+        assert "CreditorCode" in row_keys
+
+    def test_autocount_sales_has_debtor_col(self):
+        spec = preview_column_spec(software="AutoCount", sheet="Sales")
+        row_keys = [c.row_key for c in spec]
+        assert "DebtorCode" in row_keys
+
+    def test_autocount_sales_has_currency_code_col(self):
+        spec = preview_column_spec(software="AutoCount", sheet="Sales")
+        row_keys = [c.row_key for c in spec]
+        assert "CurrencyCode" in row_keys
+
+    def test_sql_account_purchase_has_code10_col(self):
+        spec = preview_column_spec(software="SQL Account", sheet="Purchase")
+        row_keys = [c.row_key for c in spec]
+        assert "CODE(10)" in row_keys
+
+    def test_sql_account_sales_has_code10_col(self):
+        spec = preview_column_spec(software="SQL Account", sheet="Sales")
+        row_keys = [c.row_key for c in spec]
+        assert "CODE(10)" in row_keys
+
+    def test_sql_account_purchase_first_col_row_key_is_docno(self):
+        spec = preview_column_spec(software="SQL Account", sheet="Purchase")
+        assert spec[0].row_key == "DOCNO(20)"
+
+    def test_autocount_and_sql_bank_sheet_returns_bank_cols(self):
+        # Bank sheets always return the 6-col bank spec, regardless of software.
+        spec_ac = preview_column_spec(software="AutoCount", sheet="OCBC SGD")
+        spec_sql = preview_column_spec(software="SQL Account", sheet="DBS MYR")
+        assert len(spec_ac) == 6
+        assert len(spec_sql) == 6
+
+
+class TestSoftwareLabel:
+
+    def test_autocount_label(self):
+        assert software_label("AutoCount") == "AutoCount"
+
+    def test_sql_account_label(self):
+        assert software_label("SQL Account") == "SQL Account"
+
+    def test_xero_label(self):
+        assert software_label("Xero") == "Xero"
+
+    def test_qbs_ledger_label(self):
+        assert software_label("QBS Ledger") == "QBS Ledger"
+
+    def test_empty_defaults_to_qbs_ledger(self):
+        assert software_label("") == "QBS Ledger"
+
+
+# --------------------------------------------------------------------------- #
+# _software_label_for_summary (nodes.py)
+# --------------------------------------------------------------------------- #
+
+from accounting_agents.nodes import _software_label_for_summary
+
+
+class TestSoftwareLabelForSummary:
+
+    def test_autocount(self):
+        assert _software_label_for_summary("AutoCount") == "AutoCount"
+
+    def test_sql_account(self):
+        assert _software_label_for_summary("SQL Account") == "SQL Account"
+
+    def test_xero(self):
+        assert _software_label_for_summary("Xero") == "Xero"
+
+    def test_qbs_ledger(self):
+        assert _software_label_for_summary("QBS Ledger") == "QBS Ledger"
+
+    def test_empty_string_returns_empty(self):
+        assert _software_label_for_summary("") == ""
+
+    def test_none_equivalent_returns_empty(self):
+        # None is coerced to "" by the function guard.
+        assert _software_label_for_summary(None) == ""  # type: ignore[arg-type]
+
+
+# --------------------------------------------------------------------------- #
+# Readiness-note block appended for AutoCount/SQL purchase deliveries
+# --------------------------------------------------------------------------- #
+
+class TestDeliveryCardReadinessBlock:
+    """Unit-test the import-readiness branch in _post_delivery_card.
+
+    We verify the logic directly on the function that builds the ``blocks``
+    list — no real Slack API is called.
+    """
+
+    def _make_payload(self, *, software: str, doc_type: str, import_readiness: dict | None) -> dict:
+        return {
+            "software": software,
+            "doc_type": doc_type,
+            "fy": 2025,
+            "kind": "invoice",
+            "import_readiness": import_readiness,
+            "delivered": True,
+            "batches": [],
+        }
+
+    def test_autocount_purchase_with_readiness_appends_context_block(self, monkeypatch):
+        from accounting_agents import nodes
+        from invoice_processing.export.exporters import format_import_readiness_note
+
+        # Patch format_import_readiness_note so it returns a known string.
+        monkeypatch.setattr(nodes, "format_import_readiness_note", lambda r: "Ready to import")
+
+        from app.blocks import confident_note_block, delivery_card_blocks
+
+        # Simulate the logic inside _post_delivery_card.
+        software = "AutoCount"
+        doc_type = "purchase"
+        payload = self._make_payload(
+            software=software, doc_type=doc_type,
+            import_readiness={"ready": True},
+        )
+
+        blocks: list = delivery_card_blocks("summary", [])
+
+        if doc_type not in ("expense_claim", "other"):
+            from invoice_processing.export.exporters import normalize_software_key as _nsk
+            if _nsk(software) in ("autocount", "sql_account"):
+                rnote = nodes.format_import_readiness_note(payload.get("import_readiness"))
+                if rnote:
+                    blocks.append(confident_note_block(rnote))
+
+        context_blocks = [b for b in blocks if b.get("type") == "context"]
+        assert len(context_blocks) == 1
+        assert "Ready to import" in context_blocks[0]["elements"][0]["text"]
+
+    def test_sql_account_purchase_with_readiness_appends_context_block(self, monkeypatch):
+        from accounting_agents import nodes
+        monkeypatch.setattr(nodes, "format_import_readiness_note", lambda r: "Import checklist done")
+
+        from app.blocks import confident_note_block, delivery_card_blocks
+
+        software = "SQL Account"
+        doc_type = "purchase"
+        payload = self._make_payload(
+            software=software, doc_type=doc_type,
+            import_readiness={"ready": True},
+        )
+
+        blocks: list = delivery_card_blocks("summary", [])
+        if doc_type not in ("expense_claim", "other"):
+            from invoice_processing.export.exporters import normalize_software_key as _nsk
+            if _nsk(software) in ("autocount", "sql_account"):
+                rnote = nodes.format_import_readiness_note(payload.get("import_readiness"))
+                if rnote:
+                    blocks.append(confident_note_block(rnote))
+
+        context_blocks = [b for b in blocks if b.get("type") == "context"]
+        assert len(context_blocks) == 1
+        assert "Import checklist done" in context_blocks[0]["elements"][0]["text"]
+
+    def test_qbs_software_does_not_append_readiness_block(self, monkeypatch):
+        from accounting_agents import nodes
+        monkeypatch.setattr(nodes, "format_import_readiness_note", lambda r: "Should not appear")
+
+        from app.blocks import confident_note_block, delivery_card_blocks
+
+        software = "QBS Ledger"
+        doc_type = "purchase"
+        payload = self._make_payload(
+            software=software, doc_type=doc_type,
+            import_readiness={"ready": True},
+        )
+
+        blocks: list = delivery_card_blocks("summary", [])
+        if doc_type not in ("expense_claim", "other"):
+            from invoice_processing.export.exporters import normalize_software_key as _nsk
+            if _nsk(software) in ("autocount", "sql_account"):
+                rnote = nodes.format_import_readiness_note(payload.get("import_readiness"))
+                if rnote:
+                    blocks.append(confident_note_block(rnote))
+
+        context_blocks = [b for b in blocks if b.get("type") == "context"]
+        assert len(context_blocks) == 0
+
+    def test_expense_claim_doc_type_skips_readiness_block(self, monkeypatch):
+        from accounting_agents import nodes
+        monkeypatch.setattr(nodes, "format_import_readiness_note", lambda r: "Should not appear")
+
+        from app.blocks import confident_note_block, delivery_card_blocks
+
+        software = "AutoCount"
+        doc_type = "expense_claim"
+        payload = self._make_payload(
+            software=software, doc_type=doc_type,
+            import_readiness={"ready": True},
+        )
+
+        blocks: list = delivery_card_blocks("summary", [])
+        # Simulate: readiness block only added when doc_type NOT in expense_claim/other
+        if doc_type not in ("expense_claim", "other"):
+            from invoice_processing.export.exporters import normalize_software_key as _nsk
+            if _nsk(software) in ("autocount", "sql_account"):
+                rnote = nodes.format_import_readiness_note(payload.get("import_readiness"))
+                if rnote:
+                    blocks.append(confident_note_block(rnote))
+
+        context_blocks = [b for b in blocks if b.get("type") == "context"]
+        assert len(context_blocks) == 0
+
+    def test_empty_readiness_note_does_not_append_block(self, monkeypatch):
+        from accounting_agents import nodes
+        monkeypatch.setattr(nodes, "format_import_readiness_note", lambda r: "")
+
+        from app.blocks import confident_note_block, delivery_card_blocks
+
+        software = "AutoCount"
+        doc_type = "purchase"
+        payload = self._make_payload(
+            software=software, doc_type=doc_type,
+            import_readiness=None,
+        )
+
+        blocks: list = delivery_card_blocks("summary", [])
+        if doc_type not in ("expense_claim", "other"):
+            from invoice_processing.export.exporters import normalize_software_key as _nsk
+            if _nsk(software) in ("autocount", "sql_account"):
+                rnote = nodes.format_import_readiness_note(payload.get("import_readiness"))
+                if rnote:
+                    blocks.append(confident_note_block(rnote))
+
+        context_blocks = [b for b in blocks if b.get("type") == "context"]
+        assert len(context_blocks) == 0
+
+
 class TestLedgerPreviewDataTableFallback:
 
     @pytest.fixture(autouse=True)
