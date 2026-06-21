@@ -7261,6 +7261,50 @@ def test_batch_aggregate_surfaces_extraction_doc_count(monkeypatch):
     )
 
 
+def test_batch_aggregate_surfaces_partial_failure_warning(monkeypatch):
+    """WS-2.5 — G5 partial-failure warning on the batch delivery card."""
+    from accounting_agents.slack_runner import _build_batch_aggregate_blocks
+
+    monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
+    from app import native_blocks_compat as _nbc
+    _nbc._PROBE_CACHE.pop("C-test", None)
+
+    deferred = [
+        {
+            "payload": {
+                "fy": "2026", "software": "Xero", "kind": "invoice",
+                "doc_type": "invoice",
+                "client_name": "Acme",
+                "workbook_label": "multi-invoice.pdf",
+                "extracted_doc_count": 2,
+                "input_page_count": 3,
+                "partial_failure_warnings": [
+                    "partial extraction: 1 of 2 documents reconciled; 1 failed (INV-BAD)",
+                ],
+                "batches": [{"sheet": "Purchase",
+                             "rows": [{"Contact": "Vendor A", "Total": 100.0}]}],
+            },
+            "batches": [{"sheet": "Purchase",
+                         "rows": [{"Contact": "Vendor A", "Total": 100.0}]}],
+            "workbook_name": "Ledger_FY2026.xlsx",
+        },
+    ]
+
+    _, blocks = _build_batch_aggregate_blocks(deferred, "C-test")
+    block_texts: list[str] = []
+    for b in blocks:
+        if b.get("type") == "section" and isinstance(b.get("text"), dict):
+            block_texts.append(b["text"].get("text", ""))
+        elif b.get("type") == "context":
+            for el in b.get("elements", []):
+                if isinstance(el, dict) and el.get("type") == "mrkdwn":
+                    block_texts.append(el.get("text", ""))
+    all_text = " ".join(block_texts).lower()
+
+    assert "partial extraction" in all_text
+    assert "1 of 2" in all_text
+
+
 # =========================================================================== #
 # Phase 3C — summary table wired into HITL review/approval cards
 # =========================================================================== #

@@ -87,12 +87,15 @@ def segmentation_uncertain_note(detail: str) -> str:
 def apply_segmentation_uncertain_flag(
     normalized: list,
     detail: str,
+    *,
+    preserve_individually_reconciled: bool = True,
 ) -> None:
-    """Mark every normalized invoice unreconciled with a segmentation note."""
+    """Append segmentation note; G5 preserves per-doc G1 pass when requested."""
     note = segmentation_uncertain_note(detail)
     for inv in normalized:
-        inv.reconciled = False
         if inv.reconcile_note:
             inv.reconcile_note = f"{note}; {inv.reconcile_note}"
         else:
             inv.reconcile_note = note
+        if not (preserve_individually_reconciled and inv.reconciled):
+            inv.reconciled = False

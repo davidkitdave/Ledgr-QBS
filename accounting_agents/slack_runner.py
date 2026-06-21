@@ -95,6 +95,7 @@ from app.blocks import (
 from app.slack_app import _SeenEvents
 from invoice_processing.export.client_context import FirestoreClientStore
 from invoice_processing.export.exporters import format_extraction_doc_count_note
+from invoice_processing.extract.partial_failure import format_partial_failure_note
 
 def _strip_slack_mentions(text: str) -> str:
     import re
@@ -1038,7 +1039,14 @@ def _extraction_doc_count_blocks(
         return []
     if file_label:
         note = f"📄 *{file_label}* — {note}"
-    return [confident_note_block(note)]
+    blocks = [confident_note_block(note)]
+    partial = payload.get("partial_failure_warnings") or []
+    partial_note = format_partial_failure_note(partial)
+    if partial_note:
+        if file_label:
+            partial_note = f"📄 *{file_label}* — {partial_note}"
+        blocks.append(confident_note_block(partial_note))
+    return blocks
 
 
 def _post_delivery_card(

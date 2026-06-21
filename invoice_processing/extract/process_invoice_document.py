@@ -24,6 +24,7 @@ from .ledger_extract import (
     use_capture_book_pipeline,
     validate_extracted_document,
 )
+from .partial_failure import build_partial_failure_warnings
 from .segmentation_gates import (
     apply_segmentation_uncertain_flag,
     count_input_pages,
@@ -49,6 +50,7 @@ class InvoiceProcessResult:
     document_read_notes: Optional[str] = None
     booking_proposals: Optional[list[dict]] = None
     input_page_count: Optional[int] = None
+    partial_failure_warnings: list[str] = field(default_factory=list)
 
 
 def _parse_iso_date(value: Optional[str]) -> Optional[date]:
@@ -206,6 +208,13 @@ def process_invoice_document(
     if not page_ok:
         apply_segmentation_uncertain_flag(normalized, page_detail)
 
+    partial_warnings = build_partial_failure_warnings(
+        normalized,
+        page_coverage_ok=page_ok,
+        page_coverage_detail=page_detail,
+        input_page_count=input_page_count,
+    )
+
     return InvoiceProcessResult(
         normalized=normalized,
         extraction_path="understand",
@@ -213,4 +222,5 @@ def process_invoice_document(
         document_read_notes=bundle.notes,
         ledger_extract=bundle.model_dump(),
         input_page_count=input_page_count,
+        partial_failure_warnings=partial_warnings,
     )

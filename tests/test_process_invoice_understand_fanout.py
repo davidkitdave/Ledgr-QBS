@@ -141,6 +141,9 @@ def test_process_invoice_document_understand_reconcile_per_doc(monkeypatch):
     assert by_ref["INV-OK"].reconcile_note
     assert by_ref["INV-BAD"].reconciled is False
     assert "total" in (by_ref["INV-BAD"].reconcile_note or "").lower()
+    assert len(result.normalized) == 2
+    assert any("partial extraction" in w for w in result.partial_failure_warnings)
+    assert any("1 of 2" in w for w in result.partial_failure_warnings)
 
 
 def test_process_invoice_document_understand_page_coverage_valid(monkeypatch):
@@ -217,11 +220,15 @@ def test_process_invoice_document_understand_page_coverage_gap_flags_all(monkeyp
     )
 
     assert len(result.normalized) == 2
+    by_ref = {inv.invoice_number: inv for inv in result.normalized}
     for inv in result.normalized:
-        assert inv.reconciled is False
         note = (inv.reconcile_note or "").lower()
         assert "segmentation uncertain" in note
         assert "gaps" in note
+    assert by_ref["INV-A"].reconciled is True
+    assert by_ref["INV-C"].reconciled is True
+    assert any("partial extraction" in w for w in result.partial_failure_warnings)
+    assert any("gaps" in w for w in result.partial_failure_warnings)
 
 
 def test_process_invoice_document_understand_page_coverage_overlap_flags_all(monkeypatch):
@@ -258,5 +265,6 @@ def test_process_invoice_document_understand_page_coverage_overlap_flags_all(mon
     )
 
     for inv in result.normalized:
-        assert inv.reconciled is False
+        assert inv.reconciled is True
         assert "segmentation uncertain" in (inv.reconcile_note or "").lower()
+    assert any("partial extraction" in w for w in result.partial_failure_warnings)
