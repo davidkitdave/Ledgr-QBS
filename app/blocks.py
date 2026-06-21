@@ -9,39 +9,10 @@ from accounting_agents.jurisdiction import supported_regions
 from invoice_processing.export.exporters import (
     PreviewColumn,
     load_erp_profile_for_system,
+    normalize_software_preview_key,
     preview_columns_from_profile,
+    software_label,
 )
-
-
-def _normalize_software(software: str) -> str | None:
-    """Normalise software strings to preview keys, or None when unresolved."""
-    from invoice_processing.export.axis_resolvers import resolve_software
-
-    res = resolve_software(software)
-    if res.flagged or not res.value:
-        return None
-    key = res.value
-    if key == "xero":
-        return "xero"
-    if key == "autocount":
-        return "autocount"
-    if key == "sql_account":
-        return "sql_account"
-    return "qbs_ledger"
-
-
-def software_label(software: str) -> str:
-    """Human-readable label for a software key (normalised or raw)."""
-    norm = _normalize_software(software)
-    if norm is None:
-        return "Unknown ERP"
-    if norm == "xero":
-        return "Xero"
-    if norm == "autocount":
-        return "AutoCount"
-    if norm == "sql_account":
-        return "SQL Account"
-    return "QBS Ledger"
 
 
 def _enc(val: str | None) -> str:
@@ -115,7 +86,7 @@ def preview_column_spec(*, software: str, sheet: str) -> list[PreviewColumn]:
     """
     if sheet not in ("Purchase", "Sales"):
         return _BANK_COLS
-    norm = _normalize_software(software)
+    norm = normalize_software_preview_key(software)
     if norm is None:
         return []
     if norm == "xero":

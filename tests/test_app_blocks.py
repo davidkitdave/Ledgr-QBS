@@ -1633,32 +1633,31 @@ class TestSoftwareLabel:
 
 
 # --------------------------------------------------------------------------- #
-# _software_label_for_summary (nodes.py)
+# software_label empty_label= (delivery summary path)
 # --------------------------------------------------------------------------- #
 
-from accounting_agents.nodes import _software_label_for_summary
+from invoice_processing.export.exporters import software_label as canonical_software_label
 
 
 class TestSoftwareLabelForSummary:
 
     def test_autocount(self):
-        assert _software_label_for_summary("AutoCount") == "AutoCount"
+        assert canonical_software_label("AutoCount", empty_label="") == "AutoCount"
 
     def test_sql_account(self):
-        assert _software_label_for_summary("SQL Account") == "SQL Account"
+        assert canonical_software_label("SQL Account", empty_label="") == "SQL Account"
 
     def test_xero(self):
-        assert _software_label_for_summary("Xero") == "Xero"
+        assert canonical_software_label("Xero", empty_label="") == "Xero"
 
     def test_qbs_ledger(self):
-        assert _software_label_for_summary("QBS Ledger") == "QBS Ledger"
+        assert canonical_software_label("QBS Ledger", empty_label="") == "QBS Ledger"
 
     def test_empty_string_returns_empty(self):
-        assert _software_label_for_summary("") == ""
+        assert canonical_software_label("", empty_label="") == ""
 
     def test_none_equivalent_returns_empty(self):
-        # None is coerced to "" by the function guard.
-        assert _software_label_for_summary(None) == ""  # type: ignore[arg-type]
+        assert canonical_software_label(None, empty_label="") == ""  # type: ignore[arg-type]
 
 
 # --------------------------------------------------------------------------- #

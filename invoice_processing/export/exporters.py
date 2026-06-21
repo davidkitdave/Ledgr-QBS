@@ -764,6 +764,19 @@ _SOFTWARE_ALIASES: dict[str, str] = {
     "sqlaccount": "sql_account",
 }
 
+# Human-readable labels keyed by canonical exporter key (WS-5.3 single label site).
+_SOFTWARE_LABELS: dict[str, str] = {
+    "qbs": "QBS Ledger",
+    "xero": "Xero",
+    "autocount": "AutoCount",
+    "sql_account": "SQL Account",
+}
+
+# Preview-column spec keys differ from exporter keys for some ERPs.
+_PREVIEW_SOFTWARE_KEYS: dict[str, str] = {
+    "qbs": "qbs_ledger",
+}
+
 
 def normalize_software_key(value: Optional[str]) -> Optional[str]:
     """Return the canonical exporter key for *value*, or None.
@@ -773,6 +786,24 @@ def normalize_software_key(value: Optional[str]) -> Optional[str]:
     when None is returned (genuinely unrecognised software name).
     """
     return _SOFTWARE_ALIASES.get((value or "").strip().lower())
+
+
+def software_label(value: Optional[str], *, empty_label: str = "Unknown ERP") -> str:
+    """Human-readable ERP label from a raw alias or canonical software key."""
+    if not (value or "").strip():
+        return empty_label
+    key = normalize_software_key(value)
+    if key is None:
+        return "Unknown ERP"
+    return _SOFTWARE_LABELS[key]
+
+
+def normalize_software_preview_key(value: Optional[str]) -> Optional[str]:
+    """Return preview-column spec key, or None when software is unknown/unset."""
+    key = normalize_software_key(value)
+    if key is None:
+        return None
+    return _PREVIEW_SOFTWARE_KEYS.get(key, key)
 
 
 def get_exporter(system: str, classifier: Optional[TaxClassifier] = None) -> LedgerExporter:

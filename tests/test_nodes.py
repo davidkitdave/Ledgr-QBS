@@ -1832,6 +1832,29 @@ def test_normalize_software_key_unknown_returns_none():
     assert normalize_software_key(None) is None
 
 
+def test_software_label_canonical():
+    from invoice_processing.export.exporters import software_label
+
+    assert software_label("QBS Ledger") == "QBS Ledger"
+    assert software_label("Xero") == "Xero"
+    assert software_label("AutoCount") == "AutoCount"
+    assert software_label("SQL Account") == "SQL Account"
+    assert software_label("") == "Unknown ERP"
+    assert software_label("Wave") == "Unknown ERP"
+    assert software_label("", empty_label="") == ""
+
+
+def test_normalize_software_preview_key():
+    from invoice_processing.export.exporters import normalize_software_preview_key
+
+    assert normalize_software_preview_key("QBS Ledger") == "qbs_ledger"
+    assert normalize_software_preview_key("Xero") == "xero"
+    assert normalize_software_preview_key("AutoCount") == "autocount"
+    assert normalize_software_preview_key("SQL Account") == "sql_account"
+    assert normalize_software_preview_key("Wave") is None
+    assert normalize_software_preview_key("") is None
+
+
 def test_get_exporter_display_values_pick_correct_class():
     """get_exporter must accept display values and route to the right class."""
     from invoice_processing.export.exporters import (

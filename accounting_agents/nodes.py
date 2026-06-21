@@ -69,6 +69,7 @@ from invoice_processing.export.exporters import (
     format_unmapped_export_note,
     get_bank_exporter,
     get_exporter,
+    software_label,
 )
 from invoice_processing.export.models import BankStatement, NormalizedInvoice
 from invoice_processing.export.routing import DocRoute, route_document
@@ -2278,22 +2279,6 @@ def _closing_balance_from_rows(rows: list[dict]) -> Optional[float]:
     return last_stated
 
 
-def _software_label_for_summary(software: str) -> str:
-    if not (software or "").strip():
-        return ""
-    res = resolve_software(software)
-    if res.flagged:
-        return "Unknown ERP"
-    key = res.value
-    if key == "xero":
-        return "Xero"
-    if key == "autocount":
-        return "AutoCount"
-    if key == "sql_account":
-        return "SQL Account"
-    return "QBS Ledger"
-
-
 def compose_delivery_summary(payload: dict) -> str:
     """Compose the user-facing delivery summary from a LEDGER_ROWS_KEY payload.
 
@@ -2309,7 +2294,7 @@ def compose_delivery_summary(payload: dict) -> str:
 
     doc_label = "Bank Statement" if kind == "bank" else "Ledger"
     prefix = f"{client_name} – " if client_name else ""
-    sw = _software_label_for_summary(str(payload.get("software") or ""))
+    sw = software_label(str(payload.get("software") or ""), empty_label="")
     sw_suffix = f" ({sw})" if sw and kind != "bank" else ""
     destination = f"**{prefix}{doc_label} FY{fy}{sw_suffix}**"
 
