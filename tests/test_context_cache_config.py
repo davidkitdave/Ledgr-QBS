@@ -204,6 +204,8 @@ def test_extract_uses_system_instruction_for_static_prompt(monkeypatch):
     assert captured, "generate_content was not called"
     config = captured["config"]
     assert config.system_instruction, "static rules must be in system_instruction"
+    assert config.thinking_config is not None
+    assert config.thinking_config.thinking_budget == 0
     static = config.system_instruction
     assert "transcribing financial documents faithfully" in static.lower()
     assert "do not collapse rows" in static.lower()
@@ -238,6 +240,8 @@ def test_coa_llm_uses_system_instruction_for_static_rules(monkeypatch):
     assert captured, "generate_content was not called"
     config = captured["config"]
     assert config.system_instruction
+    assert config.thinking_config is not None
+    assert config.thinking_config.thinking_budget == 0
     static = config.system_instruction
     assert "chart of accounts" in static.lower() or "coa" in static.lower()
     assert cat.UNMAPPED_ACCOUNT_CODE in static

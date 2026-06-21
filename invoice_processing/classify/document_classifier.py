@@ -19,6 +19,7 @@ from typing import Optional
 from google.genai import types
 from pydantic import BaseModel, Field
 
+from ..shared_libraries.gemini_call_config import default_llm_config
 from ..shared_libraries.genai_client import lite_model, make_client
 
 ALLOWED_DOC_TYPES = [
@@ -120,7 +121,7 @@ def classify_document(
     resp = client.models.generate_content(
         model=model,
         contents=[part, _PROMPT],
-        config=types.GenerateContentConfig(
+        config=default_llm_config(
             temperature=0,
             response_mime_type="application/json",
             response_schema=ClassificationResult,

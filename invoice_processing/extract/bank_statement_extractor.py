@@ -23,6 +23,7 @@ from google.genai import types
 from pydantic import BaseModel, Field
 
 from ..export.models import BankStatement, BankTransaction
+from ..shared_libraries.gemini_call_config import default_llm_config
 from ..shared_libraries.genai_client import lite_model, make_client, std_model
 from .invoice_extractor import _parse_date, mime_for
 
@@ -132,7 +133,7 @@ def _extract_digital(text: str, *, model: Optional[str] = None,
     resp = client.models.generate_content(
         model=model,
         contents=[text, _PROMPT],
-        config=types.GenerateContentConfig(
+        config=default_llm_config(
             temperature=0,
             response_mime_type="application/json",
             response_schema=ExtractedBankStatement,
@@ -150,7 +151,7 @@ def _extract_vision(data: bytes, mime_type: str, *, model: Optional[str] = None,
     resp = client.models.generate_content(
         model=model,
         contents=[part, _PROMPT],
-        config=types.GenerateContentConfig(
+        config=default_llm_config(
             temperature=0,
             response_mime_type="application/json",
             response_schema=ExtractedBankStatement,

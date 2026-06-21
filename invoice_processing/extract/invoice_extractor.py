@@ -17,6 +17,7 @@ from google.genai import types
 from pydantic import BaseModel, Field
 
 from ..export.models import InvoiceLine, NormalizedInvoice, PartyInfo
+from ..shared_libraries.gemini_call_config import default_llm_config
 from ..shared_libraries.genai_client import lite_model, make_client
 
 logger = logging.getLogger(__name__)
@@ -256,7 +257,7 @@ def extract_invoice(
     resp = client.models.generate_content(
         model=model,
         contents=[part, _append_hint(_PROMPT, hint)],
-        config=types.GenerateContentConfig(
+        config=default_llm_config(
             temperature=0,
             response_mime_type="application/json",
             response_schema=ExtractedInvoice,
@@ -291,7 +292,7 @@ def extract_invoice_bundle(
     resp = client.models.generate_content(
         model=model,
         contents=[part, _append_hint(_BUNDLE_PROMPT, hint)],
-        config=types.GenerateContentConfig(
+        config=default_llm_config(
             temperature=0,
             response_mime_type="application/json",
             response_schema=ExtractedInvoiceBundle,

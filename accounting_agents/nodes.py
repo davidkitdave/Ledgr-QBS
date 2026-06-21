@@ -861,14 +861,13 @@ def _retry_resolve_direction_llm(ctx, extract: dict) -> str:
         reason: str
 
     try:
-        from google.genai import types as _genai_types
-
+        from invoice_processing.shared_libraries.gemini_call_config import default_llm_config
         from invoice_processing.shared_libraries.genai_client import make_client
         client = make_client()
         resp = client.models.generate_content(
             model=MODEL_LITE,
             contents=[instruction],
-            config=_genai_types.GenerateContentConfig(
+            config=default_llm_config(
                 response_mime_type="application/json",
                 response_schema=_DirectionDecision,
                 temperature=0,

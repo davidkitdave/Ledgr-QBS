@@ -301,12 +301,11 @@ def _llm_match_lines(
     ADK state templating (``{client_region?}``) — the graph node is expected
     to fill these from session state before calling.
     """
-    from google.genai import types
-
     from ..shared_libraries.context_cache_config import (
         log_context_cache_usage,
         resolve_coa_cached_content,
     )
+    from ..shared_libraries.gemini_call_config import default_llm_config
     from ..shared_libraries.genai_client import lite_model, make_client
 
     coa_for_prompt = [
@@ -387,7 +386,7 @@ def _llm_match_lines(
         resp = client.models.generate_content(
             model=resolved_model,
             contents=dynamic_content,
-            config=types.GenerateContentConfig(**gen_config_kwargs),
+            config=default_llm_config(**gen_config_kwargs),
         )
         log_context_cache_usage(resp, lane="coa")
         data = json.loads(resp.text or "{}")

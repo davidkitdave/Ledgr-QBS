@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field
 
 from ..export.models import NormalizedInvoice
 from ..shared_libraries.context_cache_config import log_context_cache_usage
+from ..shared_libraries.gemini_call_config import default_llm_config
 from ..shared_libraries.genai_client import lite_model, make_client
 from .invoice_extractor import (
     ExtractedInvoice,
@@ -596,7 +597,7 @@ def extract_document_ledger(
     resp = client.models.generate_content(
         model=model,
         contents=[part, dynamic_prompt],
-        config=types.GenerateContentConfig(
+        config=default_llm_config(
             system_instruction=static_instruction,
             temperature=0,
             response_mime_type="application/json",

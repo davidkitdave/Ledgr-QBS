@@ -13,6 +13,7 @@ from google.genai import types
 from google.genai import errors as genai_errors
 from pydantic import BaseModel, Field
 
+from ..shared_libraries.gemini_call_config import default_llm_config
 from ..shared_libraries.genai_client import lite_model, make_client
 from ..shared_libraries.model_config import std_model
 from .document_record import DocumentRecord
@@ -118,7 +119,7 @@ def book_from_capture(
             resp = client.models.generate_content(
                 model=attempt_model,
                 contents=[prompt],
-                config=types.GenerateContentConfig(
+                config=default_llm_config(
                     temperature=0,
                     response_mime_type="application/json",
                     response_schema=BookingProposal,

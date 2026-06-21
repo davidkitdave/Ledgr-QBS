@@ -8,6 +8,7 @@ from typing import Optional
 
 from google.genai import types
 
+from ..shared_libraries.gemini_call_config import default_llm_config
 from ..shared_libraries.genai_client import lite_model, make_client
 from .document_record import DocumentRecordBundle
 from .invoice_extractor import _append_hint, mime_for
@@ -73,7 +74,7 @@ def extract_document_bundle(
     resp = client.models.generate_content(
         model=model,
         contents=[part, _append_hint(prompt, hint)],
-        config=types.GenerateContentConfig(
+        config=default_llm_config(
             temperature=0,
             response_mime_type="application/json",
             response_schema=DocumentRecordBundle,

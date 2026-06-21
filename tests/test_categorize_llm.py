@@ -373,6 +373,8 @@ def test_generate_content_requests_logprobs(monkeypatch):
     config = captured_configs[0]
     assert config.response_logprobs is True
     assert config.logprobs == 5
+    assert config.thinking_config is not None
+    assert config.thinking_config.thinking_budget == 0
 
 
 # --------------------------------------------------------------------------- #
