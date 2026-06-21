@@ -185,15 +185,20 @@ def _find_invoice_number(fields: list[LabeledField], *, enhanced: bool) -> Optio
             if "gst" in nl and ("reg" in nl or "registration" in nl):
                 continue
             return f.value.strip()
-    # Contractor refs like INV-2026-003; claim refs like AAI-25-040
+    # Contractor refs like INV-2026-003; claim refs like CL-25-040
+    # (WS-6.1 — was `AAI-\d{2}-\d{3}`; the generic pattern captures any
+    # "<2-4 LETTERS>-<digits>-<digits>" shape, which covers most client
+    # reference formats without baking a specific vendor in.)
     for f in fields:
         val = (f.value or "").strip()
         if re.match(r"^\d{2}-D\d{2}$", val, re.I):
             return val
-    # Malaysian / compact labels: No. = IA-07465, CNA-00176
+    # Malaysian / compact labels: e.g. "No. = <2-5 LETTERS>-<digits>"
+    # (WS-6.1 — was `(IA|CNA)-\d+`; the generic pattern is the same shape
+    # without hardcoding specific vendor ref formats.)
     for f in fields:
         val = (f.value or "").strip()
-        if re.match(r"^(IA|CNA)-\d+$", val, re.I):
+        if re.match(r"^[A-Za-z]{2,5}-\d+$", val):
             return val.upper()
     return None
 

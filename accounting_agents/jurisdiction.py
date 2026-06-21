@@ -1,8 +1,8 @@
 """Multi-country jurisdiction routing for the ADK document lane.
 
-The YAU LEE Malaysia session (c92951d1) proved that the previous build was
-implicitly Singapore-only: ``tax_node`` always loaded ``sg_gst.yaml`` regardless
-of the client profile's ``region``. This module is the single source of truth
+A past Malaysia session proved that the previous build was implicitly
+Singapore-only: ``tax_node`` always loaded ``sg_gst.yaml`` regardless of
+the client profile's ``region``. This module is the single source of truth
 for **which tax system / rate band applies** based on session state, and is
 designed to be consumed by:
 

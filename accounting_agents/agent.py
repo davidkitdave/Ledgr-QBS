@@ -194,7 +194,7 @@ def _playground_default_context() -> ClientContext:
                 # mapping, and entity_memory from the JSON profile when
                 # present, so the categorize LLM has real accounts to match
                 # against (empty coa[] previously caused account_code="" in
-                # the YAU LEE ADK session).
+                # a past multi-country ADK session).
                 coa_rows = list(loaded.get("coa") or [])
                 category_mapping = dict(loaded.get("category_mapping") or {})
                 entity_memory = list(loaded.get("entity_memory") or [])

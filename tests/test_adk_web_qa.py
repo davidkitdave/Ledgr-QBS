@@ -2,14 +2,14 @@
 
 We can't drive a real browser from a non-interactive session, so we exercise
 the harness's structural assertions (per-view checklist items). The harness
-itself runs the document lane against the YAU LEE PDF and emits a markdown
+itself runs the document lane against the local test PDF and emits a markdown
 report; this test verifies:
 
 * The harness module is importable and the default client state is correct.
 * The per-view checklist keys are present in the rendered markdown.
 * The Track A + Track B graph assertions are encoded in the checklist (single
   root, classify_node inlined, no nested document_workflow box).
-* The YAU LEE line must NOT be flagged as SR 9% mismatch on valid 8% SST.
+* The MY receipt line must NOT be flagged as SR 9% mismatch on valid 8% SST.
 """
 
 from __future__ import annotations
@@ -19,17 +19,17 @@ from pathlib import Path
 from accounting_agents.adk_web_qa import _default_client_state
 
 
-def test_default_client_state_is_jbi_plus_malaysia():
-    """The harness defaults to the YAU LEE playground profile (JBI PLUS / MY / MYR)."""
+def test_default_client_state_is_my_playground():
+    """The harness defaults to the multi-country MY playground profile."""
     state = _default_client_state()
     assert state["region"] == "MALAYSIA"
     assert state["base_currency"] == "MYR"
-    assert state["client_id"] == "jbi-plus-auto"
+    assert state["client_id"] == "qa-my-playground"
     # COA must be seeded (categorize_node LLM requires it).
     assert len(state["coa"]) >= 1
-    # Entity memory should mention YAU LEE so the categorizer maps directly.
+    # Entity memory should mention the generic vendor so the categorizer maps directly.
     entity_names = {e["name"] for e in state["entity_memory"]}
-    assert "YAU LEE MOTOR" in entity_names
+    assert "Generic MY Vendor" in entity_names
 
 
 def test_render_checklist_includes_all_four_tabs(tmp_path: Path):
@@ -39,7 +39,7 @@ def test_render_checklist_includes_all_four_tabs(tmp_path: Path):
     out = tmp_path / "qa.md"
     _render_checklist(
         report={
-            "pdf": "scratch/yau_lee_motor_receipt.pdf",
+            "pdf": "scratch/my_playground_receipt.pdf",
             "graph_tab": {
                 # ADR-0021: document_workflow is now root_agent; no coordinator/
                 # dynamic_router/help_node — just classify_node + lane pipelines.
@@ -109,9 +109,9 @@ def test_render_checklist_includes_all_four_tabs(tmp_path: Path):
     assert "## 3. Events tab" in text
     assert "region seeded from profile: **PASS**" in text
     assert "tax_jurisdiction written to state" in text
-    # 4. State tab — YAU LEE must NOT be flagged (the entire point of Phase 8).
+    # 4. State tab — MY receipt must NOT be flagged (the entire point of Phase 8).
     assert "## 4. State tab" in text
-    assert "YAU LEE lines NOT flagged (8% SST, not SG 9%): **PASS**" in text
+    assert "MY receipt lines NOT flagged (8% SST, not SG 9%): **PASS**" in text
 
 
 def test_render_checklist_fails_when_no_normalized_lines(tmp_path: Path):
@@ -142,5 +142,5 @@ def test_render_checklist_fails_when_no_normalized_lines(tmp_path: Path):
         output_path=out,
     )
     text = out.read_text()
-    assert "YAU LEE lines NOT flagged" in text
+    assert "MY receipt lines NOT flagged" in text
     assert "**FAIL**" in text

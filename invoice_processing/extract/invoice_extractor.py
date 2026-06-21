@@ -83,9 +83,9 @@ class ExtractedInvoice(BaseModel):
             "country prefix on phone, \"Made in <country>\", tax reg no. country prefix "
             "(MY SST numbers start with country code, SG GST with \"M\"), or explicit "
             "country text. CRITICAL for multi-jurisdiction tax routing — the previous "
-            "extractor left this null which caused the YAU LEE Malaysia receipt to be "
-            "wrongly routed through Singapore GST rules. Always return a 2-letter code "
-            "when any country indicator is visible; null only when truly absent."
+            "extractor left this null which caused an MY receipt to be wrongly routed "
+            "through Singapore GST rules. Always return a 2-letter code when any "
+            "country indicator is visible; null only when truly absent."
         ),
     )
     issuer_tax_system: Optional[str] = Field(
@@ -174,9 +174,9 @@ Document-level fields:
   country indicator on the doc: country code in address, country prefix on phone, "Made in
   <country>", tax-reg-no country prefix (MY SST numbers prefix with country code; SG GST
   with "M"), explicit country text. CRITICAL for multi-jurisdiction tax routing — the
-  YAU LEE Malaysia receipt was wrongly processed under SG GST because this field was null.
-  Always return a 2-letter code when any country indicator is visible; null only when truly
-  absent.
+  previous extractor left this null on an MY receipt which caused it to be wrongly
+  processed under SG GST. Always return a 2-letter code when any country indicator is
+  visible; null only when truly absent.
 - issuer_tax_system = "GST" / "SST" / "VAT" / "NONE" / null — infer from explicit tax
   wording on the document (e.g. "Service Tax 8%", "SST", "GST 9%", "VAT"). Informational;
   the jurisdiction router applies the canonical rule based on the client profile + this hint.

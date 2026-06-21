@@ -77,9 +77,9 @@ Produce:
   US / ...) inferred from any country indicator on the document (address
   block, country prefix on phone, "Made in <country>", tax-reg-no country
   prefix, explicit country text). CRITICAL for multi-jurisdiction tax
-  routing — the YAU LEE Malaysia receipt was wrongly processed under SG
-  GST because this was null. Always populate when ANY country indicator is
-  visible; null only when truly absent.
+  routing — a past MY receipt was wrongly processed under SG GST because
+  this was null. Always populate when ANY country indicator is visible;
+  null only when truly absent.
 - tax_system_hint: "GST" / "SST" / "VAT" / "NONE" / null inferred from
   explicit tax wording on the document (e.g. "Service Tax 8%" -> "SST",
   "GST 9%" -> "GST", "VAT 20%" -> "VAT"). Informational; the jurisdiction
@@ -117,7 +117,7 @@ Arithmetic:
 Examples (synthetic -- placeholders, no real names):
 
 [Doc 1] Header "<Company-A>" letterhead. Body title: "EXPENSE CLAIM".
-Claimant field: "<Person-1>". Task reference: "AAI-XX-NNN". Item rows
+Claimant field: "<Person-1>". Task reference: "CL-XX-NNN". Item rows
 ("Transport", "Accommodation", ...) with a "Currency" and "Amount" column.
 Footer "Approved by" line for finance; "Total USD <amount>".
 - doc_kind: expense_claim

@@ -21,15 +21,22 @@ def _norm(s: str) -> str:
 
 
 def _claim_reference(record: DocumentRecord) -> Optional[str]:
+    # WS-6.1 — scrubbed a client-specific prefix regex (was `AAI-\d{2}-\d{3}`).
+    # The generic pattern matches the common "<2-3 LETTERS>-<digits>-<digits>"
+    # shape that expense-claim references typically take (e.g. "CL-25-040",
+    # "REF-01-123"); the actual reference format is whatever the client prints,
+    # so this is a hint, not a hard rule. If the document labels a field as
+    # "claim" / "ref" / "no." we still capture the value verbatim.
+    _GENERIC_REF = r"[A-Za-z]{2,4}-\d{1,4}-\d{1,5}"
     for f in record.labeled_fields:
         combined = f"{f.label} {f.value}"
-        m = re.search(r"AAI-\d{2}-\d{3}", combined, re.I)
+        m = re.search(_GENERIC_REF, combined, re.I)
         if m:
             return m.group(0).upper()
         if "claim" in _norm(f.label) and f.value.strip():
             return f.value.strip()[:80]
     for f in record.totals:
-        m = re.search(r"AAI-\d{2}-\d{3}", f.value or "", re.I)
+        m = re.search(_GENERIC_REF, f.value or "", re.I)
         if m:
             return m.group(0).upper()
     return None

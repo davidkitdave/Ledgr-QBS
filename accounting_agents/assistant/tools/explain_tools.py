@@ -122,7 +122,7 @@ def explain_tax_treatment(
     jurisdiction-aware reference YAML (``sg_gst.yaml`` / ``my_sst.yaml``) is
     surfaced to the LLM as rate-band context; Python only does the math
     guard. For Malaysia SST a 4.81 / 60.19 line resolves to SR + 8% (not
-    the previous SG 9% mismatch that flagged the YAU LEE receipt).
+    the previous SG 9% mismatch that flagged a past MY receipt).
 
     Args:
         tool_context: Injected by ADK; provides session state.
