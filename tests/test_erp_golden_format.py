@@ -23,7 +23,12 @@ import pytest
 from openpyxl import load_workbook
 
 from invoice_processing.export.client_context import EntityMemoryEntry
-from invoice_processing.export.exporters import AutoCountExporter, SqlAccountExporter
+from invoice_processing.export.exporters import (
+    AutoCountExporter,
+    QbsLedgerExporter,
+    SqlAccountExporter,
+    XeroLedgerExporter,
+)
 from invoice_processing.export.models import InvoiceLine, NormalizedInvoice, PartyInfo
 from invoice_processing.export.tax_classifier import get_tax_classifier
 
@@ -570,3 +575,198 @@ class TestMAP1AmountIsLineNetNotUnitPrice:
             f"SQL _QTY must default to 1 when line.quantity is None. "
             f"Got {rows[0]['_QTY']!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# MAP2 regression: column_for_field returns the real column for every exporter
+# (WS-1.2 — see plan 2026-06-21-intelligent-extraction-implementation.md).
+# compose_confident_note and any future preview/note surface must use this
+# single source of truth, not guess header strings.
+# ---------------------------------------------------------------------------
+
+
+class TestColumnForField:
+    """``LedgerExporter.column_for_field`` returns the actual column for a
+    logical field name (sub_total / currency / account_code / etc.) per doc_type.
+
+    The acceptance gate for WS-1.2 is that the "reconciles to $X" total in
+    ``compose_confident_note`` renders non-blank on a real delivery. The
+    prerequisite is that ``column_for_field`` returns a column the exporter
+    ACTUALLY emits — verified here.
+    """
+
+    def test_qbs_purchase_sub_total_column(self):
+        exp = QbsLedgerExporter(classifier=MY_CLF)
+        assert exp.column_for_field("sub_total", "purchase") == "Sub Total"
+
+    def test_qbs_sales_sub_total_column(self):
+        """QBS sales uses "Amount" for the line net (not "Sub Total")."""
+        exp = QbsLedgerExporter(classifier=MY_CLF)
+        assert exp.column_for_field("sub_total", "sales") == "Amount"
+
+    def test_qbs_currency_column(self):
+        exp = QbsLedgerExporter(classifier=MY_CLF)
+        assert exp.column_for_field("currency", "purchase") == "Currency"
+        assert exp.column_for_field("currency", "sales") == "Currency"
+
+    def test_qbs_account_code_column(self):
+        """QBS account column is "Account Code / COA" — not "Account Code"."""
+        exp = QbsLedgerExporter(classifier=MY_CLF)
+        assert exp.column_for_field("account_code", "purchase") == "Account Code / COA"
+        assert exp.column_for_field("account_code", "sales") == "Account Code / COA"
+
+    def test_xero_sub_total_is_none(self):
+        """Xero stores *UnitAmount (per-unit) — no per-line sub_total column."""
+        exp = XeroLedgerExporter(classifier=MY_CLF)
+        # *UnitAmount is "unit_amount", not "sub_total" — column_for_field("sub_total") returns None.
+        assert exp.column_for_field("sub_total", "purchase") is None
+        assert exp.column_for_field("sub_total", "sales") is None
+
+    def test_xero_currency_column(self):
+        exp = XeroLedgerExporter(classifier=MY_CLF)
+        assert exp.column_for_field("currency", "purchase") == "Currency"
+        assert exp.column_for_field("currency", "sales") == "Currency"
+
+    def test_autocount_sub_total_column(self):
+        """AutoCount: Amount is the line net (post WS-1.1 fix)."""
+        exp = AutoCountExporter(classifier=MY_CLF)
+        assert exp.column_for_field("sub_total", "purchase") == "Amount"
+        assert exp.column_for_field("sub_total", "sales") == "Amount"
+
+    def test_autocount_currency_column_only_on_sales(self):
+        """AutoCount purchase has no currency column (only CurrencyRate)."""
+        exp = AutoCountExporter(classifier=MY_CLF)
+        assert exp.column_for_field("currency", "purchase") is None
+        assert exp.column_for_field("currency", "sales") == "CurrencyCode"
+
+    def test_autocount_account_code_column(self):
+        exp = AutoCountExporter(classifier=MY_CLF)
+        assert exp.column_for_field("account_code", "purchase") == "AccNo"
+        assert exp.column_for_field("account_code", "sales") == "AccNo"
+
+    def test_sql_sub_total_column(self):
+        """SQL: _AMOUNT is the line net (post WS-1.1 fix)."""
+        exp = SqlAccountExporter(classifier=MY_CLF)
+        assert exp.column_for_field("sub_total", "purchase") == "_AMOUNT"
+        assert exp.column_for_field("sub_total", "sales") == "_AMOUNT"
+
+    def test_sql_has_no_currency_column(self):
+        exp = SqlAccountExporter(classifier=MY_CLF)
+        assert exp.column_for_field("currency", "purchase") is None
+        assert exp.column_for_field("currency", "sales") is None
+
+    def test_sql_account_code_column(self):
+        exp = SqlAccountExporter(classifier=MY_CLF)
+        assert exp.column_for_field("account_code", "purchase") == "_ACCOUNT(10)"
+        assert exp.column_for_field("account_code", "sales") == "_ACCOUNT(10)"
+
+    def test_unknown_field_returns_none(self):
+        """A field that no exporter emits must return None, not a guess."""
+        exp = AutoCountExporter(classifier=MY_CLF)
+        assert exp.column_for_field("not_a_real_field", "purchase") is None
+
+
+class TestComposeConfidentNoteWithRealColumns:
+    """End-to-end MAP2 regression.
+
+    Builds a real AutoCount row dict (via the actual exporter) and feeds it
+    into ``compose_confident_note`` as a LEDGER_ROWS_KEY-shaped payload. The
+    note must include the reconcile total and the dominant account code —
+    not blank, not the wrong currency.
+    """
+
+    def test_autocount_purchase_note_has_reconcile_total_and_code(self):
+        from accounting_agents.nodes import compose_confident_note
+
+        inv = NormalizedInvoice(
+            doc_type="purchase",
+            invoice_number="INV-WS12-001",
+            invoice_date=date(2024, 6, 1),
+            our_gst_registered=True,
+            currency="MYR",
+            doc_total=200.0,
+            supplier=PartyInfo(
+                name="GENERIC AUTO PARTS",
+                country="MY",
+                vendor_code="400-A0099",
+            ),
+        )
+        inv.lines.append(
+            InvoiceLine(
+                description="Part A",
+                net_amount=120.0,
+                gst_amount=0.0,
+                tax_treatment="ZRL",
+                account_code="510-100",
+            )
+        )
+        inv.lines.append(
+            InvoiceLine(
+                description="Part B",
+                net_amount=80.0,
+                gst_amount=0.0,
+                tax_treatment="ZRL",
+                account_code="510-200",
+            )
+        )
+
+        exporter = AutoCountExporter(classifier=MY_CLF)
+        rows = exporter.rows([inv], "purchase")
+        payload = {
+            "fy": 2025,
+            "kind": "invoice",
+            "software": "autocount",
+            "batches": [{"sheet": "AP Invoice", "rows": rows}],
+            "doc_total": 200.0,
+            "currency": "MYR",
+        }
+        note = compose_confident_note(payload, doc_type="invoice")
+        # The reconcile total must be present (MAP2 fix) — was blank before WS-1.2.
+        assert "200" in note, f"Reconcile total missing from note: {note!r}"
+        # Currency must surface as MYR (from payload-level), not the SGD default.
+        assert "MYR" in note, f"Currency missing from note: {note!r}"
+        assert "SGD" not in note, f"SGD default leaked into MY doc: {note!r}"
+
+    def test_sql_purchase_note_uses_unitprice_column_for_subtotal(self):
+        """SQL: the line net lives in _AMOUNT. The note must use _AMOUNT (not
+        'Net Amount' literal, not 'Sub Total' literal)."""
+        from accounting_agents.nodes import compose_confident_note
+
+        inv = NormalizedInvoice(
+            doc_type="purchase",
+            invoice_number="INV-WS12-SQL-001",
+            invoice_date=date(2024, 6, 1),
+            our_gst_registered=True,
+            currency="MYR",
+            doc_total=150.0,
+            supplier=PartyInfo(
+                name="GENERIC SUPPLIER",
+                country="MY",
+                vendor_code="400-A0098",
+            ),
+        )
+        inv.lines.append(
+            InvoiceLine(
+                description="Service",
+                net_amount=150.0,
+                gst_amount=0.0,
+                tax_treatment="ZRL",
+                account_code="510-300",
+            )
+        )
+
+        exporter = SqlAccountExporter(classifier=MY_CLF)
+        rows = exporter.rows([inv], "purchase")
+        payload = {
+            "fy": 2025,
+            "kind": "invoice",
+            "software": "sql_account",
+            "batches": [{"sheet": "SLPH_Invoice_Cash_Debit_Credit", "rows": rows}],
+            "doc_total": 150.0,
+            "currency": "MYR",
+        }
+        note = compose_confident_note(payload, doc_type="invoice")
+        assert "150" in note, f"Reconcile total missing: {note!r}"
+        assert "MYR" in note, f"Currency missing: {note!r}"
+        # The dominant account code (_ACCOUNT(10) = "510-300") must appear.
+        assert "510-300" in note, f"Dominant account code missing: {note!r}"

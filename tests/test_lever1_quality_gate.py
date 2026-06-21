@@ -180,16 +180,24 @@ def _make_payload(
     kind: str = "invoice",
     fy: int = 2025,
     currency: str = "SGD",
+    software: str = "qbs",
 ) -> dict:
-    """Build a minimal LEDGER_ROWS_KEY-shaped payload."""
+    """Build a minimal LEDGER_ROWS_KEY-shaped payload.
+
+    Uses the REAL QBS purchase columns (Sub Total / Currency / Account Code / COA)
+    — not the legacy literal placeholders the old test asserted. WS-1.2 changed
+    ``compose_confident_note`` to look up columns via ``exporter.column_for_field``
+    instead of guessing header strings, so the test fixture has to mirror the
+    columns the actual exporters emit.
+    """
     rows = []
     for i in range(n_lines):
         row: dict = {
             "Description": f"Line {i+1}",
-            "Net Amount": doc_total / n_lines,
+            "Sub Total": doc_total / n_lines,
         }
         if account_code:
-            row["Account Code"] = account_code
+            row["Account Code / COA"] = account_code
         if currency:
             row["Currency"] = currency
         rows.append(row)
@@ -197,6 +205,7 @@ def _make_payload(
     return {
         "fy": fy,
         "kind": kind,
+        "software": software,
         "batches": [{"sheet": "Purchase", "rows": rows}],
         "doc_total": doc_total,
         "currency": currency,

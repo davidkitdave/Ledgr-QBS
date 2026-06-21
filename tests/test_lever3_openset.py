@@ -129,21 +129,28 @@ def _make_payload(
     doc_total: float = 120.0,
     account_code: str | None = "6100",
     currency: str = "SGD",
+    software: str = "qbs",
 ) -> dict:
-    """Build a minimal LEDGER_ROWS_KEY-shaped payload."""
+    """Build a minimal LEDGER_ROWS_KEY-shaped payload.
+
+    Uses the REAL QBS purchase columns (Sub Total / Currency / Account Code / COA)
+    so the column_for_field lookup (WS-1.2) actually finds the values. The
+    legacy literal "Net Amount" / "Account Code" placeholders were the MAP2 bug.
+    """
     rows = []
     for i in range(n_lines):
         row: dict = {
             "Description": f"Line {i + 1}",
-            "Net Amount": doc_total / n_lines,
+            "Sub Total": doc_total / n_lines,
             "Currency": currency,
         }
         if account_code:
-            row["Account Code"] = account_code
+            row["Account Code / COA"] = account_code
         rows.append(row)
     return {
         "fy": 2025,
         "kind": "invoice",
+        "software": software,
         "batches": [{"sheet": "Purchase", "rows": rows}],
         "doc_total": doc_total,
         "currency": currency,

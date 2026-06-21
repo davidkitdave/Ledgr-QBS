@@ -108,6 +108,16 @@ class LedgerExporter:
     purchase_cols: list[str] = []
     sales_cols: list[str] = []
 
+    # Per-class column → logical-field map. Subclasses can override to declare
+    # which logical fields (e.g. "sub_total", "currency", "account_code") are
+    # exposed under which column name. This is the source-of-truth that
+    # ``column_for_field`` (and any preview/note/import-readiness code that
+    # wants to look up the real column for a logical field) reads from.
+    #
+    # ProfileLedgerExporter ignores this attribute — its YAML `purchase_fields`
+    # / `sales_fields` map is authoritative (see ProfileLedgerExporter.column_for_field).
+    _LOGICAL_FIELDS: dict[str, str] = {}
+
     def __init__(self, classifier: Optional[TaxClassifier] = None):
         self.clf = classifier or TaxClassifier()
 
@@ -116,6 +126,27 @@ class LedgerExporter:
         software. Subclasses override; used by the pipeline to flag (not drop)
         documents that would export half-filled rows."""
         return []
+
+    def column_for_field(self, field_name: str, doc_type: str) -> str | None:
+        """Return the actual column name for a logical *field_name* in *doc_type*.
+
+        Used by delivery notes, import-readiness, and any preview surface that
+        needs to look up the real column a logical field is written to (e.g. to
+        render a "reconciles to $X" total, we need the real column for
+        ``sub_total`` — which is "Amount" for AutoCount, "_AMOUNT" for SQL
+        Account, "Sub Total" for QBS purchase, "Amount" for QBS sales, and None
+        for Xero because Xero stores per-unit amount, not per-line net).
+
+        Returns ``None`` when the field is not emitted for this doc_type (e.g.
+        ``currency`` on a profile-driven purchase sheet that has no currency
+        column). Callers must handle ``None`` (typically: skip the field rather
+        than guess a literal column name).
+        """
+        cols = self.sales_cols if doc_type == "sales" else self.purchase_cols
+        for col in cols:
+            if self._LOGICAL_FIELDS.get(col) == field_name:
+                return col
+        return None
 
     # subclasses implement the per-line row dicts
     def _purchase_row(self, inv: NormalizedInvoice, line: InvoiceLine) -> dict:
@@ -176,6 +207,29 @@ class QbsLedgerExporter(LedgerExporter):
         "Invoice Date", "Invoice Number", "Customer Name", "Description", "Source Amount",
         "Currency", "Currency Rate", "Amount", "Tax Amount", "Total", "Account Code / COA",
     ]
+    # Logical-field map: column name → logical name. Used by column_for_field to
+    # find the real column a logical field is written to (e.g. compose_confident_note
+    # needs to render "reconciles to $X" using whichever column carries the line
+    # net for the current doc_type). "Amount" on the sales sheet is the line net
+    # (not a per-unit amount) so it maps to sub_total, same as "Sub Total" on
+    # the purchase sheet.
+    _LOGICAL_FIELDS = {
+        "Invoice Number": "invoice_number",
+        "Invoice Date": "invoice_date",
+        "Vendor Name": "vendor_name",
+        "Customer Name": "customer_name",
+        "Entity Tax ID": "entity_tax_id",
+        "Description": "description",
+        "Source Amount": "source_amount",
+        "Currency": "currency",
+        "Currency Rate": "currency_rate",
+        "Sub Total": "sub_total",
+        "Amount": "sub_total",  # QBS sales: "Amount" carries the line net
+        "Tax Amount": "tax_amount",
+        "Total Amount": "total",
+        "Total": "total",
+        "Account Code / COA": "account_code",
+    }
 
     def required_fields(self, doc_type: str) -> list[str]:
         if doc_type == "sales":
@@ -252,6 +306,28 @@ class XeroLedgerExporter(LedgerExporter):
     ]
     purchase_cols = list(_XERO_PURCHASE)
     sales_cols = list(_XERO_SALES)
+    # Logical-field map for column_for_field. Note: Xero's "*UnitAmount" is a
+    # PER-UNIT amount, not a per-line net — so it maps to "unit_amount", not
+    # "sub_total". Anything that wants a "reconciles to $X" total must compute
+    # it (qty × *UnitAmount) or accept that Xero has no per-line sub_total.
+    _LOGICAL_FIELDS = {
+        "*ContactName": "contact_name",
+        "*InvoiceNumber": "invoice_number",
+        "Reference": "reference",
+        "*InvoiceDate": "invoice_date",
+        "*DueDate": "due_date",
+        "Total": "total",
+        "InventoryItemCode": "inventory_item_code",
+        "Description": "description",
+        "*Description": "description",
+        "*Quantity": "quantity",
+        "*UnitAmount": "unit_amount",
+        "Discount": "discount",
+        "*AccountCode": "account_code",
+        "*TaxType": "tax_code",
+        "TaxAmount": "tax_amount",
+        "Currency": "currency",
+    }
 
     def required_fields(self, doc_type: str) -> list[str]:
         """Xero-required columns = the `*`-marked headers."""

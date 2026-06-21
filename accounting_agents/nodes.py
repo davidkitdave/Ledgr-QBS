@@ -54,7 +54,6 @@ from invoice_processing.export.client_context import (
     tax_codes_from_state,
 )
 from invoice_processing.export.exporters import (
-    ProfileLedgerExporter,
     bank_sheet_title,
     collect_export_unmapped_summary,
     collect_import_readiness,
@@ -2244,35 +2243,49 @@ def compose_confident_note(
     # Derive reconcile total from rows (sum of net amounts).
     # Prefer the payload-level currency (set by consolidate_node from the statement)
     # before falling back to individual row values, then "SGD" as last resort.
+    #
+    # Profile-aware: use ``exporter.column_for_field(...)`` to look up the ACTUAL
+    # column that carries the line net ("sub_total") and the currency, instead of
+    # guessing literal header strings. Each exporter (QBS / Xero / AutoCount /
+    # SQL Account) declares its own column→logical mapping, so a single call
+    # works for every software. If a field has no column for this doc_type
+    # (e.g. AutoCount purchase has no currency column; Xero has no per-line
+    # sub_total), the helper returns None and we skip that piece of the note
+    # rather than rendering a blank or wrong value.
+    from collections import Counter
+
+    _sw = normalize_software_key(str(payload.get("software") or ""))
+    _sub_total_col: Optional[str] = None
+    _currency_col: Optional[str] = None
+    _account_col: Optional[str] = None
+    try:
+        _exp = get_exporter(_sw)
+    except Exception:
+        _exp = None
+    if _exp is not None:
+        _sub_total_col = _exp.column_for_field("sub_total", doc_type)
+        _currency_col = _exp.column_for_field("currency", doc_type)
+        _account_col = _exp.column_for_field("account_code", doc_type)
+
     total: Optional[float] = None
     currency = (payload.get("currency") or "").strip() or "SGD"
     for row in all_rows:
-        amt = row.get("Net Amount")
-        if amt is not None:
-            try:
-                total = (total or 0.0) + float(amt)
-            except (TypeError, ValueError):
-                pass
-        row_currency = row.get("Currency")
-        if row_currency:
-            currency = row_currency
+        if _sub_total_col:
+            amt = row.get(_sub_total_col)
+            if amt is not None:
+                try:
+                    total = (total or 0.0) + float(amt)
+                except (TypeError, ValueError):
+                    pass
+        if _currency_col:
+            row_currency = row.get(_currency_col)
+            if row_currency:
+                currency = row_currency
 
     # Derive dominant account code (most frequent non-empty value).
-    # Use profile-aware column name so AutoCount "AccNo" / SQL "_ACCOUNT(10)" are found;
-    # fall back to the QBS/Xero "Account Code" column when not a profile-driven ERP.
-    from collections import Counter
-    _sw = normalize_software_key(str(payload.get("software") or ""))
-    _account_col = "Account Code"  # QBS / Xero fallback
-    if _sw in ("autocount", "sql_account"):
-        try:
-            _tmp_exp = get_exporter(_sw)
-            if isinstance(_tmp_exp, ProfileLedgerExporter):
-                _col = _tmp_exp.column_for_field("account_code", "purchase")
-                if _col:
-                    _account_col = _col
-        except Exception:
-            pass
-    codes = [row.get(_account_col) for row in all_rows if row.get(_account_col)]
+    codes: list[str] = []
+    if _account_col:
+        codes = [row.get(_account_col) for row in all_rows if row.get(_account_col)]
     dominant_code: Optional[str] = None
     if codes:
         dominant_code = Counter(codes).most_common(1)[0][0]
