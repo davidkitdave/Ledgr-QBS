@@ -24,6 +24,11 @@ from .ledger_extract import (
     use_capture_book_pipeline,
     validate_extracted_document,
 )
+from .segmentation_gates import (
+    apply_segmentation_uncertain_flag,
+    count_input_pages,
+    validate_bundle_page_coverage,
+)
 from .verify import verify_extracted_invoice
 
 EXTRACT_LEDGER_FN: Callable[..., ExtractedDocumentBundle] = extract_document_ledger
@@ -191,6 +196,11 @@ def process_invoice_document(
         elif inv.reconciled:
             inv.reconcile_note = note
         normalized.append(inv)
+
+    total_pages = count_input_pages(data, mime_type)
+    page_ok, page_detail = validate_bundle_page_coverage(bundle, total_pages=total_pages)
+    if not page_ok:
+        apply_segmentation_uncertain_flag(normalized, page_detail)
 
     return InvoiceProcessResult(
         normalized=normalized,

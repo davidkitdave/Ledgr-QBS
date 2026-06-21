@@ -61,6 +61,10 @@ def test_process_invoice_document_understand_fans_out_two_docs(monkeypatch):
         "invoice_processing.extract.process_invoice_document.EXTRACT_LEDGER_FN",
         fake_extract,
     )
+    monkeypatch.setattr(
+        "invoice_processing.extract.process_invoice_document.count_input_pages",
+        lambda _data, _mime: 2,
+    )
     monkeypatch.delenv("LEDGR_CAPTURE_BOOK", raising=False)
     monkeypatch.setenv("LEDGR_UNDERSTAND_EXTRACT", "1")
 
@@ -116,6 +120,10 @@ def test_process_invoice_document_understand_reconcile_per_doc(monkeypatch):
         "invoice_processing.extract.process_invoice_document.EXTRACT_LEDGER_FN",
         fake_extract,
     )
+    monkeypatch.setattr(
+        "invoice_processing.extract.process_invoice_document.count_input_pages",
+        lambda _data, _mime: 2,
+    )
     monkeypatch.delenv("LEDGR_CAPTURE_BOOK", raising=False)
     monkeypatch.setenv("LEDGR_UNDERSTAND_EXTRACT", "1")
 
@@ -133,3 +141,122 @@ def test_process_invoice_document_understand_reconcile_per_doc(monkeypatch):
     assert by_ref["INV-OK"].reconcile_note
     assert by_ref["INV-BAD"].reconciled is False
     assert "total" in (by_ref["INV-BAD"].reconcile_note or "").lower()
+
+
+def test_process_invoice_document_understand_page_coverage_valid(monkeypatch):
+    """WS-2.3 — full page coverage leaves docs reconciled when totals match."""
+    bundle = ExtractedDocumentBundle(
+        documents=[
+            _doc("INV-200", grand_total=200.0, page_range=[1, 1]),
+            _doc("INV-060", grand_total=60.0, page_range=[2, 2]),
+        ],
+        skipped_pages=None,
+    )
+
+    def fake_extract(data, mime_type, **kwargs):
+        return bundle
+
+    monkeypatch.setattr(
+        "invoice_processing.extract.process_invoice_document.EXTRACT_LEDGER_FN",
+        fake_extract,
+    )
+    monkeypatch.setattr(
+        "invoice_processing.extract.process_invoice_document.count_input_pages",
+        lambda _data, _mime: 2,
+    )
+    monkeypatch.delenv("LEDGR_CAPTURE_BOOK", raising=False)
+    monkeypatch.setenv("LEDGR_UNDERSTAND_EXTRACT", "1")
+
+    result = process_invoice_document(
+        b"%PDF",
+        "application/pdf",
+        doc_type="invoice",
+        direction="purchase",
+        our_gst_registered=True,
+        base_currency="MYR",
+    )
+
+    assert all(inv.reconciled for inv in result.normalized)
+    assert not any(
+        "segmentation uncertain" in (inv.reconcile_note or "").lower()
+        for inv in result.normalized
+    )
+
+
+def test_process_invoice_document_understand_page_coverage_gap_flags_all(monkeypatch):
+    """WS-2.3 — gap in page_range flags segmentation uncertain on every doc."""
+    bundle = ExtractedDocumentBundle(
+        documents=[
+            _doc("INV-A", grand_total=200.0, page_range=[1, 1]),
+            _doc("INV-C", grand_total=60.0, page_range=[3, 3]),
+        ],
+        skipped_pages=None,
+    )
+
+    def fake_extract(data, mime_type, **kwargs):
+        return bundle
+
+    monkeypatch.setattr(
+        "invoice_processing.extract.process_invoice_document.EXTRACT_LEDGER_FN",
+        fake_extract,
+    )
+    monkeypatch.setattr(
+        "invoice_processing.extract.process_invoice_document.count_input_pages",
+        lambda _data, _mime: 3,
+    )
+    monkeypatch.delenv("LEDGR_CAPTURE_BOOK", raising=False)
+    monkeypatch.setenv("LEDGR_UNDERSTAND_EXTRACT", "1")
+
+    result = process_invoice_document(
+        b"%PDF",
+        "application/pdf",
+        doc_type="invoice",
+        direction="purchase",
+        our_gst_registered=True,
+        base_currency="MYR",
+    )
+
+    assert len(result.normalized) == 2
+    for inv in result.normalized:
+        assert inv.reconciled is False
+        note = (inv.reconcile_note or "").lower()
+        assert "segmentation uncertain" in note
+        assert "gaps" in note
+
+
+def test_process_invoice_document_understand_page_coverage_overlap_flags_all(monkeypatch):
+    """WS-2.3 — overlapping page_range flags segmentation uncertain."""
+    bundle = ExtractedDocumentBundle(
+        documents=[
+            _doc("INV-A", grand_total=200.0, page_range=[1, 2]),
+            _doc("INV-B", grand_total=60.0, page_range=[2, 3]),
+        ],
+        skipped_pages=None,
+    )
+
+    def fake_extract(data, mime_type, **kwargs):
+        return bundle
+
+    monkeypatch.setattr(
+        "invoice_processing.extract.process_invoice_document.EXTRACT_LEDGER_FN",
+        fake_extract,
+    )
+    monkeypatch.setattr(
+        "invoice_processing.extract.process_invoice_document.count_input_pages",
+        lambda _data, _mime: 3,
+    )
+    monkeypatch.delenv("LEDGR_CAPTURE_BOOK", raising=False)
+    monkeypatch.setenv("LEDGR_UNDERSTAND_EXTRACT", "1")
+
+    result = process_invoice_document(
+        b"%PDF",
+        "application/pdf",
+        doc_type="invoice",
+        direction="purchase",
+        our_gst_registered=True,
+        base_currency="MYR",
+    )
+
+    for inv in result.normalized:
+        assert inv.reconciled is False
+        assert "segmentation uncertain" in (inv.reconcile_note or "").lower()

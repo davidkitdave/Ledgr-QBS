@@ -29,6 +29,8 @@ from google.adk.evaluation.eval_case import ConversationScenario, Invocation
 from google.adk.evaluation.eval_metrics import EvalStatus
 from google.adk.evaluation.evaluator import EvaluationResult, PerInvocationResult
 
+from invoice_processing.extract.segmentation_gates import validate_page_ranges
+
 _REPO_ROOT = pathlib.Path(__file__).parent.parent.parent
 _EVALSET_PATH = _REPO_ROOT / "tests" / "eval" / "datasets" / "ledgr.evalset.json"
 
@@ -121,38 +123,6 @@ def pdf_available(case_id: str) -> bool:
     if not key or key not in SCENARIO_PDF_RELATIVE:
         return False
     return scenario_pdf_path(key).exists()
-
-
-def validate_page_ranges(
-    page_ranges: list[tuple[int, int]],
-    *,
-    total_pages: int,
-    skipped_pages: list[int] | None = None,
-) -> tuple[bool, str]:
-    """Check page ranges cover every non-skipped page exactly once."""
-    if total_pages < 1:
-        return False, "total_pages must be >= 1"
-
-    skip = set(skipped_pages or [])
-    if any(p < 1 or p > total_pages for p in skip):
-        return False, f"skipped_pages out of bounds 1..{total_pages}: {sorted(skip)}"
-
-    covered: set[int] = set()
-    for start, end in page_ranges:
-        if start < 1 or end < start or end > total_pages:
-            return False, f"invalid page_range ({start}, {end}) for total_pages={total_pages}"
-        for page in range(start, end + 1):
-            if page in skip:
-                continue
-            if page in covered:
-                return False, f"page {page} covered by more than one document"
-            covered.add(page)
-
-    expected = {p for p in range(1, total_pages + 1) if p not in skip}
-    missing = expected - covered
-    if missing:
-        return False, f"gaps on pages {sorted(missing)}"
-    return True, "ok"
 
 
 def _grand_totals_within_tolerance(

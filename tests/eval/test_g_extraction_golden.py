@@ -29,12 +29,17 @@ import os
 
 import pytest
 
+from invoice_processing.extract.segmentation_gates import (
+    count_input_pages,
+    validate_bundle_page_coverage,
+    validate_page_ranges,
+)
+
 from tests.eval.extraction_metrics import (
     g_case_expected,
     g_case_ids,
     pdf_available,
     score_g_case,
-    validate_page_ranges,
 )
 
 _HAS_CREDS = bool(os.environ.get("GOOGLE_API_KEY") or os.environ.get("GOOGLE_CLOUD_PROJECT"))
@@ -70,10 +75,7 @@ def _g_live_case_params() -> list:
 
 def _run_live_extraction(case_id: str) -> dict:
     """Extract from the local PDF via the default understand path."""
-    from invoice_processing.extract.ledger_extract import (
-        bundle_page_ranges,
-        extract_document_ledger,
-    )
+    from invoice_processing.extract.ledger_extract import extract_document_ledger
     from invoice_processing.extract.invoice_extractor import mime_for
 
     from tests.eval.extraction_metrics import g_case_expected, scenario_pdf_path
@@ -83,15 +85,8 @@ def _run_live_extraction(case_id: str) -> dict:
     bundle = extract_document_ledger(pdf.read_bytes(), mime_for(pdf))
     totals = [float(doc.grand_total) for doc in bundle.documents]
 
-    page_coverage_ok = None
-    page_ranges = bundle_page_ranges(bundle)
-    if page_ranges:
-        total_pages = max(end for _, end in page_ranges)
-        page_coverage_ok, _ = validate_page_ranges(
-            page_ranges,
-            total_pages=total_pages,
-            skipped_pages=bundle.skipped_pages,
-        )
+    total_pages = count_input_pages(pdf.read_bytes(), mime_for(pdf))
+    page_coverage_ok, _ = validate_bundle_page_coverage(bundle, total_pages=total_pages)
 
     return {
         "doc_count": len(bundle.documents),
