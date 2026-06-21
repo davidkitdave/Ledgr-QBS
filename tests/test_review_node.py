@@ -43,7 +43,8 @@ def _clean_invoice(**overrides) -> NormalizedInvoice:
         doc_total=109.0,
         reconciled=True,
         our_gst_registered=True,
-        lines=[InvoiceLine(description="Goods", net_amount=100.0, gst_amount=9.0)],
+        lines=[InvoiceLine(description="Goods", net_amount=100.0, gst_amount=9.0,
+                            account_code="6100")],
     )
     defaults.update(overrides)
     return NormalizedInvoice(**defaults)
@@ -55,6 +56,10 @@ def _state(invoices, *, doc_type="invoice", confidence=0.95, **extra) -> dict:
         nodes.NORMALIZED_KEY: [nodes._inv_to_dict(i) for i in invoices],
         nodes.DOC_TYPE_KEY: doc_type,
         nodes.CLASSIFY_CONFIDENCE_KEY: confidence,
+        # WS-1.5: pre-set tax_jurisdiction so the jurisdiction_unresolved
+        # flag does NOT fire by default. Tests that want to assert that
+        # flag specifically override this with tax_jurisdiction=None.
+        nodes.TAX_JURISDICTION_KEY: "SINGAPORE",
         "op_id": "C1:F1",
         "tax_registered": True,
         "direction": "purchase",
@@ -102,7 +107,7 @@ def _reconciled_extract_result():
     """Re-extract stub that produces a fully reconciled invoice (WS4 success path)."""
     from tests.test_nodes import _legacy_result_from_ex_bundle
 
-    return _legacy_result_from_ex_bundle(
+    result = _legacy_result_from_ex_bundle(
         ExtractedInvoiceBundle(
             invoices=[
                 ExtractedInvoice(
@@ -120,6 +125,12 @@ def _reconciled_extract_result():
             ]
         )
     )
+    # WS-1.5: simulate categorize_node filling in account_code on the line
+    # so the blank_account_code flag does not fire on the post-extract state.
+    for inv in result.normalized:
+        for ln in inv.lines:
+            ln.account_code = "6100"
+    return result
 
 
 @pytest.fixture(autouse=True)
@@ -202,7 +213,7 @@ def test_hints_needed_reextracts_exactly_once_then_rereviews():
         extract_calls["n"] += 1
         extract_calls["hints"].append(kw.get("hint"))
         from tests.test_nodes import _legacy_result_from_ex_bundle
-        return _legacy_result_from_ex_bundle(
+        result = _legacy_result_from_ex_bundle(
             ExtractedInvoiceBundle(
             invoices=[
                 ExtractedInvoice(
@@ -219,6 +230,12 @@ def test_hints_needed_reextracts_exactly_once_then_rereviews():
                 )
             ]
         ))
+        # WS-1.5: simulate categorize_node filling in account_code on the
+        # line so the blank_account_code flag does not fire.
+        for inv in result.normalized:
+            for ln in inv.lines:
+                ln.account_code = "6100"
+        return result
 
     nodes.REVIEWER_FN = fake_reviewer
     nodes.EXTRACT_INVOICE_DOCUMENT_FN = fake_extract

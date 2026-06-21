@@ -37,6 +37,10 @@ def _state(invoices=None, *, doc_type="invoice", confidence=0.95, **extra) -> di
         nodes.NORMALIZED_KEY: inv_dicts,
         nodes.DOC_TYPE_KEY: doc_type,
         nodes.CLASSIFY_CONFIDENCE_KEY: confidence,
+        # WS-1.5: pre-set tax_jurisdiction so the jurisdiction_unresolved
+        # flag does NOT fire by default. Tests that want to assert that
+        # flag specifically override this with tax_jurisdiction=None.
+        nodes.TAX_JURISDICTION_KEY: "SINGAPORE",
     }
     state.update(extra)
     return state

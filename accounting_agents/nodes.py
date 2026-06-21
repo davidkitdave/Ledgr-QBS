@@ -1130,6 +1130,23 @@ def detect_struggle(state: dict) -> tuple[bool, list[str]]:
 
     reasons: list[str] = []
 
+    # WS-1.5 — pre-compute jurisdiction + COA signals for the new flags.
+    # We read from the same state keys that resolve_jurisdiction_node +
+    # categorize_node wrote: tax_jurisdiction, flag_for_human, coa_from_state.
+    # Catching these BEFORE the export stage is the whole point of the
+    # D1 fix — a missing reference_yaml must never silently SG-default.
+    tax_jurisdiction = (state.get(TAX_JURISDICTION_KEY) or "").strip()
+    flag_for_human = bool(state.get(FLAG_FOR_HUMAN_KEY))
+    resolved_jurisdiction = tax_jurisdiction.upper() if tax_jurisdiction else ""
+    try:
+        _coa = coa_from_state(state)
+        coa_keys: set[str] | None = (
+            {entry.code for entry in _coa if getattr(entry, "code", None)}
+            if _coa else None
+        )
+    except Exception:  # noqa: BLE001 — defensive; missing COA is a non-skip
+        coa_keys = None
+
     # Phase 1 read fidelity (DocumentRecord capture) — legacy path only.
     extraction_path = (state.get(EXTRACTION_PATH_KEY) or "").strip().lower()
     records_raw = state.get(DOCUMENT_RECORDS_KEY)
@@ -1214,6 +1231,59 @@ def detect_struggle(state: dict) -> tuple[bool, list[str]]:
             missing.append("doc_total")
         if missing:
             reasons.append(f"missing_required: {label} ({', '.join(missing)})")
+
+        # WS-1.5 Signal #7: blank_account_code (CRIT).
+        # A line that survived categorization but still has no account_code
+        # will export with a blank AccNo / _ACCOUNT(10) — for AutoCount that
+        # is the GL control account, which means the entry silently books
+        # against the default suspense account. Flag loudly so HITL routes
+        # it instead of letting the export go through.
+        #
+        # Scoped: only fires for doc types that go through categorization
+        # (invoice / credit_note / receipt). 'other' / 'expense_claim' /
+        # 'bank_statement' / 'statement_of_account' lines legitimately may
+        # not have an account_code at this stage — flagging them would
+        # drown the reviewer in false positives.
+        if doc_type in ("invoice", "credit_note", "receipt"):
+            for ln_idx, ln in enumerate(inv.lines):
+                if not (ln.account_code and str(ln.account_code).strip()):
+                    reasons.append(
+                        f"blank_account_code: {label} line #{ln_idx + 1}"
+                    )
+
+            # WS-1.5 Signal #8: account_code_not_in_coa.
+            # The COA resolution is supposed to null out hallucinated keys
+            # (categorizer.py:265-266) — but a wrong-client entity-memory entry
+            # or a stale cached code can bypass that. Force blank + flag so the
+            # post-export check catches what the LLM step missed.
+            if coa_keys is not None:
+                for ln_idx, ln in enumerate(inv.lines):
+                    code = (ln.account_code or "").strip()
+                    if code and code not in coa_keys:
+                        reasons.append(
+                            f"account_code_not_in_coa: {label} line #{ln_idx + 1} "
+                            f"code={code!r}"
+                        )
+
+        # WS-1.5 Signal #9: currency_mismatch.
+        # An MY doc whose currency defaulted to SGD (D6) is a strong signal
+        # the extract lost the printed currency — the file may still be a
+        # legitimate MY invoice, but the user wants to be told before it
+        # books against a SGD-defaulted tax band.
+        if inv.currency == "SGD" and resolved_jurisdiction == "MALAYSIA":
+            reasons.append(
+                f"currency_mismatch: {label} is MY-jurisdiction but currency=SGD"
+            )
+
+    # WS-1.5 Signal #6: jurisdiction_unresolved (D1 CRIT).
+    # The previous behaviour: when state lacked ``tax_jurisdiction`` or
+    # ``reference_yaml``, get_tax_classifier(None) silently fell back to
+    # sg_gst.yaml, so an MY doc with lost reference_yaml booked SG codes.
+    # Now: the moment we observe an unresolved jurisdiction, the struggle
+    # detector flags BEFORE the export stage — HITL routes the doc to a
+    # human reviewer instead of letting the SG-default corrupt the books.
+    if (not tax_jurisdiction) or flag_for_human:
+        reasons.append("jurisdiction_unresolved")
 
     # Signal #4: doc_type_other — quality-gated (ADR-0017 Lever 1).
     # For 'other' and 'expense_claim' doc types, only escalate when the

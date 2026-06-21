@@ -69,7 +69,8 @@ def _tripped_state(channel: str) -> dict:
         doc_total=109.0,
         reconciled=False,
         reconcile_note="totals do not reconcile",
-        lines=[InvoiceLine(description="ambiguous charge", tax_confidence=0.40)],
+        lines=[InvoiceLine(description="ambiguous charge", tax_confidence=0.40,
+                            account_code="6100")],
     )
     return {
         "op_id": f"{channel}:F1",
@@ -80,6 +81,9 @@ def _tripped_state(channel: str) -> dict:
         nodes.ARTIFACT_NAME_KEY: nodes.ARTIFACT_NAME_FMT.format(file_id="F1"),
         nodes.DOC_TYPE_KEY: "invoice",
         nodes.CLASSIFY_CONFIDENCE_KEY: 0.50,
+        # WS-1.5: pre-set tax_jurisdiction so the jurisdiction_unresolved
+        # flag does NOT fire by default.
+        nodes.TAX_JURISDICTION_KEY: "SINGAPORE",
         nodes.NORMALIZED_KEY: [nodes._inv_to_dict(inv)],
     }
 
@@ -87,7 +91,7 @@ def _tripped_state(channel: str) -> dict:
 def _fake_clean_bundle(*_a, **_k):
     from tests.test_nodes import _legacy_result_from_ex_bundle
 
-    return _legacy_result_from_ex_bundle(
+    result = _legacy_result_from_ex_bundle(
         ExtractedInvoiceBundle(
             invoices=[
                 ExtractedInvoice(
@@ -105,6 +109,12 @@ def _fake_clean_bundle(*_a, **_k):
             ]
         )
     )
+    # WS-1.5: simulate categorize_node filling in account_code on the line
+    # so the blank_account_code flag does not fire on the post-extract state.
+    for inv in result.normalized:
+        for ln in inv.lines:
+            ln.account_code = "6100"
+    return result
 
 
 def _force_clarify(state, reasons, *, model):
@@ -341,6 +351,11 @@ def _driver_state(channel: str) -> dict:
         "client_id": "drv-client",
         "region": "SINGAPORE",
         "base_currency": "SGD",
+        # WS-1.5: pre-set tax_jurisdiction so the jurisdiction_unresolved
+        # flag does not fire by default. resolve_jurisdiction_node would
+        # normally set this from `region` but the test driver runs against
+        # a stub workflow that may not invoke it.
+        nodes.TAX_JURISDICTION_KEY: "SINGAPORE",
         nodes.ARTIFACT_NAME_KEY: nodes.ARTIFACT_NAME_FMT.format(file_id="F1"),
     }
 

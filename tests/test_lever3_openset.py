@@ -60,6 +60,9 @@ def _state(invoices=None, *, doc_type="invoice", confidence=0.95,
         nodes.NORMALIZED_KEY: inv_dicts,
         nodes.DOC_TYPE_KEY: doc_type,
         nodes.CLASSIFY_CONFIDENCE_KEY: confidence,
+        # WS-1.5: pre-set tax_jurisdiction so the jurisdiction_unresolved
+        # flag does NOT fire by default.
+        nodes.TAX_JURISDICTION_KEY: "SINGAPORE",
     }
     if processable is not None:
         state[CLASSIFY_PROCESSABLE_KEY] = processable

@@ -45,7 +45,8 @@ def _clean_invoice(**overrides) -> NormalizedInvoice:
         doc_total=109.0,
         reconciled=True,
         our_gst_registered=True,
-        lines=[InvoiceLine(description="Goods", net_amount=100.0, gst_amount=9.0)],
+        lines=[InvoiceLine(description="Goods", net_amount=100.0, gst_amount=9.0,
+                            account_code="6100")],
     )
     defaults.update(overrides)
     return NormalizedInvoice(**defaults)
@@ -57,6 +58,9 @@ def _state(invoices, *, doc_type="invoice", confidence=0.95, **extra) -> dict:
         nodes.NORMALIZED_KEY: [nodes._inv_to_dict(i) for i in invoices],
         nodes.DOC_TYPE_KEY: doc_type,
         nodes.CLASSIFY_CONFIDENCE_KEY: confidence,
+        # WS-1.5: pre-set tax_jurisdiction so the jurisdiction_unresolved
+        # flag does NOT fire by default.
+        nodes.TAX_JURISDICTION_KEY: "SINGAPORE",
         "op_id": "C1:F1",
         "tax_registered": True,
         "direction": "purchase",
@@ -438,8 +442,12 @@ def test_hard_signal_autofix_via_hints_proceeds_when_detect_struggle_clears():
         return {"verdict": nodes.REVIEW_VERDICT_OK}
 
     def fake_extract_returns_clean(data, mime, **kw):
-        # Re-extraction produces a fully reconciled invoice
-        return _legacy_result_from_ex_bundle(
+        # Re-extraction produces a fully reconciled invoice. The resulting
+        # line is then post-processed to carry account_code="6100" so the
+        # WS-1.5 blank_account_code flag does not fire (it would, in
+        # production, have been filled by categorize_node which this stub
+        # bypasses).
+        result = _legacy_result_from_ex_bundle(
             ExtractedInvoiceBundle(
                 invoices=[
                     ExtractedInvoice(
@@ -459,6 +467,11 @@ def test_hard_signal_autofix_via_hints_proceeds_when_detect_struggle_clears():
                 ]
             )
         )
+        # Simulate categorize_node writing the GL code onto the line.
+        for inv in result.normalized:
+            for ln in inv.lines:
+                ln.account_code = "6100"
+        return result
 
     nodes.REVIEWER_FN = fake_reviewer_hints_then_ok
     nodes.EXTRACT_INVOICE_DOCUMENT_FN = fake_extract_returns_clean

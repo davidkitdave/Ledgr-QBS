@@ -57,7 +57,8 @@ def _clean_invoice(vendor: str | None = "Acme Corp", **overrides) -> NormalizedI
         doc_total=109.0,
         reconciled=True,
         our_gst_registered=True,
-        lines=[InvoiceLine(description="Goods", net_amount=100.0, gst_amount=9.0)],
+        lines=[InvoiceLine(description="Goods", net_amount=100.0, gst_amount=9.0,
+                            account_code="6100")],
     )
     if vendor is not None:
         defaults["supplier"] = PartyInfo(name=vendor)
@@ -73,6 +74,9 @@ def _state(invoices=None, *, doc_type="other", confidence=0.6,
         nodes.NORMALIZED_KEY: inv_dicts,
         nodes.DOC_TYPE_KEY: doc_type,
         nodes.CLASSIFY_CONFIDENCE_KEY: confidence,
+        # WS-1.5: pre-set tax_jurisdiction so the jurisdiction_unresolved
+        # flag does NOT fire by default.
+        nodes.TAX_JURISDICTION_KEY: "SINGAPORE",
     }
     if familiarity is not None:
         state[nodes.FAMILIARITY_KEY] = familiarity
