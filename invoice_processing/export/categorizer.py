@@ -29,6 +29,58 @@ from .models import NormalizedInvoice, PartyInfo
 
 UNMAPPED_ACCOUNT_CODE = "UNMAPPED"
 
+# Logprob gate thresholds (WS-3.3, ADR-0025). avg_logprobs closer to 0 = more confident.
+# When logprobs are missing we flag conservatively — safer to ask a human than miscode.
+COA_MIN_AVG_LOGPROBS = -0.5
+COA_MIN_LOGPROB_MARGIN = 0.3
+
+
+def evaluate_coa_logprob_gate(
+    avg_logprobs: Optional[float],
+    logprob_margin: Optional[float],
+) -> tuple[bool, str]:
+    """Return (should_flag, reason) from calibrated logprob signals.
+
+    Flags when avg_logprobs is low, top-1→top-2 margin is narrow, or data is missing.
+    Self-reported JSON ``confidence`` is advisory only — not used here.
+    """
+    if avg_logprobs is None or logprob_margin is None:
+        return True, "missing_logprobs"
+    reasons: list[str] = []
+    if avg_logprobs < COA_MIN_AVG_LOGPROBS:
+        reasons.append("low_avg_logprobs")
+    if logprob_margin < COA_MIN_LOGPROB_MARGIN:
+        reasons.append("narrow_margin")
+    if reasons:
+        return True, ";".join(reasons)
+    return False, ""
+
+
+def extract_logprob_metrics(resp) -> tuple[Optional[float], Optional[float]]:
+    """Parse avg_logprobs and minimum top-1→top-2 margin from a Gemini response."""
+    candidates = getattr(resp, "candidates", None) or []
+    if not candidates:
+        return None, None
+    cand = candidates[0]
+    avg = getattr(cand, "avg_logprobs", None)
+    lpr = getattr(cand, "logprobs_result", None)
+    top_steps = getattr(lpr, "top_candidates", None) if lpr else None
+    margins: list[float] = []
+    for step in top_steps or []:
+        raw = getattr(step, "candidates", None) or []
+        lps = sorted(
+            (
+                c.log_probability
+                for c in raw
+                if getattr(c, "log_probability", None) is not None
+            ),
+            reverse=True,
+        )
+        if len(lps) >= 2:
+            margins.append(lps[0] - lps[1])
+    margin = min(margins) if margins else None
+    return avg, margin
+
 
 @dataclass
 class AccountResolution:
@@ -269,11 +321,18 @@ def _llm_match_lines(
                 response_mime_type="application/json",
                 response_schema=response_schema,
                 temperature=0,
+                response_logprobs=True,
+                logprobs=5,
             ),
         )
         data = json.loads(resp.text or "{}")
     except Exception:
         return {}
+
+    avg_logprobs, logprob_margin = extract_logprob_metrics(resp)
+    logprob_flagged, logprob_flag_reason = evaluate_coa_logprob_gate(
+        avg_logprobs, logprob_margin
+    )
 
     out: dict[int, dict] = {}
     for item in data.get("results", []) or []:
@@ -284,6 +343,11 @@ def _llm_match_lines(
         key = item.get("account_code")
         reason = item.get("reasoning") or item.get("reason") or ""
         conf = float(item.get("confidence") or 0.0)
+        base_metrics = {
+            "avg_logprobs": avg_logprobs,
+            "logprob_margin": logprob_margin,
+            "logprob_flag_reason": logprob_flag_reason,
+        }
         if key in (None, UNMAPPED_ACCOUNT_CODE):
             out[idx] = {
                 "account_code": None,
@@ -291,6 +355,7 @@ def _llm_match_lines(
                 "confidence": conf,
                 "flagged": True,
                 "alternative_codes": item.get("alternative_codes") or [],
+                **base_metrics,
             }
             continue
         if key not in valid_keys:
@@ -299,8 +364,9 @@ def _llm_match_lines(
             "account_code": key,
             "reason": reason,
             "confidence": conf,
-            "flagged": key is None or conf < 0.6,
+            "flagged": key is None or logprob_flagged,
             "alternative_codes": item.get("alternative_codes") or [],
+            **base_metrics,
         }
     return out
 
@@ -367,7 +433,7 @@ def categorize_invoice(
                 continue
             key = m.get("account_code")
             conf = m.get("confidence", 0.0)
-            flagged = m.get("flagged", conf < 0.6)
+            flagged = m.get("flagged", True)
             if key:
                 acc = by_key.get(key)
                 resolutions[idx] = AccountResolution(

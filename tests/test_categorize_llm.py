@@ -4,8 +4,8 @@ All tests are fully hermetic — no network, no Gemini API.
 The genai call inside _llm_match_lines is stubbed via monkeypatch.
 
 Coverage:
-  a. LLM result fills account_code, source="llm_coa", flagged=False (conf>=0.6)
-  b. confidence < 0.6 → flagged=True (surfaces at approval gate)
+  a. LLM result fills account_code, source="llm_coa", flagged=False (good logprobs)
+  b. WS-3.3 logprob gate — low avgLogprobs / narrow margin → flagged=True
   c. LLM returns a key NOT in the COA → rejected, line stays unresolved+flagged
   d. LLM raises / returns empty/malformed → {} returned, no crash, no miscoding
   e. Deterministic short-circuit: all lines resolved → LLM seam never called
@@ -49,13 +49,46 @@ def _inv_unresolved(description: str = "Mystery Service") -> NormalizedInvoice:
     )
 
 
-def _make_fake_client(text: str):
+def _make_logprob_response(
+    text: str,
+    *,
+    avg_logprobs: float = -0.1,
+    margin: float = 1.5,
+):
+    """Build a fake Gemini response with avgLogprobs + top-1→top-2 margin."""
+    lp1 = -0.2
+    lp2 = lp1 - margin
+    top_step = SimpleNamespace(
+        candidates=[
+            SimpleNamespace(log_probability=lp1, token="6001"),
+            SimpleNamespace(log_probability=lp2, token="6200"),
+        ]
+    )
+    candidate = SimpleNamespace(
+        avg_logprobs=avg_logprobs,
+        logprobs_result=SimpleNamespace(top_candidates=[top_step]),
+        text=text,
+    )
+    return SimpleNamespace(candidates=[candidate], text=text)
+
+
+def _make_fake_client(
+    text: str,
+    *,
+    avg_logprobs: float = -0.1,
+    margin: float = 1.5,
+    include_logprobs: bool = True,
+):
     """Return a fake genai client whose generate_content returns resp.text=text."""
-    resp = SimpleNamespace(text=text)
+    if include_logprobs:
+        resp = _make_logprob_response(text, avg_logprobs=avg_logprobs, margin=margin)
+    else:
+        resp = SimpleNamespace(text=text, candidates=[])
     model_ns = SimpleNamespace(generate_content=lambda **kwargs: resp)
-    # also accept positional model arg + contents kwarg
+
     def gen_content(model=None, contents=None, config=None, **_kw):
         return resp
+
     model_ns.generate_content = gen_content
     return SimpleNamespace(models=model_ns)
 
@@ -127,7 +160,14 @@ def _patch_genai(monkeypatch, canned_text: str):
 # Use a seam-based approach: monkeypatch make_client inside categorizer's scope
 # --------------------------------------------------------------------------- #
 
-def _stub_make_client(monkeypatch, canned_text: str):
+def _stub_make_client(
+    monkeypatch,
+    canned_text: str,
+    *,
+    avg_logprobs: float = -0.1,
+    margin: float = 1.5,
+    include_logprobs: bool = True,
+):
     """
     _llm_match_lines does `from ..shared_libraries.genai_client import make_client`
     at call time (inside the function body). We patch the source module attribute
@@ -135,13 +175,18 @@ def _stub_make_client(monkeypatch, canned_text: str):
     """
     import invoice_processing.shared_libraries.genai_client as gc
 
-    fake_client = _make_fake_client(canned_text)
+    fake_client = _make_fake_client(
+        canned_text,
+        avg_logprobs=avg_logprobs,
+        margin=margin,
+        include_logprobs=include_logprobs,
+    )
     monkeypatch.setattr(gc, "make_client", lambda *a, **kw: fake_client)
     return fake_client
 
 
 # --------------------------------------------------------------------------- #
-# Test (a): LLM fills account_code, source=llm_coa, flagged=False at conf>=0.6
+# Test (a): LLM fills account_code, source=llm_coa, flagged=False with good logprobs
 # --------------------------------------------------------------------------- #
 
 def test_llm_fills_account_code_high_confidence(monkeypatch):
@@ -164,7 +209,7 @@ def test_llm_fills_account_code_high_confidence(monkeypatch):
 
 
 def test_llm_source_and_flagged_high_confidence(monkeypatch):
-    """Directly test _llm_match_lines returns a valid match at conf>=0.6."""
+    """Directly test _llm_match_lines returns a valid match with good logprobs."""
     canned = _canned_result(0, "6001", 0.85)
     _stub_make_client(monkeypatch, canned)
 
@@ -178,51 +223,79 @@ def test_llm_source_and_flagged_high_confidence(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# Test (b): confidence < 0.6 → flagged=True
+# Test (b): WS-3.3 logprob gate — self-reported confidence is advisory only
 # --------------------------------------------------------------------------- #
 
-def test_llm_low_confidence_sets_flagged(monkeypatch):
-    canned = _canned_result(0, "6001", 0.45)
-    _stub_make_client(monkeypatch, canned)
+def test_llm_low_self_reported_confidence_good_logprobs_not_flagged(monkeypatch):
+    """Self-reported confidence 0.3 but strong logprobs → not flagged."""
+    canned = _canned_result(0, "6001", 0.3)
+    _stub_make_client(monkeypatch, canned, avg_logprobs=-0.1, margin=1.5)
 
-    inv = _inv_unresolved()
-    result = categorize_invoice(
-        inv,
-        coa=SAMPLE_COA,
-        category_mapping={},
-        entity_memory=[],
-        use_llm=True,
-    )
-
-    # account_code is still set (provisional), but the invoice line carries the
-    # low-confidence result which categorize_invoice marks flagged=True in the
-    # AccountResolution. The line's account_code is still written (it goes to
-    # HITL for review). We verify the resolution was flagged by re-running
-    # _llm_match_lines directly and checking confidence.
     unresolved = [(0, "Mystery Service", "Unknown Vendor XYZ")]
     match = _llm_match_lines(unresolved, SAMPLE_COA, model=None)
-    assert match[0]["confidence"] == 0.45
-
-    # And categorize_invoice writes flagged resolution: account_code is set but
-    # the AccountResolution had flagged=True.  The invoice line gets account_code
-    # anyway (provisional pick for HITL review).
-    line = result.lines[0]
-    # account_code written even at low confidence (human reviews at HITL gate)
-    assert line.account_code  # not empty — provisional pick
+    assert match[0]["confidence"] == 0.3
+    assert match[0]["flagged"] is False
 
 
-def test_llm_low_confidence_resolution_flagged(monkeypatch):
-    """Verify the AccountResolution is flagged when confidence < 0.6."""
-
-    canned = _canned_result(0, "6001", 0.45)
-    _stub_make_client(monkeypatch, canned)
+def test_llm_high_self_reported_confidence_bad_logprobs_flagged(monkeypatch):
+    """Self-reported confidence 0.99 but weak logprobs → flagged."""
+    canned = _canned_result(0, "6001", 0.99)
+    _stub_make_client(monkeypatch, canned, avg_logprobs=-2.0, margin=1.5)
 
     unresolved = [(0, "Mystery Service", "Unknown Vendor XYZ")]
-    matches = _llm_match_lines(unresolved, SAMPLE_COA, model=None)
-    conf = matches[0]["confidence"]
-    # Reproduce the flagging logic from categorize_invoice
-    flagged = conf < 0.6
-    assert flagged is True
+    match = _llm_match_lines(unresolved, SAMPLE_COA, model=None)
+    assert match[0]["flagged"] is True
+    assert "low_avg_logprobs" in match[0]["logprob_flag_reason"]
+
+
+def test_llm_narrow_logprob_margin_flagged(monkeypatch):
+    """Ambiguous top-1 vs top-2 margin → flagged (ambiguous-two-accounts case)."""
+    canned = _canned_result(0, "6001", 0.95)
+    _stub_make_client(monkeypatch, canned, avg_logprobs=-0.1, margin=0.05)
+
+    unresolved = [(0, "Bank transaction fee", "Generic Bank")]
+    match = _llm_match_lines(unresolved, SAMPLE_COA, model=None)
+    assert match[0]["flagged"] is True
+    assert "narrow_margin" in match[0]["logprob_flag_reason"]
+
+
+def test_llm_missing_logprobs_flagged(monkeypatch):
+    """Missing logprob data → conservative flag."""
+    canned = _canned_result(0, "6001", 0.95)
+    import invoice_processing.shared_libraries.genai_client as gc
+
+    resp = SimpleNamespace(text=canned, candidates=[])
+    fake_client = SimpleNamespace(
+        models=SimpleNamespace(generate_content=lambda **kw: resp)
+    )
+    monkeypatch.setattr(gc, "make_client", lambda *a, **kw: fake_client)
+
+    unresolved = [(0, "Mystery Service", "Unknown Vendor XYZ")]
+    match = _llm_match_lines(unresolved, SAMPLE_COA, model=None)
+    assert match[0]["flagged"] is True
+    assert "missing_logprobs" in match[0]["logprob_flag_reason"]
+
+
+def test_generate_content_requests_logprobs(monkeypatch):
+    """GenerateContentConfig must request response_logprobs and logprobs=5."""
+    import invoice_processing.shared_libraries.genai_client as gc
+
+    captured_configs: list[object] = []
+
+    def fake_generate(model=None, contents=None, config=None, **_kw):
+        captured_configs.append(config)
+        return _make_logprob_response(json.dumps({"results": []}))
+
+    fake_client = SimpleNamespace(models=SimpleNamespace(generate_content=fake_generate))
+    monkeypatch.setattr(gc, "make_client", lambda *a, **kw: fake_client)
+
+    unresolved = [(0, "Mystery", "Vendor")]
+    _llm_match_lines(unresolved, SAMPLE_COA, model=None)
+
+    assert captured_configs
+    config = captured_configs[0]
+    assert config.response_logprobs is True
+    assert config.logprobs == 5
 
 
 # --------------------------------------------------------------------------- #
