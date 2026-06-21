@@ -136,6 +136,11 @@ class NormalizedInvoice:
     # to apply the credit-note sign-flip (negative amounts on export).
     document_kind: Optional[str] = None  # classify doc_type: invoice/credit_note/receipt/... (NOT direction)
 
+    # Provenance from extraction (WS-5.4): page span within the source PDF and
+    # the Slack file id for this processing run (not used in dedupe keys).
+    page_range: Optional[tuple[int, int]] = None
+    source_file_id: Optional[str] = None
+
     @property
     def counterparty(self) -> PartyInfo:
         """The other party: supplier for purchases, customer for sales."""

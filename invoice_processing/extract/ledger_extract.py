@@ -783,6 +783,8 @@ def extracted_document_to_normalized(
         append_direction_review_note(inv, effective_direction)
     inv.tax_visible_on_document = doc.tax_visible_on_document
     inv.direction_reason = doc.direction_reason
+    if len(doc.page_range) >= 2:
+        inv.page_range = (int(doc.page_range[0]), int(doc.page_range[1]))
     return inv
 
 

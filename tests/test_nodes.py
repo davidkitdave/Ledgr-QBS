@@ -1894,6 +1894,43 @@ def _minimal_invoice_state(**overrides) -> dict:
     return state
 
 
+def test_consolidate_node_multi_invoice_doc_keys_include_page_range():
+    """WS-5.4 — each invoice in a multi-doc PDF gets a distinct dedupe key."""
+    from datetime import date as _date
+
+    from invoice_processing.export.models import InvoiceLine, NormalizedInvoice
+
+    inv_a = NormalizedInvoice(
+        invoice_number="INV-200",
+        invoice_date=_date(2025, 6, 1),
+        page_range=(1, 1),
+        lines=[InvoiceLine(description="A", net_amount=200.0)],
+    )
+    inv_b = NormalizedInvoice(
+        invoice_number="INV-060",
+        invoice_date=_date(2025, 6, 2),
+        page_range=(2, 2),
+        lines=[InvoiceLine(description="B", net_amount=60.0)],
+    )
+    state = _base_state(
+        **{
+            nodes.DIRECTION_KEY: "purchase",
+            nodes.NORMALIZED_KEY: [nodes._inv_to_dict(inv_a), nodes._inv_to_dict(inv_b)],
+            nodes.ROUTES_KEY: [
+                {"fy": 2025, "workbook": "Ledger_FY2025.xlsx", "sheet": "Purchase"},
+                {"fy": 2025, "workbook": "Ledger_FY2025.xlsx", "sheet": "Purchase"},
+            ],
+            "software": "qbs",
+        }
+    )
+    ctx = FakeContext(state)
+    asyncio.run(nodes.consolidate_node._func(ctx))
+
+    keys = [b["doc_key"] for b in ctx.state[nodes.LEDGER_ROWS_KEY]["batches"]]
+    assert keys == ["Purchase:INV-200:1-1", "Purchase:INV-060:2-2"]
+    assert len(set(keys)) == 2
+
+
 def test_consolidate_node_qbs_ledger_display_no_warning(caplog):
     """'QBS Ledger' display value must NOT log an 'unknown software' warning."""
     import logging

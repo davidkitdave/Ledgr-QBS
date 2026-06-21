@@ -97,6 +97,7 @@ from .normalized_invoice_codec import (
     dict_to_invoice,
     invoice_to_dict,
 )
+from .ledger_doc_identity import ledger_doc_identity
 from invoice_processing.extract.bank_statement_extractor import (
     extract_bank_statement,
     to_bank_statements,
@@ -652,8 +653,14 @@ def _apply_invoice_process_result(ctx, result: InvoiceProcessResult) -> None:
         ctx.state[BOOKING_PROPOSALS_KEY] = _guard_state_payload(
             BOOKING_PROPOSALS_KEY, result.booking_proposals
         )
+    file_id = (ctx.state.get("file_id") or "").strip()
+    normalized = list(result.normalized)
+    if file_id:
+        for inv in normalized:
+            if not inv.source_file_id:
+                inv.source_file_id = file_id
     ctx.state[NORMALIZED_KEY] = _guard_state_payload(
-        NORMALIZED_KEY, [_inv_to_dict(i) for i in result.normalized]
+        NORMALIZED_KEY, [_inv_to_dict(i) for i in normalized]
     )
 
 
@@ -2078,17 +2085,17 @@ async def approval_gate(ctx):
     )
 
 
-def _doc_key(state: dict, sheet: str, identity: str, index: int, *, period: str = "") -> str:
+def _doc_key(state: dict, sheet: str, identity: str, index: int, *, period: str = "", page_range: tuple[int, int] | None = None) -> str:
     """Content-based per-document dedupe key (re-uploading re-emits the same key).
 
     Does NOT include the Slack file id (which changes on every upload).
     Bank statements include the statement period so different months are
-    distinct; invoices use the invoice number.
+    distinct; invoices use reference + optional page_range (WS-5.4).
     """
-    ident = (identity or "").strip() or f"i{index}"
     if period:
+        ident = (identity or "").strip() or f"i{index}"
         return f"{sheet}:{ident}:{period}"
-    return f"{sheet}:{ident}"
+    return ledger_doc_identity(sheet, identity, page_range, index=index)
 
 
 @node
@@ -2177,7 +2184,13 @@ async def consolidate_node(ctx) -> Event:
                 batches.append(
                     {
                         "sheet": sheet,
-                        "doc_key": _doc_key(state, sheet, inv.invoice_number, idx),
+                        "doc_key": _doc_key(
+                            state,
+                            sheet,
+                            inv.invoice_number,
+                            idx,
+                            page_range=inv.page_range,
+                        ),
                         "rows": rows,
                     }
                 )

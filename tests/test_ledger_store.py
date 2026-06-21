@@ -2306,6 +2306,135 @@ def test_replace_true_multi_line_invoice_all_lines_replaced():
     assert "Line B" not in all_descs
 
 
+def test_redrop_multi_invoice_pdf_dedupes_all_docs():
+    """WS-5.4 — N docs from one PDF: second drop adds 0 rows (all deduped)."""
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+
+    batches = [
+        {
+            "sheet": "Purchase",
+            "doc_key": "Purchase:INV-200:1-1",
+            "rows": [
+                {"Invoice Number": "INV-200", "Description": "Doc A", "Source Amount": 200.0, "Account Code / COA": "6000"},
+            ],
+        },
+        {
+            "sheet": "Purchase",
+            "doc_key": "Purchase:INV-060:2-2",
+            "rows": [
+                {"Invoice Number": "INV-060", "Description": "Doc B", "Source Amount": 60.0, "Account Code / COA": "6001"},
+            ],
+        },
+    ]
+    result1 = store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        software="qbs", kind="invoice",
+        batches=batches,
+    )
+    assert result1["appended"] == 2
+    rows_before = store.read_rows("c1", "2026", slack, "C1")
+    assert len(rows_before) == 2
+
+    result2 = store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        software="qbs", kind="invoice",
+        batches=batches,
+    )
+    assert result2["appended"] == 0
+    assert result2["deduped"] == 2
+    rows_after = store.read_rows("c1", "2026", slack, "C1")
+    assert len(rows_after) == 2
+
+
+def _make_autocount_store_with_supplier_invoices() -> tuple["FakeSlackClient", "SlackLedgerStore"]:
+    """Seed AutoCount AP rows keyed by SupplierInvoiceNo (DocNo is always <<New>>)."""
+    from invoice_processing.export.exporters import AutoCountExporter
+
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+    exporter = AutoCountExporter()
+    cols = exporter.purchase_cols
+    row_a = {col: "" for col in cols}
+    row_a.update({
+        "DocNo": "<<New>>",
+        "DocDate": "01/06/2026",
+        "CreditorCode": "400-X0001",
+        "SupplierInvoiceNo": "SUP-10",
+        "JournalType": "PURCHASE",
+        "InclusiveTax": "F",
+        "Description": "Line A",
+        "AccNo": "6000",
+        "Amount": 100.0,
+    })
+    row_b = {col: "" for col in cols}
+    row_b.update({
+        "DocNo": "<<New>>",
+        "DocDate": "01/06/2026",
+        "CreditorCode": "400-X0001",
+        "SupplierInvoiceNo": "SUP-20",
+        "JournalType": "PURCHASE",
+        "InclusiveTax": "F",
+        "Description": "Other",
+        "AccNo": "6001",
+        "Amount": 200.0,
+    })
+    store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        software="autocount", kind="invoice",
+        batches=[
+            {"sheet": "Purchase", "doc_key": "Purchase:SUP-10:1-1", "rows": [row_a]},
+            {"sheet": "Purchase", "doc_key": "Purchase:SUP-20:2-2", "rows": [row_b]},
+        ],
+    )
+    return slack, store
+
+
+def test_replace_true_autocount_matches_supplier_invoice_no():
+    """MAP5 — replace must match SupplierInvoiceNo, not the constant DocNo."""
+    slack, store = _make_autocount_store_with_supplier_invoices()
+    from invoice_processing.export.exporters import AutoCountExporter
+
+    exporter = AutoCountExporter()
+    cols = exporter.purchase_cols
+    corrected = {col: "" for col in cols}
+    corrected.update({
+        "DocNo": "<<New>>",
+        "DocDate": "01/06/2026",
+        "CreditorCode": "400-X0001",
+        "SupplierInvoiceNo": "SUP-10",
+        "JournalType": "PURCHASE",
+        "InclusiveTax": "F",
+        "Description": "Corrected",
+        "AccNo": "6000",
+        "Amount": 999.0,
+    })
+
+    rows_before = store.read_rows("c1", "2026", slack, "C1")
+    assert len(rows_before) == 2
+
+    result = store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        software="autocount", kind="invoice",
+        replace=True,
+        batches=[{
+            "sheet": "Purchase",
+            "doc_key": "Purchase:SUP-10:1-1",
+            "rows": [corrected],
+        }],
+    )
+
+    assert result["appended"] == 1
+    counts = result.get("batch_replace_counts") or []
+    assert counts and counts[0]["replaced"] == 1
+
+    rows_after = store.read_rows("c1", "2026", slack, "C1")
+    assert len(rows_after) == 2
+    sup10_rows = [r for r in rows_after if r.get("SupplierInvoiceNo") == "SUP-10"]
+    assert len(sup10_rows) == 1
+    assert sup10_rows[0].get("Amount") == 999.0
+
+
 def test_replace_true_doc_key_in_seen_after_replace():
     """After replace=True the replaced doc_key is still in seen_doc_keys
     (the re-added key blocks accidental double-append)."""
