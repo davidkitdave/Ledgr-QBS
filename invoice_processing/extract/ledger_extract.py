@@ -4,8 +4,11 @@ Default invoice extraction path (ADR-0011): a single multimodal ``generate_conte
 with the PDF ``Part`` plus a Pydantic ``response_schema``. Matches Google's
 recommended pattern for invoice extraction.
 
-ADR-0014's two-call Capture → Book → Verify pipeline is available as opt-in via
-``LEDGR_CAPTURE_BOOK=1`` (SOA experiments only); not the default.
+Production routing (WS-5.1): invoice/receipt always use the faithful-array
+``ExtractedDocumentBundle`` path below. Legacy SOA extraction is quarantined
+behind ``LEDGR_LEGACY_SOA=1`` + ``doc_type=statement_of_account``. ADR-0014's
+Capture → Book → Verify pipeline remains opt-in via ``LEDGR_CAPTURE_BOOK=1``
+(deprecated; logs a warning when enabled).
 
 Returns a human-readable summary table plus ledger-ready lines in a single
 ``DocumentLedgerExtract``. Maps to :class:`NormalizedInvoice` via a thin adapter
@@ -459,22 +462,37 @@ class DocumentLedgerExtract(BaseModel):
 
 
 def use_understand_extract() -> bool:
-    """Drive-parity single-call Understand path (default). Set LEDGR_UNDERSTAND_EXTRACT=0 to disable."""
+    """Drive-parity single-call Understand path (production default).
+
+    Routing no longer falls back to legacy when this env is off — invoice/receipt
+    always use the understand path unless capture_book or legacy SOA quarantine
+    applies. ``LEDGR_UNDERSTAND_EXTRACT=0`` is retained for diagnostics only.
+    """
     raw = os.environ.get("LEDGR_UNDERSTAND_EXTRACT", "1").strip().lower()
     return raw not in ("0", "false", "no", "off")
 
 
 def use_capture_book_pipeline() -> bool:
-    """Opt-in Capture → Book → Verify path (ADR-0014). Off by default."""
+    """Opt-in Capture → Book → Verify path (ADR-0014). Off by default; deprecated."""
     raw = os.environ.get("LEDGR_CAPTURE_BOOK", "0").strip().lower()
     return raw in ("1", "true", "yes", "on")
 
 
+def use_legacy_soa() -> bool:
+    """Opt-in legacy DocumentRecordBundle path for SOA packages only (WS-5.1).
+
+    Quarantined behind ``LEDGR_LEGACY_SOA=1``. Regular invoices never use this
+    path regardless of other extraction env flags.
+    """
+    raw = os.environ.get("LEDGR_LEGACY_SOA", "0").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
 def should_use_legacy_extract(doc_type: str) -> bool:
-    """SOA packages stay on DocumentRecordBundle + normalizer."""
-    if not use_understand_extract() and not use_capture_book_pipeline():
-        return True
-    return doc_type.strip().lower() in ("statement_of_account",)
+    """Legacy SOA only — requires ``doc_type=statement_of_account`` and ``LEDGR_LEGACY_SOA=1``."""
+    if doc_type.strip().lower() != "statement_of_account":
+        return False
+    return use_legacy_soa()
 
 
 def _build_faithful_extract_prompt(

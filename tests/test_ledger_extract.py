@@ -13,15 +13,33 @@ from invoice_processing.extract.ledger_extract import (
     ledger_extract_to_normalized,
     should_use_legacy_extract,
     use_capture_book_pipeline,
+    use_legacy_soa,
     use_understand_extract,
     validate_extracted_document,
     validate_ledger_extract,
 )
 
 
-def test_should_use_legacy_for_soa():
+def test_should_use_legacy_soa_quarantined(monkeypatch):
+    monkeypatch.delenv("LEDGR_LEGACY_SOA", raising=False)
+    assert use_legacy_soa() is False
+    assert should_use_legacy_extract("statement_of_account") is False
+    assert should_use_legacy_extract("invoice") is False
+
+    monkeypatch.setenv("LEDGR_LEGACY_SOA", "1")
+    assert use_legacy_soa() is True
     assert should_use_legacy_extract("statement_of_account") is True
     assert should_use_legacy_extract("invoice") is False
+
+
+def test_understand_disabled_does_not_route_invoice_to_legacy(monkeypatch):
+    """WS-5.1: LEDGR_UNDERSTAND_EXTRACT=0 must not accidentally fall back to legacy."""
+    monkeypatch.setenv("LEDGR_UNDERSTAND_EXTRACT", "0")
+    monkeypatch.delenv("LEDGR_LEGACY_SOA", raising=False)
+    monkeypatch.delenv("LEDGR_CAPTURE_BOOK", raising=False)
+    assert should_use_legacy_extract("invoice") is False
+    assert should_use_legacy_extract("receipt") is False
+    assert should_use_legacy_extract("statement_of_account") is False
 
 
 def test_use_understand_extract_defaults_on(monkeypatch):

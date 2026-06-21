@@ -6,6 +6,7 @@ duplicate routing between capture→book→verify, understand-extract, and legac
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Callable, Optional
@@ -31,6 +32,8 @@ from .segmentation_gates import (
     validate_bundle_page_coverage,
 )
 from .verify import verify_extracted_invoice
+
+logger = logging.getLogger(__name__)
 
 EXTRACT_LEDGER_FN: Callable[..., ExtractedDocumentBundle] = extract_document_ledger
 EXTRACT_DOCUMENT_FN = extract_document_bundle
@@ -125,9 +128,13 @@ def process_invoice_document(
     hint: Optional[str] = None,
     model: Optional[str] = None,
 ) -> InvoiceProcessResult:
-    """Classify-routed extraction: capture→book→verify, understand, or legacy."""
+    """Single orchestrated extraction: understand (default), legacy SOA, or capture_book."""
     input_page_count = count_input_pages(data, mime_type)
     if should_use_legacy_extract(doc_type):
+        logger.warning(
+            "LEDGR_LEGACY_SOA=1: using quarantined legacy SOA extraction "
+            "(DocumentRecordBundle + normalizer)."
+        )
         bundle: DocumentRecordBundle = EXTRACT_DOCUMENT_FN(
             data, mime_type, model=model, hint=hint
         )
@@ -153,6 +160,10 @@ def process_invoice_document(
         )
 
     if use_capture_book_pipeline():
+        logger.warning(
+            "LEDGR_CAPTURE_BOOK=1: using deprecated Capture→Book→Verify path. "
+            "Prefer the default understand/faithful-array extraction."
+        )
         bundle: DocumentRecordBundle = EXTRACT_DOCUMENT_FN(
             data, mime_type, model=model, hint=hint
         )
