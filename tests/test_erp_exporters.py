@@ -14,11 +14,15 @@ from invoice_processing.export.code_resolver import (
     resolve_creditor_code,
     resolve_tax_code,
 )
+from invoice_processing.export.categorizer import UNMAPPED_ACCOUNT_CODE
 from invoice_processing.export.exporters import (
     AutoCountExporter,
+    QbsLedgerExporter,
     SqlAccountExporter,
+    XeroLedgerExporter,
     collect_export_unmapped_summary,
     get_exporter,
+    validate_export_account_code,
 )
 from invoice_processing.export.models import InvoiceLine, NormalizedInvoice, PartyInfo
 from invoice_processing.export.tax_classifier import get_tax_classifier
@@ -183,3 +187,63 @@ class TestAutoCountExportRows:
         )
         assert summary["count"] >= 1
         assert any("CreditorCode" in d.get("missing", []) for d in summary["details"])
+
+
+class TestExportCoaZeroTolerance:
+    """WS-3.2 — exported rows must never carry out-of-COA account codes."""
+
+    _COA_KEYS = {"6100", "6200", "7100"}
+
+    def test_validate_export_account_code_valid_passes(self):
+        result = validate_export_account_code("6100", coa_keys=self._COA_KEYS)
+        assert result.account_code == "6100"
+        assert result.flagged is False
+        assert result.reason is None
+
+    def test_validate_export_account_code_hallucinated_blanked_and_flagged(self):
+        result = validate_export_account_code("999-FAKE", coa_keys=self._COA_KEYS)
+        assert result.account_code == ""
+        assert result.flagged is True
+        assert result.reason is not None
+        assert "999-FAKE" in result.reason
+
+    def test_validate_export_account_code_unmapped_is_abstention(self):
+        result = validate_export_account_code(
+            UNMAPPED_ACCOUNT_CODE, coa_keys=self._COA_KEYS
+        )
+        assert result.account_code == ""
+        assert result.flagged is True
+
+    def test_qbs_exporter_valid_coa_code_passes_through(self):
+        inv = _purchase_inv(inv_date=date(2024, 6, 1))
+        inv.lines[0].account_code = "6100"
+        exporter = QbsLedgerExporter(classifier=MY_CLF)
+        exporter.configure_client_context(coa_keys=self._COA_KEYS)
+        rows = exporter.rows([inv], "purchase")
+        assert rows[0]["Account Code / COA"] == "6100"
+
+    def test_qbs_exporter_hallucinated_code_blanked_at_export(self):
+        inv = _purchase_inv(inv_date=date(2024, 6, 1))
+        inv.lines[0].account_code = "999-FAKE"
+        exporter = QbsLedgerExporter(classifier=MY_CLF)
+        exporter.configure_client_context(coa_keys=self._COA_KEYS)
+        rows = exporter.rows([inv], "purchase")
+        assert rows[0]["Account Code / COA"] == ""
+
+    def test_xero_exporter_hallucinated_code_blanked_at_export(self):
+        inv = _purchase_inv(inv_date=date(2024, 6, 1))
+        inv.lines[0].account_code = "XXX-INVALID"
+        exporter = XeroLedgerExporter(classifier=MY_CLF)
+        exporter.configure_client_context(coa_keys=self._COA_KEYS)
+        rows = exporter.rows([inv], "purchase")
+        assert rows[0]["*AccountCode"] == ""
+
+    def test_autocount_exporter_hallucinated_code_blanked_at_export(self):
+        inv = _purchase_inv(inv_date=date(2024, 6, 1))
+        inv.lines[0].account_code = "XXX-INVALID"
+        exporter = AutoCountExporter(classifier=MY_CLF)
+        exporter.configure_client_context(coa_keys=self._COA_KEYS)
+        rows = exporter.rows([inv], "purchase")
+        account_col = exporter.column_for_field("account_code", "purchase")
+        assert account_col is not None
+        assert rows[0][account_col] == ""

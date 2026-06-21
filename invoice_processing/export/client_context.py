@@ -309,6 +309,18 @@ def coa_from_state(state: dict) -> list[CoaAccount]:
     return out
 
 
+def coa_keys_from_state(state: dict) -> set[str] | None:
+    """Return the set of valid COA keys for export validation, or None if absent."""
+    try:
+        coa = coa_from_state(state)
+    except Exception:
+        return None
+    if not coa:
+        return None
+    keys = {entry.key for entry in coa if entry.key}
+    return keys or None
+
+
 def entity_memory_from_state(state: dict) -> list[EntityMemoryEntry]:
     out: list[EntityMemoryEntry] = []
     for d in state.get("entity_memory") or []:

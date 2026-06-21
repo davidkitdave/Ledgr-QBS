@@ -434,25 +434,24 @@ def test_coa_scenario(scenario: CoaScenario):
 
 @pytest.mark.skipif(not _DATA_PRESENT, reason="Local client COA not on this machine")
 def test_zero_tolerance_post_validation():
-    """An account_code outside the client COA must not pass the post-validation.
+    """An account_code outside the client COA must not pass export validation.
 
-    The COA resolution is supposed to null out hallucinated keys
-    (categorizer.py:265-266). This test asserts the invariant: any
-    account_code not in the COA is force-blanked, so the exported
-    workbook never has a code that doesn't exist in the client's company.
+    WS-3.2 asserts zero-tolerance at the export boundary: any code not in the
+    client's COA is force-blanked before rows are written to the workbook.
     """
+    from invoice_processing.export.exporters import validate_export_account_code
+
     coa = _load_local_coa()
-    coa_codes = {c.code for c in coa if c.code}
-    # Simulate a hallucinated key the LLM might emit.
+    coa_keys = {c.key for c in coa if c.key}
     hallucinated = "999-FAKE-CODE"
-    assert hallucinated not in coa_codes, (
+    assert hallucinated not in coa_keys, (
         "Test invariant: hallucinated code must NOT be in the client COA."
     )
-    # The categorizer's post-validation (line 265-266) should null it.
-    # We test the invariant by simulating the same logic the categorizer
-    # would apply: if the code is not in coa_codes, blank it.
-    safe_code = hallucinated if hallucinated in coa_codes else None
-    assert safe_code is None, (
-        f"Post-validation must null out codes not in the client COA. "
-        f"Got {safe_code!r} for hallucinated input {hallucinated!r}."
+    result = validate_export_account_code(hallucinated, coa_keys=coa_keys)
+    assert result.account_code == "", (
+        f"Export validation must blank codes not in the client COA. "
+        f"Got {result.account_code!r} for hallucinated input {hallucinated!r}."
     )
+    assert result.flagged is True
+    assert result.reason is not None
+    assert hallucinated in result.reason

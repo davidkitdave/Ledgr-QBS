@@ -50,6 +50,7 @@ from invoice_processing.export.categorizer import categorize_invoice
 from invoice_processing.export.client_context import (
     category_mapping_from_state,
     coa_from_state,
+    coa_keys_from_state,
     entity_memory_from_state,
     tax_codes_from_state,
 )
@@ -1899,6 +1900,7 @@ def _preview_export_unmapped(state: dict) -> dict:
         exporter.configure_client_context(
             tax_codes=tax_codes_from_state(state),
             entity_memory=entity_memory_from_state(state),
+            coa_keys=coa_keys_from_state(state),
         )
 
     direction = state.get(DIRECTION_KEY) or "purchase"
@@ -2120,6 +2122,7 @@ async def consolidate_node(ctx) -> Event:
             exporter.configure_client_context(
                 tax_codes=tax_codes_from_state(state),
                 entity_memory=entity_memory_from_state(state),
+                coa_keys=coa_keys_from_state(state),
             )
         invoices = _normalized_from_state(state)
         for idx, (inv, route) in enumerate(zip(invoices, routes)):

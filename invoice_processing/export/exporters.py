@@ -16,6 +16,7 @@ row mapper.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -24,6 +25,7 @@ import yaml
 from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
 
+from .categorizer import UNMAPPED_ACCOUNT_CODE
 from .code_resolver import (
     resolve_creditor_code,
     resolve_rate_for_line,
@@ -46,6 +48,39 @@ def _fmt_date(d) -> str:
 
 def _num(x: Optional[float]) -> Optional[float]:
     return None if x is None else round(float(x), 2)
+
+
+@dataclass(frozen=True)
+class ExportAccountCodeValidation:
+    """Result of zero-tolerance COA validation at the export boundary."""
+
+    account_code: str
+    flagged: bool
+    reason: str | None = None
+
+
+def validate_export_account_code(
+    account_code: str | None,
+    *,
+    coa_keys: set[str],
+) -> ExportAccountCodeValidation:
+    """Blank and flag account codes that are not in the client's COA key set.
+
+    ``UNMAPPED`` is treated as abstention (blank + flagged). Empty input is
+    left blank without a not-in-COA flag. This is the last-line defense before
+    rows are written to the workbook — enum-constraint and categorizer
+    post-validation may already have nulled bad codes upstream.
+    """
+    code = (account_code or "").strip()
+    if not code:
+        return ExportAccountCodeValidation(account_code="", flagged=False)
+    if code == UNMAPPED_ACCOUNT_CODE or code not in coa_keys:
+        return ExportAccountCodeValidation(
+            account_code="",
+            flagged=True,
+            reason=f"account_code_not_in_coa: {code}",
+        )
+    return ExportAccountCodeValidation(account_code=code, flagged=False)
 
 
 def _doc_sign(inv: NormalizedInvoice) -> int:
@@ -120,6 +155,27 @@ class LedgerExporter:
 
     def __init__(self, classifier: Optional[TaxClassifier] = None):
         self.clf = classifier or TaxClassifier()
+        self._coa_keys: set[str] | None = None
+
+    def configure_client_context(
+        self,
+        *,
+        tax_codes: list[dict] | dict[str, str] | None = None,
+        entity_memory: list[EntityMemoryEntry] | None = None,
+        coa_keys: set[str] | None = None,
+    ) -> None:
+        """Attach client COA keys for zero-tolerance export validation."""
+        self._coa_keys = coa_keys
+
+    def _sanitize_row_account_code(self, row: dict, doc_type: str) -> dict:
+        if not self._coa_keys:
+            return row
+        col = self.column_for_field("account_code", doc_type)
+        if not col:
+            return row
+        validated = validate_export_account_code(row.get(col, ""), coa_keys=self._coa_keys)
+        row[col] = validated.account_code
+        return row
 
     def required_fields(self, doc_type: str) -> list[str]:
         """Column names that must be non-empty in every exported row for this
@@ -166,7 +222,7 @@ class LedgerExporter:
         out = []
         for inv in invoices:
             for line in inv.lines:
-                out.append(builder(inv, line))
+                out.append(self._sanitize_row_account_code(builder(inv, line), doc_type))
         return out
 
     def write_workbook(
@@ -419,7 +475,13 @@ class ProfileLedgerExporter(LedgerExporter):
         *,
         tax_codes: list[dict] | dict[str, str] | None = None,
         entity_memory: list[EntityMemoryEntry] | None = None,
+        coa_keys: set[str] | None = None,
     ) -> None:
+        super().configure_client_context(
+            tax_codes=tax_codes,
+            entity_memory=entity_memory,
+            coa_keys=coa_keys,
+        )
         self._client_tax_codes = tax_codes
         self._entity_memory = list(entity_memory or [])
 
