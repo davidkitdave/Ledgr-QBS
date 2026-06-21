@@ -1179,6 +1179,44 @@ def _build_batch_aggregate_blocks(
         if preview_blocks
         else [{"type": "section", "text": {"type": "mrkdwn", "text": summary}}]
     )
+
+    # AR2 / WS-1.3 — render the per-doc confident note + import-readiness
+    # checklist on the batch-aggregate path too. The single-file path
+    # (_post_delivery_card) already does this; the multi-file drop is the
+    # COMMON path for the user, and previously showed neither a reconcile
+    # total nor a readiness note (the batch cards were "blind"). Iterate
+    # deferred_items in the order the user dropped them and append a
+    # confident_note_block per item that has one. Errors are non-fatal —
+    # the cosmetic notes never break delivery.
+    for item in deferred_items:
+        item_payload = item.get("payload") or {}
+        item_doc_type = str(item_payload.get("doc_type") or "").strip().lower()
+        item_software = str(item_payload.get("software") or "")
+        if not item_payload:
+            continue
+        try:
+            if item_doc_type in ("expense_claim", "other") and item_payload.get("delivered"):
+                free_type = item_payload.get("free_type") or None
+                note = nodes.compose_confident_note(
+                    item_payload, doc_type=item_doc_type, free_type=free_type,
+                )
+                if note:
+                    blocks.append(confident_note_block(note))
+            elif item_doc_type not in ("expense_claim", "other"):
+                from invoice_processing.export.exporters import (
+                    normalize_software_key as _nsk,
+                )
+                if _nsk(item_software) in ("autocount", "sql_account"):
+                    rnote = nodes.format_import_readiness_note(
+                        item_payload.get("import_readiness"),
+                    )
+                    if rnote:
+                        blocks.append(confident_note_block(rnote))
+        except Exception:  # noqa: BLE001 — notes are cosmetic
+            logger.warning(
+                "batch per-item note build failed (non-fatal)", exc_info=True,
+            )
+
     return summary, blocks
 
 

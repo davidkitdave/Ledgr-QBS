@@ -7029,6 +7029,94 @@ def test_batch_aggregate_n_docs_counts_documents_not_batches():
     assert "2 lines" in summary, f"expected 2 lines, got: {summary!r}"
 
 
+def test_batch_aggregate_includes_per_doc_confident_notes(monkeypatch):
+    """WS-1.3 / AR2 regression.
+
+    The multi-file drop path is the COMMON case. Before WS-1.3, the batch
+    aggregate card showed neither the confident note (with reconcile total)
+    nor the AutoCount/SQL import-readiness checklist. After the fix, each
+    deferred item that has a confident note or readiness payload contributes
+    its own ``confident_note_block`` to the returned blocks.
+    """
+    from accounting_agents.slack_runner import _build_batch_aggregate_blocks
+
+    monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
+    from app import native_blocks_compat as _nbc
+    _nbc._PROBE_CACHE.pop("C-test", None)
+
+    deferred = [
+        # Item 1: confident-note eligible (delivered=True, doc_type=other).
+        # Software "qbs" matches the normalize_software_key alias map.
+        {
+            "payload": {
+                "fy": "2026", "software": "qbs", "kind": "other",
+                "doc_type": "other", "delivered": True,
+                "client_name": "Acme Client",
+                "batches": [{"sheet": "Purchase",
+                             "rows": [{"Sub Total": 240.0,
+                                       "Account Code / COA": "6100",
+                                       "Currency": "MYR"}]}],
+                "doc_total": 240.0, "currency": "MYR",
+            },
+            "batches": [{"sheet": "Purchase",
+                         "rows": [{"Sub Total": 240.0,
+                                   "Account Code / COA": "6100",
+                                   "Currency": "MYR"}]}],
+            "workbook_name": "Ledger_FY2026.xlsx",
+        },
+        # Item 2: import-readiness eligible (AutoCount, doc_type=invoice).
+        # Uses the real collect_import_readiness schema (tax_codes / party_codes
+        # / account_codes), not the legacy checklist placeholders.
+        {
+            "payload": {
+                "fy": "2026", "software": "AutoCount", "kind": "invoice",
+                "doc_type": "invoice",
+                "client_name": "Acme Client",
+                "batches": [{"sheet": "AP Invoice",
+                             "rows": [{"Amount": 100.0, "AccNo": "510-100"}]}],
+                "import_readiness": {
+                    "software": "AutoCount",
+                    "tax_codes": ["SV-6"],
+                    "party_codes": ["400-X0001"],
+                    "account_codes": ["510-100"],
+                    "unmapped": {"count": 0},
+                },
+            },
+            "batches": [{"sheet": "AP Invoice",
+                         "rows": [{"Amount": 100.0, "AccNo": "510-100"}]}],
+            "workbook_name": "Ledger_FY2026.xlsx",
+        },
+    ]
+
+    _, blocks = _build_batch_aggregate_blocks(deferred, "C-test")
+    # The returned blocks must include the per-doc confident note (reconciles to
+    # 240 / MYR / coded to 6100) AND the import-readiness checklist. Notes
+    # render as ``context`` blocks (per confident_note_block in app/blocks.py).
+    all_texts: list[str] = []
+    for b in blocks:
+        if b.get("type") == "section" and isinstance(b.get("text"), dict):
+            all_texts.append(b["text"].get("text", ""))
+        elif b.get("type") == "context":
+            for el in b.get("elements", []):
+                if isinstance(el, dict) and el.get("type") == "mrkdwn":
+                    all_texts.append(el.get("text", ""))
+    all_text = " ".join(all_texts)
+    assert "240" in all_text, (
+        f"Batch must include the per-doc reconcile total in a confident note. "
+        f"Got: {all_texts!r}"
+    )
+    assert "MYR" in all_text, (
+        f"Batch must include the per-doc currency. Got: {all_texts!r}"
+    )
+    # AutoCount import-readiness renders as:
+    #   "AutoCount import — needs these codes to exist in your company: tax SV-6
+    #    · creditors/debtors 400-X0001 · accounts 510-100. ..."
+    assert "AutoCount import" in all_text and "510-100" in all_text, (
+        f"Batch must include the AutoCount import-readiness checklist. "
+        f"Got: {all_texts!r}"
+    )
+
+
 # =========================================================================== #
 # Phase 3C — summary table wired into HITL review/approval cards
 # =========================================================================== #
