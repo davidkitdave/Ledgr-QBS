@@ -11,11 +11,7 @@ import os
 import re
 from typing import Any, Optional
 
-from ..export.line_grouping import (
-    apply_line_grouping_to_lines,
-    record_matches_telco_markers,
-    telco_grouped_totals,
-)
+from ..export.line_grouping import apply_line_grouping_to_lines
 from ..export.models import NormalizedInvoice
 from .document_record import DocumentRecord, DocumentRecordBundle, LabeledField
 from .record_merge import merge_document_records
@@ -49,6 +45,35 @@ _KNOWN_ISO = frozenset({
 })
 _CLAIM_REF_PATTERN = re.compile(r"\b([A-Z]{2,5}-\d{2}-\d{2,4})\b", re.I)
 _MAX_LINE_SUM_FALLBACK = 25
+_GST_BUCKET_RE = re.compile(
+    r"GST\s*@\s*(\d+(?:\.\d+)?)\s*%\s*on\s*\$?\s*([\d,]+\.?\d*)",
+    re.I,
+)
+_DEFAULT_TELCO_MARKERS = (
+    "telco",
+    "mobile pte",
+    "telecommunications",
+    "broadband",
+    "m1 ",
+    "simba",
+)
+
+
+def record_matches_telco_markers(
+    record: DocumentRecord,
+    markers: tuple[str, ...] = _DEFAULT_TELCO_MARKERS,
+) -> bool:
+    """True when capture text or GST bucket fields look like a telco/utility bill."""
+    parts = [record.notes or ""]
+    parts.extend(f"{f.label} {f.value}" for f in record.labeled_fields)
+    parts.extend((line.description or "") for line in record.line_items[:8])
+    blob = " ".join(parts).lower()
+    if any(m in blob for m in markers):
+        return True
+    return any(
+        _GST_BUCKET_RE.search(f.label or "") or _GST_BUCKET_RE.search(f.value or "")
+        for f in record.labeled_fields
+    )
 
 
 def slim_document_record_for_state(record: DocumentRecord) -> dict:
@@ -355,19 +380,7 @@ def _record_to_extracted(
     if len(lines) == 1 and gst_total is not None and all(ln.gst_amount is None for ln in lines):
         lines[0].gst_amount = gst_total
 
-    pre_group_count = len(lines)
     lines = apply_line_grouping_to_lines(record, lines, erp_profile)
-    if len(lines) != pre_group_count and record_matches_telco_markers(record):
-        subtotal, gst_total, total = telco_grouped_totals(record, lines)
-        reconcile(
-            ExtractedInvoice(
-                doc_type="invoice",
-                lines=lines,
-                subtotal=subtotal,
-                gst_total=gst_total,
-                total=total,
-            )
-        )
 
     fx_rate = None
     fx_text = _find_field(record.labeled_fields, "Exchange Rate", "FX Rate", "Rate")

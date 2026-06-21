@@ -1,9 +1,8 @@
-"""M1 verbatim-by-default line grouping (WS-2.6)."""
+"""M1 verbatim-by-default line grouping (WS-2.6 / WS-4.1)."""
 
 from __future__ import annotations
 
 from invoice_processing.export.exporters import _load_erp_profile
-from invoice_processing.export.line_grouping import telco_gst_bucket_lines
 from invoice_processing.extract.document_normalizer import normalize_document_record
 from invoice_processing.extract.ledger_extract import (
     ExtractedDocument,
@@ -25,8 +24,8 @@ def test_m1_verbatim_default_telco_keeps_all_capture_lines():
     assert len(inv.lines) == 300
 
 
-def test_m1_erp_profile_declares_telco_grouping():
-    """Telco SR/ZR collapse runs only when the ERP profile declares it."""
+def test_m1_erp_profile_keeps_telco_lines_verbatim():
+    """ERP profile no longer collapses telco capture to fabricated SR/ZR buckets (WS-4.1)."""
     profile = _load_erp_profile("autocount.yaml")
     inv = normalize_document_record(
         _telco_bill_a_capture(),
@@ -35,12 +34,8 @@ def test_m1_erp_profile_declares_telco_grouping():
         mapper_version="enhanced",
         erp_profile=profile,
     )
-    assert len(inv.lines) == 2
-    assert inv.lines[0].net_amount == 1164.42
-    assert inv.lines[0].gst_amount == 104.80
-    assert inv.lines[1].net_amount == 58.93
-    assert inv.doc_total == 1328.15
-    assert inv.reconciled is True
+    assert len(inv.lines) == 300
+    assert inv.lines[0].net_amount == 52.0
 
 
 def test_m1_multi_line_parts_invoice_stays_itemized():
@@ -123,10 +118,3 @@ def test_m1_gdex_shaped_summary_stays_faithful():
     assert len(inv.lines) == 1
     assert inv.doc_total == 75.55
     assert "Courier charges" in inv.lines[0].description
-
-
-def test_telco_gst_bucket_lines_dedupes_duplicate_buckets():
-    record = _telco_bill_a_capture()
-    lines = telco_gst_bucket_lines(record)
-    assert lines is not None
-    assert len(lines) == 2

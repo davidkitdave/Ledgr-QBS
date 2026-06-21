@@ -1,10 +1,8 @@
-"""Telco bill Phase 2 summarization — SR/ZR from GST buckets, not per-line detail."""
+"""Telco bill Phase 2 — verbatim capture lines (WS-4.1)."""
 
 from __future__ import annotations
 
 from invoice_processing.export.exporters import _load_erp_profile
-from invoice_processing.export.exporters import XeroLedgerExporter
-from invoice_processing.export.tax_classifier import TaxClassifier
 from invoice_processing.extract.document_normalizer import normalize_document_record
 from invoice_processing.extract.document_record import (
     DocumentRecord,
@@ -44,22 +42,18 @@ def _telco_bill_a_capture() -> DocumentRecord:
 
 
 class TestTelcoSummary:
-    def test_collapses_detail_to_sr_zr_lines(self):
+    def test_keeps_all_capture_lines_verbatim(self):
         inv = normalize_document_record(
             _telco_bill_a_capture(),
             direction="purchase",
             our_gst_registered=True,
             mapper_version="enhanced",
-            erp_profile=_AUTOCOUNT_PROFILE,
         )
-        assert len(inv.lines) == 2
-        assert inv.lines[0].net_amount == 1164.42
-        assert inv.lines[0].gst_amount == 104.80
-        assert inv.lines[1].net_amount == 58.93
-        assert inv.doc_total == 1328.15
-        assert inv.reconciled is True
+        assert len(inv.lines) == 300
+        assert inv.lines[0].description == "Mobile line detail 0"
+        assert inv.lines[0].net_amount == 52.0
 
-    def test_xero_export_sr_and_zr(self):
+    def test_erp_profile_does_not_collapse_telco_lines(self):
         inv = normalize_document_record(
             _telco_bill_a_capture(),
             direction="purchase",
@@ -67,14 +61,8 @@ class TestTelcoSummary:
             mapper_version="enhanced",
             erp_profile=_AUTOCOUNT_PROFILE,
         )
-        tax = TaxClassifier()
-        for line in inv.lines:
-            tax.classify_line(line, inv)
-        rows = XeroLedgerExporter(tax).rows([inv], "purchase")
-        assert [r["*TaxType"] for r in rows] == ["SR", "ZR"]
-        assert [r["TaxAmount"] for r in rows] == [104.80, 0.0]
-        assert float(rows[0]["*UnitAmount"]) == 1164.42
-        assert float(rows[1]["*UnitAmount"]) == 58.93
+        assert len(inv.lines) == 300
+        assert inv.lines[0].net_amount == 52.0
 
     def test_not_expense_reimbursement(self):
         inv = normalize_document_record(
@@ -97,7 +85,7 @@ class TestTelcoSummary:
             erp_profile=_AUTOCOUNT_PROFILE,
         )
         assert len(invoices) == 1
-        assert len(invoices[0].lines) == 2
+        assert len(invoices[0].lines) == 300
 
 
 def test_slim_document_record_for_state_strips_telco_line_items():
@@ -109,17 +97,3 @@ def test_slim_document_record_for_state_strips_telco_line_items():
     assert slim["line_items"] == []
     assert slim["tables"] == []
     assert any("GST @ 9%" in f["label"] for f in slim["labeled_fields"])
-
-
-def test_telco_dedupes_duplicate_gst_buckets():
-    from invoice_processing.export.line_grouping import telco_gst_bucket_lines
-
-    record = _telco_bill_a_capture()
-    dup_fields = list(record.labeled_fields) + [
-        LabeledField(label="GST @ 9% on $1,164.42", value="$104.80"),
-        LabeledField(label="GST @ 0% on $58.93", value="$0.00"),
-    ]
-    record.labeled_fields = dup_fields
-    lines = telco_gst_bucket_lines(record)
-    assert lines is not None
-    assert len(lines) == 2
