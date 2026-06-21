@@ -39,6 +39,7 @@ hardcoded list; that bug dropped B7/B8, see ADR-0023).
 ```bash
 pytest tests/eval/ -m eval -v                      # golden + GST + HITL (AgentEvaluator)
 pytest tests/eval/test_f_extract_direction.py -m eval   # F-cluster, offline, no LLM
+pytest tests/eval/test_g_extraction_golden.py -m eval   # G-cluster, live PDF extraction (WS-0.2)
 ```
 
 Document behaviour is also covered by `process_file_event` integration tests outside this
@@ -49,11 +50,20 @@ via `eval_config.yaml`, or by the offline F-cluster scorers in `custom_metrics.p
 `eval_config_adr0015.yaml`), and/or a `process_file_event` integration test. Do **not** add it
 as an agents-cli eval case — `_select_case_ids(lane="doc")` raises on purpose.
 
+**Adding an extraction golden case (G-cluster, WS-0.2):** add a `G<n>_...` case to
+`ledgr.evalset.json` with `_eval_assertions` in `session_input.state`, register expected
+values in `tests/eval/extraction_metrics.py` (`_G_CASE_TABLE`), and map the local PDF via
+`SCENARIO_PDF_RELATIVE` (PDF stays on `~/Desktop/LocalTest/` — never commit). Grade with
+`eval_config_extraction.yaml` custom metrics (`doc_count_score`, `extraction_totals_score`,
+`page_coverage_score`). Run `pytest tests/eval/test_g_extraction_golden.py -m eval`.
+
 ## Configs (two runners, by design)
 
 - `eval_config.yaml` — the **pytest `AgentEvaluator`** path (tool-trajectory + a
   `custom_response_quality` LLM judge).
 - `eval_config_adr0015.yaml` — the **offline F-cluster** rubric + deterministic scorers.
+- `eval_config_extraction.yaml` — the **G-cluster** extraction golden gate (WS-0.2:
+  `doc_count_score`, `extraction_totals_score`, `page_coverage_score`).
 - `eval_config_chat.yaml` — the **agents-cli** chat grade (subsequence tool-trajectory match +
   response-quality judge).
 

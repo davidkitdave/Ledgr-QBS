@@ -81,11 +81,13 @@ def main() -> None:
     # Understand extract (Gemini, may be slow) — only if classifier succeeded.
     extract_summary: dict = {"skipped": True}
     try:
-        ex = extract_ledger_file(pdf)
+        bundle = extract_ledger_file(pdf)
+        first = bundle.documents[0] if bundle.documents else None
         extract_summary = {
-            "vendor_name": ex.vendor_name,
-            "customer_name": ex.customer_name,
-            "summary_table": ex.summary_table,
+            "doc_count": len(bundle.documents),
+            "vendor_name": first.vendor if first else None,
+            "customer_name": first.buyer if first else None,
+            "skipped_pages": bundle.skipped_pages,
         }
     except Exception as exc:  # noqa: BLE001 - extraction is best-effort
         extract_summary = {"skipped": True, "reason": str(exc)}
@@ -120,12 +122,7 @@ def main() -> None:
     else:
         print(f"  vendor_name:    {extract_summary['vendor_name']!r}")
         print(f"  customer_name:  {extract_summary['customer_name']!r}")
-        if extract_summary.get("summary_table"):
-            print("  summary_table:")
-            for line in extract_summary["summary_table"][:5]:
-                print(f"    - {line}")
-            if len(extract_summary["summary_table"]) > 5:
-                print(f"    ... and {len(extract_summary['summary_table']) - 5} more")
+        print(f"  doc_count:      {extract_summary.get('doc_count', 0)}")
     print()
     drift = (
         extract_summary.get("customer_name")

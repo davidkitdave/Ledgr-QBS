@@ -1687,6 +1687,216 @@
           "expected_outcome": "per-line tax_treatment=SR with tax_flagged=false; 4.81 / 60.19 = 7.99% within 1% of MY 8% SST band; no SG 9% mismatch flag; account_code=500-020 (YAU LEE entity memory match)"
         }
       }
+    },
+
+    {
+      "eval_id": "G1_multi_invoice_doc_count",
+      "description": "WS-0.2 extraction golden — two distinct invoices in one PDF (2→1 regression guard).",
+      "session_input": {
+        "app_name": "accounting_agents",
+        "user_id": "eval_user",
+        "state": {
+          "client_name": "Test Firm MY",
+          "region": "MALAYSIA",
+          "base_currency": "MYR",
+          "tax_registered": true,
+          "_eval_assertions": {
+            "scenario_key": "multi_invoice_regression",
+            "expected_doc_count": 2,
+            "expected_outcome": "Faithful capture returns 2 documents; neither invoice silently dropped."
+          }
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "G1_multi_invoice_doc_count",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Extraction eval G1: a multi-invoice purchase PDF must yield exactly 2 logical documents after faithful capture."
+              }
+            ]
+          },
+          "final_response": null,
+          "intermediate_data": {"tool_uses": [], "intermediate_responses": []}
+        }
+      ]
+    },
+
+    {
+      "eval_id": "G2_soa_embedded_eleven",
+      "description": "WS-0.2 extraction golden — SOA package with 11 embedded invoices (skip cover).",
+      "session_input": {
+        "app_name": "accounting_agents",
+        "user_id": "eval_user",
+        "state": {
+          "client_name": "Test Firm MY",
+          "region": "MALAYSIA",
+          "base_currency": "MYR",
+          "tax_registered": true,
+          "_eval_assertions": {
+            "scenario_key": "soa_embedded_eleven",
+            "expected_doc_count": 11,
+            "expected_outcome": "SOA cover skipped; 11 embedded invoices extracted."
+          }
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "G2_soa_embedded_eleven",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Extraction eval G2: an SOA PDF with embedded invoices must yield 11 documents after skipping the summary cover page."
+              }
+            ]
+          },
+          "final_response": null,
+          "intermediate_data": {"tool_uses": [], "intermediate_responses": []}
+        }
+      ]
+    },
+
+    {
+      "eval_id": "G3_soa_skip_cover_six",
+      "description": "WS-0.2 extraction golden — SOA with six embedded invoices and known totals.",
+      "session_input": {
+        "app_name": "accounting_agents",
+        "user_id": "eval_user",
+        "state": {
+          "client_name": "Test Firm MY",
+          "region": "MALAYSIA",
+          "base_currency": "MYR",
+          "tax_registered": true,
+          "_eval_assertions": {
+            "scenario_key": "soa_skip_cover_six",
+            "expected_doc_count": 6,
+            "expected_outcome": "Six embedded invoices; per-doc grand totals reconcile within tolerance."
+          }
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "G3_soa_skip_cover_six",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Extraction eval G3: SOA package must yield 6 embedded invoices with reconciling grand totals."
+              }
+            ]
+          },
+          "final_response": null,
+          "intermediate_data": {"tool_uses": [], "intermediate_responses": []}
+        }
+      ]
+    },
+
+    {
+      "eval_id": "G4_single_summary_invoice",
+      "description": "WS-0.2 extraction golden — single summary-style invoice, faithful totals.",
+      "session_input": {
+        "app_name": "accounting_agents",
+        "user_id": "eval_user",
+        "state": {
+          "client_name": "Test Firm MY",
+          "region": "MALAYSIA",
+          "base_currency": "MYR",
+          "tax_registered": true,
+          "_eval_assertions": {
+            "scenario_key": "single_summary_invoice",
+            "expected_doc_count": 1,
+            "expected_outcome": "One document; grand total 75.55 within tolerance."
+          }
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "G4_single_summary_invoice",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Extraction eval G4: a single courier invoice PDF must yield 1 document with grand total 75.55."
+              }
+            ]
+          },
+          "final_response": null,
+          "intermediate_data": {"tool_uses": [], "intermediate_responses": []}
+        }
+      ]
+    },
+
+    {
+      "eval_id": "G5_non_english_doc",
+      "description": "WS-0.2 extraction golden — non-English doc (pending annotation).",
+      "session_input": {
+        "app_name": "accounting_agents",
+        "user_id": "eval_user",
+        "state": {
+          "client_name": "Test Firm MY",
+          "region": "MALAYSIA",
+          "base_currency": "MYR",
+          "_eval_assertions": {
+            "scenario_key": "non_english_doc",
+            "expected_doc_count": 1,
+            "pending_annotation": true,
+            "expected_outcome": "Non-English purchase doc segmented without keyword-lexicon breakage."
+          }
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "G5_non_english_doc",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Extraction eval G5: non-English purchase document — pending local annotation."
+              }
+            ]
+          },
+          "final_response": null,
+          "intermediate_data": {"tool_uses": [], "intermediate_responses": []}
+        }
+      ]
+    },
+
+    {
+      "eval_id": "G6_segmentation_stress",
+      "description": "WS-0.2 extraction golden — ≥3 invoices on one page (pending local stress doc).",
+      "session_input": {
+        "app_name": "accounting_agents",
+        "user_id": "eval_user",
+        "state": {
+          "client_name": "Test Firm MY",
+          "region": "MALAYSIA",
+          "base_currency": "MYR",
+          "_eval_assertions": {
+            "scenario_key": "segmentation_stress",
+            "expected_doc_count": 3,
+            "pending_local_doc": true,
+            "expected_outcome": "Three distinct invoices on one page must not collapse to one."
+          }
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "G6_segmentation_stress",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Extraction eval G6: segmentation stress doc — pending local PDF with ≥3 invoices on one page."
+              }
+            ]
+          },
+          "final_response": null,
+          "intermediate_data": {"tool_uses": [], "intermediate_responses": []}
+        }
+      ]
     }
 
   ]

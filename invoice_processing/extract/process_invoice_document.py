@@ -17,16 +17,16 @@ from .document_normalizer import normalize_document_bundle
 from .document_record import DocumentRecordBundle
 from .invoice_extractor import append_direction_review_note, direction_needs_review, to_normalized
 from .ledger_extract import (
-    DocumentLedgerExtract,
+    ExtractedDocumentBundle,
     extract_document_ledger,
-    ledger_extract_to_normalized,
+    extracted_document_to_normalized,
     should_use_legacy_extract,
     use_capture_book_pipeline,
-    validate_ledger_extract,
+    validate_extracted_document,
 )
 from .verify import verify_extracted_invoice
 
-EXTRACT_LEDGER_FN: Callable[..., DocumentLedgerExtract] = extract_document_ledger
+EXTRACT_LEDGER_FN: Callable[..., ExtractedDocumentBundle] = extract_document_ledger
 EXTRACT_DOCUMENT_FN = extract_document_bundle
 NORMALIZE_DOCUMENT_FN = normalize_document_bundle
 
@@ -168,7 +168,7 @@ def process_invoice_document(
             booking_proposals=proposals,
         )
 
-    extract = EXTRACT_LEDGER_FN(
+    bundle = EXTRACT_LEDGER_FN(
         data,
         mime_type,
         model=model,
@@ -176,27 +176,24 @@ def process_invoice_document(
         client_name=client_name,
         client_uen=client_uen,
     )
-    normalized = [
-        ledger_extract_to_normalized(
-            extract,
+    normalized: list[NormalizedInvoice] = []
+    for doc in bundle.documents:
+        inv = extracted_document_to_normalized(
+            doc,
             direction=direction,
             our_gst_registered=our_gst_registered,
             base_currency=base_currency,
         )
-    ]
-    ok, note = validate_ledger_extract(extract)
-    if not ok and normalized:
-        inv = normalized[0]
-        inv.reconciled = False
-        inv.reconcile_note = note
+        ok, note = validate_extracted_document(doc)
+        if not ok:
+            inv.reconciled = False
+            inv.reconcile_note = note
+        normalized.append(inv)
 
-    summary_table = [
-        {"category": row.category, "details": row.details}
-        for row in extract.summary_table
-    ]
     return InvoiceProcessResult(
         normalized=normalized,
         extraction_path="understand",
-        summary_table=summary_table,
-        ledger_extract=extract.model_dump(),
+        skipped_pages=bundle.skipped_pages,
+        document_read_notes=bundle.notes,
+        ledger_extract=bundle.model_dump(),
     )

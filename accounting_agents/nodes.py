@@ -608,7 +608,11 @@ def _resolve_direction_from_extract(
     """
     if not extract:
         return fallback
-    direction = extract.get("direction_for_client")
+    documents = extract.get("documents")
+    if isinstance(documents, list) and documents:
+        direction = documents[0].get("direction_for_client")
+    else:
+        direction = extract.get("direction_for_client")
     if direction in ("purchase", "sales", "self_referential"):
         return direction
     if direction == "unknown":
@@ -735,18 +739,31 @@ def _retry_resolve_direction_llm(ctx, extract: dict) -> str:
 
     from_party = extract.get("from_party") or {}
     to_party = extract.get("to_party") or {}
-    issuer_name = from_party.get("name") or extract.get("vendor_name")
-    issuer_uen = from_party.get("uen") or extract.get("issuer_gst_regno")
-    bill_to_name = to_party.get("name") or extract.get("customer_name")
-    bill_to_uen = to_party.get("uen")
-    doc_kind = extract.get("doc_kind") or "invoice"
-    summary_table = extract.get("summary_table") or []
-
-    summary_str = "\n".join(
-        f"- {s.get('category')}: {s.get('details')}"
-        for s in summary_table
-        if isinstance(s, dict)
-    )
+    documents = extract.get("documents") or []
+    if documents:
+        first_doc = documents[0]
+        issuer_name = first_doc.get("vendor")
+        issuer_uen = first_doc.get("vendor_tax_regno")
+        bill_to_name = first_doc.get("buyer")
+        bill_to_uen = None
+        doc_kind = first_doc.get("doc_type") or "invoice"
+        summary_str = (
+            f"- reference: {first_doc.get('reference')}\n"
+            f"- vendor: {issuer_name or 'Not visible'}\n"
+            f"- buyer: {bill_to_name or 'Not visible'}"
+        )
+    else:
+        issuer_name = from_party.get("name") or extract.get("vendor_name")
+        issuer_uen = from_party.get("uen") or extract.get("issuer_gst_regno")
+        bill_to_name = to_party.get("name") or extract.get("customer_name")
+        bill_to_uen = to_party.get("uen")
+        doc_kind = extract.get("doc_kind") or "invoice"
+        summary_table = extract.get("summary_table") or []
+        summary_str = "\n".join(
+            f"- {s.get('category')}: {s.get('details')}"
+            for s in summary_table
+            if isinstance(s, dict)
+        )
 
     # Two prompt variants: the standard one (name-match against the document) and
     # a playground variant (no real client to match against — pick the most

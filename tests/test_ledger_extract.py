@@ -4,13 +4,17 @@ from __future__ import annotations
 
 from invoice_processing.extract.ledger_extract import (
     DocumentLedgerExtract,
+    ExtractedDocument,
+    ExtractedDocumentLine,
     LedgerLine,
     SummaryField,
+    extracted_document_to_normalized,
     ledger_extract_to_extracted_invoice,
     ledger_extract_to_normalized,
     should_use_legacy_extract,
     use_capture_book_pipeline,
     use_understand_extract,
+    validate_extracted_document,
     validate_ledger_extract,
 )
 
@@ -229,3 +233,27 @@ def test_currency_propagates_to_normalized_and_exporter():
     rows = XeroLedgerExporter().rows([inv], "purchase")
     assert rows, "expected at least one Xero row for the expense claim"
     assert rows[0]["Currency"] == "USD"
+
+
+def test_extracted_document_mapper_single_doc():
+    doc = ExtractedDocument(
+        doc_type="invoice",
+        page_range=[1, 1],
+        vendor="Vendor-A",
+        buyer="Buyer-B",
+        reference="INV-42",
+        date="2026-06-01",
+        currency="MYR",
+        presentation="summary",
+        lines=[ExtractedDocumentLine(description="Parts", net_amount=60.0, gst_amount=0.0)],
+        subtotal=60.0,
+        tax_total=0.0,
+        grand_total=60.0,
+        direction_for_client="purchase",
+        tax_visible_on_document=False,
+    )
+    ok, detail = validate_extracted_document(doc)
+    assert ok, detail
+    inv = extracted_document_to_normalized(doc, direction="purchase", base_currency="MYR")
+    assert inv.invoice_number == "INV-42"
+    assert inv.doc_total == 60.0
