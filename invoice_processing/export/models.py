@@ -93,7 +93,7 @@ class NormalizedInvoice:
     invoice_number: Optional[str] = None
     invoice_date: Optional[date] = None
     due_date: Optional[date] = None
-    currency: str = "SGD"
+    currency: str = ""
     po_number: Optional[str] = None
 
     supplier: PartyInfo = field(default_factory=PartyInfo)   # used when doc_type=purchase
@@ -162,7 +162,7 @@ class BankStatement:
 
     bank_name: str = ""                  # -> Excel sheet title (e.g. "OCBC - 5001")
     account_number: Optional[str] = None
-    currency: str = "SGD"
+    currency: str = ""
     statement_period: Optional[str] = None
     opening_balance: Optional[float] = None
     closing_balance: Optional[float] = None

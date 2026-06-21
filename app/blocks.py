@@ -18,31 +18,28 @@ class PreviewColumn:
     cell_type: str  # "raw_text" or "raw_number"
 
 
-def _normalize_software(software: str) -> str:
-    """Normalise assorted software strings to one of ``"xero"``, ``"autocount"``,
-    ``"sql_account"``, or ``"qbs_ledger"``.
+def _normalize_software(software: str) -> str | None:
+    """Normalise software strings to preview keys, or None when unresolved."""
+    from invoice_processing.export.axis_resolvers import resolve_software
 
-    Delegates to ``normalize_software_key`` from the exporters module for the
-    canonical mapping, then maps the ``"qbs"`` key to ``"qbs_ledger"`` to
-    preserve the existing return contract (callers compare == "xero" etc.).
-    Unknown software (None returned by normalize_software_key) defaults to
-    ``"qbs_ledger"``.
-    """
-    from invoice_processing.export.exporters import normalize_software_key
-    key = normalize_software_key(software)
+    res = resolve_software(software)
+    if res.flagged or not res.value:
+        return None
+    key = res.value
     if key == "xero":
         return "xero"
     if key == "autocount":
         return "autocount"
     if key == "sql_account":
         return "sql_account"
-    # "qbs" and any unrecognised value → qbs_ledger
     return "qbs_ledger"
 
 
 def software_label(software: str) -> str:
     """Human-readable label for a software key (normalised or raw)."""
     norm = _normalize_software(software)
+    if norm is None:
+        return "Unknown ERP"
     if norm == "xero":
         return "Xero"
     if norm == "autocount":
@@ -163,12 +160,14 @@ def preview_column_spec(*, software: str, sheet: str) -> list[PreviewColumn]:
     """Return the curated preview columns for a (software, sheet) combination.
 
     Bank sheets (anything other than ``"Purchase"`` or ``"Sales"``) always
-    use the 6-col bank spec regardless of software.  Unknown software defaults
-    to the QBS Ledger shape.
+    use the 6-col bank spec regardless of software.  Unresolved software
+    returns an empty spec (caller should flag for review).
     """
     if sheet not in ("Purchase", "Sales"):
         return _BANK_COLS
     norm = _normalize_software(software)
+    if norm is None:
+        return []
     if norm == "xero":
         return _XERO_PURCHASE_COLS if sheet == "Purchase" else _XERO_SALES_COLS
     if norm == "autocount":
@@ -653,11 +652,11 @@ def needs_setup_blocks() -> list:
     ]
 
 
-def _fmt_money(amount: float | None, currency: str = "SGD") -> str:
-    """Format a document total with its currency, e.g. '$1,234.50' / 'SGD 1,234.50'."""
+def _fmt_money(amount: float | None, currency: str = "") -> str:
+    """Format a document total with its currency, e.g. 'SGD 1,234.50'."""
     if amount is None:
         return "—"
-    cur = (currency or "SGD").strip().upper()
+    cur = (currency or "?").strip().upper()
     return f"{cur} {amount:,.2f}"
 
 
@@ -718,7 +717,7 @@ def _per_doc_line(doc) -> str:
     inv_no = getattr(norm, "invoice_number", None)
     inv_date = getattr(norm, "invoice_date", None)
     total = getattr(norm, "doc_total", None)
-    currency = getattr(norm, "currency", None) or "SGD"
+    currency = (getattr(norm, "currency", None) or "").strip().upper() or "?"
 
     parts = [f"*{counterparty}*"]
     if inv_no:
@@ -805,7 +804,7 @@ def _per_doc_card_native(doc, *, actions: list[str], op_id: str | None) -> list[
             inv_no = _doc_get(doc, "invoice_number")
             inv_date = _doc_get(doc, "invoice_date")
             date_str = str(inv_date) if inv_date else ""
-            currency = _doc_get(doc, "currency") or "SGD"
+            currency = (_doc_get(doc, "currency") or "").strip().upper() or "?"
             total = _doc_get(doc, "total")
             tax_code = _doc_get(doc, "tax_code")
             account_code = _doc_get(doc, "account_code")
@@ -823,7 +822,7 @@ def _per_doc_card_native(doc, *, actions: list[str], op_id: str | None) -> list[
             date_str = (
                 inv_date.isoformat() if inv_date and hasattr(inv_date, "isoformat") else str(inv_date)
             ) if inv_date else ""
-            currency = getattr(norm, "currency", None) or "SGD"
+            currency = (getattr(norm, "currency", None) or "").strip().upper() or "?"
             total = getattr(norm, "doc_total", None)
             tax_code = None
             account_code = None

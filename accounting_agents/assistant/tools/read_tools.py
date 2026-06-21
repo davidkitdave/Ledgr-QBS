@@ -689,7 +689,7 @@ def list_recent_documents(tool_context: ToolContext, limit: str = "10") -> str:
                 "doc_type": doc_type,
                 "row_count": 0,
                 "total": 0.0,
-                "currency": row.get("Currency") or row.get("currency") or "SGD",
+                "currency": row.get("Currency") or row.get("currency") or "",
                 "flagged_count": 0,
             }
         entry = groups[key]

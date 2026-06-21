@@ -291,7 +291,7 @@ def to_bank_statements(
         stmt = BankStatement(
             bank_name=acct.bank_name or "",
             account_number=acct.account_number,
-            currency=acct.currency or "SGD",
+            currency=acct.currency or "",
             statement_period=acct.statement_period,
             opening_balance=acct.opening_balance,
             closing_balance=acct.closing_balance,

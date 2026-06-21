@@ -822,7 +822,7 @@ async def persist_and_deliver(
             slack_client=slack_client,
             channel_id=channel_id,
             batches=batches,
-            software=payload.get("software") or "qbs",
+            software=payload.get("software") or "",
             kind=payload.get("kind") or "invoice",
             client_name=payload.get("client_name") or "",
             replace=effective_replace,
@@ -1416,7 +1416,7 @@ def _stash_bank_dedup_replace(
         client_id=str(payload.get("client_id") or ""),
         fy=str(payload.get("fy") or ""),
         kind=str(payload.get("kind") or "bank"),
-        software=str(payload.get("software") or "qbs"),
+        software=str(payload.get("software") or ""),
         client_name=str(payload.get("client_name") or ""),
         batches=batches,
     )
@@ -1472,7 +1472,7 @@ async def _flush_deferred_ledger_writes(
         payload = item.get("payload") or {}
         client_id = payload.get("client_id") or "unknown"
         fy = str(payload.get("fy") or "unknown")
-        software = payload.get("software") or "qbs"
+        software = payload.get("software") or ""
         kind = payload.get("kind") or "invoice"
         key = (client_id, fy, software, kind)
         grp = groups.setdefault(
@@ -2617,7 +2617,7 @@ def _stage_output_for_completed_node(node_name: str, state: dict) -> Optional[st
         vendor = _vendor_from_inv_dict(first) or "Unknown vendor"
         inv_no = (first.get("invoice_number") or "").strip()
         total = first.get("doc_total")
-        cur = (first.get("currency") or "SGD").strip().upper()
+        cur = (first.get("currency") or "?").strip().upper()
         lines = first.get("lines") or []
         n_lines = len(lines)
         parts = [vendor]
@@ -5953,7 +5953,7 @@ def build_async_app(
                         slack_client=sync_client,
                         channel_id=channel_id_dr,
                         batches=stash["batches"],
-                        software=stash.get("software") or "qbs",
+                        software=stash.get("software") or "",
                         kind=stash.get("kind") or "bank",
                         client_name=stash.get("client_name") or "",
                     )

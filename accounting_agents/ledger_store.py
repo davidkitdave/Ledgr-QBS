@@ -340,7 +340,12 @@ class SlackLedgerStore:
     @staticmethod
     def _exporter_for(software: str):
         """Return the invoice exporter matching the client's accounting software."""
-        return get_exporter(software or "qbs")
+        from invoice_processing.export.axis_resolvers import resolve_software
+
+        res = resolve_software(software)
+        if res.flagged or not res.value:
+            raise ValueError(res.reason or "software not resolved")
+        return get_exporter(res.value)
 
     def _fresh_invoice_workbook(self, software: str) -> Workbook:
         """Create an empty invoice workbook (Purchase + Sales sheets, headers only).

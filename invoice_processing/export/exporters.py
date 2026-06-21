@@ -662,6 +662,7 @@ _SOFTWARE_ALIASES: dict[str, str] = {
     "qbs": "qbs",
     "qbs ledger": "qbs",
     "qbsledger": "qbs",
+    "qbs_ledger": "qbs",
     "xero": "xero",
     "xero ledger": "xero",
     "xeroledger": "xero",
@@ -1195,7 +1196,7 @@ def bank_sheet_title(
     """
     label = _bank_label(bank_name)
     last4 = _last4_digits(account_number, bank_name)
-    ccy = (currency or "SGD").upper()
+    ccy = (currency or "?").strip().upper() or "?"
     return _sheet_title(f"{label} - {last4} - {ccy}")
 
 
@@ -1548,7 +1549,7 @@ class BankStatementExporter:
                 bank_sheet_title(
                     bank_name=stmt.bank_name,
                     account_number=stmt.account_number,
-                    currency=stmt.currency or "SGD",
+                    currency=stmt.currency or "",
                 ),
                 [],
             ).append(stmt)

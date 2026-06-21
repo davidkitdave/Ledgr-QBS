@@ -348,9 +348,8 @@ class TestConsolidateNodeGuard:
         payload = ctx.state.get(nodes.LEDGER_ROWS_KEY)
         assert payload is not None
         assert payload["kind"] == "invoice"
-        # Fell back to qbs
-        assert payload["software"] == "qbs"
-        assert len(payload["batches"]) == 1
+        assert payload["software"] == ""
+        assert payload["batches"] == []
 
     def test_completes_when_software_is_none(self):
         """consolidate_node must not raise when software=None."""
@@ -359,7 +358,8 @@ class TestConsolidateNodeGuard:
         asyncio.run(nodes.consolidate_node._func(ctx))
 
         payload = ctx.state[nodes.LEDGER_ROWS_KEY]
-        assert payload["software"] == "qbs"
+        assert payload["software"] == ""
+        assert payload["batches"] == []
 
     def test_completes_when_software_is_empty_string(self):
         """consolidate_node must not raise when software=''."""
@@ -368,7 +368,8 @@ class TestConsolidateNodeGuard:
         asyncio.run(nodes.consolidate_node._func(ctx))
 
         payload = ctx.state[nodes.LEDGER_ROWS_KEY]
-        assert payload["software"] == "qbs"
+        assert payload["software"] == ""
+        assert payload["batches"] == []
 
     def test_uses_valid_software_when_provided(self):
         """consolidate_node respects software='xero' when it is valid."""

@@ -166,7 +166,7 @@ def _build_bank_workbook(
             bank_sheet_title(
                 bank_name=stmt.bank_name,
                 account_number=stmt.account_number,
-                currency=stmt.currency or "SGD",
+                currency=stmt.currency or "",
             ),
             [],
         ).append(stmt)

@@ -675,20 +675,17 @@ class TestGetTaxClassifierFactory:
         code = clf.tax_code("SR", "purchase", "qbs")
         assert code == "TX", f"Expected SG code 'TX' for SINGAPORE jurisdiction, got {code!r}"
 
-    def test_cross_border_defaults_to_sg(self):
-        clf = get_tax_classifier("CROSS_BORDER")
-        code = clf.tax_code("SR", "purchase", "qbs")
-        assert code == "TX", f"Expected SG code 'TX' for CROSS_BORDER, got {code!r}"
+    def test_cross_border_without_yaml_returns_none(self):
+        assert get_tax_classifier("CROSS_BORDER") is None
 
-    def test_none_defaults_to_sg(self):
-        clf = get_tax_classifier(None)
-        code = clf.tax_code("SR", "purchase", "qbs")
-        assert code == "TX", f"Expected SG default 'TX' for None, got {code!r}"
+    def test_none_returns_none_not_sg_default(self):
+        assert get_tax_classifier(None) is None
 
-    def test_empty_string_defaults_to_sg(self):
-        clf = get_tax_classifier("")
-        code = clf.tax_code("SR", "purchase", "qbs")
-        assert code == "TX", f"Expected SG default 'TX' for empty string, got {code!r}"
+    def test_empty_string_returns_none_not_sg_default(self):
+        assert get_tax_classifier("") is None
+
+    def test_unknown_jurisdiction_returns_none(self):
+        assert get_tax_classifier("ATLANTIS") is None
 
     def test_my_sst_nt_code_purchase_qbs(self):
         clf = get_tax_classifier("my_sst.yaml")

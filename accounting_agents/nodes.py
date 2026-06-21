@@ -54,6 +54,11 @@ from invoice_processing.export.client_context import (
     entity_memory_from_state,
     tax_codes_from_state,
 )
+from invoice_processing.export.axis_resolvers import (
+    resolve_currency,
+    resolve_software,
+    resolve_tax_classifier_reference,
+)
 from invoice_processing.export.exporters import (
     bank_sheet_title,
     collect_account_flagged_summary,
@@ -64,9 +69,7 @@ from invoice_processing.export.exporters import (
     format_unmapped_export_note,
     get_bank_exporter,
     get_exporter,
-    normalize_software_key,
 )
-from invoice_processing.export.tax_classifier import get_tax_classifier
 from invoice_processing.export.models import BankStatement, NormalizedInvoice
 from invoice_processing.export.routing import DocRoute, route_document
 # Jurisdiction + LLM tax reasoning (multi-country support, replaces the
@@ -660,6 +663,21 @@ def _base_currency_from_state(state: dict) -> str:
     return resolved or ""
 
 
+def _client_region_and_currency_from_state(state: dict) -> tuple[str, str]:
+    region = _norm_region(state.get("client_region") or state.get("region") or "")
+    currency = _resolve_client_currency(state, region) or ""
+    return region, currency
+
+
+def _resolve_software_from_state(state: dict) -> tuple[str, bool]:
+    """Return (canonical software key, flagged). Blank key when unresolved."""
+    res = resolve_software(state.get("software"))
+    if res.flagged:
+        state["software_unresolved"] = res.reason
+        return "", True
+    return res.value or "", False
+
+
 def _our_gst_registered_from_state(state: dict) -> bool:
     """Map session tax_registered to extract bool — unknown (None) must not assume registered."""
     val = state.get("tax_registered")
@@ -1209,6 +1227,11 @@ def detect_struggle(state: dict) -> tuple[bool, list[str]]:
     # Read doc_type now; Signal #4 is evaluated AFTER the per-invoice loop so
     # weak_extract can be computed from signals gathered in that loop.
     doc_type = (state.get(DOC_TYPE_KEY) or "").strip().lower()
+
+    if "software" in state:
+        sw = resolve_software(state.get("software"))
+        if sw.flagged:
+            reasons.append(f"software_unresolved: {sw.reason}")
 
     # Signal #5: low_classify_confidence — classifier hedged.
     conf = state.get(CLASSIFY_CONFIDENCE_KEY)
@@ -1898,15 +1921,24 @@ def _preview_export_unmapped(state: dict) -> dict:
     if doc_type == "bank_statement":
         return {"count": 0, "details": []}
 
-    software = state.get("software")
-    _software_key = normalize_software_key(software)
-    if _software_key is None:
-        _software_key = "qbs"
+    software = ""
+    software_flagged = False
+    if "software" in state:
+        software, software_flagged = _resolve_software_from_state(state)
+    if not software or software_flagged:
+        return {"count": 0, "details": []}
 
     _rates = state.get(JURISDICTION_RATES_KEY) or {}
     _ref_yaml = _rates.get("reference_yaml") or state.get(TAX_JURISDICTION_KEY) or None
-    classifier = get_tax_classifier(_ref_yaml)
-    exporter = get_exporter(_software_key, classifier=classifier)
+    client_region, _ = _client_region_and_currency_from_state(state)
+    clf_res = resolve_tax_classifier_reference(
+        _ref_yaml,
+        client_region=client_region,
+    )
+    if clf_res.flagged or clf_res.value is None:
+        return {"count": 0, "details": []}
+
+    exporter = get_exporter(software, classifier=clf_res.value)
     if hasattr(exporter, "configure_client_context"):
         exporter.configure_client_context(
             tax_codes=tax_codes_from_state(state),
@@ -2073,7 +2105,10 @@ async def consolidate_node(ctx) -> Event:
     routes = state.get(ROUTES_KEY) or []
     doc_type = (state.get(DOC_TYPE_KEY) or "").strip().lower()
     client_id = state.get("client_id") or "unknown"
-    software = state.get("software")  # seeded by the runner; get_exporter raises if missing
+    software = ""
+    software_flagged = False
+    if "software" in state:
+        software, software_flagged = _resolve_software_from_state(state)
 
     # Representative FY for the run (the workbook is per-FY); take the first route.
     fy = str(routes[0]["fy"]) if routes else "unknown"
@@ -2082,22 +2117,27 @@ async def consolidate_node(ctx) -> Event:
     export_unmapped: dict = {}
     import_readiness: dict = {}
     account_flagged_summary: dict = {}
+    invoices: list = []
 
     if doc_type == "bank_statement":
         kind = "bank"
         exporter = get_bank_exporter()
         statements = _bank_statements_from_state(state)
+        client_region, client_currency = _client_region_and_currency_from_state(state)
         for idx, (stmt, route) in enumerate(zip(statements, routes)):
+            ccy_res = resolve_currency(
+                stmt.currency,
+                client_region=client_region,
+                client_currency=client_currency,
+            )
+            currency = ccy_res.value
             sheet = bank_sheet_title(
                 bank_name=stmt.bank_name,
                 account_number=stmt.account_number,
-                currency=stmt.currency or "SGD",
+                currency=currency,
             )
             rows = exporter.bank_rows(stmt)
-            # Currency is part of the dedupe identity so different currency
-            # sections of the same account don't share a doc_key (and so a
-            # re-drop of just one currency doesn't get silently deduped).
-            ident = f"{stmt.account_number or stmt.bank_name}:{stmt.currency or 'SGD'}"
+            ident = f"{stmt.account_number or stmt.bank_name}:{currency or '?'}"
             batches.append(
                 {
                     "sheet": sheet,
@@ -2108,52 +2148,51 @@ async def consolidate_node(ctx) -> Event:
             )
     else:
         kind = "invoice"
-        # Guard: get_exporter raises ValueError for None/unknown; default to "qbs"
-        # so the pipeline completes in the playground (no client profile seeded yet
-        # at consolidate time) and in any other no-software scenario.
-        # normalize_software_key accepts display values ("QBS Ledger", "Xero Ledger")
-        # and their lowercase aliases, returning the canonical key or None.
-        _software_key = normalize_software_key(software)
-        if _software_key is None:
-            if software is not None and software != "":
-                logger.warning(
-                    "consolidate_node: unknown software %r; falling back to 'qbs'",
-                    software,
-                )
-            _software_key = "qbs"
-        software = _software_key
-        # Derive jurisdiction-aware tax classifier from state so MY invoices get
-        # SST codes instead of SG GST codes. JURISDICTION_RATES_KEY["reference_yaml"]
-        # is the canonical source; fall back to TAX_JURISDICTION_KEY string, then
-        # to the default (sg_gst.yaml) when neither is present.
+        invoices = _normalized_from_state(state)
         _rates = state.get(JURISDICTION_RATES_KEY) or {}
         _ref_yaml = _rates.get("reference_yaml") or state.get(TAX_JURISDICTION_KEY) or None
-        classifier = get_tax_classifier(_ref_yaml)
-        exporter = get_exporter(software, classifier=classifier)
-        if hasattr(exporter, "configure_client_context"):
-            exporter.configure_client_context(
-                tax_codes=tax_codes_from_state(state),
-                entity_memory=entity_memory_from_state(state),
-                coa_keys=coa_keys_from_state(state),
+        client_region, _ = _client_region_and_currency_from_state(state)
+        clf_res = resolve_tax_classifier_reference(
+            _ref_yaml,
+            client_region=client_region,
+        )
+        if (
+            software
+            and not software_flagged
+            and not clf_res.flagged
+            and clf_res.value is not None
+        ):
+            exporter = get_exporter(software, classifier=clf_res.value)
+            if hasattr(exporter, "configure_client_context"):
+                exporter.configure_client_context(
+                    tax_codes=tax_codes_from_state(state),
+                    entity_memory=entity_memory_from_state(state),
+                    coa_keys=coa_keys_from_state(state),
+                )
+            for idx, (inv, route) in enumerate(zip(invoices, routes)):
+                sheet = route.get("sheet") or "Purchase"
+                row_doc_type = "sales" if sheet == "Sales" else "purchase"
+                rows = exporter.rows([inv], row_doc_type)
+                batches.append(
+                    {
+                        "sheet": sheet,
+                        "doc_key": _doc_key(state, sheet, inv.invoice_number, idx),
+                        "rows": rows,
+                    }
+                )
+            export_unmapped = collect_export_unmapped_summary(batches, exporter)
+            state["export_unmapped_summary"] = export_unmapped
+            account_flagged_summary = collect_account_flagged_summary(batches)
+            state["account_flagged_summary"] = account_flagged_summary
+            import_readiness = collect_import_readiness(
+                batches, exporter, unmapped=export_unmapped
             )
-        invoices = _normalized_from_state(state)
-        for idx, (inv, route) in enumerate(zip(invoices, routes)):
-            sheet = route.get("sheet") or "Purchase"
-            row_doc_type = "sales" if sheet == "Sales" else "purchase"
-            rows = exporter.rows([inv], row_doc_type)
-            batches.append(
-                {
-                    "sheet": sheet,
-                    "doc_key": _doc_key(state, sheet, inv.invoice_number, idx),
-                    "rows": rows,
-                }
+            state["import_readiness"] = import_readiness
+        elif software_flagged:
+            logger.warning(
+                "consolidate_node: unresolved software %r — skipping export rows",
+                state.get("software"),
             )
-        export_unmapped = collect_export_unmapped_summary(batches, exporter)
-        state["export_unmapped_summary"] = export_unmapped
-        account_flagged_summary = collect_account_flagged_summary(batches)
-        state["account_flagged_summary"] = account_flagged_summary
-        import_readiness = collect_import_readiness(batches, exporter, unmapped=export_unmapped)
-        state["import_readiness"] = import_readiness
 
     payload = {
         "client_id": client_id,
@@ -2242,15 +2281,16 @@ def _closing_balance_from_rows(rows: list[dict]) -> Optional[float]:
 def _software_label_for_summary(software: str) -> str:
     if not (software or "").strip():
         return ""
-    # Delegate to the canonical exporter key to stay consistent with normalize_software_key.
-    key = normalize_software_key(software)
+    res = resolve_software(software)
+    if res.flagged:
+        return "Unknown ERP"
+    key = res.value
     if key == "xero":
         return "Xero"
     if key == "autocount":
         return "AutoCount"
     if key == "sql_account":
         return "SQL Account"
-    # "qbs" or any unrecognised value
     return "QBS Ledger"
 
 
@@ -2372,21 +2412,33 @@ def compose_confident_note(
     # rather than rendering a blank or wrong value.
     from collections import Counter
 
-    _sw = normalize_software_key(str(payload.get("software") or ""))
+    sw_res = resolve_software(str(payload.get("software") or ""))
     _sub_total_col: Optional[str] = None
     _currency_col: Optional[str] = None
     _account_col: Optional[str] = None
-    try:
-        _exp = get_exporter(_sw)
-    except Exception:
-        _exp = None
+    _exp = None
+    if not sw_res.flagged and sw_res.value:
+        try:
+            _exp = get_exporter(sw_res.value)
+        except Exception:
+            _exp = None
     if _exp is not None:
         _sub_total_col = _exp.column_for_field("sub_total", doc_type)
         _currency_col = _exp.column_for_field("currency", doc_type)
         _account_col = _exp.column_for_field("account_code", doc_type)
 
+    client_region, client_currency = _client_region_and_currency_from_state(
+        {"region": payload.get("region"), "base_currency": payload.get("base_currency")}
+        if payload.get("region") or payload.get("base_currency")
+        else {}
+    )
     total: Optional[float] = None
-    currency = (payload.get("currency") or "").strip() or "SGD"
+    currency_res = resolve_currency(
+        payload.get("currency"),
+        client_region=client_region,
+        client_currency=client_currency,
+    )
+    currency = currency_res.value
     for row in all_rows:
         if _sub_total_col:
             amt = row.get(_sub_total_col)

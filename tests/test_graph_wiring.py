@@ -372,6 +372,8 @@ def test_placeholder_spine_invoice_pass_reaches_deliver():
         # in production. This unit test drives consolidate_node directly, so we
         # seed the state explicitly to keep it self-contained.
         "software": "qbs",
+        "region": "SINGAPORE",
+        "base_currency": "SGD",
         nodes.NORMALIZED_KEY: [
             {
                 "doc_type": "purchase",

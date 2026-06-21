@@ -376,7 +376,9 @@ def _profile_region_and_currency(profile: dict) -> tuple[str, str]:
         return region, currency
 
     if profile.get("legacy_profile") or profile.get("legacy"):
-        return "SINGAPORE", "SGD"
+        stored_currency = profile.get("base_currency")
+        currency = str(stored_currency).strip().upper() if stored_currency else ""
+        return "", currency
 
     default_region = os.environ.get("LEDGR_DEFAULT_REGION", "").strip().upper()
     if default_region in REGION_REGISTRY:

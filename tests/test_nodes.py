@@ -1972,8 +1972,8 @@ def test_consolidate_node_lowercase_keys_unchanged(caplog):
         )
 
 
-def test_consolidate_node_unknown_software_warns_and_falls_back_to_qbs(caplog):
-    """A genuinely unknown software value must warn and fall back to the QBS exporter."""
+def test_consolidate_node_unknown_software_skips_export(caplog):
+    """A genuinely unknown software value must flag and skip QBS export rows."""
     import logging
 
     from invoice_processing.export.exporters import QbsLedgerExporter
@@ -1994,13 +1994,11 @@ def test_consolidate_node_unknown_software_warns_and_falls_back_to_qbs(caplog):
         with patch("accounting_agents.nodes.get_exporter", side_effect=_spy_get_exporter):
             asyncio.run(nodes.consolidate_node._func(ctx))
 
-    warn_msgs = [r.message for r in caplog.records if "unknown software" in r.message]
-    assert warn_msgs, "Expected an 'unknown software' warning for 'Wave'"
+    warn_msgs = [r.message for r in caplog.records if "unresolved software" in r.message]
+    assert warn_msgs, "Expected an 'unresolved software' warning for 'Wave'"
     assert "'Wave'" in warn_msgs[0]
-
-    # Fallback must be QBS.
-    assert len(captured_exporter) == 1
-    assert isinstance(captured_exporter[0], QbsLedgerExporter), (
-        f"Expected QBS fallback, got {type(captured_exporter[0]).__name__}"
-    )
+    assert captured_exporter == []
+    payload = ctx.state.get(nodes.LEDGER_ROWS_KEY) or {}
+    assert payload.get("software") == ""
+    assert payload.get("batches") == []
 

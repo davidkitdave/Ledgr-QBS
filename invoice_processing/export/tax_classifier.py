@@ -35,6 +35,7 @@ _JURISDICTION_TO_YAML: dict[str, str] = {
     "MY": "my_sst.yaml",
 }
 _JURISDICTION_UPPER_TO_YAML: dict[str, str] = {
+    "SINGAPORE": "sg_gst.yaml",
     "MALAYSIA": "my_sst.yaml",
 }
 
@@ -48,38 +49,39 @@ def _load_taxonomy(yaml_name: str = _DEFAULT_YAML) -> dict:
     return _TAXONOMY_CACHE[yaml_name]
 
 
-def get_tax_classifier(reference_yaml: Optional[str] = None) -> "TaxClassifier":
+def get_tax_classifier(reference_yaml: Optional[str] = None) -> Optional["TaxClassifier"]:
     """Build a :class:`TaxClassifier` for the given taxonomy reference.
 
     Accepts:
     - A bare YAML filename  ("my_sst.yaml", "sg_gst.yaml")
-    - A jurisdiction string ("MALAYSIA", "SINGAPORE", "CROSS_BORDER")
-    - ``None`` / empty / unrecognised → falls back to ``sg_gst.yaml``
+    - A jurisdiction string ("MALAYSIA", "SINGAPORE")
 
-    Validates the resolved file exists; falls back to ``sg_gst.yaml`` with a
-    logged warning if it does not (defensive for unexpected reference_yaml values).
+    Returns ``None`` when reference is missing, unrecognised, or the YAML file
+    is absent — callers must flag for review instead of silently defaulting to SG.
     """
     ref = (reference_yaml or "").strip()
+    if not ref:
+        return None
 
-    # Resolve jurisdiction code → yaml filename.
-    if ref and not ref.endswith(".yaml"):
-        ref = _JURISDICTION_UPPER_TO_YAML.get(ref.upper(), _DEFAULT_YAML)
+    if not ref.endswith(".yaml"):
+        mapped = _JURISDICTION_UPPER_TO_YAML.get(ref.upper())
+        if mapped is None:
+            logger.warning(
+                "get_tax_classifier: unrecognised jurisdiction/reference %r",
+                ref,
+            )
+            return None
+        ref = mapped
 
-    # Empty or unrecognised → default.
-    yaml_name = ref or _DEFAULT_YAML
-
-    # Validate the file exists; fall back with warning if not.
-    yaml_path = _SHARED_LIBS / yaml_name
+    yaml_path = _SHARED_LIBS / ref
     if not yaml_path.exists():
         logger.warning(
-            "get_tax_classifier: '%s' not found in shared_libraries; "
-            "falling back to %s",
-            yaml_name,
-            _DEFAULT_YAML,
+            "get_tax_classifier: '%s' not found in shared_libraries",
+            ref,
         )
-        yaml_name = _DEFAULT_YAML
+        return None
 
-    return TaxClassifier(taxonomy=_load_taxonomy(yaml_name))
+    return TaxClassifier(taxonomy=_load_taxonomy(ref))
 
 
 def _band_end(band: dict[str, Any]) -> date:
@@ -502,8 +504,13 @@ class TaxClassifier:
             if code == "NT":
                 return "OS", conf, flag, "OS(?): description keyword hint — no printed tax signal"
             return code, conf, flag, reason
-        # 4. Default local sale -> standard-rated.
-        return "SR", 0.9, False, "SR: local standard-rated supply"
+        # 4. Indeterminate local sale — flag; do not silently book output tax.
+        return (
+            "SR",
+            0.5,
+            True,
+            "SR: indeterminate local sale — no printed tax signal; review required",
+        )
 
     # -- target-system code string ---------------------------------------------
     def tax_code(

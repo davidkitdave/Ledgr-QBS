@@ -1309,10 +1309,11 @@ class TestPreviewColumnSpec:
         spec_qbs = preview_column_spec(software="qbs_ledger", sheet="DBS MYR")
         assert spec_xero == spec_qbs  # bank spec is software-agnostic
 
-    def test_unknown_software_defaults_to_qbs_ledger_shape(self):
+    def test_unknown_software_returns_empty_preview_spec(self):
         spec_unknown = preview_column_spec(software="some_future_tool", sheet="Purchase")
         spec_qbs = preview_column_spec(software="qbs_ledger", sheet="Purchase")
-        assert spec_unknown == spec_qbs
+        assert spec_unknown == []
+        assert spec_qbs
 
     def test_normalised_software_strings_resolve(self):
         # "qbs" and "QBS Ledger" and "qbs_ledger" all map to the same spec.
@@ -1593,8 +1594,8 @@ class TestSoftwareLabel:
     def test_qbs_ledger_label(self):
         assert software_label("QBS Ledger") == "QBS Ledger"
 
-    def test_empty_defaults_to_qbs_ledger(self):
-        assert software_label("") == "QBS Ledger"
+    def test_empty_returns_unknown_erp(self):
+        assert software_label("") == "Unknown ERP"
 
 
 # --------------------------------------------------------------------------- #
