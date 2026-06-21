@@ -119,6 +119,7 @@ def dict_to_invoice(d: dict[str, Any]) -> NormalizedInvoice:
         reconcile_note=d.get("reconcile_note"),
         tax_visible_on_document=d.get("tax_visible_on_document"),
         direction_reason=d.get("direction_reason"),
+        document_kind=d.get("document_kind"),
     )
 
 
