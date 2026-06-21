@@ -1204,6 +1204,9 @@ def _build_batch_aggregate_blocks(
                     blocks.append(confident_note_block(note))
             elif item_doc_type not in ("expense_claim", "other"):
                 from invoice_processing.export.exporters import (
+                    compute_doc_flag_breakdown,
+                    format_flag_breakdown_note,
+                    get_exporter as _get_exporter,
                     normalize_software_key as _nsk,
                 )
                 if _nsk(item_software) in ("autocount", "sql_account"):
@@ -1212,6 +1215,35 @@ def _build_batch_aggregate_blocks(
                     )
                     if rnote:
                         blocks.append(confident_note_block(rnote))
+                    # WS-1.4 — per-doc ✓/✗ reconcile status + flag-reason
+                    # breakdown. Counts were already computed by
+                    # ``collect_export_unmapped_summary`` for the readiness
+                    # path; we recompute here per-doc so the per-reason
+                    # counts (blank account / missing tax / missing
+                    # creditor) surface on the delivery card instead of
+                    # being discarded in the aggregate unmapped count.
+                    try:
+                        _exp = _get_exporter(item_software)
+                        _batches = item.get("batches") or item_payload.get("batches") or []
+                        _breakdown = compute_doc_flag_breakdown(_batches, _exp)
+                        _flag_note = format_flag_breakdown_note(_breakdown)
+                        if _flag_note:
+                            # Prepend the doc label so the user can see
+                            # which file each status applies to.
+                            _label = (
+                                item_payload.get("workbook_label")
+                                or item_payload.get("source_file")
+                                or item_payload.get("client_name")
+                                or "document"
+                            )
+                            blocks.append(confident_note_block(
+                                f"📄 *{_label}* — {_flag_note}"
+                            ))
+                    except Exception:  # noqa: BLE001 — flag breakdown is cosmetic
+                        logger.warning(
+                            "batch per-doc flag breakdown failed (non-fatal)",
+                            exc_info=True,
+                        )
         except Exception:  # noqa: BLE001 — notes are cosmetic
             logger.warning(
                 "batch per-item note build failed (non-fatal)", exc_info=True,

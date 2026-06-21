@@ -720,6 +720,131 @@ def format_unmapped_export_note(summary: dict | None) -> str:
     return f"{count} {noun} need creditor or tax codes before ERP import"
 
 
+def compute_doc_flag_breakdown(
+    batches: list[dict],
+    exporter: LedgerExporter,
+) -> dict:
+    """Per-document reconcile status + flag-reason counts (WS-1.4).
+
+    Returns a dict:
+        {
+          "reconciles": bool,            # True iff no flags raised
+          "n_total": int,                # total rows across all batches
+          "reasons": {
+            "blank_account": int,        # rows with empty account_code column
+            "missing_tax": int,          # rows with empty tax_code column
+            "missing_creditor": int,     # rows with empty creditor_code/debtor_code column
+            "missing_invoice_number": int,
+          }
+        }
+
+    A doc "reconciles" iff none of the three primary flag reasons fired
+    (blank account / missing tax / missing creditor). TaxType is NOT in the
+    formal ``required_*`` list for profile ERPs (it can be blank and the line
+    still imports), but a blank tax code is a "tax-unresolved" signal the
+    user wants surfaced — so we count it as a flag even though the row
+    wouldn't fail the strict required-field check. A doc with all flags
+    zero renders as ✓ reconciled on the delivery card.
+
+    Used by the batch delivery card to surface per-doc visibility (✓/✗ + reason
+    breakdown) — previously the unmapped count was rendered but the per-reason
+    breakdown was discarded. Now a multi-file dropper sees exactly which rows
+    need attention and why.
+    """
+    if not isinstance(exporter, ProfileLedgerExporter):
+        # QBS / Xero: required-field check via the legacy literal columns.
+        # (These exporters don't expose column_for_field for all required fields,
+        # but the required_fields() list still drives the unmapped summary.)
+        legacy = {"blank_account": 0, "missing_tax": 0, "missing_creditor": 0,
+                  "missing_invoice_number": 0}
+        n_total = 0
+        for batch in batches:
+            sheet = batch.get("sheet") or "Purchase"
+            row_doc_type = "sales" if sheet == "Sales" else "purchase"
+            required = exporter.required_fields(row_doc_type)
+            for row in batch.get("rows") or []:
+                n_total += 1
+                for col in required:
+                    if _is_empty(row.get(col, "")):
+                        # Map legacy column names to per-reason buckets.
+                        if col in ("Account Code / COA", "Account Code", "*AccountCode", "AccNo", "Acc No", "_ACCOUNT(10)"):
+                            legacy["blank_account"] += 1
+        return {
+            "reconciles": sum(legacy.values()) == 0,
+            "n_total": n_total,
+            "reasons": legacy,  # not fully decomposed for legacy exporters
+        }
+
+    reasons = {"blank_account": 0, "missing_tax": 0, "missing_creditor": 0,
+               "missing_invoice_number": 0}
+    n_total = 0
+
+    for batch in batches:
+        sheet = batch.get("sheet") or "Purchase"
+        row_doc_type = "sales" if sheet == "Sales" else "purchase"
+        account_col = exporter.column_for_field("account_code", row_doc_type)
+        tax_col = exporter.column_for_field("tax_code", row_doc_type)
+        creditor_col = exporter.column_for_field("creditor_code", row_doc_type)
+        debtor_col = exporter.column_for_field("debtor_code", row_doc_type)
+        inv_col = exporter.column_for_field("invoice_number", row_doc_type)
+
+        for row in batch.get("rows") or []:
+            n_total += 1
+            # Decompose per-reason counts. A single row can contribute to
+            # multiple reasons (e.g. blank account + blank tax).
+            if account_col and _is_empty(row.get(account_col, "")):
+                reasons["blank_account"] += 1
+            if tax_col and _is_empty(row.get(tax_col, "")):
+                reasons["missing_tax"] += 1
+            if (creditor_col and _is_empty(row.get(creditor_col, ""))) or \
+               (debtor_col and _is_empty(row.get(debtor_col, ""))):
+                reasons["missing_creditor"] += 1
+            if inv_col and _is_empty(row.get(inv_col, "")):
+                reasons["missing_invoice_number"] += 1
+
+    # ✓ reconciled iff none of the three primary flag reasons fired.
+    reconciles = (
+        reasons["blank_account"] == 0
+        and reasons["missing_tax"] == 0
+        and reasons["missing_creditor"] == 0
+    )
+    return {
+        "reconciles": reconciles,
+        "n_total": n_total,
+        "reasons": reasons,
+    }
+
+
+def format_flag_breakdown_note(breakdown: dict | None) -> str:
+    """Human-readable flag-reason breakdown for a single doc (WS-1.4).
+
+    Returns a short string like:
+        "✓ reconciled"     (when reconciles=True)
+        "✗ 2 blank accounts · 1 missing tax code"  (when reconciles=False)
+    """
+    if not breakdown:
+        return ""
+    if breakdown.get("reconciles"):
+        return "✓ reconciled"
+    reasons = breakdown.get("reasons") or {}
+    parts: list[str] = []
+    if reasons.get("blank_account"):
+        n = reasons["blank_account"]
+        parts.append(f"{n} blank account{'s' if n != 1 else ''}")
+    if reasons.get("missing_tax"):
+        n = reasons["missing_tax"]
+        parts.append(f"{n} missing tax code{'s' if n != 1 else ''}")
+    if reasons.get("missing_creditor"):
+        n = reasons["missing_creditor"]
+        parts.append(f"{n} missing creditor/debtor code{'s' if n != 1 else ''}")
+    if reasons.get("missing_invoice_number"):
+        n = reasons["missing_invoice_number"]
+        parts.append(f"{n} missing invoice number{'s' if n != 1 else ''}")
+    if not parts:
+        return "✗ not reconciled"
+    return "✗ " + " · ".join(parts)
+
+
 def collect_import_readiness(
     batches: list[dict],
     exporter: LedgerExporter,

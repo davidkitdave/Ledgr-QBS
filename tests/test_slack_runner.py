@@ -7117,6 +7117,108 @@ def test_batch_aggregate_includes_per_doc_confident_notes(monkeypatch):
     )
 
 
+def test_batch_aggregate_per_doc_flag_breakdown(monkeypatch):
+    """WS-1.4 regression.
+
+    The batch card now surfaces per-doc ✓/✗ reconcile status + a per-reason
+    breakdown (blank account / missing tax / missing creditor) — previously
+    these counts were computed but discarded in the aggregate unmapped
+    total. Multi-file droppers can now see which file failed and why.
+    """
+    from accounting_agents.slack_runner import _build_batch_aggregate_blocks
+
+    monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
+    from app import native_blocks_compat as _nbc
+    _nbc._PROBE_CACHE.pop("C-test", None)
+
+    deferred = [
+        # Item 1: AutoCount invoice, all required fields filled → ✓ reconciled
+        {
+            "payload": {
+                "fy": "2026", "software": "AutoCount", "kind": "invoice",
+                "doc_type": "invoice",
+                "client_name": "Acme",
+                "workbook_label": "INV-001.pdf",
+                "batches": [{"sheet": "AP Invoice",
+                             "rows": [{"Amount": 100.0, "AccNo": "510-100",
+                                       "TaxType": "SV-6",
+                                       "CreditorCode": "400-X0001",
+                                       "DocNo": "<<New>>", "DocDate": "01/06/2026",
+                                       "JournalType": "PURCHASE",
+                                       "InclusiveTax": "F"}]}],
+                "import_readiness": {
+                    "software": "AutoCount",
+                    "tax_codes": ["SV-6"], "party_codes": ["400-X0001"],
+                    "account_codes": ["510-100"], "unmapped": {"count": 0},
+                },
+            },
+            "batches": [{"sheet": "AP Invoice",
+                         "rows": [{"Amount": 100.0, "AccNo": "510-100",
+                                   "TaxType": "SV-6",
+                                   "CreditorCode": "400-X0001",
+                                   "DocNo": "<<New>>", "DocDate": "01/06/2026",
+                                   "JournalType": "PURCHASE",
+                                   "InclusiveTax": "F"}]}],
+            "workbook_name": "Ledger_FY2026.xlsx",
+        },
+        # Item 2: AutoCount invoice, missing AccNo + missing TaxType on one row
+        # → ✗ with reason breakdown "1 blank account · 1 missing tax code"
+        {
+            "payload": {
+                "fy": "2026", "software": "AutoCount", "kind": "invoice",
+                "doc_type": "invoice",
+                "client_name": "Acme",
+                "workbook_label": "INV-002.pdf",
+                "batches": [{"sheet": "AP Invoice",
+                             "rows": [{"Amount": 50.0, "AccNo": "",
+                                       "TaxType": "",
+                                       "CreditorCode": "400-Y0001",
+                                       "DocNo": "<<New>>", "DocDate": "01/06/2026",
+                                       "JournalType": "PURCHASE",
+                                       "InclusiveTax": "F"}]}],
+                "import_readiness": {
+                    "software": "AutoCount",
+                    "tax_codes": [], "party_codes": ["400-Y0001"],
+                    "account_codes": [], "unmapped": {"count": 1},
+                },
+            },
+            "batches": [{"sheet": "AP Invoice",
+                         "rows": [{"Amount": 50.0, "AccNo": "",
+                                   "TaxType": "",
+                                   "CreditorCode": "400-Y0001",
+                                   "DocNo": "<<New>>", "DocDate": "01/06/2026",
+                                   "JournalType": "PURCHASE",
+                                   "InclusiveTax": "F"}]}],
+            "workbook_name": "Ledger_FY2026.xlsx",
+        },
+    ]
+
+    _, blocks = _build_batch_aggregate_blocks(deferred, "C-test")
+    block_texts: list[str] = []
+    for b in blocks:
+        if b.get("type") == "section" and isinstance(b.get("text"), dict):
+            block_texts.append(b["text"].get("text", ""))
+        elif b.get("type") == "context":
+            for el in b.get("elements", []):
+                if isinstance(el, dict) and el.get("type") == "mrkdwn":
+                    block_texts.append(el.get("text", ""))
+    all_text = " ".join(block_texts)
+
+    # Item 1: ✓ reconciled
+    assert "INV-001.pdf" in all_text and "✓ reconciled" in all_text, (
+        f"Doc 1 must show ✓ reconciled. Got: {block_texts!r}"
+    )
+    # Item 2: ✗ with reason breakdown
+    assert "INV-002.pdf" in all_text, f"Doc 2 must be labeled. Got: {block_texts!r}"
+    assert "✗" in all_text, f"Doc 2 must show ✗. Got: {block_texts!r}"
+    assert "blank account" in all_text, (
+        f"Reason breakdown must include 'blank account'. Got: {block_texts!r}"
+    )
+    assert "missing tax code" in all_text, (
+        f"Reason breakdown must include 'missing tax code'. Got: {block_texts!r}"
+    )
+
+
 # =========================================================================== #
 # Phase 3C — summary table wired into HITL review/approval cards
 # =========================================================================== #
