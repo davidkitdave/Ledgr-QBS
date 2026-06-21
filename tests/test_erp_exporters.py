@@ -125,6 +125,68 @@ class TestClientTaxCodeOverride:
         assert code == "CUSTOM-8"
         assert code != "SV-8"
 
+    def test_empty_client_tax_list_returns_blank_not_yaml(self):
+        inv = _purchase_inv(inv_date=date(2024, 6, 1))
+        line = inv.lines[0]
+        rate = MY_CLF.standard_rate_for_date(inv.invoice_date)
+        code = resolve_tax_code(
+            line.tax_treatment,
+            rate=rate,
+            doc_type="purchase",
+            software="autocount",
+            client_tax_codes=[],
+            classifier=MY_CLF,
+        )
+        assert code == ""
+        assert code != "SV-8"
+
+    def test_none_client_tax_list_still_uses_yaml_seed(self):
+        """When no client master is configured (None), YAML seed is allowed."""
+        inv = _purchase_inv(inv_date=date(2024, 6, 1))
+        line = inv.lines[0]
+        rate = MY_CLF.standard_rate_for_date(inv.invoice_date)
+        code = resolve_tax_code(
+            line.tax_treatment,
+            rate=rate,
+            doc_type="purchase",
+            software="autocount",
+            client_tax_codes=None,
+            classifier=MY_CLF,
+        )
+        assert code == "SV-8"
+
+
+class TestXeroTaxCodeMaster:
+    def test_xero_uses_client_tax_codes_not_yaml(self):
+        inv = _purchase_inv(inv_date=date(2024, 6, 1))
+        client_codes = [
+            {"code": "CLIENT-SR", "description": "Client SR", "treatment": "SR:0.08"},
+        ]
+        exporter = XeroLedgerExporter(classifier=MY_CLF)
+        exporter.configure_client_context(tax_codes=client_codes)
+        rows = exporter.rows([inv], "purchase")
+        assert rows[0]["*TaxType"] == "CLIENT-SR"
+        assert rows[0]["*TaxType"] != "SV-8"
+
+    def test_xero_empty_tax_codes_blanks_tax_type(self):
+        inv = _purchase_inv(inv_date=date(2024, 6, 1))
+        exporter = XeroLedgerExporter(classifier=MY_CLF)
+        exporter.configure_client_context(tax_codes=[])
+        rows = exporter.rows([inv], "purchase")
+        assert rows[0]["*TaxType"] == ""
+
+    def test_xero_empty_tax_codes_surfaces_in_unmapped_summary(self):
+        inv = _purchase_inv(inv_date=date(2024, 6, 1))
+        exporter = XeroLedgerExporter(classifier=MY_CLF)
+        exporter.configure_client_context(tax_codes=[])
+        rows = exporter.rows([inv], "purchase")
+        summary = collect_export_unmapped_summary(
+            [{"sheet": "Purchase", "rows": rows}],
+            exporter,
+        )
+        assert summary["count"] >= 1
+        assert any("*TaxType" in d.get("missing", []) for d in summary["details"])
+
 
 class TestCreditorCodeResolution:
     def test_unmapped_vendor_returns_blank_creditor(self):

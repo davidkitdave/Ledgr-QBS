@@ -159,6 +159,7 @@ class LedgerExporter:
     def __init__(self, classifier: Optional[TaxClassifier] = None):
         self.clf = classifier or TaxClassifier()
         self._coa_keys: set[str] | None = None
+        self._client_tax_codes: list[dict] | dict[str, str] | None = None
 
     def configure_client_context(
         self,
@@ -169,6 +170,8 @@ class LedgerExporter:
     ) -> None:
         """Attach client COA keys for zero-tolerance export validation."""
         self._coa_keys = coa_keys
+        if tax_codes is not None:
+            self._client_tax_codes = tax_codes
 
     def _sanitize_row_account_code(
         self,
@@ -412,7 +415,15 @@ class XeroLedgerExporter(LedgerExporter):
 
     def _xero_common(self, inv, line):
         party = inv.counterparty
-        tax_type = self.clf.tax_code(line.tax_treatment, inv.doc_type, "xero")
+        rate = resolve_rate_for_line(self.clf, line, inv)
+        tax_type = resolve_tax_code(
+            line.tax_treatment,
+            rate=rate,
+            doc_type=inv.doc_type,
+            software=self.system,
+            client_tax_codes=self._client_tax_codes,
+            classifier=self.clf,
+        )
         qty = line.quantity if line.quantity is not None else 1
         # *UnitAmount must satisfy Quantity × UnitAmount = the line's post-discount net,
         # so the invoice ties out on Xero import. Prefer the effective amount derived from
@@ -502,7 +513,8 @@ class ProfileLedgerExporter(LedgerExporter):
             entity_memory=entity_memory,
             coa_keys=coa_keys,
         )
-        self._client_tax_codes = tax_codes
+        if tax_codes is not None:
+            self._client_tax_codes = tax_codes
         self._entity_memory = list(entity_memory or [])
 
     def required_fields(self, doc_type: str) -> list[str]:

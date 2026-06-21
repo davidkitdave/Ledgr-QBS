@@ -99,10 +99,11 @@ def resolve_tax_code(
                 return code
 
     yaml_code = classifier.tax_code(treatment, doc_type, software, rate=rate) or ""
-    if entries:
-        allowed = _client_code_set(entries)
-        if yaml_code and yaml_code in allowed:
-            return yaml_code
+    if client_tax_codes is not None:
+        if entries:
+            allowed = _client_code_set(entries)
+            if yaml_code and yaml_code in allowed:
+                return yaml_code
         return ""
     return yaml_code
 

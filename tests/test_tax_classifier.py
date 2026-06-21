@@ -497,6 +497,11 @@ class TestMySstMultiRate:
     assert clf.tax_code("SR", "purchase", "autocount", rate=0.08) == "SV-8"
     assert clf.tax_code("SR", "purchase", "autocount", rate=0.06) == "SV-6"
 
+  def test_autocount_sales_es_rate_keyed(self):
+    clf = get_tax_classifier("my_sst.yaml")
+    assert clf.tax_code("ES", "sales", "autocount", rate=0.08) == "ESV-8"
+    assert clf.tax_code("ES", "sales", "autocount", rate=0.06) == "ESV-6"
+
   def test_sql_account_flat_codes_no_svz(self):
     clf = get_tax_classifier("my_sst.yaml")
     assert clf.tax_code("SR", "purchase", "sql_account") == "SV"
