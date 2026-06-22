@@ -496,7 +496,12 @@ class TaxClassifier:
             if reconciled:
                 treatment, _rate, reason = reconciled
                 return treatment, 0.85, False, reason
-            return "SR", 0.9, False, "SR: local standard-rated supply with GST line"
+            return (
+                "SR",
+                0.5,
+                True,
+                "SR(?): printed GST amount does not reconcile to any allowed rate band",
+            )
         # 3. YAML lexicon tie-break only — no printed tax_keyword and no GST amount.
         tiebreak = self._lexicon_tiebreak(desc)
         if tiebreak:

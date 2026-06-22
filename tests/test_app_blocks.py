@@ -1333,6 +1333,94 @@ class TestPreviewColumnSpec:
         assert {"Withdrawal", "Deposit", "Balance"} == num_keys
 
 
+class TestPreviewColumnSpecSlackLimit:
+    """WS-5.2 fix: Slack's data_table block allows at most 20 columns. The
+    AutoCount full export list is 21 cols, so the preview must use a curated
+    ≤20-col subset that still includes the amount/total column."""
+
+    @pytest.mark.parametrize("software", ["autocount", "sql_account", "xero", "qbs_ledger"])
+    @pytest.mark.parametrize("sheet", ["Purchase", "Sales"])
+    def test_preview_spec_at_most_20_cols(self, software, sheet):
+        spec = preview_column_spec(software=software, sheet=sheet)
+        assert len(spec) <= 20, (
+            f"{software}/{sheet} preview has {len(spec)} cols — Slack rejects >20"
+        )
+
+    def test_autocount_purchase_preview_keeps_amount_and_identity(self):
+        spec = preview_column_spec(software="autocount", sheet="Purchase")
+        headers = [c.header for c in spec]
+        # AutoCount col #21 (Amount) is the most important preview column.
+        assert "Amount" in headers
+        assert "DocNo" in headers
+        assert "DocDate" in headers
+        assert "CreditorCode" in headers
+
+    def test_autocount_sales_preview_keeps_amount_and_identity(self):
+        spec = preview_column_spec(software="autocount", sheet="Sales")
+        headers = [c.header for c in spec]
+        assert "Amount" in headers
+        assert "DocNo" in headers
+        assert "DocDate" in headers
+        assert "DebtorCode" in headers
+
+    def test_autocount_preview_is_curated_subset_of_export_cols(self):
+        # Preview row_keys must be a subset of the full export columns so the
+        # exporter row dicts actually carry a value for every preview column.
+        from invoice_processing.export.exporters import load_erp_profile_for_system
+
+        profile = load_erp_profile_for_system("autocount")
+        for sheet, full_key in (("Purchase", "purchase_cols"), ("Sales", "sales_cols")):
+            spec = preview_column_spec(software="autocount", sheet=sheet)
+            full = set(profile[full_key])
+            assert {c.row_key for c in spec} <= full
+
+    def test_autocount_amount_is_numeric_cell(self):
+        spec = preview_column_spec(software="autocount", sheet="Purchase")
+        amount = next(c for c in spec if c.header == "Amount")
+        assert amount.cell_type == "raw_number"
+
+
+# AutoCount exporter row shape (full 21-col export dict, keyed by ERP column).
+_AUTOCOUNT_PURCHASE_ROWS = [
+    {
+        "DocNo": "<<New>>", "DocDate": "01/06/2024", "CreditorCode": "400-A0001",
+        "SupplierInvoiceNo": "INV-JBI-001", "JournalType": "PURCHASE",
+        "DisplayTerm": "", "PurchaseAgent": "", "Description": "Auto parts",
+        "CurrencyRate": "", "RefNo2": "", "Note": "", "InclusiveTax": "F",
+        "AccNo": "510-000", "ToAccountRate": "", "DetailDescription": "Auto parts",
+        "ProjNo": "", "DeptNo": "", "TaxType": "SV-6", "TaxableAmt": 1000.0,
+        "TaxAdjustment": "", "Amount": 1000.0,
+    },
+]
+
+
+class TestLedgerPreviewDataTableSlackLimit:
+    """The assembled data_table must never carry >20 cells per row."""
+
+    @pytest.fixture(autouse=True)
+    def _force_native(self, monkeypatch):
+        monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
+
+    def test_autocount_data_table_rows_at_most_20_cells(self):
+        blocks = ledger_preview_data_table(
+            rows=_AUTOCOUNT_PURCHASE_ROWS, workbook_name="Ledger_FY2024.xlsx",
+            fy=2024, sheet="Purchase", software="autocount",
+        )
+        table = next(b for b in blocks if b["type"] == "data_table")
+        for row in table["rows"]:
+            assert len(row) <= 20, f"data_table row has {len(row)} cells (>20)"
+
+    def test_autocount_data_table_header_includes_amount(self):
+        blocks = ledger_preview_data_table(
+            rows=_AUTOCOUNT_PURCHASE_ROWS, workbook_name="Ledger_FY2024.xlsx",
+            fy=2024, sheet="Purchase", software="autocount",
+        )
+        table = next(b for b in blocks if b["type"] == "data_table")
+        header_texts = [c["text"] for c in table["rows"][0]]
+        assert "Amount" in header_texts
+        assert "DocNo" in header_texts
+
+
 class TestLedgerPreviewDataTableNative:
 
     @pytest.fixture(autouse=True)
@@ -1546,12 +1634,18 @@ class TestPreviewColumnSpecAutoCountSQL:
         spec = preview_column_spec(software="AutoCount", sheet="Purchase")
         assert spec[0].row_key == profile["purchase_cols"][0]
 
-    def test_autocount_purchase_row_keys_match_profile_cols(self):
+    def test_autocount_purchase_row_keys_match_curated_preview_cols(self):
+        # WS-5.2 fix: the AutoCount preview uses the curated ≤20-col
+        # `purchase_preview_cols` subset (the full 21-col `purchase_cols` export
+        # list exceeds Slack's data_table limit), and every preview key is a
+        # real export column so the exporter rows carry a value for it.
         from invoice_processing.export.exporters import load_erp_profile_for_system
 
         profile = load_erp_profile_for_system("autocount")
         spec = preview_column_spec(software="AutoCount", sheet="Purchase")
-        assert [c.row_key for c in spec] == profile["purchase_cols"]
+        assert [c.row_key for c in spec] == profile["purchase_preview_cols"]
+        assert {c.row_key for c in spec} <= set(profile["purchase_cols"])
+        assert len(spec) <= 20
 
     def test_autocount_purchase_has_creditor_col(self):
         spec = preview_column_spec(software="AutoCount", sheet="Purchase")
@@ -1563,17 +1657,25 @@ class TestPreviewColumnSpecAutoCountSQL:
         row_keys = [c.row_key for c in spec]
         assert "DebtorCode" in row_keys
 
-    def test_autocount_sales_has_currency_code_col(self):
-        spec = preview_column_spec(software="AutoCount", sheet="Sales")
-        row_keys = [c.row_key for c in spec]
-        assert "CurrencyCode" in row_keys
-
-    def test_autocount_sales_row_keys_match_profile_cols(self):
+    def test_autocount_sales_curated_preview_drops_currency_code(self):
+        # CurrencyCode is a non-key export column trimmed from the curated Slack
+        # preview to fit the 20-col limit; it remains in the full .xlsx export.
         from invoice_processing.export.exporters import load_erp_profile_for_system
 
         profile = load_erp_profile_for_system("autocount")
         spec = preview_column_spec(software="AutoCount", sheet="Sales")
-        assert [c.row_key for c in spec] == profile["sales_cols"]
+        row_keys = [c.row_key for c in spec]
+        assert "CurrencyCode" not in row_keys
+        assert "CurrencyCode" in profile["sales_cols"]
+
+    def test_autocount_sales_row_keys_match_curated_preview_cols(self):
+        from invoice_processing.export.exporters import load_erp_profile_for_system
+
+        profile = load_erp_profile_for_system("autocount")
+        spec = preview_column_spec(software="AutoCount", sheet="Sales")
+        assert [c.row_key for c in spec] == profile["sales_preview_cols"]
+        assert {c.row_key for c in spec} <= set(profile["sales_cols"])
+        assert len(spec) <= 20
 
     def test_sql_account_purchase_row_keys_match_profile_cols(self):
         from invoice_processing.export.exporters import load_erp_profile_for_system
@@ -2331,4 +2433,50 @@ def test_processing_plan_headline_single_vs_multi():
     assert processing_plan_headline(total=1) == "Processing document"
     assert processing_plan_headline(total=2) == "Processing batch (2 documents)"
     assert processing_plan_headline(total=1, title="Custom") == "Custom"
+
+
+# --------------------------------------------------------------------------- #
+# Regression: review_card_blocks never emits an empty body.text
+# --------------------------------------------------------------------------- #
+
+
+class TestReviewCardBlocksNeverEmptyBody:
+    """review_card_blocks must never produce an empty body / section text,
+    even when question is empty or whitespace-only (fixes SlackApiError crash)."""
+
+    def test_empty_string_native_body_is_non_empty(self, monkeypatch):
+        monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
+        blocks = review_card_blocks(question="", op_id="RV-1")
+        card = next(b for b in blocks if b["type"] == "card")
+        body_text = card["body"]["text"]
+        assert body_text and body_text.strip(), (
+            "native card body.text must not be empty when question=''"
+        )
+
+    def test_whitespace_string_native_body_is_non_empty(self, monkeypatch):
+        monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
+        blocks = review_card_blocks(question="   ", op_id="RV-1")
+        card = next(b for b in blocks if b["type"] == "card")
+        body_text = card["body"]["text"]
+        assert body_text and body_text.strip(), (
+            "native card body.text must not be empty when question is whitespace-only"
+        )
+
+    def test_empty_string_fallback_section_is_non_empty(self, monkeypatch):
+        monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "0")
+        blocks = review_card_blocks(question="", op_id="RV-1")
+        section = next(b for b in blocks if b["type"] == "section")
+        text = section["text"]["text"]
+        assert text and text.strip(), (
+            "fallback section text must not be empty when question=''"
+        )
+
+    def test_whitespace_string_fallback_section_is_non_empty(self, monkeypatch):
+        monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "0")
+        blocks = review_card_blocks(question="   ", op_id="RV-1")
+        section = next(b for b in blocks if b["type"] == "section")
+        text = section["text"]["text"]
+        assert text and text.strip(), (
+            "fallback section text must not be empty when question is whitespace-only"
+        )
 

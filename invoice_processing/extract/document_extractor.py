@@ -35,8 +35,8 @@ Rules:
 
 Segmentation:
 - If the file contains MULTIPLE distinct documents, return one ``documents`` entry each.
-- For SOA packages: skip the summary/cover page (record page numbers in skipped_pages) and
-  extract only embedded invoices.
+- For SOA packages: put summary/cover page number(s) in ``skipped_pages`` ONLY — do NOT
+  emit the cover as a ``documents`` entry; extract only embedded invoices on following pages.
 - If the file is a single document, return a one-element documents list.
 
 Segmentation (expense packages):

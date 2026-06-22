@@ -107,8 +107,7 @@ from invoice_processing.extract.bank_statement_extractor import (
     to_bank_statements,
 )
 from invoice_processing.extract.document_extractor import extract_document_bundle
-from invoice_processing.extract.document_normalizer import normalize_document_bundle
-from invoice_processing.extract.document_record import DocumentRecord, DocumentRecordBundle
+from invoice_processing.extract.document_record import DocumentRecordBundle
 from invoice_processing.extract.process_invoice_document import (
     InvoiceProcessResult,
     process_invoice_document,
@@ -374,7 +373,6 @@ CLASSIFY_FN: Callable[..., ClassificationResult] = classify_document
 DIRECTION_FN: Callable[..., str] = resolve_direction
 EXTRACT_BUNDLE_FN: Callable[..., ExtractedInvoiceBundle] = extract_invoice_bundle
 EXTRACT_DOCUMENT_FN: Callable[..., DocumentRecordBundle] = extract_document_bundle
-NORMALIZE_DOCUMENT_FN = normalize_document_bundle
 EXTRACT_INVOICE_DOCUMENT_FN: Callable[..., InvoiceProcessResult] = process_invoice_document
 EXTRACT_BANK_FN: Callable[..., Any] = extract_bank_statement
 CATEGORIZE_FN: Callable[..., NormalizedInvoice] = categorize_invoice
@@ -700,7 +698,7 @@ def _our_gst_registered_from_state(state: dict) -> bool:
 
 @node
 async def extract_invoice_document_node(ctx) -> Event:
-    """Understand or legacy extraction — single orchestrated invoice lane step."""
+    """Understand extraction — single orchestrated invoice lane step."""
     data, mime_type = await _load_pdf_bytes(ctx)
     review_hint = (ctx.state.get("review_hint") or "").strip()
     result = EXTRACT_INVOICE_DOCUMENT_FN(
@@ -1181,56 +1179,16 @@ def detect_struggle(state: dict) -> tuple[bool, list[str]]:
 
     invoices = _normalized_from_state(state)
 
-    from invoice_processing.extract.document_normalizer import _is_telco_bill
-
     reasons: list[str] = []
 
-    # WS-1.5 — pre-compute jurisdiction + COA signals for the new flags.
-    # We read from the same state keys that resolve_jurisdiction_node +
-    # categorize_node wrote: tax_jurisdiction, flag_for_human, coa_from_state.
-    # Catching these BEFORE the export stage is the whole point of the
-    # D1 fix — a missing reference_yaml must never silently SG-default.
-    tax_jurisdiction = (state.get(TAX_JURISDICTION_KEY) or "").strip()
-    flag_for_human = bool(state.get(FLAG_FOR_HUMAN_KEY))
-    resolved_jurisdiction = tax_jurisdiction.upper() if tax_jurisdiction else ""
-    try:
-        _coa = coa_from_state(state)
-        coa_keys: set[str] | None = (
-            {entry.code for entry in _coa if getattr(entry, "code", None)}
-            if _coa else None
-        )
-    except Exception:  # noqa: BLE001 — defensive; missing COA is a non-skip
-        coa_keys = None
-
-    # Phase 1 read fidelity (DocumentRecord capture) — legacy path only.
-    extraction_path = (state.get(EXTRACTION_PATH_KEY) or "").strip().lower()
-    records_raw = state.get(DOCUMENT_RECORDS_KEY)
-    doc_records: list = []
-    if extraction_path not in ("understand", "capture_book") and records_raw is not None:
-        if not records_raw:
-            reasons.append("read_empty")
-        for idx, raw in enumerate(records_raw):
-            doc = DocumentRecord.model_validate(raw) if isinstance(raw, dict) else raw
-            doc_records.append(doc)
-            if not doc.labeled_fields and not doc.line_items and not doc.tables:
-                reasons.append(f"read_no_capture: doc #{idx + 1}")
-            elif (
-                (doc.totals or doc.labeled_fields)
-                and not doc.line_items
-                and not doc.tables
-                and not _is_telco_bill(doc)
-            ):
-                reasons.append(f"read_no_lines: doc #{idx + 1}")
-        if len(doc_records) > 1:
-            reasons.append(f"read_false_split: {len(doc_records)} documents")
-
-    # Phase 1 rich but Phase 2 incomplete.
-    if doc_records and invoices:
-        primary = doc_records[0]
-        inv0 = invoices[0]
-        rich_read = bool(primary.labeled_fields or primary.line_items)
-        if rich_read and not inv0.invoice_number and not inv0.doc_total and inv0.lines:
-            reasons.append("normalize_incomplete: read captured lines but missing headers")
+    # NOTE: jurisdiction + COA + currency signals are NOT computed here.
+    # detect_struggle runs at lane position 2 (review_extraction), BEFORE
+    # categorize (writes account_code) and resolve_jurisdiction (writes
+    # tax_jurisdiction). Reading those state keys here always saw empty
+    # values and over-flagged every commercial doc. The genuine conditions
+    # (blank/not-in-COA account codes, unresolved jurisdiction, currency
+    # mismatch) are caught post-resolution at the terminal gate in
+    # _needs_review instead.
 
     # Signal #1: bundle_empty — normalization produced zero invoices.
     if not invoices:
@@ -1272,9 +1230,7 @@ def detect_struggle(state: dict) -> tuple[bool, list[str]]:
                 or "self-referential" in note
                 or "direction not confirmed" in note
             ):
-                primary = doc_records[idx] if idx < len(doc_records) else None
-                if not (primary and _is_telco_bill(primary)):
-                    reasons.append(f"direction_uncertain: {label}")
+                reasons.append(f"direction_uncertain: {label}")
 
         # Signal #6: missing_required — a core identifier/total is absent.
         # §0.5-C: doc_total is a tax/GST-shaped total only insofar as a
@@ -1291,59 +1247,6 @@ def detect_struggle(state: dict) -> tuple[bool, list[str]]:
             missing.append("doc_total")
         if missing:
             reasons.append(f"missing_required: {label} ({', '.join(missing)})")
-
-        # WS-1.5 Signal #7: blank_account_code (CRIT).
-        # A line that survived categorization but still has no account_code
-        # will export with a blank AccNo / _ACCOUNT(10) — for AutoCount that
-        # is the GL control account, which means the entry silently books
-        # against the default suspense account. Flag loudly so HITL routes
-        # it instead of letting the export go through.
-        #
-        # Scoped: only fires for doc types that go through categorization
-        # (invoice / credit_note / receipt). 'other' / 'expense_claim' /
-        # 'bank_statement' / 'statement_of_account' lines legitimately may
-        # not have an account_code at this stage — flagging them would
-        # drown the reviewer in false positives.
-        if doc_type in ("invoice", "credit_note", "receipt"):
-            for ln_idx, ln in enumerate(inv.lines):
-                if not (ln.account_code and str(ln.account_code).strip()):
-                    reasons.append(
-                        f"blank_account_code: {label} line #{ln_idx + 1}"
-                    )
-
-            # WS-1.5 Signal #8: account_code_not_in_coa.
-            # The COA resolution is supposed to null out hallucinated keys
-            # (categorizer.py:265-266) — but a wrong-client entity-memory entry
-            # or a stale cached code can bypass that. Force blank + flag so the
-            # post-export check catches what the LLM step missed.
-            if coa_keys is not None:
-                for ln_idx, ln in enumerate(inv.lines):
-                    code = (ln.account_code or "").strip()
-                    if code and code not in coa_keys:
-                        reasons.append(
-                            f"account_code_not_in_coa: {label} line #{ln_idx + 1} "
-                            f"code={code!r}"
-                        )
-
-        # WS-1.5 Signal #9: currency_mismatch.
-        # An MY doc whose currency defaulted to SGD (D6) is a strong signal
-        # the extract lost the printed currency — the file may still be a
-        # legitimate MY invoice, but the user wants to be told before it
-        # books against a SGD-defaulted tax band.
-        if inv.currency == "SGD" and resolved_jurisdiction == "MALAYSIA":
-            reasons.append(
-                f"currency_mismatch: {label} is MY-jurisdiction but currency=SGD"
-            )
-
-    # WS-1.5 Signal #6: jurisdiction_unresolved (D1 CRIT).
-    # The previous behaviour: when state lacked ``tax_jurisdiction`` or
-    # ``reference_yaml``, get_tax_classifier(None) silently fell back to
-    # sg_gst.yaml, so an MY doc with lost reference_yaml booked SG codes.
-    # Now: the moment we observe an unresolved jurisdiction, the struggle
-    # detector flags BEFORE the export stage — HITL routes the doc to a
-    # human reviewer instead of letting the SG-default corrupt the books.
-    if (not tax_jurisdiction) or flag_for_human:
-        reasons.append("jurisdiction_unresolved")
 
     # Signal #4: doc_type_other — quality-gated (ADR-0017 Lever 1).
     # For 'other' and 'expense_claim' doc types, only escalate when the
@@ -1666,9 +1569,11 @@ async def review_extraction_node(ctx):
             # Critic cleared the soft signals — fall through, no human pause.
             return
         # Critic returned CLARIFY or HINTS exhausted → escalate to human.
+        review_q = ctx.state.get("review_question") or _review_clarify_question(reasons)
+        ctx.state["review_question"] = review_q
         yield RequestInput(
             interrupt_id=review_interrupt_id,
-            message=ctx.state.get("review_question") or _review_clarify_question(reasons),
+            message=review_q,
             response_schema=ReviewClarifyDecision,
         )
         return
@@ -1695,9 +1600,11 @@ async def review_extraction_node(ctx):
         # critic explicitly asked for human clarification.
         ctx.state[REVIEW_VERDICT_KEY] = REVIEW_VERDICT_CLARIFY
         ctx.state[REVIEW_REASON_KEY] = recheck_reasons  # update to post-fix state
+        review_q = ctx.state.get("review_question") or _review_clarify_question(recheck_reasons)
+        ctx.state["review_question"] = review_q
         yield RequestInput(
             interrupt_id=review_interrupt_id,
-            message=ctx.state.get("review_question") or _review_clarify_question(recheck_reasons),
+            message=review_q,
             response_schema=ReviewClarifyDecision,
         )
         return
@@ -1907,6 +1814,12 @@ def _needs_review(state: dict) -> tuple[bool, list[str]]:
         if not inv.reconciled:
             note = inv.reconcile_note or "totals do not reconcile"
             reasons.append(f"{label}: not reconciled ({note})")
+        # Currency vs jurisdiction mismatch — invoice-level, OUTSIDE the
+        # per-line jurisdiction_ambiguous guard so it is not suppressed under
+        # AMBIGUOUS. At the terminal gate tax_jurisdiction is reliably populated.
+        resolved = (state.get(TAX_JURISDICTION_KEY) or "").strip().upper()
+        if inv.currency == "SGD" and resolved == "MALAYSIA":
+            reasons.append(f"{label}: MY-jurisdiction but currency=SGD (currency_mismatch)")
         for line in inv.lines:
             if jurisdiction_ambiguous:
                 continue
@@ -2061,17 +1974,9 @@ async def approval_gate(ctx):
         ctx.state[RECONCILE_REEXTRACT_ATTEMPTED_KEY] = True
         needs_review, reasons = _needs_review(ctx.state)
 
-    if not needs_review and not is_multi:
+    if not needs_review:
         ctx.state[APPROVAL_STATUS_KEY] = "auto_approved"
         return
-
-    # Multi-entity bundles get a bundle-level reason when no per-doc flags fired.
-    if is_multi and not reasons:
-        total_lines = sum(len(getattr(inv, "lines", [])) for inv in invoices)
-        reasons = [
-            f"{len(invoices)} sub-documents extracted, {total_lines} total lines"
-            " — review before posting."
-        ]
 
     export_unmapped = _preview_export_unmapped(ctx.state)
     ctx.state["export_unmapped_summary"] = export_unmapped

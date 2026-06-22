@@ -2081,6 +2081,63 @@ def test_single_file_drop_keeps_processing_and_delivery_on_top_level_message():
     assert "thread_ts" not in slack.updates[-1]
 
 
+class _FailRichUpdateSlackClient(FakeSlackClient):
+    """Job-summary chat_update with blocks raises (simulates Slack
+    ``invalid_blocks``); the plain-text-only fallback succeeds."""
+
+    def chat_update(self, **kwargs):
+        if "blocks" in kwargs:
+            raise Exception("invalid_blocks: no more than 20 items allowed")
+        # Text-only fallback path records normally.
+        return super().chat_update(**kwargs)
+
+
+def test_batch_job_summary_falls_back_to_plain_text_on_invalid_blocks():
+    """WS-5.2: if the rich Job-summary chat_update is rejected (e.g.
+    invalid_blocks from a too-wide data_table), the card must NOT stay stuck on
+    'Processing batch …' — the handler retries with a plain-text-only update so
+    the user gets a clean delivery confirmation.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from accounting_agents import slack_runner
+    from app.slack_app import _SeenEvents
+
+    slack_runner._seen = _SeenEvents()
+    slack = _FailRichUpdateSlackClient()
+    handler, _ = _capture_message_handler_with_slack_client(slack)
+
+    body = {"event_id": "Ev-batch-fallback"}
+    event = {
+        "type": "message",
+        "subtype": "file_share",
+        "ts": "333.001",
+        "channel": "C-fallback",
+        "files": [{"id": "FB1"}, {"id": "FB2"}],
+    }
+    fake_client = MagicMock()
+    mock_pfe = AsyncMock(side_effect=[
+        {"status": "delivered", "append": {"appended": 1, "software": "AutoCount", "fy": "2024"}},
+        {"status": "delivered", "append": {"appended": 1, "software": "AutoCount", "fy": "2024"}},
+    ])
+
+    with patch.object(slack_runner, "process_file_event", mock_pfe), \
+         patch.object(slack_runner, "download_pdf_bytes", return_value=b"%PDF fake"):
+        asyncio.run(handler(event=event, body=body, client=fake_client))
+
+    summary_ts = next(
+        p.get("ts") for p in slack._posts if not p.get("thread_ts")
+    )
+    # A text-only fallback chat_update must have landed on the summary message,
+    # so the card is never left stuck on "Processing batch …".
+    fallback_updates = [
+        u for u in slack.updates
+        if u.get("ts") == summary_ts and "blocks" not in u
+    ]
+    assert fallback_updates, "expected a plain-text fallback chat_update"
+    assert (fallback_updates[-1].get("text") or "").strip()
+
+
 def test_single_file_drop_uses_processing_document_headline(monkeypatch):
     """Single-file drops must not say 'Processing batch (1 document)'."""
     from unittest.mock import AsyncMock, MagicMock, patch
@@ -7779,34 +7836,26 @@ def test_batch_six_files_post_initial_native_plan_block(monkeypatch):
 # =========================================================================== #
 
 
-def test_document_ledger_extract_schema_has_party_and_direction():
-    """``DocumentLedgerExtract`` owns From/To parties + ``direction_for_client``."""
-    from invoice_processing.extract.ledger_extract import (
-        DocumentLedgerExtract,
-        PartyField,
-    )
+def test_extracted_document_schema_has_vendor_buyer_and_direction():
+    """``ExtractedDocument`` owns vendor/buyer parties + ``direction_for_client``."""
+    from invoice_processing.extract.ledger_extract import ExtractedDocument
 
-    extract = DocumentLedgerExtract(
-        vendor_name="Contractor Beta",
-        customer_name="Company-A",
-        document_reference="INV-26-001",
-        document_date="2026-06-01",
-        document_total=1200.0,
-        from_party=PartyField(
-            name="Contractor Beta", uen=None, role="issuer",
-        ),
-        to_party=PartyField(
-            name="Company-A",
-            uen="201700001A",
-            role="recipient",
-        ),
+    doc = ExtractedDocument(
+        doc_type="invoice",
+        page_range=[1, 1],
+        vendor="Contractor Beta",
+        buyer="Company-A",
+        reference="INV-26-001",
+        date="2026-06-01",
+        currency="SGD",
+        grand_total=1200.0,
+        vendor_tax_regno=None,
         direction_for_client="purchase",
     )
     # The Contractor Beta case: client is the recipient → "purchase" (not "sales").
-    assert extract.direction_for_client == "purchase"
-    assert extract.to_party.uen == "201700001A"
-    assert extract.to_party.role == "recipient"
-    assert extract.from_party.role == "issuer"
+    assert doc.direction_for_client == "purchase"
+    assert doc.buyer == "Company-A"
+    assert doc.vendor == "Contractor Beta"
 
 
 def test_understand_prompt_includes_client_context():
@@ -7836,34 +7885,32 @@ def test_understand_prompt_omits_client_context_when_absent():
     assert "direction_for_client as follows" not in prompt
 
 
-def test_ledger_extract_to_normalized_uses_direction_for_client_when_auto():
+def test_extracted_document_to_normalized_uses_direction_for_client_when_auto():
     """``direction="auto"`` causes the adapter to honor the Understand verdict."""
     from invoice_processing.extract.ledger_extract import (
-        DocumentLedgerExtract,
-        PartyField,
-        ledger_extract_to_normalized,
+        ExtractedDocument,
+        ExtractedDocumentLine,
+        extracted_document_to_normalized,
     )
 
-    extract = DocumentLedgerExtract(
-        vendor_name="Vendor Pte Ltd",
-        customer_name="Company-A",
-        document_reference="INV-1",
-        document_date="2026-06-01",
-        document_total=100.0,
-        from_party=PartyField(name="Vendor Pte Ltd", role="issuer"),
-        to_party=PartyField(
-            name="Company-A",
-            uen="201700001A",
-            role="recipient",
-        ),
+    doc = ExtractedDocument(
+        doc_type="invoice",
+        page_range=[1, 1],
+        vendor="Vendor Pte Ltd",
+        buyer="Company-A",
+        reference="INV-1",
+        date="2026-06-01",
+        currency="SGD",
+        grand_total=100.0,
+        lines=[ExtractedDocumentLine(description="Service", net_amount=100.0, gst_amount=0.0)],
         direction_for_client="purchase",
     )
-    normalized = ledger_extract_to_normalized(extract, direction="auto")
+    normalized = extracted_document_to_normalized(doc, direction="auto")
     assert normalized.doc_type == "purchase"
 
     # Flip direction_for_client → sales and the adapter should follow.
-    extract_sales = extract.model_copy(update={"direction_for_client": "sales"})
-    normalized_sales = ledger_extract_to_normalized(extract_sales, direction="auto")
+    doc_sales = doc.model_copy(update={"direction_for_client": "sales"})
+    normalized_sales = extracted_document_to_normalized(doc_sales, direction="auto")
     assert normalized_sales.doc_type == "sales"
 
 

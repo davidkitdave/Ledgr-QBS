@@ -1010,7 +1010,6 @@ def _record_processing_log(
         "delivered_at": datetime.now(timezone.utc).isoformat(),
         "row_count": row_count,
         "fy": str(payload.get("fy") or append_result.get("fy") or ""),
-        "soa_legacy_path": doc_type == "statement_of_account" or extraction_path == "legacy",
     }
     # Phase 2: thread-context linkage. Optional keys only — older entries (pre-fix)
     # simply lack them and the resolver skips.
@@ -2493,9 +2492,6 @@ def _build_processing_log_entry(file_id: str, state: dict) -> dict:
         ),
         "row_count": row_count,
         "fy": str(state.get("fy") or ""),
-        "soa_legacy_path": (
-            doc_type == "statement_of_account" or extraction_path == "legacy"
-        ),
         "backfilled": True,
     }
 
@@ -6556,6 +6552,41 @@ def build_async_app(
                     sync_client.chat_update(**update_kwargs)
                 except Exception:  # noqa: BLE001 - cosmetic
                     logger.exception("failed to update Job summary in %s", channel_id)
+                    # Never leave the card stuck on "Processing batch …". Slack
+                    # rejects the rich update (e.g. invalid_blocks when a preview
+                    # data_table exceeds a block limit), so retry with a
+                    # plain-text-only summary — no blocks — so the user always
+                    # gets a clean delivery confirmation.
+                    try:
+                        fallback_text = (
+                            final_text
+                            if "final_text" in locals() and final_text
+                            else job_summary_text(
+                                total=total,
+                                posted=posted,
+                                needs_review=needs_review,
+                                rejected=rejected,
+                                failed=failed,
+                                duplicates=duplicates,
+                                software=software_hint,
+                                fy=fy_hint,
+                                kind=kind_hint,
+                            )
+                        )
+                        logger.warning(
+                            "falling back to plain-text Job summary in %s",
+                            channel_id,
+                        )
+                        sync_client.chat_update(
+                            channel=channel_id,
+                            ts=summary_ts,
+                            text=fallback_text,
+                        )
+                    except Exception:  # noqa: BLE001 - cosmetic
+                        logger.exception(
+                            "failed to update fallback Job summary in %s",
+                            channel_id,
+                        )
                 # Phase 2 backfill: patch delivery_message_ts onto per-doc log
                 # entries written during the batch loop (summary_ts is the thread parent).
                 if batch_file_ids and store is not None:

@@ -85,9 +85,6 @@ def _extract_entry(file_id: str, state: dict) -> dict:
         "delivered_at": delivered_at,
         "row_count": row_count,
         "fy": str(state.get("fy") or ""),
-        "soa_legacy_path": (
-            doc_type == "statement_of_account" or extraction_path == "legacy"
-        ),
         "backfilled": True,
     }
 

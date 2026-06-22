@@ -7,6 +7,7 @@ import urllib.parse
 from app.native_blocks_compat import supports_native_blocks
 from accounting_agents.jurisdiction import supported_regions
 from invoice_processing.export.exporters import (
+    SLACK_DATA_TABLE_MAX_COLS,
     PreviewColumn,
     load_erp_profile_for_system,
     normalize_software_preview_key,
@@ -1648,6 +1649,11 @@ def approval_outcome_blocks(summary: str, decision: str) -> list:
     ]
 
 
+_REVIEW_CARD_DEFAULT_QUESTION = (
+    "This document needs your review before it's added to the ledger."
+)
+
+
 def review_card_blocks(
     question: str,
     op_id: str,
@@ -1677,6 +1683,10 @@ def review_card_blocks(
                   the bullets section.
         channel_id: Used by supports_native_blocks() for per-channel probe.
     """
+    question = question.strip() if question else ""
+    if not question:
+        question = _REVIEW_CARD_DEFAULT_QUESTION
+
     reextract_btn = {
         "type": "button",
         "text": {"type": "plain_text", "text": "Re-extract with a hint", "emoji": True},
@@ -2246,7 +2256,13 @@ def ledger_preview_data_table(
     if not rows:
         return []
 
+    # Belt-and-suspenders: never emit a data_table wider than Slack's 20-column
+    # limit, no matter what the spec source produced. When capping, keep the
+    # first 19 columns plus the LAST (typically the amount/total) rather than
+    # dropping the tail.
     col_spec = preview_column_spec(software=software, sheet=sheet)
+    if len(col_spec) > SLACK_DATA_TABLE_MAX_COLS:
+        col_spec = [*col_spec[: SLACK_DATA_TABLE_MAX_COLS - 1], col_spec[-1]]
     sw_label = software_label(software)
     effective_max = min(max_rows, _DATA_TABLE_MAX_ROWS)
     preview = rows[:effective_max]

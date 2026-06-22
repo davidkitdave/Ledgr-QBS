@@ -350,6 +350,24 @@ class TestExistingRulesUnchanged:
         assert result.tax_treatment == "SR"
         assert not result.tax_flagged
 
+    def test_sales_gst_non_reconciling_amount_flags_for_review(self):
+        """Sales: positive GST that does not match any allowed rate band → SR flagged, low conf."""
+        line, inv = _sales(
+            desc="Local consulting",
+            net=1000.0,
+            gst=50.0,  # 5% — does not reconcile to 9% standard rate
+        )
+        result = CLF.classify_line(line, inv)
+
+        assert result.tax_treatment == "SR"
+        assert result.tax_flagged, (
+            f"Expected flag when printed GST does not reconcile. Reason: {result.tax_reason}"
+        )
+        assert result.tax_confidence <= 0.5, (
+            f"Expected low confidence for non-reconciling GST, got {result.tax_confidence}"
+        )
+        assert "does not reconcile" in (result.tax_reason or "").lower()
+
     def test_sales_not_gst_registered_nt(self):
         line, inv = _sales(desc="Service", our_gst_registered=False)
         result = CLF.classify_line(line, inv)

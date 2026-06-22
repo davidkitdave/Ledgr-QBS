@@ -149,14 +149,22 @@ def test_non_registered_missing_gst_does_not_trip():
 
 
 # ---------------------------------------------------------------------------
-# WS-1.5 — runtime fail-loud flags. Each of the four new signals must trip
-# the reviewer so HITL routes the doc to a human instead of silently
-# booking bad data. The D1 critical path test: an MY doc with lost
-# reference_yaml must flag (not silently SG-default).
+# Terminal-gate (_needs_review) parity tests.
+#
+# detect_struggle runs at lane position 2 (review_extraction) — BEFORE
+# categorize writes account_code and resolve_jurisdiction writes
+# tax_jurisdiction. So the four WS-1.5 signals (blank_account_code,
+# account_code_not_in_coa, jurisdiction_unresolved, currency_mismatch) read
+# always-empty state there and over-flagged every commercial doc. They have
+# been removed from detect_struggle; the genuine conditions are now caught
+# post-resolution at the terminal approval gate in _needs_review. These tests
+# prove the terminal gate still blocks export for each genuine condition, and
+# the lane-order regression test locks the premature signals out of
+# detect_struggle.
 # ---------------------------------------------------------------------------
 
 
-class TestWS15RuntimeFlags:
+class TestTerminalNeedsReview:
     def _clean_invoice_with_account(self, **overrides) -> NormalizedInvoice:
         defaults = dict(
             invoice_number="INV-1",
@@ -173,89 +181,83 @@ class TestWS15RuntimeFlags:
         defaults.update(overrides)
         return NormalizedInvoice(**defaults)
 
-    def test_jurisdiction_unresolved_when_tax_jurisdiction_missing(self):
-        """D1 critical: a doc with no tax_jurisdiction must flag — the
-        previous code silently SG-defaulted. Now HITL is forced."""
-        inv = self._clean_invoice_with_account()
-        state = _state([inv])
-        # Wipe the default tax_jurisdiction (the helper pre-sets it).
-        state[nodes.TAX_JURISDICTION_KEY] = None
-        tripped, reasons = detect_struggle(state)
-        assert tripped is True
-        assert "jurisdiction_unresolved" in reasons
-
-    def test_jurisdiction_unresolved_when_flag_for_human_set(self):
-        """resolve_jurisdiction_node sets flag_for_human=True when the
-        jurisdiction is ambiguous. detect_struggle must respect that flag."""
-        inv = self._clean_invoice_with_account()
-        state = _state([inv])
-        state[nodes.FLAG_FOR_HUMAN_KEY] = True
-        tripped, reasons = detect_struggle(state)
-        assert tripped is True
-        assert "jurisdiction_unresolved" in reasons
-
-    def test_blank_account_code_flags_for_invoice_doc(self):
-        """A categorized invoice line with no account_code flags blank_account_code."""
-        inv = self._clean_invoice_with_account(
-            lines=[InvoiceLine(description="Goods", net_amount=100.0, gst_amount=9.0,
-                                account_code="")],
-        )
-        tripped, reasons = detect_struggle(_state([inv]))
-        assert tripped is True
-        assert any(r.startswith("blank_account_code") for r in reasons)
-
-    def test_blank_account_code_does_not_fire_for_other_doc_type(self):
-        """'other' / 'expense_claim' lines legitimately may not have an
-        account_code; the flag would be a false positive on those lanes."""
-        inv = self._clean_invoice_with_account(
-            lines=[InvoiceLine(description="Petty cash", net_amount=50.0, gst_amount=0.0,
-                                account_code="")],
-        )
-        tripped, reasons = detect_struggle(
-            _state([inv], doc_type="expense_claim"),
-        )
-        assert not any(r.startswith("blank_account_code") for r in reasons), (
-            f"blank_account_code should NOT fire for expense_claim. Got: {reasons}"
-        )
-
-    def test_account_code_not_in_coa_flags(self):
-        """An account_code that survives categorization but isn't in the
-        client COA must flag — the LLM step is supposed to null these out
-        (categorizer.py:265-266) but a wrong-client entity-memory entry
-        can bypass that."""
-        inv = self._clean_invoice_with_account(
-            lines=[InvoiceLine(description="Goods", net_amount=100.0, gst_amount=9.0,
-                                account_code="XXX-INVALID-CODE")],
-        )
-        state = _state([inv])
-        # Inject a COA that does NOT include the line's account_code.
-        # coa_from_state reads from the "coa" key (list of dicts with
-        # 'code' / 'description' fields).
-        state["coa"] = [
-            {"code": "6100", "description": "Office Expenses"},
-            {"code": "6200", "description": "Travel"},
-        ]
-        tripped, reasons = detect_struggle(state)
-        assert tripped is True
-        assert any(r.startswith("account_code_not_in_coa") for r in reasons)
-        # The reported code must be the offending one.
-        flagged = [r for r in reasons if r.startswith("account_code_not_in_coa")]
-        assert "XXX-INVALID-CODE" in flagged[0]
-
-    def test_currency_mismatch_flags_my_doc_with_sgd(self):
-        """An MY-jurisdiction doc whose currency defaulted to SGD must flag —
-        this is the D6 silent-corruption guard."""
+    def test_needs_review_currency_mismatch_my_sgd(self):
+        """MY-jurisdiction invoice with currency=SGD → terminal gate flags."""
         inv = self._clean_invoice_with_account(currency="SGD")
         state = _state([inv])
         state[nodes.TAX_JURISDICTION_KEY] = "MALAYSIA"
-        tripped, reasons = detect_struggle(state)
-        assert tripped is True
-        assert any(r.startswith("currency_mismatch") for r in reasons)
+        needs, reasons = nodes._needs_review(state)
+        assert needs is True
+        assert any("currency_mismatch" in r for r in reasons), reasons
 
-    def test_no_flags_when_all_clean(self):
-        """A clean, categorized, MY-jurisdiction MYR invoice does NOT trip."""
+    def test_needs_review_no_currency_mismatch_when_myr(self):
+        """MY-jurisdiction invoice with currency=MYR → no currency reason."""
         inv = self._clean_invoice_with_account(currency="MYR")
         state = _state([inv])
         state[nodes.TAX_JURISDICTION_KEY] = "MALAYSIA"
-        tripped, reasons = detect_struggle(state)
-        assert tripped is False, f"Clean MY doc tripped: {reasons}"
+        _needs, reasons = nodes._needs_review(state)
+        assert not any("currency_mismatch" in r for r in reasons), reasons
+
+    def test_needs_review_flagged_account_code(self):
+        """A line with account_flagged=True (blank/abstained code) → caught."""
+        inv = self._clean_invoice_with_account(
+            lines=[InvoiceLine(
+                description="Goods", net_amount=100.0, gst_amount=9.0,
+                account_code="", account_flagged=True,
+                account_flag_reason="unresolved",
+            )],
+        )
+        state = _state([inv])
+        needs, reasons = nodes._needs_review(state)
+        assert needs is True
+        assert any("flagged for account review" in r for r in reasons), reasons
+
+    def test_needs_review_ambiguous_jurisdiction(self):
+        """AMBIGUOUS jurisdiction + flag_for_human → terminal gate flags."""
+        inv = self._clean_invoice_with_account()
+        state = _state([inv])
+        state[nodes.TAX_JURISDICTION_KEY] = nodes.JURISDICTION_AMBIGUOUS
+        state[nodes.FLAG_FOR_HUMAN_KEY] = True
+        needs, reasons = nodes._needs_review(state)
+        assert needs is True
+        assert any("region" in r.lower() for r in reasons), reasons
+
+
+class TestLaneOrderRegression:
+    """Lock the four removed premature signals out of detect_struggle.
+
+    detect_struggle runs before categorize/resolve_jurisdiction, so a clean
+    commercial invoice with an EMPTY account_code and NO tax_jurisdiction in
+    state must NOT emit any of the four removed signals. This pins the fix
+    against re-introduction.
+    """
+
+    def test_detect_struggle_omits_premature_signals(self):
+        inv = NormalizedInvoice(
+            invoice_number="INV-1",
+            invoice_date=__import__("datetime").date(2025, 1, 15),
+            doc_total=109.0,
+            reconciled=True,
+            our_gst_registered=True,
+            currency="SGD",
+            lines=[InvoiceLine(
+                description="Goods", net_amount=100.0, gst_amount=9.0,
+                account_code="",  # not yet categorized at this lane position
+            )],
+        )
+        state = {
+            nodes.NORMALIZED_KEY: [nodes._inv_to_dict(inv)],
+            nodes.DOC_TYPE_KEY: "invoice",
+            nodes.CLASSIFY_CONFIDENCE_KEY: 0.95,
+            # No tax_jurisdiction set — resolve_jurisdiction hasn't run yet.
+        }
+        _tripped, reasons = detect_struggle(state)
+        for forbidden in (
+            "blank_account_code",
+            "account_code_not_in_coa",
+            "jurisdiction_unresolved",
+            "currency_mismatch",
+        ):
+            assert not any(forbidden in r for r in reasons), (
+                f"{forbidden} must not be emitted by detect_struggle. Got: {reasons}"
+            )

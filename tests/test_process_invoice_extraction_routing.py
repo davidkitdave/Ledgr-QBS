@@ -92,15 +92,17 @@ def test_soa_without_quarantine_switch_uses_understand(monkeypatch):
     assert result.extraction_path == "understand"
 
 
-def test_soa_with_legacy_quarantine_uses_legacy(monkeypatch):
-    from invoice_processing.extract.document_record import DocumentRecordBundle
+def test_soa_with_legacy_quarantine_still_uses_understand(monkeypatch):
+    """Retired: LEDGR_LEGACY_SOA no longer switches routing."""
+    ledger_called = {"count": 0}
 
-    def fake_legacy_extract(data, mime_type, **kwargs):
-        return DocumentRecordBundle(documents=[])
+    def fake_extract(*args, **kwargs):
+        ledger_called["count"] += 1
+        return _single_doc_bundle()
 
     monkeypatch.setattr(
-        "invoice_processing.extract.process_invoice_document.EXTRACT_DOCUMENT_FN",
-        fake_legacy_extract,
+        "invoice_processing.extract.process_invoice_document.EXTRACT_LEDGER_FN",
+        fake_extract,
     )
     monkeypatch.setattr(
         "invoice_processing.extract.process_invoice_document.count_input_pages",
@@ -115,7 +117,8 @@ def test_soa_with_legacy_quarantine_uses_legacy(monkeypatch):
         doc_type="statement_of_account",
         direction="purchase",
     )
-    assert result.extraction_path == "legacy"
+    assert result.extraction_path == "understand"
+    assert ledger_called["count"] == 1
 
 
 def test_capture_book_not_default_for_invoice(monkeypatch):

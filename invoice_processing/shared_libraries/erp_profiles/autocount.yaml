@@ -53,6 +53,34 @@ sales_cols:
   - TaxAdjustment
   - Amount
 
+# Curated Slack-preview column subset (WS-5.2 fix). The full purchase_cols/
+# sales_cols lists (21 cols each) are correct for the .xlsx export, but Slack's
+# data_table block allows at most 20 columns per row — and the full list is also
+# too wide to read in chat. These curated subsets mirror the ~8-9 col single-doc
+# card view and MUST include the amount/total column (Amount) plus the key
+# identity columns. preview_columns_from_profile() reads these when present and
+# falls back to purchase_cols/sales_cols otherwise.
+purchase_preview_cols:
+  - DocNo
+  - DocDate
+  - CreditorCode
+  - SupplierInvoiceNo
+  - Description
+  - AccNo
+  - TaxType
+  - TaxableAmt
+  - Amount
+
+sales_preview_cols:
+  - DocNo
+  - DocDate
+  - DebtorCode
+  - Description
+  - AccNo
+  - TaxType
+  - TaxableAmt
+  - Amount
+
 # Constant values applied after field mapping (per doc type)
 purchase_constants:
   DocNo: "<<New>>"

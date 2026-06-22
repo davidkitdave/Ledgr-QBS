@@ -3,7 +3,7 @@
 These tests exercise the Drive-parity direction logic (the
 ``_resolve_direction_from_extract`` helper) against captured party
 information for six sample batch documents. They run without any API calls
-because they feed pre-extracted ``DocumentLedgerExtract`` objects through the
+because they feed pre-extracted ``ExtractedDocumentBundle`` objects through the
 direction resolver, then assert against the fixture's expected verdict.
 
 The fixtures live in ``eval/fixtures/direction/`` (JSON only, no PDFs).
@@ -16,8 +16,8 @@ from pathlib import Path
 
 from accounting_agents.nodes import _resolve_direction_from_extract
 from invoice_processing.extract.ledger_extract import (
-    DocumentLedgerExtract,
-    PartyField,
+    ExtractedDocument,
+    ExtractedDocumentBundle,
 )
 
 FIXTURES_DIR = Path(__file__).resolve().parents[1] / "eval" / "fixtures" / "direction"
@@ -33,28 +33,21 @@ def _load_fixtures() -> list[dict]:
     ]
 
 
-def _fixture_to_extract(fix: dict) -> DocumentLedgerExtract:
-    """Convert a fixture dict into a DocumentLedgerExtract for the resolver."""
-    from_party = PartyField(
-        name=fix["from_party"]["name"],
-        uen=fix["from_party"].get("uen"),
-        role="issuer",
-    )
-    to_party = PartyField(
-        name=fix["to_party"]["name"],
-        uen=fix["to_party"].get("uen"),
-        role="recipient",
-    )
-    return DocumentLedgerExtract(
-        vendor_name=from_party.name,
-        customer_name=to_party.name,
-        document_reference=fix.get("file_label", "FIX-1"),
-        document_date="2026-08-01",
-        document_total=100.0,
-        from_party=from_party,
-        to_party=to_party,
+def _fixture_to_bundle(fix: dict) -> ExtractedDocumentBundle:
+    """Convert a fixture dict into an ExtractedDocumentBundle for the resolver."""
+    doc = ExtractedDocument(
+        doc_type="invoice",
+        page_range=[1, 1],
+        vendor=fix["from_party"]["name"],
+        buyer=fix["to_party"]["name"],
+        reference=fix.get("file_label", "FIX-1"),
+        date="2026-08-01",
+        currency="SGD",
+        grand_total=100.0,
+        vendor_tax_regno=fix["from_party"].get("uen"),
         direction_for_client=fix["expected_direction_for_client"],
     )
+    return ExtractedDocumentBundle(documents=[doc])
 
 
 def test_batch_direction_fixtures_resolve_to_expected_direction():
@@ -65,9 +58,9 @@ def test_batch_direction_fixtures_resolve_to_expected_direction():
     )
 
     for fix in fixtures:
-        extract = _fixture_to_extract(fix)
+        bundle = _fixture_to_bundle(fix)
         resolved = _resolve_direction_from_extract(
-            extract.model_dump(),
+            bundle.model_dump(),
             fallback="purchase",
         )
         assert resolved == fix["expected_direction_for_client"], (
@@ -83,17 +76,16 @@ def test_batch_direction_fixtures_resolve_to_expected_direction():
 
 
 def test_batch_direction_fixtures_parties_round_trip():
-    """The fixture From/To parties survive the DocumentLedgerExtract round-trip."""
+    """The fixture From/To parties survive the ExtractedDocument round-trip."""
     fixtures = _load_fixtures()
     assert fixtures
     for fix in fixtures:
-        extract = _fixture_to_extract(fix)
-        assert extract.from_party.role == "issuer"
-        assert extract.to_party.role == "recipient"
+        bundle = _fixture_to_bundle(fix)
+        doc = bundle.documents[0]
+        assert doc.vendor == fix["from_party"]["name"]
+        assert doc.buyer == fix["to_party"]["name"]
         if fix["from_party"].get("uen") is not None:
-            assert extract.from_party.uen == fix["from_party"]["uen"]
-        if fix["to_party"].get("uen") is not None:
-            assert extract.to_party.uen == fix["to_party"]["uen"]
+            assert doc.vendor_tax_regno == fix["from_party"]["uen"]
 
 
 def test_batch_direction_fixtures_include_contractor_case():

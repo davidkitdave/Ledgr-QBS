@@ -40,6 +40,11 @@ _ERP_PROFILES_DIR = Path(__file__).resolve().parent.parent / "shared_libraries" 
 # Preview-only marker for low-confidence COA picks on Slack delivery cards (WS-3.4).
 ACCOUNT_FLAGGED_PREVIEW_MARKER = " ⚠️"
 
+# Slack's `data_table` block rejects rows with more than 20 columns
+# (`invalid_blocks: no more than 20 items allowed`). Every Slack preview column
+# spec must stay at or under this, independent of the .xlsx export width.
+SLACK_DATA_TABLE_MAX_COLS = 20
+
 
 @dataclass(frozen=True)
 class PreviewColumn:
@@ -48,6 +53,19 @@ class PreviewColumn:
     header: str    # shown in the data_table column header
     row_key: str   # dict key on each exporter row (ERP column name)
     cell_type: str  # "raw_text" or "raw_number"
+
+
+def _cap_preview_columns(cols: list[PreviewColumn]) -> list[PreviewColumn]:
+    """Hard-cap a preview column spec at the Slack data_table limit.
+
+    Defensive guard so a wide ERP export list can never produce a >20-column
+    Slack preview.  When a cap is applied we keep the first 19 columns plus the
+    LAST column — the last column is typically the amount/total, the single most
+    important value to keep visible — rather than blindly dropping the tail.
+    """
+    if len(cols) <= SLACK_DATA_TABLE_MAX_COLS:
+        return cols
+    return [*cols[: SLACK_DATA_TABLE_MAX_COLS - 1], cols[-1]]
 
 
 # Logical context keys whose values are numeric in exporter row dicts.
@@ -88,16 +106,22 @@ def load_erp_profile_for_system(system: str) -> dict[str, Any] | None:
 def preview_columns_from_profile(profile: dict, sheet: str) -> list[PreviewColumn]:
     """Derive Slack preview columns from an ERP profile (same source as Excel export).
 
-    Uses ``purchase_cols`` / ``sales_cols`` for column order and header labels, and
-    ``purchase_fields`` / ``sales_fields`` to infer numeric vs text cells.  Each
-    ``PreviewColumn.row_key`` is the ERP column name emitted by
-    :class:`ProfileLedgerExporter` row dicts.
+    Column order/headers come from the curated ``purchase_preview_cols`` /
+    ``sales_preview_cols`` list when present (a ≤20-col key-column subset, e.g.
+    AutoCount whose full 21-col export list exceeds Slack's data_table limit),
+    otherwise from the full ``purchase_cols`` / ``sales_cols`` export list.  Cell
+    type (numeric vs text) is always inferred from ``purchase_fields`` /
+    ``sales_fields``.  Each ``PreviewColumn.row_key`` is the ERP column name
+    emitted by :class:`ProfileLedgerExporter` row dicts.
+
+    Regardless of source, the result is hard-capped at
+    :data:`SLACK_DATA_TABLE_MAX_COLS` as a defensive Slack-limit guard.
     """
     if sheet == "Purchase":
-        cols = list(profile.get("purchase_cols") or [])
+        cols = list(profile.get("purchase_preview_cols") or profile.get("purchase_cols") or [])
         field_map = dict(profile.get("purchase_fields") or {})
     elif sheet == "Sales":
-        cols = list(profile.get("sales_cols") or [])
+        cols = list(profile.get("sales_preview_cols") or profile.get("sales_cols") or [])
         field_map = dict(profile.get("sales_fields") or {})
     else:
         return []
@@ -107,7 +131,7 @@ def preview_columns_from_profile(profile: dict, sheet: str) -> list[PreviewColum
         ctx_key = field_map.get(col, "")
         cell_type = "raw_number" if ctx_key in _NUMERIC_CONTEXT_KEYS else "raw_text"
         out.append(PreviewColumn(header=col, row_key=col, cell_type=cell_type))
-    return out
+    return _cap_preview_columns(out)
 
 
 def preview_columns_from_logical_fields(

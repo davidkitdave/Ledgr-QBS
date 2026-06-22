@@ -19,7 +19,6 @@ from typing import Any, Optional
 
 from invoice_processing.extract.document_record import DocumentRecord, DocumentRecordBundle
 from invoice_processing.extract.document_extractor import extract_document_file
-from invoice_processing.extract.document_normalizer import normalize_document_bundle
 from invoice_processing.extract.record_merge import merge_document_records
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "document_record"
@@ -111,28 +110,12 @@ def path_stem(path: Path) -> str:
 
 
 def score_completeness(record: DocumentRecord, *, direction: str = "purchase") -> dict[str, Any]:
-    """Phase 2 write readiness on a synthetic normalized invoice."""
-    bundle = DocumentRecordBundle(documents=[record])
-    normalized = normalize_document_bundle(
-        bundle,
-        direction=direction,
-        base_currency="SGD",
-        mapper_version="enhanced",
-    )
-    if not normalized:
-        return {"completeness": 0.0, "has_invoice_number": False, "has_lines": False}
-    inv = normalized[0]
-    checks = [
-        bool(inv.invoice_number),
-        bool(inv.invoice_date),
-        bool(inv.lines),
-        inv.doc_total is not None,
-    ]
+    """Phase 2 write readiness — retired with legacy document_normalizer."""
     return {
-        "completeness": sum(checks) / len(checks),
-        "has_invoice_number": bool(inv.invoice_number),
-        "has_lines": bool(inv.lines),
-        "reconciled": inv.reconciled,
+        "completeness": 0.0,
+        "has_invoice_number": False,
+        "has_lines": False,
+        "retired": True,
     }
 
 

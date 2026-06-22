@@ -1,28 +1,22 @@
-"""Drive-parity document understanding — one structured Gemini call.
+"""Faithful multi-document extraction — one structured Gemini call.
 
-Default invoice extraction path (ADR-0011): a single multimodal ``generate_content``
-with the PDF ``Part`` plus a Pydantic ``response_schema``. Matches Google's
-recommended pattern for invoice extraction.
+Production default (ADR-0011, ADR-0025): a single multimodal ``generate_content``
+with the PDF ``Part`` plus a Pydantic ``response_schema`` matching
+:class:`ExtractedDocumentBundle` (one entry per logical document in the upload).
+Matches Google's recommended pattern for invoice extraction.
 
-Production routing (WS-5.1): invoice/receipt always use the faithful-array
-``ExtractedDocumentBundle`` path below. Legacy SOA extraction is quarantined
-behind ``LEDGR_LEGACY_SOA=1`` + ``doc_type=statement_of_account``. ADR-0014's
-Capture → Book → Verify pipeline remains opt-in via ``LEDGR_CAPTURE_BOOK=1``
-(deprecated; logs a warning when enabled).
+Retired from live routing (Phase F): ``LEDGR_CAPTURE_BOOK`` and ``LEDGR_LEGACY_SOA``
+env flags are ignored by ``process_invoice_document`` (warn-only if set).
 
-Returns a human-readable summary table plus ledger-ready lines in a single
-``DocumentLedgerExtract``. Maps to :class:`NormalizedInvoice` via a thin adapter
-that reuses ``reconcile`` / ``to_normalized`` from ``invoice_extractor``.
-
-Per ADR-0011 and the Batch Direction plan, this module also owns the
-``direction_for_client`` field: one multimodal call now decides the
-sales-vs-purchase direction by looking at the document's From/To parties AND
-the client identity passed into the prompt — replacing the legacy two-step
-``classify_document`` + ``resolve_direction`` plumbing for invoice lane.
+The Understand call owns the ``direction_for_client`` decision per document:
+one multimodal call resolves the sales-vs-purchase direction by comparing the
+document's From/To parties against the client identity passed into the prompt,
+replacing the legacy two-step ``classify_document`` + ``resolve_direction`` plumbing.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Literal, Optional
 
@@ -43,6 +37,8 @@ from .invoice_extractor import (
     reconcile,
     to_normalized,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _build_understand_prompt(client_name: Optional[str], client_uen: Optional[str]) -> str:
@@ -177,51 +173,10 @@ document."""
 UNDERSTAND_PROMPT = _build_understand_prompt(None, None)
 
 
-class PartyField(BaseModel):
-    """From/To party on a document (Drive-style "Sender" / "Recipient")."""
-
-    name: str = Field(description="Party name as shown on the document")
-    uen: Optional[str] = Field(
-        default=None,
-        description="UEN / tax reg no if visible on the document",
-    )
-    role: Literal["issuer", "recipient"] = Field(
-        description="issuer = the party that sent/issued; recipient = the party billed/addressed"
-    )
-    country: Optional[str] = Field(
-        default=None,
-        description=(
-            "2-letter country code (SG / MY / US / ...). Infer from any country "
-            "indicator on the document. CRITICAL for multi-jurisdiction tax routing."
-        ),
-    )
-
-
-class SummaryField(BaseModel):
-    category: str = Field(description="Field label e.g. Vendor Name, Invoice Number")
-    details: str = Field(description="Extracted value as shown on document")
-
-
-class LedgerLine(BaseModel):
-    description: str
-    net_amount: float
-    gst_amount: float = Field(default=0, description="GST component on this line if shown")
-    tax_hint: Optional[str] = Field(
-        default=None,
-        description="SR, ZR, ES, OS, or NT — only when tax wording is visible on the document",
-    )
-
-
 #: Direction labels the Understand call can return. ``"unknown"`` triggers
 #: a HITL gate — never a fuzzy Python rewrite.
 DirectionForClient = Literal["purchase", "sales", "self_referential", "unknown"]
 
-
-#: Document kinds the Understand call can declare (per ADR-0015 eval gate).
-#: Used for eval rubrics and Slack UX surfacing only — Python never switches
-#: on this value. ``"expense_claim"`` is the route the previous case study
-#: (employee reimbursement) needs the model to surface.
-DocKind = Literal["invoice", "receipt", "expense_claim", "credit_note", "other"]
 
 # WS-2.1 — faithful multi-document schema (ADR-0025, spec §1).
 ExtractedDocType = Literal[
@@ -265,7 +220,12 @@ class ExtractedDocument(BaseModel):
     """One logical invoice/receipt in an upload — faithful transcription."""
 
     doc_type: ExtractedDocType = Field(
-        description="Classify each document in-call — invoice, receipt, credit_note, …"
+        description=(
+            "Document shape: invoice, receipt, credit_note, expense_claim, statement, other. "
+            "Use statement ONLY for an SOA summary/cover page that lists invoice refs and "
+            "balances — never bookable. Do NOT emit a statement entry alongside the "
+            "itemized invoices it summarizes; put the cover page in skipped_pages instead."
+        ),
     )
     page_range: list[int] = Field(
         description="1-based inclusive [start_page, end_page] this document occupies",
@@ -281,13 +241,18 @@ class ExtractedDocument(BaseModel):
     presentation: LinePresentation = Field(
         default="itemized",
         description=(
-            "itemized when lines mirror printed rows; summary when the document "
-            "only exposes summary/totals rows"
+            "itemized when lines[] mirrors every visible printed charge row; summary when "
+            "the document exposes only summary/total buckets (e.g. SR + ZR on a telco bill). "
+            "Never collapse itemized rows into summary buckets during extraction."
         ),
     )
     lines: list[ExtractedDocumentLine] = Field(
         default_factory=list,
-        description="Every printed charge row — do NOT collapse for bookkeeping",
+        description=(
+            "Every visible charge row transcribed verbatim — one line per printed row on "
+            "itemized invoices/receipts. Do NOT merge or collapse rows for bookkeeping. "
+            "When presentation=summary, lines[] holds only the summary rows as printed."
+        ),
     )
     subtotal: Optional[float] = Field(None, description="Subtotal ex-tax as printed")
     tax_total: Optional[float] = Field(None, description="Total tax as printed")
@@ -299,8 +264,10 @@ class ExtractedDocument(BaseModel):
     direction_for_client: DirectionForClient = Field(
         default="unknown",
         description=(
-            "Direction in the client's books for this document. "
-            "purchase = client pays; sales = client collects."
+            "Direction in the client's books: purchase = client pays vendor; "
+            "sales = client is issuer/collects; self_referential when client is both sides. "
+            "Return unknown when the client cannot be identified on the document — "
+            "never guess from partial name matches."
         ),
     )
     direction_reason: Optional[str] = None
@@ -335,130 +302,24 @@ class ExtractedDocumentBundle(BaseModel):
 
     documents: list[ExtractedDocument] = Field(
         default_factory=list,
-        description="One entry per distinct invoice/receipt in the upload",
+        description=(
+            "One entry per distinct bookable invoice, receipt, credit note, or expense claim. "
+            "Never include SOA summary covers — record those pages in skipped_pages only."
+        ),
     )
     skipped_pages: Optional[list[int]] = Field(
         default=None,
-        description="1-based pages deliberately skipped (e.g. SOA cover)",
+        description=(
+            "1-based page numbers for SOA summary/cover pages ONLY — never use for "
+            "bookable invoices or receipts. Record the cover here and omit it from "
+            "documents[]; embedded invoices on following pages become separate entries."
+        ),
     )
     notes: Optional[str] = Field(
         default=None,
-        description="Optional note about segmentation decisions",
-    )
-
-
-class DocumentLedgerExtract(BaseModel):
-    vendor_name: str
-    customer_name: Optional[str] = None
-    document_reference: str = Field(description="Invoice or bill number — not GST reg no")
-    document_date: str = Field(description="ISO yyyy-mm-dd")
-    due_date: Optional[str] = None
-    currency: str = Field(
-        default="SGD",
         description=(
-            "ISO 4217 currency code of the document — read it from the document, "
-            "not from the client. Primary source: the document's dedicated "
-            "Currency column when present (if all rows agree, use that code). "
-            "Secondary source: the total footer (e.g. 'TOTAL USD $1,195.11' "
-            "→ USD; 'Sub Total SGD 1,000' → SGD). Foreign codes embedded in "
-            "the Details / Description text (e.g. 'BHT 4466.68 x 0.0295' for "
-            "a per-line FX conversion note) are NOT the document currency when "
-            "a Currency column says otherwise. Never infer from the client "
-            "letterhead, the SG address, or the client's base_currency. When "
-            "every line and the footer agree on USD, currency must be USD even "
-            "if the client books in SGD."
-        ),
-    )
-    document_total: float
-    subtotal: Optional[float] = Field(None, description="Ex-GST total if shown separately")
-    gst_total: Optional[float] = Field(None, description="GST grand total if shown")
-    issuer_gst_regno: Optional[str] = None
-    tax_system_hint: Optional[str] = Field(
-        default=None,
-        description=(
-            "Informational hint of which tax system applies (GST / SST / VAT / NONE). "
-            "The jurisdiction router in accounting_agents.jurisdiction applies the "
-            "canonical rule based on the client profile + this hint."
-        ),
-    )
-    doc_kind: DocKind = Field(
-        default="invoice",
-        description=(
-            "What kind of document this is. expense_claim = an employee or "
-            "contractor submitting receipts for reimbursement (look for "
-            '"Expense Claim", "Claim", "Reimbursement", a Claimant / Signature '
-            "block, or a task / job reference plus per-row receipts). "
-            "receipt = a supplier-issued sale receipt (no claimant). "
-            "invoice = standard trade invoice. "
-            "credit_note = refund / credit memo. other = none of the above."
-        ),
-    )
-    claimant_name: Optional[str] = Field(
-        default=None,
-        description=(
-            "The person submitting the claim when doc_kind == expense_claim. "
-            "The claimant is the supplier of the reimbursement (the company "
-            "letterhead is the approver, not the issuer). Leave null for "
-            "non-expense_claim documents."
-        ),
-    )
-    tax_visible_on_document: bool = Field(
-        default=False,
-        description=(
-            "True ONLY when the document explicitly shows a Tax / GST / VAT "
-            "row, column, or amount with a numeric value. A 'Total', "
-            "'Amount', 'Subtotal', 'Currency' or 'Grand Total' column is "
-            "NOT a tax column. If you cannot point to the literal word "
-            "'GST', 'Tax', 'VAT', or a percentage like '9%' / '0%' on the "
-            "document, this field is False. When false, ledger_lines must "
-            "use gst_amount=0 — the export layer will never invent tax."
-        ),
-    )
-    # Drive-parity parties: one structured From/To pair replaces the legacy
-    # ``issuer_name`` / ``bill_to_name`` split. ``from_party`` and ``to_party``
-    # are the single source of truth for parties in the Understand path;
-    # ``vendor_name`` / ``customer_name`` are kept for backward compatibility
-    # with the ``ExtractedInvoice`` reconcile adapter.
-    from_party: Optional[PartyField] = Field(
-        default=None,
-        description="Who issued/sent the document — visible From block on the document",
-    )
-    to_party: Optional[PartyField] = Field(
-        default=None,
-        description="Who it is addressed/billed to — visible Bill-To / Recipient block",
-    )
-    direction_for_client: DirectionForClient = Field(
-        default="unknown",
-        description=(
-            "Direction in the client's books. Decide by money flow, not "
-            "letterhead. 'purchase' when the client is the party that PAYS "
-            "(recipient of goods, services, or a reimbursement claim). "
-            "'sales' when the client is the party that COLLECTS (issuer of "
-            "the bill to a separate counterparty). 'self_referential' when "
-            "the same legal entity is both issuer and recipient. 'unknown' "
-            "when the client identity does not appear on the document or the "
-            "parties are ambiguous — never guess."
-        ),
-    )
-    direction_reason: Optional[str] = Field(
-        default=None,
-        description=(
-            "Short grounded reason for direction_for_client — name the visible "
-            "signal (letterhead vs claimant, Bill-To block, From block, etc.) "
-            "that decided it. Example: 'claimant signed the form; client is "
-            "the approver'. Used by eval rubrics for debugging; never Python-"
-            "switched on."
-        ),
-    )
-    summary_table: list[SummaryField] = Field(
-        default_factory=list,
-        description="Drive-style key facts for human review; 8–15 rows",
-    )
-    ledger_lines: list[LedgerLine] = Field(
-        default_factory=list,
-        description=(
-            "Visible charge rows transcribed verbatim — one line per printed row. "
-            "ERP profiles may declare post-extraction grouping (M1); do not collapse here."
+            "Optional free-text note about segmentation or extraction uncertainty "
+            "(e.g. ambiguous page splits, unreadable stamps) — not for bookkeeping summaries."
         ),
     )
 
@@ -466,53 +327,47 @@ class DocumentLedgerExtract(BaseModel):
 def use_understand_extract() -> bool:
     """Drive-parity single-call Understand path (production default).
 
-    Routing no longer falls back to legacy when this env is off — invoice/receipt
-    always use the understand path unless capture_book or legacy SOA quarantine
-    applies. ``LEDGR_UNDERSTAND_EXTRACT=0`` is retained for diagnostics only.
+    Invoice/receipt/SOA packages always use the understand path. Routing ignores
+    retired ``LEDGR_CAPTURE_BOOK`` and ``LEDGR_LEGACY_SOA``. ``LEDGR_UNDERSTAND_EXTRACT=0``
+    is retained for diagnostics only.
     """
     raw = os.environ.get("LEDGR_UNDERSTAND_EXTRACT", "1").strip().lower()
     return raw not in ("0", "false", "no", "off")
-
-
-def use_capture_book_pipeline() -> bool:
-    """Opt-in Capture → Book → Verify path (ADR-0014). Off by default; deprecated."""
-    raw = os.environ.get("LEDGR_CAPTURE_BOOK", "0").strip().lower()
-    return raw in ("1", "true", "yes", "on")
-
-
-def use_legacy_soa() -> bool:
-    """Opt-in legacy DocumentRecordBundle path for SOA packages only (WS-5.1).
-
-    Quarantined behind ``LEDGR_LEGACY_SOA=1``. Regular invoices never use this
-    path regardless of other extraction env flags.
-    """
-    raw = os.environ.get("LEDGR_LEGACY_SOA", "0").strip().lower()
-    return raw in ("1", "true", "yes", "on")
-
-
-def should_use_legacy_extract(doc_type: str) -> bool:
-    """Legacy SOA only — requires ``doc_type=statement_of_account`` and ``LEDGR_LEGACY_SOA=1``."""
-    if doc_type.strip().lower() != "statement_of_account":
-        return False
-    return use_legacy_soa()
 
 
 FAITHFUL_EXTRACT_STATIC_INSTRUCTION = """You are transcribing financial documents faithfully into structured JSON.
 
 Your job is to READ and COPY what is printed — not to summarize for bookkeeping.
 
-For the uploaded file:
-- Return one ``documents`` entry per DISTINCT logical invoice or receipt.
+Segmentation (one call, zero or more bookable documents):
+- Return one ``documents`` entry per DISTINCT logical invoice, receipt, credit note,
+  or expense claim.
 - If the file is a single document, return a one-element ``documents`` list.
-- For SOA packages: skip the summary/cover page (record its page in
-  ``skipped_pages``) and extract only embedded invoices.
 - For multiple invoices in one PDF: one entry each, with its own ``page_range``,
   ``reference``, and ``grand_total``.
 - For multiple receipts on one scanned page: one entry per receipt.
 
+SOA packages (Statement of Account):
+- Page 1 is often a summary/cover listing invoice refs and a rolled-up total.
+- Put cover page number(s) in ``skipped_pages`` ONLY — do NOT add a ``documents[]``
+  entry for the cover. Extract only the embedded invoices on following pages.
+- A summary/cover total re-sums the invoices that follow; it is NOT a bookable
+  document even when it prints a grand total.
+- ``doc_type`` = statement describes an SOA summary cover if you must classify it;
+  never book it alongside the itemized invoices it summarizes.
+
+Line granularity (faithful transcription):
+- Itemized invoice/receipt: one ``lines[]`` row per visible printed charge row.
+- Telco/utility bill whose ONLY charge breakdown is a summary section: transcribe
+  those summary rows as printed (often SR + ZR buckets) with ``presentation`` =
+  "summary" — do NOT emit per-phone/per-call detail from appendix pages unless
+  those rows are visibly printed on the bill face.
+- Simple single-total receipt: one line when only one charge row exists.
+- Do NOT collapse itemized rows into bookkeeper buckets during extraction.
+
 Per document, transcribe VERBATIM:
-- ``doc_type``: classify in-call (invoice | receipt | credit_note | expense_claim |
-  statement | other).
+- ``doc_type``: invoice | receipt | credit_note | expense_claim | other (see SOA rule
+  above for statement).
 - ``page_range``: [start_page, end_page] 1-based inclusive pages this doc uses.
 - ``vendor`` / ``buyer`` / ``reference`` / ``date`` / ``currency`` as printed.
 - ``lines[]``: every visible charge row — do NOT collapse rows into ledger buckets.
@@ -523,19 +378,39 @@ Per document, transcribe VERBATIM:
 - ``tax_visible_on_document``: true ONLY when Tax/GST/VAT wording and amounts appear.
 - When ``tax_visible_on_document`` is false, line ``gst_amount`` must be 0.
 
-Direction (when client context is supplied):
+Direction (when client context is supplied in the user turn):
 - ``direction_for_client``: purchase | sales | self_referential | unknown.
-- Decide from From/Bill-To/claimant blocks vs the client — never guess.
+- Decide from From/Bill-To/claimant/letterhead blocks vs the client identity.
+- Abstain: return ``unknown`` when the client does not appear on the document —
+  never guess from partial name matches or ambiguous layout.
 
 Expense claims:
 - ``doc_type`` = expense_claim; ``claimant_name`` = person signing the form.
 - The letterhead company is the approver, not the supplier.
 
+Uncertainty:
+- Use ``notes`` for segmentation or extraction uncertainty (ambiguous splits,
+  unreadable stamps) — not for bookkeeping summaries.
+
 Arithmetic:
 - Line nets + tax must reconcile to ``grand_total`` for each document.
 - Discount lines use negative ``net_amount`` when printed as discounts.
 
-Examples use placeholders only (Vendor-A, Buyer-B, Person-1) — no real names."""
+Examples (synthetic — placeholders only, no real names):
+
+[SOA package] Page 1: "<Vendor-A> Statement of Account" listing INV-001..003 and
+total MYR 1,500. Pages 2-4: three separate tax invoices with own refs and totals
+summing to 1,500.
+- skipped_pages: [1]
+- documents: three invoice entries (pages 2, 3, 4) — NO cover entry
+- notes: null unless page boundaries are ambiguous
+
+[Itemized invoice] "<Vendor-B> Tax Invoice" with 5 printed line rows and a GST column.
+- presentation: itemized
+- lines[]: 5 rows matching the printout — do NOT merge into one "Services" line
+
+[Unknown direction] Receipt with no client name or UEN visible anywhere.
+- direction_for_client: unknown"""
 
 
 def _build_faithful_extract_static_instruction() -> str:
@@ -557,7 +432,7 @@ def _build_faithful_extract_dynamic_prompt(
     ctx = " · ".join(bits)
     return f"""Client context: {ctx}.
 Match the client by name OR UEN against vendor/buyer/letterhead/claimant blocks.
-Return "unknown" when the client does not appear on the document."""
+Abstain with direction_for_client=unknown when the client does not appear on the document — never guess."""
 
 
 def _build_faithful_extract_prompt(
@@ -567,6 +442,77 @@ def _build_faithful_extract_prompt(
     static = _build_faithful_extract_static_instruction()
     dynamic = _build_faithful_extract_dynamic_prompt(client_name, client_uen)
     return f"{static}\n\n{dynamic}"
+
+
+def _drop_soa_cover_documents(bundle: ExtractedDocumentBundle) -> ExtractedDocumentBundle:
+    """Deterministically drop a Statement-of-Account / summary cover document.
+
+    The model is told to skip SOA cover pages (FAITHFUL_EXTRACT_STATIC_INSTRUCTION)
+    but sometimes returns the cover as a full document alongside the real invoices,
+    double-counting the totals. Two vendor-agnostic signals identify a redundant
+    cover in a multi-document bundle:
+
+    1. PRIMARY: a document whose ``doc_type`` is ``statement`` — a summary cover
+       sitting among the real invoices/receipts it itemizes.
+    2. FALLBACK (only when NO ``statement`` doc is present — handles the model
+       mislabeling the cover as ``invoice``): a SINGLE document whose
+       ``grand_total`` equals the sum of all the other documents' grand_totals
+       within one cent. If more than one document matches, the signal is
+       ambiguous and nothing is dropped.
+
+    Guard: never empty the bundle. A cover is only dropped when at least one
+    bookable document survives; if every document is a statement the whole
+    bundle is left intact for human review.
+    """
+    if len(bundle.documents) < 2:
+        return bundle
+
+    docs = bundle.documents
+    totals = [float(doc.grand_total or 0.0) for doc in docs]
+
+    statement_idxs = [
+        i for i, doc in enumerate(docs)
+        if (doc.doc_type or "").strip().lower() == "statement"
+    ]
+
+    if statement_idxs:
+        drop_idxs = statement_idxs
+        signal = "doc_type=statement"
+    else:
+        # Arithmetic fallback: one doc whose total == sum of the others (±1c).
+        fallback_idxs = [
+            i
+            for i in range(len(docs))
+            if len(docs) - 1 >= 2
+            and abs(totals[i] - (sum(totals) - totals[i])) < 0.01
+        ]
+        if len(fallback_idxs) == 1:
+            drop_idxs = fallback_idxs
+            signal = "grand_total==sum-of-others"
+        else:
+            drop_idxs = []
+            signal = ""
+
+    # Guard: never drop so many docs that zero bookable documents remain.
+    if not drop_idxs or len(drop_idxs) >= len(docs):
+        return bundle
+
+    drop_set = set(drop_idxs)
+    skipped: set[int] = set(bundle.skipped_pages or [])
+    for i in drop_idxs:
+        doc = docs[i]
+        pages = [int(p) for p in (doc.page_range or [])]
+        skipped.update(pages)
+        logger.warning(
+            "hard-gate: dropping SOA cover document (signal=%s, reference=%s, page_range=%s)",
+            signal,
+            doc.reference,
+            pages or None,
+        )
+
+    bundle.documents = [doc for i, doc in enumerate(docs) if i not in drop_set]
+    bundle.skipped_pages = sorted(skipped) if skipped else None
+    return bundle
 
 
 def extract_document_ledger(
@@ -605,7 +551,8 @@ def extract_document_ledger(
         ),
     )
     log_context_cache_usage(resp, lane="extract")
-    return ExtractedDocumentBundle.model_validate_json(resp.text)
+    bundle = ExtractedDocumentBundle.model_validate_json(resp.text)
+    return _drop_soa_cover_documents(bundle)
 
 
 def extract_ledger_file(path: str, **kwargs) -> ExtractedDocumentBundle:
@@ -613,118 +560,6 @@ def extract_ledger_file(path: str, **kwargs) -> ExtractedDocumentBundle:
 
     p = Path(path)
     return extract_document_ledger(p.read_bytes(), mime_for(p), **kwargs)
-
-
-def ledger_extract_to_extracted_invoice(extract: DocumentLedgerExtract) -> ExtractedInvoice:
-    """Adapt understand output to the existing ExtractedInvoice reconcile path.
-
-    Prefers the structured ``from_party`` / ``to_party`` blocks when present —
-    the Drive-parity parties are richer than the legacy ``vendor_name`` /
-    ``customer_name`` strings (they carry the role + UEN). Falls back to the
-    legacy fields for backward compatibility with older extracts that don't
-    populate the new schema fields.
-
-    For ``expense_claim`` documents, the claimant (not the letterhead) is
-    the supplier / issuer of the claim; the mapper prefers ``claimant_name``
-    for the contact / issuer slot so the export layer's "Pay to" field lands
-    on the right person. This is data-shape plumbing, not a domain rule
-    (ADR-0015).
-    """
-    lines = [
-        ExtractedLine(
-            description=line.description,
-            net_amount=line.net_amount,
-            gst_amount=line.gst_amount,
-            tax_label=line.tax_hint,
-        )
-        for line in extract.ledger_lines
-    ]
-    # Prefer structured parties when present; they win over the legacy strings.
-    issuer_name = extract.vendor_name
-    issuer_gst_regno = extract.issuer_gst_regno
-    issuer_country: Optional[str] = None
-    bill_to_name = extract.customer_name
-    bill_to_country: Optional[str] = None
-    if extract.from_party and extract.from_party.name:
-        issuer_name = extract.from_party.name
-        if extract.from_party.uen:
-            issuer_gst_regno = extract.from_party.uen
-        issuer_country = extract.from_party.country
-    if extract.to_party and extract.to_party.name:
-        bill_to_name = extract.to_party.name
-        bill_to_country = extract.to_party.country
-    # Expense-claim routing: the claimant (employee / contractor) is the
-    # supplier; the company letterhead is the approver.
-    if extract.doc_kind == "expense_claim" and extract.claimant_name:
-        issuer_name = extract.claimant_name
-    return ExtractedInvoice(
-        doc_type="invoice",
-        invoice_number=extract.document_reference,
-        invoice_date=extract.document_date,
-        due_date=extract.due_date,
-        currency=extract.currency,
-        issuer_name=issuer_name,
-        issuer_gst_regno=issuer_gst_regno,
-        issuer_country=issuer_country,
-        issuer_tax_system=extract.tax_system_hint,
-        bill_to_name=bill_to_name,
-        bill_to_country=bill_to_country,
-        lines=lines,
-        subtotal=extract.subtotal,
-        gst_total=extract.gst_total,
-        total=extract.document_total,
-    )
-
-
-def ledger_extract_to_normalized(
-    extract: DocumentLedgerExtract,
-    *,
-    direction: str,
-    our_gst_registered: bool = True,
-    client_country: str = "SG",
-    base_currency: str = "SGD",
-) -> NormalizedInvoice:
-    """Map DocumentLedgerExtract → NormalizedInvoice (thin wrapper).
-
-    Honors ``extract.direction_for_client`` when the caller passes a sentinel
-    like ``"auto"`` — the Understand call now owns the direction decision, so
-    passing ``"auto"`` is the standard way for the invoice lane to use the
-    call's verdict (the legacy ``direction`` kwarg is kept for backward
-    compatibility with the legacy two-phase path and tests).
-
-    Propagates ``extract.tax_visible_on_document`` so the export layer honors
-    ADR-0014 (never invent tax when the document is silent).
-    """
-    effective_direction = direction
-    if direction == "auto" and extract.direction_for_client != "unknown":
-        effective_direction = extract.direction_for_client
-    elif extract.direction_for_client not in ("unknown", "") and not direction:
-        # No direction supplied at all (Understand call owns it now).
-        effective_direction = extract.direction_for_client
-    structural_direction = (
-        effective_direction
-        if effective_direction in ("purchase", "sales")
-        else "purchase"
-    )
-    inv = to_normalized(
-        ledger_extract_to_extracted_invoice(extract),
-        direction=structural_direction,
-        our_gst_registered=our_gst_registered,
-        client_country=client_country,
-        base_currency=base_currency,
-    )
-    if direction_needs_review(effective_direction):
-        append_direction_review_note(inv, effective_direction)
-    inv.tax_visible_on_document = extract.tax_visible_on_document
-    return inv
-
-
-def validate_ledger_extract(extract: DocumentLedgerExtract) -> tuple[bool, str]:
-    """CEL-style math gate after model extraction."""
-    if not extract.ledger_lines:
-        return False, "no ledger lines extracted"
-    ex = ledger_extract_to_extracted_invoice(extract)
-    return reconcile(ex, tax_visible_on_document=extract.tax_visible_on_document)
 
 
 def extracted_document_to_extracted_invoice(doc: ExtractedDocument) -> ExtractedInvoice:

@@ -529,3 +529,50 @@ def test_approval_gate_direction_uncertain_does_not_auto_retry():
 
     assert extract_calls["n"] == 0, "direction-uncertain doc must NOT trigger reconcile re-extract"
     assert nodes.RECONCILE_REEXTRACT_ATTEMPTED_KEY not in ctx.state
+
+
+# --------------------------------------------------------------------------- #
+# Regression: review_question persisted to state in BOTH escalation branches
+# --------------------------------------------------------------------------- #
+
+
+def test_review_question_persisted_soft_only_branch():
+    """Soft-only path: critic returns CLARIFY → state['review_question'] is non-empty."""
+
+    def clarify_reviewer(state, reasons, *, model):
+        return {"verdict": nodes.REVIEW_VERDICT_CLARIFY, "question": None}
+
+    nodes.REVIEWER_FN = clarify_reviewer
+    # Low classify confidence is a soft signal.
+    inv = _clean_invoice(lines=[])
+    ctx = FakeContext(_state([inv], confidence=0.45))
+
+    asyncio.run(_drive(nodes.review_extraction_node._func(ctx)))
+
+    q = ctx.state.get("review_question")
+    assert q, "review_question must be persisted to state when soft-only branch escalates"
+    assert len(q.strip()) > 0
+
+
+def test_review_question_persisted_hard_signal_ok_verdict_branch():
+    """Hard-signal path: critic returns OK but hard signal survives recheck →
+    state['review_question'] is non-empty (the bug: it was missing before this fix)."""
+
+    def ok_reviewer(state, reasons, *, model):
+        # Critic says OK, but the hard signal (unreconciled) cannot be cleared.
+        return {"verdict": nodes.REVIEW_VERDICT_OK}
+
+    nodes.REVIEWER_FN = ok_reviewer
+    inv = _clean_invoice(reconciled=False, reconcile_note="totals do not match")
+    ctx = FakeContext(_state([inv]))
+
+    asyncio.run(_drive(nodes.review_extraction_node._func(ctx)))
+
+    # Hard signal still present → must escalate with CLARIFY verdict.
+    assert ctx.state[nodes.REVIEW_VERDICT_KEY] == nodes.REVIEW_VERDICT_CLARIFY
+    q = ctx.state.get("review_question")
+    assert q, (
+        "review_question must be persisted to state when hard signal survives critic OK "
+        "(fixes the empty card body / SlackApiError regression)"
+    )
+    assert len(q.strip()) > 0
