@@ -1,180 +1,122 @@
 # Deployment Guide
 
-Deploy an ADK agent to Agent Runtime and optionally register it on Gemini Enterprise.
+Production runs on **Google Cloud Run** (`asia-southeast1`), serving the FastAPI app
+built by `accounting_agents.slack_runner.build_fastapi_app` behind `app.main:app`.
 
-**Reference:** [Google Agents CLI](https://github.com/google/agents-cli)
-
----
-
-## Prerequisites
-
-- Python 3.10+
-- [Google Cloud SDK](https://cloud.google.com/sdk/docs/install) (`gcloud` CLI)
-- A GCP project with Vertex AI API enabled
-- Python packages: `google-adk[vertexai]`, `python-dotenv`
-- (Optional) `google-agents-cli` — required only for Gemini Enterprise registration
-
-```bash
-pip install "google-adk[vertexai]" python-dotenv
-```
+**CI/CD decision record:** [`docs/adr/0018-cicd-github-actions-artifact-registry-cloud-run.md`](../docs/adr/0018-cicd-github-actions-artifact-registry-cloud-run.md)
 
 ---
 
-## Step 1: Authenticate and set quota project
+## Automated deploy (normal path)
 
-```bash
-gcloud auth application-default login
-gcloud auth application-default set-quota-project <YOUR_PROJECT_ID>
-```
+Every merge to `main` triggers `.github/workflows/deploy.yml`:
 
----
+1. **Test gate** — `uv sync --frozen`, `ruff check .`, `uv run pytest` (all hermetic).
+2. **Build + push** — Docker image tagged `asia-southeast1-docker.pkg.dev/ledgr-qbs/ledgr/app:${GITHUB_SHA}`.
+3. **Deploy** — `gcloud run deploy ledgr` with the full flag set from
+   `scripts/deploy-prod.sh` (single source of truth for env vars, secrets, scaling).
+   The new revision receives **100% traffic immediately** — there is no
+   no-traffic RC or manual promote gate (simplified 2026-06-20; see ADR-0018 update).
 
-## Step 2: Prepare the agent package
+### Prerequisites (one-time)
 
-Agent Runtime uploads only the agent directory (the folder containing `agent.py` and `__init__.py`).
+Run `scripts/gcloud-bootstrap-cicd.sh` to provision:
 
-**Key requirements:**
+- Workload Identity Federation (keyless GitHub → GCP auth)
+- Artifact Registry repository `ledgr-qbs/ledgr`
+- CI deploy service account with `run.admin`, `artifactregistry.writer`, etc.
 
-1. **`requirements.txt`** must exist **inside the agent package directory** (not the project root). Agent Runtime uses it to install dependencies in the container.
-2. **`.env`** file in the agent directory is auto-detected and deployed. Use it for runtime env vars (`PROJECT_ID`, `LOCATION`, etc.). Alternatively, use `--env_file` to point to a different file.
-3. **All imports must be relative** (e.g., `from .tools.tools import ...`). Agent Runtime renames the package directory during deployment, which breaks absolute imports.
-4. **Minimize the `data/` directory** — any files inside the agent package are uploaded. Remove runtime outputs (logs, cache, temp files) before deploying.
-5. **Environment variable access must be lazy** — Agent Runtime sets env vars *after* module import. Any `os.getenv()` calls at module level will return `None`. Use a lazy initialization pattern (call `os.getenv()` inside a function on first use, not at import time).
+Set these **GitHub repository variables** (Actions → Variables):
 
-### `.env` file template
+| Variable | Purpose |
+|----------|---------|
+| `WORKLOAD_IDENTITY_PROVIDER` | WIF provider resource name |
+| `CICD_SERVICE_ACCOUNT` | e.g. `ledgr-cicd@ledgr-qbs.iam.gserviceaccount.com` |
+| `SLACK_BASE_URL` | Cloud Run service URL (must match Slack app manifest) |
+| `SLACK_CLIENT_ID` | Public OAuth client ID |
+| `LEDGR_MODEL_LITE` / `LEDGR_MODEL_STD` | Vertex model tiers |
 
-Create a `.env` file in the agent package directory:
+`SLACK_CLIENT_SECRET` and `SLACK_SIGNING_SECRET` live in **GCP Secret Manager**;
+Cloud Run pulls them via `--set-secrets` at deploy time — no GitHub secrets needed.
 
-```bash
-GOOGLE_GENAI_USE_VERTEXAI=TRUE
-PROJECT_ID=<YOUR_PROJECT_ID>
-GOOGLE_CLOUD_PROJECT=<YOUR_PROJECT_ID>
-LOCATION=<YOUR_REGION>
-```
+### Rollback
 
-> A `.env.example` is provided in the agent directory. Copy it to `.env` and fill in your values.
-
----
-
-## Step 3: Deploy to Agent Runtime
-
-```bash
-adk deploy agent_engine \
-  --project=<YOUR_PROJECT_ID> \
-  --region=<YOUR_REGION> \
-  --display_name="<AGENT_DISPLAY_NAME>" \
-  --description="<AGENT_DESCRIPTION>" \
-  <PATH_TO_AGENT_PACKAGE>
-```
-
-On success, the CLI outputs:
-
-```
-✅ Created agent engine: projects/<PROJECT_NUMBER>/locations/<REGION>/reasoningEngines/<RESOURCE_ID>
-```
-
-**Save the `<RESOURCE_ID>`** — you need it for updates and Gemini Enterprise registration.
+In GitHub Actions, run **Deploy to Cloud Run** with `workflow_dispatch` and set
+`rollback_revision` to a prior named revision (e.g. `ledgr-00042-abc`). This shifts
+100% traffic back without rebuilding.
 
 ---
 
-## Step 4: Update an existing deployment
-
-To push changes without creating a new instance:
+## Manual deploy (emergency / bootstrap)
 
 ```bash
-adk deploy agent_engine \
-  --project=<YOUR_PROJECT_ID> \
-  --region=<YOUR_REGION> \
-  --agent_engine_id=<RESOURCE_ID> \
-  <PATH_TO_AGENT_PACKAGE>
+bash scripts/deploy-prod.sh
 ```
+
+Builds from the **local working tree** via `gcloud run deploy --source .`. Use only
+when CI is unavailable. Keep `scripts/deploy-prod.sh` in sync with the workflow's
+flag set — the workflow asserts parity at build time.
+
+### Runtime configuration (prod)
+
+| Setting | Value |
+|---------|-------|
+| Service account | `ledgr-runtime@ledgr-qbs.iam.gserviceaccount.com` |
+| `LEDGR_ENV` | `prod` |
+| Gemini | Vertex AI (`GOOGLE_GENAI_USE_VERTEXAI=TRUE`) in `asia-southeast1` |
+| Firestore | `FIRESTORE_PROJECT=ledgr-qbs`, **no** `LEDGR_FIRESTORE_NAMESPACE` |
+| Scaling | `--min-instances 1 --max-instances 1` (in-memory dedup; see ADR) |
+| Auth | `--allow-unauthenticated` (Slack must reach `/slack/events`) |
+
+Model note: `gemini-2.5-flash-lite` is not served in Asia Vertex regions; prod uses
+`gemini-2.5-flash` for both LITE and STD tiers to keep data in Singapore (PDPA).
 
 ---
 
-## Step 5: Register on Gemini Enterprise (optional)
-
-Requires `google-agents-cli`:
+## Verify a deployment
 
 ```bash
-pip install google-agents-cli
+# Process up (no Slack creds needed locally)
+curl -sS http://localhost:8080/openapi.json | head
+
+# Readiness (needs Slack HTTP + OAuth env vars in the container)
+curl -sS -o /dev/null -w "%{http_code}\n" https://<service-url>/healthz
+# 200 = config present; 503 + {"missing": [...]} = expected until secrets mount
 ```
 
-### Option A: Interactive (recommended)
-
-```bash
-agents-cli publish gemini-enterprise
-```
-
-The CLI will:
-1. Auto-detect the Agent Runtime ID from `deployment_metadata.json`
-2. List available Gemini Enterprise apps in your project
-3. Fetch the agent's display name and description
-4. Register the agent as a tool in Gemini Enterprise
-5. Print a console link to view the registered agent
-
-### Option B: Non-interactive
-
-```bash
-ID="projects/<PROJECT_NUMBER>/locations/global/collections/default_collection/engines/<GE_APP_ID>" \
-AGENT_ENGINE_ID="projects/<PROJECT_NUMBER>/locations/<REGION>/reasoningEngines/<RESOURCE_ID>" \
-GEMINI_DISPLAY_NAME="<AGENT_DISPLAY_NAME>" \
-GEMINI_DESCRIPTION="<AGENT_DESCRIPTION>" \
-agents-cli publish gemini-enterprise
-```
-
-Find your Gemini Enterprise App ID in the Google Cloud Console under Gemini Enterprise settings.
+Slack app manifest URLs (`slack/manifest-qbs.json`) must match `SLACK_BASE_URL`:
+Event Subscriptions, Interactivity, OAuth redirect, slash commands.
 
 ---
 
-## Step 6: Verify
+## Slack app setup
 
-1. **Console check:** Open the Gemini Enterprise console and confirm your agent appears as an available tool
-2. **Chat test:** Select the agent and send a test message
-3. **Logs:** If something goes wrong, check Agent Runtime logs:
-
-```bash
-gcloud logging read \
-  "resource.type=aiplatform.googleapis.com/ReasoningEngine" \
-  --project=<YOUR_PROJECT_ID> \
-  --limit=20 \
-  --format="table(timestamp,textPayload)"
-```
+See [`slack/README.md`](../slack/README.md) for manifest paste + reinstall steps.
 
 ---
 
-## Updating configuration post-deployment
+## Not this guide
 
-When rules, data files, or agent instructions change:
-
-1. Update the relevant files in the agent package
-2. Re-deploy using the update command (Step 4)
-
-No need to re-register on Gemini Enterprise — the registration points to the Agent Runtime instance, which is updated in place.
+- **Agent Runtime / `adk deploy agent_engine`** — not used for Ledgr production.
+- **`agents-cli deploy`** — dev playground tooling only; prod is Cloud Run + WIF.
+- **Local dev** — socket mode via `slack_bot.py`; see [`docs/dev-environment.md`](../docs/dev-environment.md).
 
 ---
 
 ## Troubleshooting
 
-### "failed to start and cannot serve traffic"
+| Symptom | Likely cause | Fix |
+|---------|--------------|-----|
+| Deploy workflow fails at ruff/pytest | Bad commit on main | Fix tests locally, push |
+| `/healthz` 503 in prod | Secret Manager mount or env var gap | Check Cloud Run revision env + secrets |
+| Slack events 500 | Missing Firestore ADC or bad signing secret | Cloud Run logs; verify `FIRESTORE_PROJECT` |
+| Deploy OK but Slack unchanged | `SLACK_BASE_URL` / manifest URL mismatch | Align manifest request URLs with service URL |
+| Wrong Firestore data | Dev namespace leaked to prod | Prod must **not** set `LEDGR_FIRESTORE_NAMESPACE` (ADR-0022) |
 
-| Cause | Fix |
-|-------|-----|
-| Missing `requirements.txt` in agent dir | Add `requirements.txt` inside the agent package directory |
-| Missing env vars | Ensure `.env` exists in the agent dir with `PROJECT_ID` and `GOOGLE_CLOUD_PROJECT` |
-| Large package size | Remove runtime outputs from `data/` before deploying |
-| Absolute imports | Convert all imports to relative (`.` / `..`) — Agent Runtime renames the package |
-| Module-level `os.getenv()` | Defer env var reads to call time using lazy initialization |
-
-### ADC quota warning
+Logs:
 
 ```bash
-gcloud auth application-default set-quota-project <YOUR_PROJECT_ID>
+gcloud logging read \
+  "resource.type=cloud_run_revision AND resource.labels.service_name=ledgr" \
+  --project=ledgr-qbs --limit=20 --format="table(timestamp,textPayload)"
 ```
-
----
-
-## Further Reading
-
-- [Google Agents CLI — Getting Started](https://github.com/google/agents-cli)
-- [Google Agents CLI — Deployment](https://github.com/google/agents-cli)
-- [ADK Deploy CLI Reference](https://google.github.io/adk-docs/deploy/agent-engine/)
