@@ -2095,6 +2095,58 @@ def test_remove_rows_for_month_missing_sheet_returns_zero_count():
     assert len(sep_sales) == 1
 
 
+def test_remove_rows_for_month_qbs_invoice_date_column():
+    """Production QBS workbooks use 'Invoice Date', not 'Date' — month-clear must match."""
+    from openpyxl import Workbook as _WB
+    import io
+
+    wb = _WB()
+    ws = wb.active
+    ws.title = "Purchase"
+    ws.append(["Invoice Number", "Invoice Date", "Description", "Source Amount"])
+    ws.append(["INV-P1", "05/09/2025", "AWS Sep", 100.0])
+    ws.append(["INV-P2", "03/10/2025", "AWS Oct", 120.0])
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    slack, store = _store_with_workbook(buf.getvalue())
+    result = store.remove_rows_for_month("c1", "2026", slack, "C1", year=2025, month=9)
+
+    assert result["sheets"]["Purchase"] == 1
+    latest_id = store.get_pointer("c1", "2026")["slack_file_id"]
+    from openpyxl import load_workbook
+    wb2 = load_workbook(io.BytesIO(slack.files[latest_id]))
+    rows = list(wb2["Purchase"].iter_rows(min_row=2, values_only=True))
+    assert len([r for r in rows if r[0] is not None]) == 1
+    assert rows[0][2] == "AWS Oct"
+
+
+def test_remove_rows_for_month_xero_invoice_date_column():
+    """Xero workbooks use '*InvoiceDate' / '*InvoiceNumber' — month-clear must match."""
+    from openpyxl import Workbook as _WB
+    import io
+
+    wb = _WB()
+    ws = wb.active
+    ws.title = "Purchase"
+    ws.append(["*InvoiceNumber", "*InvoiceDate", "Description", "*UnitAmount"])
+    ws.append(["X-1", "05/09/2025", "Sep line", 50.0])
+    ws.append(["X-2", "03/10/2025", "Oct line", 60.0])
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    slack, store = _store_with_workbook(buf.getvalue())
+    result = store.remove_rows_for_month("c1", "2026", slack, "C1", year=2025, month=9)
+
+    assert result["sheets"]["Purchase"] == 1
+    latest_id = store.get_pointer("c1", "2026")["slack_file_id"]
+    from openpyxl import load_workbook
+    wb2 = load_workbook(io.BytesIO(slack.files[latest_id]))
+    rows = list(wb2["Purchase"].iter_rows(min_row=2, values_only=True))
+    assert len([r for r in rows if r[0] is not None]) == 1
+    assert rows[0][0] == "X-2"
+
+
 # --------------------------------------------------------------------------- #
 # append_rows replace=True (Step 7 / E-3 identity-replace primitive)
 # --------------------------------------------------------------------------- #
@@ -2327,6 +2379,42 @@ def test_replace_true_doc_key_in_seen_after_replace():
     ptr = store.get_pointer("c1", "2026")
     seen = set(ptr.get("seen_doc_keys") or [])
     assert "Purchase:INV-10" in seen
+
+
+def test_replace_true_xero_invoice_number_column():
+    """Xero rows use '*InvoiceNumber' — replace must delete old rows, not duplicate."""
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+    store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        software="xero", kind="invoice",
+        batches=[{
+            "sheet": "Purchase",
+            "doc_key": "Purchase:X-10",
+            "rows": [
+                {"*InvoiceNumber": "X-10", "Description": "Old line", "*UnitAmount": 100.0},
+            ],
+        }],
+    )
+
+    result = store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        software="xero", kind="invoice",
+        replace=True,
+        batches=[{
+            "sheet": "Purchase",
+            "doc_key": "Purchase:X-10",
+            "rows": [
+                {"*InvoiceNumber": "X-10", "Description": "Corrected", "*UnitAmount": 999.0},
+            ],
+        }],
+    )
+
+    assert result["batch_replace_counts"][0]["replaced"] == 1
+    rows_after = store.read_rows("c1", "2026", slack, "C1")
+    x10_rows = [r for r in rows_after if r.get("*InvoiceNumber") == "X-10"]
+    assert len(x10_rows) == 1
+    assert x10_rows[0]["Description"] == "Corrected"
 
 
 def test_best_fy_for_chat_picks_fy_with_most_rows():

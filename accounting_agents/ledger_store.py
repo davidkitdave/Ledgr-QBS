@@ -60,6 +60,23 @@ _LEDGERS_SUBCOLLECTION = "ledgers"
 #: Sheet titles for the invoice ledger workbook (mirrors LedgerExporter).
 _INVOICE_SHEETS = ("Purchase", "Sales")
 
+#: Exporter column names for invoice date / number (QBS, Xero, test legacy).
+_DATE_COL_NAMES: tuple[str, ...] = ("Invoice Date", "*InvoiceDate", "Date")
+_INVOICE_COL_NAMES: tuple[str, ...] = ("Invoice Number", "*InvoiceNumber")
+
+
+def _row_invoice_number(row: dict) -> str:
+    """Return the invoice number from a batch row (QBS or Xero column names)."""
+    return str(row.get("Invoice Number") or row.get("*InvoiceNumber") or "").strip()
+
+
+def _resolve_col(col_map: dict[str, int], candidates: tuple[str, ...]) -> Optional[int]:
+    """Return the 1-based column index for the first matching header name."""
+    for name in candidates:
+        if name in col_map:
+            return col_map[name]
+    return None
+
 
 def _is_slack_host(host: str) -> bool:
     host = (host or "").lower()
@@ -915,16 +932,14 @@ class SlackLedgerStore:
             if replace and kind == "invoice" and sheet_name in _INVOICE_SHEETS:
                 # Collect the invoice numbers carried by the incoming batch.
                 batch_inv_nums: set[str] = {
-                    str(r.get("Invoice Number", "")).strip()
-                    for r in rows
-                    if r.get("Invoice Number") not in (None, "")
+                    num for r in rows if (num := _row_invoice_number(r))
                 }
 
                 if batch_inv_nums and sheet_name in wb.sheetnames:
                     ws = wb[sheet_name]
                     if ws.max_row >= 2:
                         col_map = self._header_col_map(ws)
-                        inv_col = col_map.get("Invoice Number")
+                        inv_col = _resolve_col(col_map, _INVOICE_COL_NAMES)
                         if inv_col is not None:
                             # Collect matching row indices (ascending) then delete bottom-up.
                             matching_rows: list[int] = []
@@ -1500,8 +1515,8 @@ class SlackLedgerStore:
                         continue
 
                     col_map = self._header_col_map(ws)
-                    date_col = col_map.get("Date")
-                    inv_col = col_map.get("Invoice Number")
+                    date_col = _resolve_col(col_map, _DATE_COL_NAMES)
+                    inv_col = _resolve_col(col_map, _INVOICE_COL_NAMES)
 
                     # Collect matching row numbers in ascending order, then delete bottom-up.
                     matching_rows: list[int] = []
