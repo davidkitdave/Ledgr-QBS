@@ -21,6 +21,17 @@
           }
         ]
       }
+    },
+    {
+      "eval_case_id": "process_playground_batch",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "For client_id playground, process the file tests/fixtures/stub-invoice.pdf with process_document_batch and summarize the BatchResult status."
+          }
+        ]
+      }
     }
   ]
 }

@@ -25,14 +25,22 @@ This spec is too large for one risky implementation plan. Build it as six small 
 5. **Credit Integration**: add Firestore credit gate/deduct flow with eval and live QA.
 6. **Cutover + Retirement**: switch agent eval/traffic carefully, shrink `accounting_agents/`, retire `eval/` scripts after parity.
 
-This document fully details **Plan 1**. Plans 2-6 should be written after Plan 1 lands, because Plan 1 defines the contracts those later plans depend on.
+This document fully details **Plan 1** (complete — commit `12c6b36`) and **Plan 2** (in progress). Plans 3-6 should be written after Plan 2 lands.
+
+## Progress
+
+| Plan | Status | Notes |
+|------|--------|-------|
+| 1 — Contract + Eval Shell | **Done** | `ledgr_agent/`, schemas, SG/MY YAML, root agent, smoke eval |
+| 2 — Document Tool Wrapper | **In progress** | `process_document_batch` FunctionTool + mapper + tests |
+| 3-6 | Not started | Write after prior plan passes gates |
 
 ---
 
 ## Current Repo Facts
 
 - `app/main.py` is the current Cloud Run entrypoint and imports `accounting_agents.slack_runner.build_fastapi_app`.
-- `agents-cli-manifest.yaml` currently uses `agent_directory: "accounting_agents"`.
+- `agents-cli-manifest.yaml` uses `agent_directory: "ledgr_agent"` (switched in Plan 1).
 - `agents-cli eval generate` reads `agent_directory` from `agents-cli-manifest.yaml`; it has no `--app-name` flag.
 - `agents-cli run` supports `--app-name`, so it can smoke-test a local alternate app more easily than eval generation.
 - `pyproject.toml` currently packages `accounting_agents`, `app`, and `invoice_processing`, but not `ledgr_agent`.
@@ -1147,6 +1155,16 @@ Plan 2 should be written after Plan 1 passes. It should:
 - Add `tests/ledgr_agent/test_document_tool_contract.py`.
 - Add agents-cli eval cases that assert `process_document_batch` appears in tool traces.
 - Keep real/private PDFs in `tests/eval_invoices/` or `scratch/` only.
+
+### Plan 2 Acceptance Gates
+
+Plan 2 is complete when:
+
+- `uv run pytest tests/ledgr_agent -q` passes (includes document tool contract tests).
+- `process_document_batch` is registered on `root_agent.tools`.
+- Hermetic tests prove blocked/missing-client/missing-file/success paths without Gemini.
+- `tests/eval/datasets/clean-root-smoke.json` includes a document-batch prompt case.
+- No live Slack traffic change.
 
 ---
 
