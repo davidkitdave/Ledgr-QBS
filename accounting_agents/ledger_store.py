@@ -914,17 +914,20 @@ class SlackLedgerStore:
             replaced_count = 0
             if replace and kind == "invoice" and sheet_name in _INVOICE_SHEETS:
                 # Collect the invoice numbers carried by the incoming batch.
-                batch_inv_nums: set[str] = {
-                    str(r.get("Invoice Number", "")).strip()
-                    for r in rows
-                    if r.get("Invoice Number") not in (None, "")
-                }
+                batch_inv_nums: set[str] = set()
+                for r in rows:
+                    inv_num = r.get("Invoice Number") or r.get("*InvoiceNumber")
+                    if inv_num not in (None, ""):
+                        batch_inv_nums.add(str(inv_num).strip())
 
                 if batch_inv_nums and sheet_name in wb.sheetnames:
                     ws = wb[sheet_name]
                     if ws.max_row >= 2:
                         col_map = self._header_col_map(ws)
-                        inv_col = col_map.get("Invoice Number")
+                        inv_col = (
+                            col_map.get("Invoice Number")
+                            or col_map.get("*InvoiceNumber")
+                        )
                         if inv_col is not None:
                             # Collect matching row indices (ascending) then delete bottom-up.
                             matching_rows: list[int] = []
@@ -1500,8 +1503,15 @@ class SlackLedgerStore:
                         continue
 
                     col_map = self._header_col_map(ws)
-                    date_col = col_map.get("Date")
-                    inv_col = col_map.get("Invoice Number")
+                    date_col = (
+                        col_map.get("Invoice Date")
+                        or col_map.get("*InvoiceDate")
+                        or col_map.get("Date")
+                    )
+                    inv_col = (
+                        col_map.get("Invoice Number")
+                        or col_map.get("*InvoiceNumber")
+                    )
 
                     # Collect matching row numbers in ascending order, then delete bottom-up.
                     matching_rows: list[int] = []
