@@ -1,0 +1,23 @@
+policy_version: sg-2026-01
+market: SG
+currency: SGD
+tax_system: GST
+registration:
+  client_flag: gst_registered
+  effective_date_field: gst_registration_effective_from
+  turnover_threshold_sgd: 1000000
+  non_registered:
+    allow_output_gst: false
+    allow_input_tax_claim: false
+rates:
+  standard:
+    - rate: 0.08
+      effective_from: 2023-01-01
+      effective_to: 2023-12-31
+    - rate: 0.09
+      effective_from: 2024-01-01
+review_rules:
+  - id: gst_claimed_by_non_registered_client
+    severity: hard_review
+  - id: gst_charged_without_supplier_gst_number
+    severity: hard_review

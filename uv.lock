@@ -1597,6 +1597,11 @@ dependencies = [
     { name = "vertexai" },
 ]
 
+[package.optional-dependencies]
+eval = [
+    { name = "google-adk", extra = ["eval"] },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "agent-starter-pack" },
@@ -1611,6 +1616,7 @@ requires-dist = [
     { name = "aiohttp", specifier = ">=3.14.1" },
     { name = "fastapi", specifier = ">=0.135.3" },
     { name = "google-adk", specifier = ">=2.0.0,<3.0.0" },
+    { name = "google-adk", extras = ["eval"], marker = "extra == 'eval'", specifier = ">=2.0.0,<3.0.0" },
     { name = "google-cloud-aiplatform", specifier = ">=1.38.0" },
     { name = "google-cloud-firestore", specifier = ">=2.27.0" },
     { name = "openpyxl", specifier = ">=3.1.5" },
@@ -1623,6 +1629,7 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.44.0" },
     { name = "vertexai", specifier = ">=1.38.0" },
 ]
+provides-extras = ["eval"]
 
 [package.metadata.requires-dev]
 dev = [

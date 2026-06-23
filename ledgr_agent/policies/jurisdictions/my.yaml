@@ -1,0 +1,32 @@
+policy_version: my-2026-01
+market: MY
+currency: MYR
+tax_system: SST
+registration:
+  supplier_sst_number_field: supplier_sst_registration_number
+  buyer_sst_number_field: buyer_sst_registration_number
+  not_registered_value: NA
+rates:
+  sales_tax:
+    - code: MY_ST_10
+      myinvois_tax_type: "01"
+      rate: 0.10
+      label: Sales tax 10%
+    - code: MY_ST_5
+      myinvois_tax_type: "01"
+      rate: 0.05
+      label: Sales tax 5%
+  service_tax:
+    - code: MY_SVC_8
+      myinvois_tax_type: "02"
+      rate: 0.08
+      effective_from: 2024-03-01
+    - code: MY_SVC_6
+      myinvois_tax_type: "02"
+      rate: 0.06
+myinvois:
+  tax_types:
+    sales_tax: "01"
+    service_tax: "02"
+    not_applicable: "06"
+    exempt: "E"

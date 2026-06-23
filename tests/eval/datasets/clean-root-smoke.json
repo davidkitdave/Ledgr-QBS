@@ -1,0 +1,26 @@
+{
+  "eval_cases": [
+    {
+      "eval_case_id": "clean_root_capabilities",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "What can the Ledgr accountant agent do, and what market policies can it inspect?"
+          }
+        ]
+      }
+    },
+    {
+      "eval_case_id": "inspect_sg_policy",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "Inspect the Singapore market policy."
+          }
+        ]
+      }
+    }
+  ]
+}
