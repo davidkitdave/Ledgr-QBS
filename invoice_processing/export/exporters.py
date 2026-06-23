@@ -677,6 +677,11 @@ class ProfileLedgerExporter(LedgerExporter):
             "entity_tax_id": party.gst_regno or "",
             "description": line.description,
             "sub_total": net,
+            # Taxable base for ERP columns that derive tax as rate × base (e.g.
+            # AutoCount TaxableAmt). Under tax-exclusive import (InclusiveTax=F)
+            # this equals the line net — a distinct logical field from sub_total
+            # so column_for_field("sub_total") stays unambiguously the Amount column.
+            "taxable_amount": net,
             "tax_amount": tax,
             "total_amount": round(net + tax, 2),
             "account_code": line.account_code or "",

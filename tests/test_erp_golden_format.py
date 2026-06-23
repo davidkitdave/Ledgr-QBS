@@ -522,6 +522,13 @@ class TestMAP1AmountIsLineNetNotUnitPrice:
             f"AutoCount Amount must be the line net (sub_total) for qty>1. "
             f"Expected 300.0, got {row['Amount']!r}. This is MAP1 — see WS-1.1."
         )
+        # TaxableAmt is ALSO the line net: AutoCount derives tax as
+        # TaxType × TaxableAmt, so a per-unit value here understates the tax base
+        # by the qty factor (the same MAP1 defect, on the tax column).
+        assert row["TaxableAmt"] == 300.0, (
+            f"AutoCount TaxableAmt must be the line net (sub_total) for qty>1. "
+            f"Expected 300.0, got {row['TaxableAmt']!r}. This is MAP1 — see WS-1.1."
+        )
         # InclusiveTax must remain F (we only changed the field-map, not the constant).
         assert row["InclusiveTax"] == "F"
 
