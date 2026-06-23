@@ -2182,21 +2182,29 @@ def _make_invoice_store_with_named_invoices() -> tuple["FakeSlackClient", "Slack
 
 def _make_xero_invoice_store_with_named_invoices() -> tuple["FakeSlackClient", "SlackLedgerStore"]:
     """Seed a Purchase sheet with Xero export headers and INV-10 (2 lines) + INV-20."""
-    from openpyxl import Workbook as _WB
-
-    wb = _WB()
-    ws = wb.active
-    ws.title = "Purchase"
-    ws.append([
-        "*InvoiceNumber", "*InvoiceDate", "*ContactName", "*Description",
-        "*UnitAmount", "*AccountCode",
-    ])
-    ws.append(["INV-10", "01/01/2026", "Vendor A", "Line A", 100.0, "6000"])
-    ws.append(["INV-10", "01/01/2026", "Vendor A", "Line B", 50.0, "6001"])
-    ws.append(["INV-20", "02/01/2026", "Vendor B", "Other Invoice", 200.0, "6002"])
-    buf = io.BytesIO()
-    wb.save(buf)
-    slack, store = _store_with_workbook(buf.getvalue())
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+    store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        software="xero", kind="invoice",
+        batches=[
+            {
+                "sheet": "Purchase",
+                "doc_key": "Purchase:INV-10",
+                "rows": [
+                    {"*InvoiceNumber": "INV-10", "*Description": "Line A", "*UnitAmount": 100.0, "*AccountCode": "6000"},
+                    {"*InvoiceNumber": "INV-10", "*Description": "Line B", "*UnitAmount": 50.0, "*AccountCode": "6001"},
+                ],
+            },
+            {
+                "sheet": "Purchase",
+                "doc_key": "Purchase:INV-20",
+                "rows": [
+                    {"*InvoiceNumber": "INV-20", "*Description": "Other Invoice", "*UnitAmount": 200.0, "*AccountCode": "6002"},
+                ],
+            },
+        ],
+    )
     return slack, store
 
 
@@ -2259,7 +2267,7 @@ def test_replace_true_xero_invoice_number_header():
             "rows": [
                 {
                     "*InvoiceNumber": "INV-10",
-                    "*Description": "Corrected Line",
+                    "Description": "Corrected Line",
                     "*UnitAmount": 999.0,
                     "*AccountCode": "6000",
                 },
@@ -2277,7 +2285,7 @@ def test_replace_true_xero_invoice_number_header():
         if (r.get("*InvoiceNumber") or r.get("Invoice Number")) == "INV-10"
     ]
     assert len(inv10_rows) == 1
-    assert inv10_rows[0].get("*Description") == "Corrected Line"
+    assert inv10_rows[0].get("Description") == "Corrected Line"
     assert len(rows_after) == 2
 
 
