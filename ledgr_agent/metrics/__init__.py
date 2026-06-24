@@ -1,5 +1,6 @@
 from ledgr_agent.metrics.batch_result_metrics import (
     cost_efficiency_code,
+    credit_charge_code,
     hitl_noise_score,
     no_unneeded_llm_code,
     tax_validity_code,
@@ -7,6 +8,7 @@ from ledgr_agent.metrics.batch_result_metrics import (
 
 __all__ = [
     "cost_efficiency_code",
+    "credit_charge_code",
     "hitl_noise_score",
     "no_unneeded_llm_code",
     "tax_validity_code",

@@ -72,6 +72,20 @@ def tax_validity_code(instance: dict[str, Any]) -> dict[str, Any]:
     return {"score": 0.0, "explanation": "missing tax_policy_version"}
 
 
+def credit_charge_code(instance: dict[str, Any]) -> dict[str, Any]:
+    batch = _latest_batch_result(instance)
+    if batch is None:
+        return {"score": 1.0, "explanation": "no batch"}
+    credits = batch.get("credits") or {}
+    status = credits.get("credit_status")
+    block = (batch.get("validation_summary") or {}).get("block_reason")
+    if block == "zero_credit" and int(batch.get("llm_call_count") or 0) == 0:
+        return {"score": 1.0, "explanation": "zero credit blocked before LLM"}
+    if status in {"charged", "not_billable", "estimated"}:
+        return {"score": 1.0, "explanation": f"credit_status={status}"}
+    return {"score": 0.0, "explanation": "unexpected credit state"}
+
+
 def hitl_noise_score(instance: dict[str, Any]) -> dict[str, Any]:
     batch = _latest_batch_result(instance)
     if batch is None:
