@@ -1,137 +1,56 @@
 from __future__ import annotations
 
-from collections.abc import Callable
-from pathlib import Path
+import time
 from typing import Any
 
-from invoice_processing.pipeline import BatchResult as EngineBatchResult
-from invoice_processing.pipeline import process_batch as engine_process_batch
-from invoice_processing.shared_libraries.model_config import lite_model, resolve_model
-from ledgr_agent.client_registry import resolve_client
-from ledgr_agent.tools.batch_mapper import map_engine_batch_to_contract
-
-PipelineInject = dict[str, Callable[..., Any]]
-_pipeline_overrides: PipelineInject = {}
+from invoice_processing.export.client_context import client_context_from_state
+from invoice_processing.pipeline import process_batch
 
 
-def configure_document_batch_pipeline(**inject: Callable[..., Any]) -> None:
-    """Replace engine callables for hermetic tests (same pattern as ``process_batch`` inject)."""
+def process_document_batch(tool_context: Any, paths: list[str], **inject: Any) -> dict[str, Any]:
+    """Process a batch of document file paths (invoices, receipts, bank statements) for the active client.
 
-    _pipeline_overrides.clear()
-    _pipeline_overrides.update(inject)
+    Args:
+        paths: List of absolute file paths to the documents to be processed.
+        tool_context: Context injected by ADK providing access to the current session state.
+        **inject: Seam for dependency injection in testing (e.g. classify_fn).
+    """
+    start_time = time.perf_counter()
 
+    # 1. Resolve the client context state
+    if tool_context is not None and getattr(tool_context, "state", None) is not None:
+        state = tool_context.state
+    else:
+        # Fallback to playground context for local testing/eval
+        from accounting_agents.agent import _playground_default_context
+        state = _playground_default_context().to_state()
 
-def reset_document_batch_pipeline() -> None:
-    """Clear injected engine callables after tests."""
+    client = client_context_from_state(state)
 
-    _pipeline_overrides.clear()
+    # 2. Call the underlying procedual engine
+    engine_result = process_batch(paths, client, **inject)
 
+    # 3. Estimate LLM call counts
+    llm_call_count = 0
+    for doc in engine_result.docs:
+        if not doc.note.startswith("ERROR"):
+            if doc.doc_type == "bank_statement":
+                llm_call_count += 1
+            elif doc.doc_type in ("invoice", "receipt"):
+                llm_call_count += 3
 
-def _resolve_existing_paths(source_files: list[str]) -> tuple[list[Path], list[str]]:
-    existing: list[Path] = []
-    missing: list[str] = []
-    for raw in source_files:
-        path = Path(raw)
-        if path.is_file():
-            existing.append(path)
-        else:
-            missing.append(raw)
-    return existing, missing
+    elapsed_ms = int((time.perf_counter() - start_time) * 1000)
 
-
-def _build_pipeline_inject() -> tuple[PipelineInject, dict[str, Any]]:
-    """Build engine inject kwargs and LLM telemetry for the current call."""
-
-    telemetry: dict[str, Any] = {
-        "llm_call_count": 0,
-        "models_used": [],
-        "strong_model_used": False,
-    }
-
-    if _pipeline_overrides:
-        return dict(_pipeline_overrides), telemetry
-
-    from invoice_processing.classify.document_classifier import classify_file
-    from invoice_processing.extract.bank_statement_extractor import extract_bank_file
-    from invoice_processing.extract.invoice_extractor import extract_file
-
-    lite_name = lite_model()
-
-    def _track(fn: Callable[..., Any], *, model_name: str, strong: bool = False) -> Callable[..., Any]:
-        def wrapped(*args: Any, **kwargs: Any) -> Any:
-            telemetry["llm_call_count"] += 1
-            if model_name not in telemetry["models_used"]:
-                telemetry["models_used"].append(model_name)
-            if strong:
-                telemetry["strong_model_used"] = True
-            return fn(*args, **kwargs)
-
-        return wrapped
-
-    inject: PipelineInject = {
-        "classify_fn": _track(classify_file, model_name=lite_name),
-        "extract_fn": _track(extract_file, model_name=lite_name),
-        "bank_fn": _track(
-            extract_bank_file,
-            model_name=resolve_model("std"),
-            strong=True,
-        ),
-    }
-    return inject, telemetry
-
-
-def _empty_engine_result() -> EngineBatchResult:
-    return EngineBatchResult(workbooks={}, docs=[], errors=[])
-
-
-def process_document_batch(client_id: str, source_files: list[str]) -> dict[str, Any]:
-    """Process uploaded documents through the accounting engine and return ``BatchResult``."""
-
-    if not source_files:
-        batch = map_engine_batch_to_contract(
-            _empty_engine_result(),
-            client=type("MissingClient", (), {"client_id": client_id, "firm_id": None})(),
-            source_files=[],
-            missing_files=[],
-            blocked_reason="no_source_files",
-        )
-        return batch.model_dump()
-
-    client = resolve_client(client_id)
-    if client is None:
-        batch = map_engine_batch_to_contract(
-            _empty_engine_result(),
-            client=type("MissingClient", (), {"client_id": client_id, "firm_id": None})(),
-            source_files=list(source_files),
-            missing_files=[],
-            blocked_reason="client_not_found",
-        )
-        return batch.model_dump()
-
-    existing_paths, missing_files = _resolve_existing_paths(source_files)
-    documents_skipped_before_llm = len(missing_files)
-
-    if not existing_paths:
-        batch = map_engine_batch_to_contract(
-            _empty_engine_result(),
-            client=client,
-            source_files=list(source_files),
-            missing_files=missing_files,
-            blocked_reason="no_readable_files",
-            documents_skipped_before_llm=documents_skipped_before_llm,
-        )
-        return batch.model_dump()
-
-    inject, telemetry = _build_pipeline_inject()
-    engine_result = engine_process_batch(existing_paths, client, **inject)
-    batch = map_engine_batch_to_contract(
+    # 4. Map engine result to posted / skipped documents and extract review requests
+    from ledgr_agent.tools.batch_mapper import map_engine_batch_to_contract
+    batch_result = map_engine_batch_to_contract(
         engine_result,
         client=client,
-        source_files=list(source_files),
-        missing_files=missing_files,
-        llm_call_count=int(telemetry["llm_call_count"]),
-        models_used=list(telemetry["models_used"]),
-        strong_model_used=bool(telemetry["strong_model_used"]),
-        documents_skipped_before_llm=documents_skipped_before_llm,
+        source_files=[str(p) for p in paths],
+        missing_files=[],
+        llm_call_count=llm_call_count,
+        models_used=["gemini-2.5-flash-lite"],
+        elapsed_ms=elapsed_ms,
     )
-    return batch.model_dump()
+
+    return batch_result.model_dump()

@@ -6,7 +6,8 @@ from invoice_processing.pipeline import BatchResult as EngineBatchResult
 from invoice_processing.pipeline import ProcessedDoc
 from ledgr_agent.schemas.batch_result import BatchResult, BatchStatus
 from ledgr_agent.schemas.credit import CreditSummary
-from ledgr_agent.schemas.review import ReviewRequest
+from ledgr_agent.schemas.review import ReviewRequest, SoftWarning
+from ledgr_agent.review.grouping import partition_and_group_reasons
 
 
 def per_file_summary(doc: ProcessedDoc) -> dict[str, object]:
@@ -23,27 +24,24 @@ def per_file_summary(doc: ProcessedDoc) -> dict[str, object]:
     }
 
 
-def review_requests_for_doc(doc: ProcessedDoc) -> list[ReviewRequest]:
-    file_name = Path(doc.path).name
-    if doc.note.startswith("ERROR"):
-        return [
-            ReviewRequest(
-                id="processing_error",
-                severity="hard_review",
-                message=doc.note,
-                file_name=file_name,
-            )
-        ]
-    if not doc.reconciled and "needs review" in doc.note.lower():
-        return [
-            ReviewRequest(
-                id="document_needs_review",
-                severity="hard_review",
-                message=doc.note,
-                file_name=file_name,
-            )
-        ]
-    return []
+def review_from_note(
+    note: str | None,
+    file_name: str,
+) -> tuple[list[ReviewRequest], list[SoftWarning]]:
+    """Parse legacy notes and group them into hard review requests and soft warnings."""
+    if not note:
+        return [], []
+
+    # Case-insensitive prefix check and strip
+    if note.lower().startswith("needs review:"):
+        note = note[len("needs review:"):]
+
+    note = note.strip()
+    if not note:
+        return [], []
+
+    reasons = [r.strip() for r in note.split(";") if r.strip()]
+    return partition_and_group_reasons(reasons, file_name=file_name)
 
 
 def posted_document_summary(doc: ProcessedDoc) -> dict[str, object]:
@@ -108,17 +106,23 @@ def map_engine_batch_to_contract(
     models_used: list[str] | None = None,
     strong_model_used: bool = False,
     documents_skipped_before_llm: int = 0,
+    elapsed_ms: int | None = None,
 ) -> BatchResult:
     """Convert the engine harness result into the shared ``BatchResult`` contract."""
 
     review_requests: list[ReviewRequest] = []
+    soft_warnings: list[SoftWarning] = []
     per_file: list[dict[str, object]] = []
     posted_documents: list[dict[str, object]] = []
     skipped_documents: list[dict[str, object]] = []
 
     for doc in engine_result.docs:
         per_file.append(per_file_summary(doc))
-        review_requests.extend(review_requests_for_doc(doc))
+        file_name = Path(doc.path).name
+        hard_reqs, soft_warns = review_from_note(doc.note, file_name)
+        review_requests.extend(hard_reqs)
+        soft_warnings.extend(soft_warns)
+
         if doc.note.startswith("ERROR"):
             skipped_documents.append(per_file_summary(doc))
         elif doc.reconciled:
@@ -159,12 +163,14 @@ def map_engine_batch_to_contract(
         posted_documents=posted_documents,
         skipped_documents=skipped_documents,
         review_requests=review_requests,
+        soft_warnings=soft_warnings,
         erp_exports=erp_export_summaries(engine_result.workbooks),
         credits=CreditSummary(credit_status="not_checked"),
         models_used=list(models_used or []),
         validation_summary=validation_summary,
         llm_call_count=llm_call_count,
         strong_model_used=strong_model_used,
+        elapsed_ms=elapsed_ms,
         documents_requested=len(source_files),
         documents_processed=len(posted_documents),
         documents_skipped_before_llm=documents_skipped_before_llm,
