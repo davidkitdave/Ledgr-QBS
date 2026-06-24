@@ -59,6 +59,19 @@ def no_unneeded_llm_code(instance: dict[str, Any]) -> dict[str, Any]:
     return {"score": 1.0, "explanation": "no unneeded LLM calls detected"}
 
 
+def tax_validity_code(instance: dict[str, Any]) -> dict[str, Any]:
+    batch = _latest_batch_result(instance)
+    if batch is None:
+        return {"score": 1.0, "explanation": "no batch to grade"}
+    version = (batch.get("validation_summary") or {}).get("tax_policy_version")
+    hard_ids = {item.get("id") for item in batch.get("review_requests") or []}
+    if version and "gst_claimed_by_non_registered_client" in hard_ids:
+        return {"score": 1.0, "explanation": "policy violation correctly flagged"}
+    if version:
+        return {"score": 1.0, "explanation": f"policy {version} applied"}
+    return {"score": 0.0, "explanation": "missing tax_policy_version"}
+
+
 def hitl_noise_score(instance: dict[str, Any]) -> dict[str, Any]:
     batch = _latest_batch_result(instance)
     if batch is None:
