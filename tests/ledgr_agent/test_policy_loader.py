@@ -27,3 +27,14 @@ def test_unknown_policy_market_fails_loud() -> None:
         assert "unsupported jurisdiction" in str(exc)
     else:
         raise AssertionError("expected unsupported jurisdiction to fail")
+
+
+def test_sg_policy_has_invoice_evidence_and_guards() -> None:
+    policy = load_jurisdiction_policy("SG")
+    assert policy["invoice_evidence"]["full_tax_invoice_threshold_inclusive_sgd"] == 1000
+    assert policy["guards"]["no_tax_when_not_registered"] is True
+
+
+def test_my_policy_has_myinvois_document_types() -> None:
+    policy = load_jurisdiction_policy("MY")
+    assert policy["myinvois"]["document_types"]["invoice"] == "01"

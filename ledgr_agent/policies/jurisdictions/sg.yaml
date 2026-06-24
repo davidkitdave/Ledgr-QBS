@@ -16,8 +16,71 @@ rates:
       effective_to: 2023-12-31
     - rate: 0.09
       effective_from: 2024-01-01
+tax_codes:
+  sales:
+    - code: SR
+      label: Standard-rated supply
+      rate_type: standard
+    - code: ZR
+      label: Zero-rated supply
+      rate: 0
+      requires_reason: true
+      requires_evidence: true
+    - code: ES
+      label: Exempt supply
+      rate: 0
+      requires_review_by_default: true
+    - code: OS
+      label: Out-of-scope supply
+      rate: null
+      requires_reason: true
+  purchases:
+    - code: TX
+      label: Standard-rated purchase/input tax
+      rate_type: standard
+      requires_valid_tax_invoice: true
+    - code: BL
+      label: Blocked or disallowed input tax
+      claimable: false
+    - code: IM
+      label: Import GST
+      requires_import_permit: true
+    - code: RC
+      label: Reverse charge
+      requires_client_reverse_charge_profile: true
+invoice_evidence:
+  full_tax_invoice_threshold_inclusive_sgd: 1000
+  simplified_invoice_allowed_if_total_lte_sgd: 1000
+  full_tax_invoice_required_fields:
+    - words_tax_invoice
+    - supplier_name
+    - supplier_address
+    - supplier_gst_registration_number
+    - invoice_date
+    - invoice_number
+    - customer_name
+    - customer_address
+    - description
+    - gst_rate
+    - amount_excluding_gst
+    - gst_amount
+    - amount_including_gst
+guards:
+  no_tax_when_not_registered: true
+  require_tax_invoice_for_input_tax: true
+  require_reason_for_zero_rate: true
 review_rules:
   - id: gst_claimed_by_non_registered_client
     severity: hard_review
   - id: gst_charged_without_supplier_gst_number
+    severity: hard_review
+  - id: input_tax_claim_without_valid_tax_invoice
+    severity: hard_review
+  - id: zero_rate_without_export_or_international_service_evidence
+    severity: hard_review
+  - id: rate_mismatch_for_invoice_date
+    severity: hard_review
+  - id: possible_blocked_input_tax
+    severity: review
+  - id: import_gst_without_import_permit
     severity: hard_review

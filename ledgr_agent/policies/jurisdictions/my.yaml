@@ -6,6 +6,8 @@ registration:
   supplier_sst_number_field: supplier_sst_registration_number
   buyer_sst_number_field: buyer_sst_registration_number
   not_registered_value: NA
+  no_sst_charge_when_supplier_not_registered: true
+  imported_service_reverse_charge_can_apply_to_non_registrant: true
 rates:
   sales_tax:
     - code: MY_ST_10
@@ -16,6 +18,10 @@ rates:
       myinvois_tax_type: "01"
       rate: 0.05
       label: Sales tax 5%
+    - code: MY_ST_SPECIFIC
+      myinvois_tax_type: "01"
+      rate_type: specific
+      requires_review: true
   service_tax:
     - code: MY_SVC_8
       myinvois_tax_type: "02"
@@ -24,9 +30,48 @@ rates:
     - code: MY_SVC_6
       myinvois_tax_type: "02"
       rate: 0.06
+      applies_to:
+        - food_and_beverage
+        - parking
+        - logistics
+        - telecommunications
+    - code: MY_CC_RM25
+      myinvois_tax_type: "02"
+      fixed_amount: 25.00
+      unit: card
 myinvois:
   tax_types:
     sales_tax: "01"
     service_tax: "02"
     not_applicable: "06"
     exempt: "E"
+  document_types:
+    invoice: "01"
+    credit_note: "02"
+    debit_note: "03"
+    refund_note: "04"
+    self_billed_invoice: "11"
+  classification_codes:
+    import_goods: "034"
+    import_services: "035"
+    others: "022"
+guards:
+  no_tax_when_not_registered: true
+  require_service_or_goods_basis: true
+review_rules:
+  - id: supplier_charges_sst_without_sst_number
+    severity: hard_review
+  - id: service_tax_rate_6_vs_8_ambiguous
+    severity: review
+  - id: tax_amount_does_not_match_rate
+    severity: hard_review
+  - id: exemption_without_reason_or_certificate
+    severity: review
+  - id: imported_service_detected
+    severity: review
+  - id: imported_goods_without_customs_form_reference
+    severity: hard_review
+  - id: foreign_currency_without_exchange_rate
+    severity: review
+  - id: sales_tax_goods_without_tariff_or_clear_goods_basis
+    severity: review
