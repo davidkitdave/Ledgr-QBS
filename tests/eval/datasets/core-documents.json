@@ -1,0 +1,38 @@
+{
+  "eval_cases": [
+    {
+      "eval_case_id": "invoice_processing_success",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "For client_id playground, process tests/fixtures/stub-invoice.pdf with process_document_batch. Confirm status=success and doc_type=invoice."
+          }
+        ]
+      },
+      "metadata": {
+        "expect_status": "success",
+        "expect_doc_type": "invoice",
+        "expect_tax_policy_version": "sg_gst.yaml",
+        "max_llm_call_count": 2
+      }
+    },
+    {
+      "eval_case_id": "receipt_processing_success",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "For client_id playground, process a synthetic single-page receipt fixture. Confirm status=success and doc_type=receipt."
+          }
+        ]
+      },
+      "metadata": {
+        "expect_status": "success",
+        "expect_doc_type": "receipt",
+        "expect_tax_policy_version": "sg_gst.yaml",
+        "max_llm_call_count": 2
+      }
+    }
+  ]
+}

@@ -86,6 +86,48 @@ def credit_charge_code(instance: dict[str, Any]) -> dict[str, Any]:
     return {"score": 0.0, "explanation": "unexpected credit state"}
 
 
+def accounting_task_success_code(instance: dict[str, Any]) -> dict[str, Any]:
+    """Score 1.0 when the batch terminal status is 'success'."""
+
+    batch = _latest_batch_result(instance)
+    if batch is None:
+        return {"score": 1.0, "explanation": "no document batch result in trace"}
+
+    status = batch.get("status")
+    if status == "success":
+        return {"score": 1.0, "explanation": "batch status=success"}
+    return {"score": 0.0, "explanation": f"batch status={status!r}"}
+
+
+_VALID_DOC_TYPES = {"invoice", "receipt", "credit_note", "bank_statement", "mixed"}
+
+
+def doc_type_code(instance: dict[str, Any]) -> dict[str, Any]:
+    """Score 1.0 when the batch has a recognised non-empty doc_type label."""
+
+    batch = _latest_batch_result(instance)
+    if batch is None:
+        return {"score": 1.0, "explanation": "no document batch result in trace"}
+
+    doc_type = batch.get("doc_type")
+    if isinstance(doc_type, str) and doc_type in _VALID_DOC_TYPES:
+        return {"score": 1.0, "explanation": f"doc_type={doc_type}"}
+    return {"score": 0.0, "explanation": f"unrecognised doc_type={doc_type!r}"}
+
+
+def erp_export_shape_code(instance: dict[str, Any]) -> dict[str, Any]:
+    """Score 1.0 when the batch carries a list of export_rows."""
+
+    batch = _latest_batch_result(instance)
+    if batch is None:
+        return {"score": 1.0, "explanation": "no document batch result in trace"}
+
+    export_rows = batch.get("export_rows")
+    if isinstance(export_rows, list):
+        return {"score": 1.0, "explanation": f"export_rows list len={len(export_rows)}"}
+    return {"score": 0.0, "explanation": "export_rows missing or not a list"}
+
+
 def hitl_noise_score(instance: dict[str, Any]) -> dict[str, Any]:
     batch = _latest_batch_result(instance)
     if batch is None:

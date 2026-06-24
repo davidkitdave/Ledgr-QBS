@@ -1,0 +1,38 @@
+{
+  "eval_cases": [
+    {
+      "eval_case_id": "sg_gst_registered_client",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "For a Singapore GST-registered client, process an invoice with process_document_batch. Confirm tax_policy_version=sg_gst.yaml and no review_request for gst_claimed_by_non_registered_client."
+          }
+        ]
+      },
+      "metadata": {
+        "expect_status": "success",
+        "expect_tax_policy_version": "sg_gst.yaml",
+        "expect_jurisdiction": "SG",
+        "max_llm_call_count": 2
+      }
+    },
+    {
+      "eval_case_id": "my_sst_client",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "For a Malaysia SST-registered client, process an invoice with process_document_batch. Confirm tax_policy_version=my_sst.yaml."
+          }
+        ]
+      },
+      "metadata": {
+        "expect_status": "success",
+        "expect_tax_policy_version": "my_sst.yaml",
+        "expect_jurisdiction": "MY",
+        "max_llm_call_count": 2
+      }
+    }
+  ]
+}
