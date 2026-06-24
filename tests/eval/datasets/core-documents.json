@@ -13,7 +13,7 @@
       "metadata": {
         "expect_status": "success",
         "expect_doc_type": "invoice",
-        "expect_tax_policy_version": "sg_gst.yaml",
+        "expect_tax_policy_version": "sg-2026-01",
         "max_llm_call_count": 2
       }
     },
@@ -30,7 +30,7 @@
       "metadata": {
         "expect_status": "success",
         "expect_doc_type": "receipt",
-        "expect_tax_policy_version": "sg_gst.yaml",
+        "expect_tax_policy_version": "sg-2026-01",
         "max_llm_call_count": 2
       }
     }

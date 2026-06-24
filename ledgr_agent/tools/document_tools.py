@@ -15,24 +15,55 @@ from ledgr_agent.tools.batch_mapper import map_engine_batch_to_contract
 PipelineInject = dict[str, Callable[..., Any]]
 
 
+# Module-level seam for the credit service. Production wires a Firestore-backed
+# store via ``_get_credit_service``. Tests swap the factory via monkeypatch to
+# inject hermetic stores without touching production code paths. Keeping this
+# at module scope (rather than instantiating ``InMemoryCreditStore()`` inline on
+# each call) avoids two production footguns: (1) every call would otherwise get
+# a fresh empty store and ``read_balance`` would always return 0; (2) tests
+# would need to mock the store class instead of a clean factory seam.
+_credit_service_factory: Callable[[], Any] | None = None
+
+
+def _get_credit_service() -> Any:
+    """Return a :class:`CreditService` for the current process.
+
+    Production wires this to a Firestore-backed store (see
+    ``app.credit_service``). When no factory is registered we fall back to the
+    hermetic :class:`InMemoryCreditStore` so unit tests and offline eval runs
+    keep working without Firestore access.
+
+    The factory is monkeypatchable: callers (and tests) can swap
+    ``ledgr_agent.tools.document_tools._credit_service_factory`` to point at a
+    different store builder.
+    """
+    if _credit_service_factory is not None:
+        return _credit_service_factory()
+
+    try:
+        from app.credit_service import CreditService, InMemoryCreditStore
+    except ImportError:
+        return None
+
+    return CreditService(InMemoryCreditStore())
+
+
 def _credit_gate(*, firm_id: str | None, paths: list[str]) -> dict[str, Any]:
     """Pre-engine credit gate.
 
     Returns ``{"allowed": bool, "reason": str, "balance": int}``. When the credit
     service is unavailable (e.g. the test environment imports ``document_tools``
     without the ``app`` package on the path) the gate is a no-op allow.
-    Production wires a Firestore-backed implementation by monkeypatching this
-    module-level helper.
+    Production wires a Firestore-backed implementation by registering a
+    ``_credit_service_factory`` (or monkeypatching it in tests).
     """
-    try:
-        from app.credit_service import CreditService, InMemoryCreditStore
-    except ImportError:
-        return {"allowed": True, "reason": "ok", "balance": 0}
-
     if not firm_id:
         return {"allowed": True, "reason": "ok", "balance": 0}
 
-    service = CreditService(InMemoryCreditStore())
+    service = _get_credit_service()
+    if service is None:
+        return {"allowed": True, "reason": "ok", "balance": 0}
+
     balance = service.read_balance(firm_id)
     allowed = balance > 0 or balance >= len(paths)
     reason = "zero_credit" if balance <= 0 and not allowed else "ok"

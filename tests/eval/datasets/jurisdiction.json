@@ -12,7 +12,7 @@
       },
       "metadata": {
         "expect_status": "success",
-        "expect_tax_policy_version": "sg_gst.yaml",
+        "expect_tax_policy_version": "sg-2026-01",
         "expect_jurisdiction": "SG",
         "max_llm_call_count": 2
       }
@@ -29,7 +29,7 @@
       },
       "metadata": {
         "expect_status": "success",
-        "expect_tax_policy_version": "my_sst.yaml",
+        "expect_tax_policy_version": "my-2026-01",
         "expect_jurisdiction": "MY",
         "max_llm_call_count": 2
       }

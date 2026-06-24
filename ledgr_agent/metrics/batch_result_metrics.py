@@ -81,6 +81,12 @@ def credit_charge_code(instance: dict[str, Any]) -> dict[str, Any]:
     block = (batch.get("validation_summary") or {}).get("block_reason")
     if block == "zero_credit" and int(batch.get("llm_call_count") or 0) == 0:
         return {"score": 1.0, "explanation": "zero credit blocked before LLM"}
+    # Note: ``batch_mapper`` currently emits ``credit_status="not_checked"`` on
+    # the happy path (because production billing is wired separately). The
+    # allow-list below covers the explicit statuses that *do* surface on
+    # charge / dedup / pre-flight estimate traces. The divergence is
+    # intentional: tests inject synthetic charged/estimated payloads while
+    # prod wires the real billing later in the pipeline.
     if status in {"charged", "not_billable", "estimated"}:
         return {"score": 1.0, "explanation": f"credit_status={status}"}
     return {"score": 0.0, "explanation": "unexpected credit state"}
