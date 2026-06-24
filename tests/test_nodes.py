@@ -1339,7 +1339,7 @@ def test_single_entity_account_flagged_emits_approval_card():
     assert len(events) == 1
     assert isinstance(events[0], RequestInput)
     assert ctx.state.get(APPROVAL_STATUS_KEY) != "auto_approved"
-    assert any("account review" in r for r in (ctx.state.get("approval_message") or "").split("\n"))
+    assert "low-confidence account mapping" in (ctx.state.get("approval_message") or "")
 
 
 # =========================================================================== #

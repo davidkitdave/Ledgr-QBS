@@ -73,6 +73,7 @@ from invoice_processing.export.exporters import (
 )
 from invoice_processing.export.models import BankStatement, NormalizedInvoice
 from invoice_processing.export.routing import DocRoute, route_document
+from ledgr_agent.review.grouping import partition_and_group_reasons
 # Jurisdiction + LLM tax reasoning (multi-country support, replaces the
 # previous SG-only TaxClassifier call inside tax_node).
 from .jurisdiction import (
@@ -1901,11 +1902,13 @@ def _approval_interrupt_id(state: dict) -> str:
 
 def _approval_summary(reasons: list[str], *, export_unmapped: dict | None = None) -> str:
     """Human-readable summary of why the document needs approval."""
+    hard, soft = partition_and_group_reasons(reasons)
+    display_lines = [item.message for item in hard] + [item.message for item in soft]
     header = (
         "Please review the proposed accounting entries — the following need a "
         "human decision before they are added to the ledger:"
     )
-    bullets = "\n".join(f"  • {r}" for r in reasons)
+    bullets = "\n".join(f"  • {line}" for line in display_lines)
     summary = f"{header}\n{bullets}"
     unmapped_note = format_unmapped_export_note(export_unmapped)
     if unmapped_note:
