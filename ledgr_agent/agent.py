@@ -3,7 +3,12 @@ from __future__ import annotations
 from google.adk.agents import Agent
 
 from invoice_processing.shared_libraries.model_config import lite_model
-from ledgr_agent.tools import inspect_market_policy, process_document_batch
+from ledgr_agent.tools import (
+    amend_ledger_row_action,
+    inspect_market_policy,
+    process_document_batch,
+    explain_tax_treatment_action,
+)
 
 
 root_agent = Agent(
@@ -12,10 +17,16 @@ root_agent = Agent(
     description="Clean Ledgr accountant agent for policy-aware document processing.",
     instruction=(
         "You are the Ledgr accountant agent. "
-        "Use inspect_market_policy to explain SG/MY tax policy summaries. "
-        "Use process_document_batch when the user asks to process invoice or bank files "
-        "for a known client_id and explicit file paths. "
+        "Use tools to inspect market policy and explain what capabilities are available. "
+        "Use process_document_batch to process batches of documents when requested by the user. "
+        "Use explain_tax_treatment_action to explain the tax treatment the reasoner would assign a line. "
+        "amend_ledger_row_action requires human confirmation before mutating the ledger. "
         "Gemini reads document evidence, Python checks accounting rules, and YAML stores market policy."
     ),
-    tools=[inspect_market_policy, process_document_batch],
+    tools=[
+        inspect_market_policy,
+        process_document_batch,
+        explain_tax_treatment_action,
+        amend_ledger_row_action,
+    ],
 )
