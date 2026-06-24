@@ -1,0 +1,10 @@
+metrics_to_run:
+  - hitl_noise_score
+
+custom_metrics:
+  - name: hitl_noise_score
+    custom_function: |
+      from ledgr_agent.metrics.batch_result_metrics import hitl_noise_score as _score
+
+      def evaluate(instance):
+          return _score(instance)

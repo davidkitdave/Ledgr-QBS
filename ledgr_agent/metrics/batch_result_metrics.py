@@ -57,3 +57,24 @@ def no_unneeded_llm_code(instance: dict[str, Any]) -> dict[str, Any]:
             "explanation": f"{block_reason} gate spent {llm_call_count} LLM calls",
         }
     return {"score": 1.0, "explanation": "no unneeded LLM calls detected"}
+
+
+def hitl_noise_score(instance: dict[str, Any]) -> dict[str, Any]:
+    batch = _latest_batch_result(instance)
+    if batch is None:
+        return {"score": 1.0, "explanation": "no document batch result in trace"}
+
+    review_requests = batch.get("review_requests") or []
+    soft_warnings = batch.get("soft_warnings") or []
+    soft_review_count = sum(
+        1 for item in review_requests if item.get("severity") == "review"
+    )
+    grouped_account = any(
+        item.get("id") == "low_coa_confidence_group" for item in soft_warnings
+    )
+    if soft_review_count >= 5 and not grouped_account:
+        return {
+            "score": 0.0,
+            "explanation": f"{soft_review_count} ungrouped soft review bullets",
+        }
+    return {"score": 1.0, "explanation": "review output is grouped or small"}
