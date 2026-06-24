@@ -109,6 +109,7 @@ def map_engine_batch_to_contract(
     strong_model_used: bool = False,
     documents_skipped_before_llm: int = 0,
     elapsed_ms: int | None = None,
+    tax_policy_version: str | None = None,
 ) -> BatchResult:
     """Convert the engine harness result into the shared ``BatchResult`` contract."""
 
@@ -152,6 +153,8 @@ def map_engine_batch_to_contract(
         validation_summary["missing_files"] = list(missing_files)
     if engine_result.errors:
         validation_summary["engine_errors"] = list(engine_result.errors)
+    if tax_policy_version is not None:
+        validation_summary["tax_policy_version"] = tax_policy_version
 
     client_id = getattr(client, "client_id", None) or "unknown"
     firm_id = getattr(client, "firm_id", None)

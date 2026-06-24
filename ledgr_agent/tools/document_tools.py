@@ -9,6 +9,7 @@ from invoice_processing.pipeline import BatchResult as EngineBatchResult
 from invoice_processing.pipeline import process_batch as engine_process_batch
 from invoice_processing.shared_libraries.model_config import lite_model, resolve_model
 from invoice_processing.export.client_context import client_context_from_state
+from ledgr_agent.policies import load_jurisdiction_policy
 from ledgr_agent.tools.batch_mapper import map_engine_batch_to_contract
 
 PipelineInject = dict[str, Callable[..., Any]]
@@ -83,6 +84,24 @@ def _empty_engine_result() -> EngineBatchResult:
     return EngineBatchResult(workbooks={}, docs=[], errors=[])
 
 
+def _resolve_tax_policy_version(client: object) -> str | None:
+    """Return the active jurisdiction policy version for the client, or None if unsupported.
+
+    Falls back gracefully when the client has no ``region`` or the region is not in the
+    supported SG/MY set (Plan 4.1's ``load_jurisdiction_policy`` raises ``ValueError``
+    for unsupported markets).
+    """
+    region = getattr(client, "region", None)
+    if not region or not isinstance(region, str):
+        return None
+    try:
+        policy = load_jurisdiction_policy(region)
+    except (ValueError, AttributeError):
+        return None
+    version = policy.get("policy_version") if isinstance(policy, dict) else None
+    return version if isinstance(version, str) and version else None
+
+
 def process_document_batch(tool_context: Any, paths: list[str], **inject: Any) -> dict[str, Any]:
     """Process a batch of document file paths (invoices, receipts, bank statements) for the active client.
 
@@ -102,6 +121,7 @@ def process_document_batch(tool_context: Any, paths: list[str], **inject: Any) -
         state = _playground_default_context().to_state()
 
     client = client_context_from_state(state)
+    tax_policy_version = _resolve_tax_policy_version(client)
 
     if not paths:
         batch = map_engine_batch_to_contract(
@@ -110,6 +130,7 @@ def process_document_batch(tool_context: Any, paths: list[str], **inject: Any) -
             source_files=[],
             missing_files=[],
             blocked_reason="no_source_files",
+            tax_policy_version=tax_policy_version,
         )
         return batch.model_dump()
 
@@ -124,6 +145,7 @@ def process_document_batch(tool_context: Any, paths: list[str], **inject: Any) -
             missing_files=missing_files,
             blocked_reason="no_readable_files",
             documents_skipped_before_llm=documents_skipped_before_llm,
+            tax_policy_version=tax_policy_version,
         )
         return batch.model_dump()
 
@@ -144,6 +166,7 @@ def process_document_batch(tool_context: Any, paths: list[str], **inject: Any) -
         strong_model_used=bool(telemetry["strong_model_used"]),
         elapsed_ms=elapsed_ms,
         documents_skipped_before_llm=documents_skipped_before_llm,
+        tax_policy_version=tax_policy_version,
     )
 
     return batch_result.model_dump()
