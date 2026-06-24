@@ -130,6 +130,8 @@ def map_engine_batch_to_contract(
             skipped_documents.append(per_file_summary(doc))
         elif doc.reconciled:
             posted_documents.append(posted_document_summary(doc))
+        else:
+            skipped_documents.append(posted_document_summary(doc))
 
     for missing in missing_files:
         skipped_documents.append(
@@ -177,6 +179,6 @@ def map_engine_batch_to_contract(
         strong_model_used=strong_model_used,
         elapsed_ms=elapsed_ms,
         documents_requested=len(source_files),
-        documents_processed=len(posted_documents),
+        documents_processed=sum(1 for doc in engine_result.docs if not doc.note.startswith("ERROR")),
         documents_skipped_before_llm=documents_skipped_before_llm,
     )
