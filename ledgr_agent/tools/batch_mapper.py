@@ -12,14 +12,16 @@ from ledgr_agent.review.grouping import partition_and_group_reasons
 
 def per_file_summary(doc: ProcessedDoc) -> dict[str, object]:
     file_name = Path(doc.path).name
+    workbook = getattr(doc.route, "workbook", None) if doc.route else None
+    sheet = getattr(doc.route, "sheet", None) if doc.route else None
     return {
         "path": doc.path,
         "file_name": file_name,
         "doc_type": doc.doc_type,
         "direction": doc.direction,
         "reconciled": doc.reconciled,
-        "workbook": doc.route.workbook,
-        "sheet": doc.route.sheet,
+        "workbook": workbook,
+        "sheet": sheet,
         "note": doc.note,
     }
 
