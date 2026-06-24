@@ -11,13 +11,21 @@ _POLICY_FILES = {
     "SG": "sg.yaml",
     "MY": "my.yaml",
 }
+_REGION_ALIASES = {
+    "SINGAPORE": "SG",
+    "SG": "SG",
+    "SGP": "SG",
+    "MALAYSIA": "MY",
+    "MY": "MY",
+    "MYS": "MY",
+}
 
 
 @lru_cache(maxsize=8)
 def load_jurisdiction_policy(market: str) -> dict[str, Any]:
     """Load a versioned jurisdiction policy YAML by market code."""
 
-    key = market.strip().upper()
+    key = _REGION_ALIASES.get(market.strip().upper(), market.strip().upper())
     file_name = _POLICY_FILES.get(key)
     if file_name is None:
         supported = ", ".join(sorted(_POLICY_FILES))
