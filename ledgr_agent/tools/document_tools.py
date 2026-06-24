@@ -15,6 +15,30 @@ from ledgr_agent.tools.batch_mapper import map_engine_batch_to_contract
 PipelineInject = dict[str, Callable[..., Any]]
 
 
+def _credit_gate(*, firm_id: str | None, paths: list[str]) -> dict[str, Any]:
+    """Pre-engine credit gate.
+
+    Returns ``{"allowed": bool, "reason": str, "balance": int}``. When the credit
+    service is unavailable (e.g. the test environment imports ``document_tools``
+    without the ``app`` package on the path) the gate is a no-op allow.
+    Production wires a Firestore-backed implementation by monkeypatching this
+    module-level helper.
+    """
+    try:
+        from app.credit_service import CreditService, InMemoryCreditStore
+    except ImportError:
+        return {"allowed": True, "reason": "ok", "balance": 0}
+
+    if not firm_id:
+        return {"allowed": True, "reason": "ok", "balance": 0}
+
+    service = CreditService(InMemoryCreditStore())
+    balance = service.read_balance(firm_id)
+    allowed = balance > 0 or balance >= len(paths)
+    reason = "zero_credit" if balance <= 0 and not allowed else "ok"
+    return {"allowed": allowed, "reason": reason, "balance": balance}
+
+
 def _resolve_existing_paths(source_files: list[str]) -> tuple[list[Path], list[str]]:
     existing: list[Path] = []
     missing: list[str] = []
@@ -122,6 +146,18 @@ def process_document_batch(tool_context: Any, paths: list[str], **inject: Any) -
 
     client = client_context_from_state(state)
     tax_policy_version = _resolve_tax_policy_version(client)
+
+    credit_decision = _credit_gate(firm_id=getattr(client, "firm_id", None), paths=paths)
+    if not credit_decision.get("allowed", True):
+        batch = map_engine_batch_to_contract(
+            _empty_engine_result(),
+            client=client,
+            source_files=[str(p) for p in paths],
+            missing_files=[],
+            blocked_reason=credit_decision.get("reason", "zero_credit"),
+            tax_policy_version=tax_policy_version,
+        )
+        return batch.model_dump()
 
     if not paths:
         batch = map_engine_batch_to_contract(
