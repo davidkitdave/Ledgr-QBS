@@ -119,6 +119,22 @@ _file_futures: dict[str, asyncio.Future] = {}
 _DEFAULT_CLIENT_STORE = FirestoreClientStore()
 
 
+#: Truthy values accepted for feature flags (matches typical Slack-bot conventions).
+_FEATURE_FLAG_TRUTHY = frozenset({"1", "true", "yes"})
+
+
+def _use_clean_agent() -> bool:
+    """Return whether Slack traffic should route through the new ``ledgr_agent`` tools.
+
+    Controlled by the ``LEDGR_USE_CLEAN_AGENT`` environment variable. Default off
+    so the existing ``document_app`` graph keeps serving production unchanged. The
+    flag is the precondition for Plan 6 cutover — once eval + live QA pass it is
+    flipped on, then retired after a soak window. See Plan 6.3.
+    """
+    raw = os.environ.get("LEDGR_USE_CLEAN_AGENT", "")
+    return raw.strip().lower() in _FEATURE_FLAG_TRUTHY
+
+
 def _profile_state_delta(client_store, channel_id: str) -> dict:
     """Return the client's ``to_state()`` keys for seeding the run, or ``{}``.
 
@@ -2056,6 +2072,28 @@ async def process_file_event(
         )
 
         await _ensure_session(runner, app_name, channel_id, session_id)
+
+        # Plan 6.3: feature-flagged clean-agent dispatch from Slack. The full
+        # BatchResult→Slack delivery wiring is intentionally NOT done in this
+        # branch — this is the precondition flag only, and the legacy
+        # ``document_app`` graph below remains the source of truth for Slack
+        # delivery until the cutover is flipped on end-to-end (after eval + live
+        # QA pass). The branch exists to prove (a) the flag is readable from
+        # this code path, (b) ``ledgr_agent`` imports cleanly when present, and
+        # (c) ANY failure (import error, missing attribute, contract drift)
+        # logs a warning and falls through to the legacy graph so production
+        # never breaks. See Plan 6.3.
+        if _use_clean_agent():
+            try:
+                from ledgr_agent.tools import (  # noqa: F401 — import check
+                    process_document_batch as _clean_process,
+                )
+            except Exception:  # noqa: BLE001 — fail loud in log, fall through
+                logger.exception(
+                    "clean-agent import failed: channel=%s file=%s — "
+                    "falling back to document_app",
+                    channel_id, file_id,
+                )
 
         state_delta = {
             "channel_id": channel_id,
