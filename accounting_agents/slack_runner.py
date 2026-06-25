@@ -151,6 +151,11 @@ def _profile_state_delta(client_store, channel_id: str) -> dict:
     if ctx is None:
         return {}
     delta = ctx.to_state()
+    from accounting_agents.credit_delivery import resolve_firm_id_from_client
+
+    resolved_firm = resolve_firm_id_from_client(ctx)
+    if resolved_firm:
+        delta["firm_id"] = resolved_firm
     # Inject familiarity map if the store supports it (InMemoryClientStore in
     # tests, FirestoreClientStore in production — both expose get_familiarity_map).
     try:
@@ -844,10 +849,33 @@ async def persist_and_deliver(
             replace=effective_replace,
         )
         # Carry context forward so the batch tally can label the destination
-        # accurately (bank statement vs ledger) without re-reading the payload.
+        # accurately (bank statement vs ledger) and so D.2 can bill on delivery.
         append_result.setdefault("kind", payload.get("kind") or "invoice")
         append_result.setdefault("software", payload.get("software") or "")
         append_result.setdefault("fy", str(payload.get("fy") or ""))
+        if not append_result.get("all_deduped"):
+            from accounting_agents.credit_delivery import (
+                charge_delivery_credits,
+                resolve_firm_id_from_state,
+            )
+
+            firm_id = resolve_firm_id_from_state(state)
+            if firm_id is None and client_store is not None:
+                ctx = client_store.get_by_channel(channel_id)
+                from accounting_agents.credit_delivery import resolve_firm_id_from_client
+
+                firm_id = resolve_firm_id_from_client(ctx)
+            credit_info = charge_delivery_credits(
+                firm_id=firm_id,
+                channel_id=channel_id,
+                file_id=state.get("file_id") or payload.get("file_id"),
+                kind=str(payload.get("kind") or "invoice"),
+                payload=payload,
+                append_result=append_result,
+                input_page_count=state.get("input_page_count"),
+            )
+            if credit_info:
+                append_result.update(credit_info)
     elif batches and defer_ledger_persist:
         # Stash the ledger payload so the batch coordinator can merge with peers
         # and call ``append_rows`` once per FY workbook. The ``deferred_ledger``
@@ -1174,6 +1202,17 @@ def _post_delivery_card(
                 blocks.append(confident_note_block(flagged_note))
     except Exception:  # noqa: BLE001 — cosmetic
         logger.warning("account-flagged delivery note failed (non-fatal)", exc_info=True)
+    credits_used = append_result.get("credits_used")
+    credits_remaining = append_result.get("credits_remaining")
+    if isinstance(credits_used, int) and isinstance(credits_remaining, int):
+        from accounting_agents.credit_delivery import credit_footer_block
+
+        blocks.append(
+            credit_footer_block(
+                credits_used=credits_used,
+                credits_remaining=credits_remaining,
+            )
+        )
     kwargs: dict = {"channel": channel_id, "text": summary, "blocks": blocks}
     if thread_ts:
         kwargs["thread_ts"] = thread_ts
@@ -2053,6 +2092,132 @@ async def process_file_event(
                 "reason": rejection_reason,
             }
 
+        from accounting_agents.credit_delivery import (
+            credit_block_message,
+            credit_gate_for_bytes,
+            estimate_upload_pages,
+            flag_unresolved_firm_billing_anomaly,
+            require_firm_for_billing,
+            resolve_firm_id_from_state,
+        )
+
+        input_page_count = estimate_upload_pages(data, source_filename)
+        profile_delta["input_page_count"] = input_page_count
+        firm_id = resolve_firm_id_from_state(profile_delta)
+        if firm_id:
+            credit_decision = credit_gate_for_bytes(
+                firm_id=firm_id,
+                data=data,
+                filename=source_filename,
+            )
+            if not credit_decision.get("allowed", True):
+                user_msg = credit_block_message(credit_decision)
+                _stage_state.mark_failed("understand", "Out of credits")
+                _update_status(
+                    slack_client,
+                    channel_id,
+                    status_ts,
+                    "❌ Out of credits",
+                    blocks=_simple_status_blocks("❌ Out of credits"),
+                )
+                _post_message(slack_client, channel_id, user_msg, thread_ts=thread_ts)
+                _remove_reaction(slack_client, channel_id, upload_msg_ts, "eyes")
+                _add_reaction(slack_client, channel_id, upload_msg_ts, "x")
+                if batch_mode and status_callback is not None:
+                    status_callback(
+                        {
+                            "file_label": source_filename,
+                            "stage": "Out of credits",
+                            "detail": user_msg,
+                            "status": "failed",
+                        }
+                    )
+                return {
+                    "status": "blocked",
+                    "channel_id": channel_id,
+                    "file_id": file_id,
+                    "reason": credit_decision.get("reason"),
+                }
+        else:
+            # LIVE upload with no resolvable firm_id: this used to be a silent
+            # skip (unbilled documents passing through unnoticed). Flag it loudly
+            # and, when LEDGR_CREDIT_REQUIRE_FIRM is set, refuse the upload.
+            flag_unresolved_firm_billing_anomaly(
+                channel_id=channel_id,
+                file_id=file_id,
+                source_filename=source_filename,
+            )
+            if require_firm_for_billing():
+                user_msg = (
+                    "I couldn't determine which workspace to bill for this "
+                    "document, so I didn't process it. Please contact support."
+                )
+                _stage_state.mark_failed("understand", "No billing firm")
+                _update_status(
+                    slack_client,
+                    channel_id,
+                    status_ts,
+                    "❌ Billing not configured",
+                    blocks=_simple_status_blocks("❌ Billing not configured"),
+                )
+                _post_message(slack_client, channel_id, user_msg, thread_ts=thread_ts)
+                _remove_reaction(slack_client, channel_id, upload_msg_ts, "eyes")
+                _add_reaction(slack_client, channel_id, upload_msg_ts, "x")
+                if batch_mode and status_callback is not None:
+                    status_callback(
+                        {
+                            "file_label": source_filename,
+                            "stage": "Billing not configured",
+                            "detail": user_msg,
+                            "status": "failed",
+                        }
+                    )
+                return {
+                    "status": "blocked",
+                    "channel_id": channel_id,
+                    "file_id": file_id,
+                    "reason": "no_firm",
+                }
+
+        # Plan 6.3 / D.3: when the clean-agent flag is on, run
+        # ``process_document_batch`` directly and map ``BatchResult`` → the
+        # existing Slack delivery structs. Any failure falls through to the
+        # legacy ``document_app`` graph so production never breaks.
+        if _use_clean_agent():
+            try:
+                from accounting_agents.clean_agent_slack import process_file_via_clean_agent
+
+                return await process_file_via_clean_agent(
+                    runner=runner,
+                    ledger_store=ledger_store,
+                    db=db,
+                    slack_client=slack_client,
+                    channel_id=channel_id,
+                    file_id=file_id,
+                    session_id=session_id,
+                    app_name=app_name,
+                    data=data,
+                    source_filename=source_filename,
+                    profile_delta=profile_delta,
+                    client_store=client_store,
+                    thread_ts=thread_ts,
+                    status_ts=status_ts,
+                    upload_msg_ts=upload_msg_ts,
+                    replace=replace,
+                    defer_slack_delivery=defer_slack_delivery,
+                    batch_mode=batch_mode,
+                    defer_ledger_persist=defer_ledger_persist,
+                    status_callback=status_callback,
+                    stage_state=_stage_state,
+                )
+            except Exception:  # noqa: BLE001 — fail loud in log, fall through
+                logger.exception(
+                    "clean-agent dispatch failed: channel=%s file=%s — "
+                    "falling back to document_app",
+                    channel_id,
+                    file_id,
+                )
+
         artifact_name = nodes.artifact_name_for(file_id)
 
         from invoice_processing.extract.invoice_extractor import mime_for
@@ -2073,33 +2238,12 @@ async def process_file_event(
 
         await _ensure_session(runner, app_name, channel_id, session_id)
 
-        # Plan 6.3: feature-flagged clean-agent dispatch from Slack. The full
-        # BatchResult→Slack delivery wiring is intentionally NOT done in this
-        # branch — this is the precondition flag only, and the legacy
-        # ``document_app`` graph below remains the source of truth for Slack
-        # delivery until the cutover is flipped on end-to-end (after eval + live
-        # QA pass). The branch exists to prove (a) the flag is readable from
-        # this code path, (b) ``ledgr_agent`` imports cleanly when present, and
-        # (c) ANY failure (import error, missing attribute, contract drift)
-        # logs a warning and falls through to the legacy graph so production
-        # never breaks. See Plan 6.3.
-        if _use_clean_agent():
-            try:
-                from ledgr_agent.tools import (  # noqa: F401 — import check
-                    process_document_batch as _clean_process,
-                )
-            except Exception:  # noqa: BLE001 — fail loud in log, fall through
-                logger.exception(
-                    "clean-agent import failed: channel=%s file=%s — "
-                    "falling back to document_app",
-                    channel_id, file_id,
-                )
-
         state_delta = {
             "channel_id": channel_id,
             "file_id": file_id,
             "source_filename": source_filename,
             nodes.ARTIFACT_NAME_KEY: artifact_name,
+            "input_page_count": input_page_count,
             **profile_delta,
         }
         # Re-extract (ADR-0010): ALWAYS write both keys unconditionally so a
@@ -3182,6 +3326,23 @@ async def handle_approval_action(
     if interrupt is None:
         logger.warning("no interrupt doc for op_id %s; cannot resume.", op_id)
         return {"status": "missing_interrupt", "op_id": op_id}
+
+    from ledgr_agent.slack.hitl_bridge import CLEAN_AGENT_HITL_KIND
+
+    if interrupt.get("kind") == CLEAN_AGENT_HITL_KIND:
+        from accounting_agents.clean_agent_slack import handle_clean_agent_approval_action
+
+        return await handle_clean_agent_approval_action(
+            runner=runner,
+            ledger_store=ledger_store,
+            db=db,
+            slack_client=slack_client,
+            op_id=op_id,
+            decision=decision,
+            app_name=app_name,
+            edits=edits,
+            client_store=_DEFAULT_CLIENT_STORE,
+        )
 
     channel_id = interrupt["channel_id"]
     session_id = interrupt["session_id"]
@@ -5091,7 +5252,10 @@ def build_runner(*, session_service=None, artifact_service=None, direct_document
     from google.adk.runners import Runner
 
     from accounting_agents.agent import document_app
+    from accounting_agents.credit_delivery import wire_shared_credit_service
     from accounting_agents.sessions import FirestoreSessionService
+
+    wire_shared_credit_service()
 
     logger.info("build_runner: using document_app (deterministic document entry, ADR-0021)")
     return Runner(
@@ -5365,14 +5529,20 @@ def build_async_app(
         if not op_id:
             return
         interrupt = read_interrupt(db, op_id)
+        from ledgr_agent.slack.hitl_bridge import CLEAN_AGENT_HITL_KIND, ledger_rows_to_edit_lines
+
         state = (
             await _read_session_state(runner, app_name, interrupt)
             if interrupt else {}
         )
-        # Single-invoice assumption (Task 6's apply_decision_node logs a WARNING
-        # when len(invs) > 1 — modal mirrors the same per-doc-session contract).
-        invs = state.get(nodes.NORMALIZED_KEY) or [{}]
-        lines = invs[0].get("lines") or []
+        if interrupt and interrupt.get("kind") == CLEAN_AGENT_HITL_KIND:
+            payload = interrupt.get("ledger_payload") or {}
+            lines = ledger_rows_to_edit_lines(payload)
+        else:
+            # Single-invoice assumption (Task 6's apply_decision_node logs a WARNING
+            # when len(invs) > 1 — modal mirrors the same per-doc-session contract).
+            invs = state.get(nodes.NORMALIZED_KEY) or [{}]
+            lines = invs[0].get("lines") or []
         coa_options = [
             (c.get("code"), f"{c.get('code')} — {c.get('description')}")
             for c in (state.get("coa") or [])

@@ -1,0 +1,314 @@
+"""Slack-side credit gate and charge-on-delivery (Plan 6 / D.2).
+
+Credits are checked before any LLM work and deducted only after a successful
+ledger append. The clean-agent tool path skips in-tool deduction unless
+``LEDGR_CHARGE_CREDITS_IN_TOOL=1`` so Slack owns billing during cutover.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from typing import Any
+
+from app.credit_service import get_shared_credit_service
+from invoice_processing.extract.invoice_extractor import mime_for
+from invoice_processing.extract.segmentation_gates import count_input_pages
+from ledgr_agent.tools.document_tools import _credit_gate
+
+logger = logging.getLogger(__name__)
+
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def _env_is_prod() -> bool:
+    return (os.environ.get("LEDGR_ENV") or "dev").strip().lower() == "prod"
+
+
+def _firestore_creds_present() -> bool:
+    """True when this process is a real GCP *runtime* with Firestore credentials.
+
+    Deliberately narrow: a bare ``GOOGLE_CLOUD_PROJECT`` is ambient in local dev
+    (and in the test env) and must NOT flip the store to Firestore — the hard
+    requirement is that dev/test keep the in-memory store and never touch GCP.
+    We only treat two signals as "creds present":
+
+    * ``GOOGLE_APPLICATION_CREDENTIALS`` — an explicit service-account key path.
+    * ``K_SERVICE`` — the Cloud Run runtime marker (set only when actually
+      running on Cloud Run, where ADC is available).
+    """
+    for var in (
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "K_SERVICE",
+    ):
+        if (os.environ.get(var) or "").strip():
+            return True
+    return False
+
+
+def configure_durable_credit_service_if_prod() -> bool:
+    """Install the Firestore-backed credit store when running in prod.
+
+    Builds ``CreditService(FirestoreCreditStore())`` and installs it as the
+    shared singleton **before** :func:`wire_shared_credit_service` points the
+    clean-agent tool factory at it — so Slack delivery, the gate, and the
+    clean-agent tool all share the durable store.  In dev/test (no creds and
+    ``LEDGR_ENV != prod``) this is a no-op and the in-memory store is kept.
+
+    Returns ``True`` when the durable store was installed, ``False`` otherwise.
+    Never raises: a wiring failure logs loudly and leaves the in-memory store in
+    place rather than aborting bot startup.
+    """
+    if not (_env_is_prod() or _firestore_creds_present()):
+        return False
+    try:
+        from app.credit_service import (
+            CreditService,
+            FirestoreCreditStore,
+            configure_shared_credit_service,
+        )
+
+        configure_shared_credit_service(CreditService(FirestoreCreditStore()))
+        logger.info("credit store: durable FirestoreCreditStore installed")
+        return True
+    except Exception:  # noqa: BLE001 — never abort startup over credit wiring
+        logger.error(
+            "credit store: failed to install FirestoreCreditStore; "
+            "falling back to in-memory (credits will NOT persist across restarts)",
+            exc_info=True,
+        )
+        return False
+
+
+def resolve_firm_id_from_client(ctx: Any) -> str | None:
+    """Firm id for billing: explicit ``firm_id`` or workspace ``slack_team_id``."""
+
+    if ctx is None:
+        return None
+    for attr in ("firm_id", "slack_team_id"):
+        val = getattr(ctx, attr, None)
+        if val and str(val).strip():
+            return str(val).strip()
+    return None
+
+
+def resolve_firm_id_from_state(state: dict | None) -> str | None:
+    if not state:
+        return None
+    for key in ("firm_id", "slack_team_id"):
+        val = state.get(key)
+        if val and str(val).strip():
+            return str(val).strip()
+    return None
+
+
+def charge_credits_in_tool_enabled() -> bool:
+    raw = os.environ.get("LEDGR_CHARGE_CREDITS_IN_TOOL", "")
+    return raw.strip().lower() in _TRUTHY
+
+
+def require_firm_for_billing() -> bool:
+    """``LEDGR_CREDIT_REQUIRE_FIRM`` truthy → block uploads with no resolvable firm."""
+
+    raw = os.environ.get("LEDGR_CREDIT_REQUIRE_FIRM", "")
+    return raw.strip().lower() in _TRUTHY
+
+
+def flag_unresolved_firm_billing_anomaly(
+    *,
+    channel_id: str,
+    file_id: str | None,
+    source_filename: str | None,
+) -> None:
+    """LOUD billing-anomaly alert for a real upload with no resolvable firm_id.
+
+    The previous behaviour silently skipped the credit gate when ``firm_id`` was
+    falsy, so unbilled documents passed through unnoticed.  This logs at ERROR so
+    Cloud Logging / alerting surfaces it.  Call only on the LIVE Slack path; the
+    playground/eval path (tool_context=None) legitimately has no firm.
+    """
+
+    logger.error(
+        "billing anomaly: could not resolve firm_id for live upload — document "
+        "will NOT be billed; channel=%s file=%s filename=%s",
+        channel_id,
+        file_id,
+        source_filename,
+    )
+
+
+def wire_shared_credit_service() -> None:
+    """Point the clean-agent tool at the same store as Slack delivery.
+
+    In prod (or when Firestore creds are present) this first swaps the shared
+    singleton to the durable :class:`FirestoreCreditStore` so the factory below
+    hands the durable store to the clean-agent tool path too.
+    """
+
+    from ledgr_agent.tools import document_tools
+
+    configure_durable_credit_service_if_prod()
+    document_tools._credit_service_factory = get_shared_credit_service
+    apply_dev_credit_grants_from_env()
+
+
+def apply_dev_credit_grants_from_env() -> None:
+    """Dev-only bootstrap: ``LEDGR_DEV_CREDIT_GRANTS=T123:50,T456:20``.
+
+    Grants apply inside the **running bot process** so Slack gate/delivery sees
+    them (unlike a separate ``admin grant`` CLI invocation, which uses a
+    throwaway in-memory store).
+    """
+
+    raw = os.environ.get("LEDGR_DEV_CREDIT_GRANTS", "").strip()
+    if not raw:
+        return
+    service = get_shared_credit_service()
+    for part in raw.split(","):
+        chunk = part.strip()
+        if not chunk or ":" not in chunk:
+            continue
+        firm_id, amount_str = chunk.split(":", 1)
+        firm_id = firm_id.strip()
+        if not firm_id:
+            continue
+        try:
+            amount = int(amount_str.strip())
+        except ValueError:
+            logger.warning("skip invalid LEDGR_DEV_CREDIT_GRANTS entry: %r", chunk)
+            continue
+        service.ensure_firm(firm_id)
+        if amount > 0:
+            service.grant(firm_id, amount, note="dev auto-grant")
+            logger.info("dev credit grant: firm=%s amount=%s", firm_id, amount)
+
+
+def estimate_upload_pages(data: bytes, filename: str) -> int:
+    try:
+        return max(count_input_pages(data, mime_for(filename)), 1)
+    except Exception:  # noqa: BLE001 — gate falls back to one unit
+        return 1
+
+
+def credit_gate_for_bytes(*, firm_id: str, data: bytes, filename: str) -> dict[str, Any]:
+    """Pre-flight gate using page count (bank) or document estimate (default 1)."""
+
+    required = estimate_upload_pages(data, filename)
+    return _credit_gate(firm_id=firm_id, paths=[filename], required_units=required)
+
+
+def credit_block_message(decision: dict[str, Any]) -> str:
+    reason = str(decision.get("reason") or "zero_credit")
+    remaining = decision.get("balance")
+    if reason == "insufficient_credit":
+        return (
+            "You don't have enough credits to process this document. "
+            f"Balance: {remaining if remaining is not None else 'unknown'}."
+        )
+    return (
+        "You're out of credits — add more before dropping documents. "
+        "Open the Ledgr app home tab to check your balance."
+    )
+
+
+def delivery_idempotency_key(*, channel_id: str, file_id: str) -> str:
+    return f"{channel_id}:{file_id}:deliver"
+
+
+def delivery_charge_units(
+    *,
+    kind: str,
+    payload: dict,
+    append_result: dict,
+    input_page_count: int | None = None,
+) -> int:
+    """Units to bill after delivery (ADR-0016 / credit plan slice 3)."""
+
+    if append_result.get("all_deduped"):
+        return 0
+    appended = int(append_result.get("appended") or 0)
+    if appended <= 0:
+        return 0
+
+    if kind == "bank":
+        pages = input_page_count or payload.get("input_page_count")
+        return max(int(pages or appended or 1), 1)
+
+    # Page-based charging for document uploads (invoice/receipt): charge by
+    # pages by default, but when a single page packs multiple invoices/receipts
+    # the segmentation captures each, so the charge must follow whichever is
+    # larger. Never charge less than the number of new captured docs, and never
+    # less than 1 when at least one doc was appended.
+    pages = input_page_count or payload.get("input_page_count")
+    pages_or_0 = int(pages) if pages else 0
+    return max(pages_or_0, appended, 1)
+
+
+def format_credit_footer(*, credits_used: int, credits_remaining: int) -> str:
+    unit = "credit" if credits_used == 1 else "credits"
+    return f"Used {credits_used} {unit} · {credits_remaining} remaining"
+
+
+def credit_footer_block(*, credits_used: int, credits_remaining: int) -> dict:
+    return {
+        "type": "context",
+        "elements": [
+            {
+                "type": "mrkdwn",
+                "text": format_credit_footer(
+                    credits_used=credits_used,
+                    credits_remaining=credits_remaining,
+                ),
+            }
+        ],
+    }
+
+
+def charge_delivery_credits(
+    *,
+    firm_id: str | None,
+    channel_id: str,
+    file_id: str | None,
+    kind: str,
+    payload: dict,
+    append_result: dict,
+    input_page_count: int | None = None,
+) -> dict | None:
+    """Deduct credits after a successful delivery; idempotent per Slack file."""
+
+    if not firm_id or not file_id:
+        return None
+
+    units = delivery_charge_units(
+        kind=kind,
+        payload=payload,
+        append_result=append_result,
+        input_page_count=input_page_count,
+    )
+    if units <= 0:
+        return None
+
+    idem = delivery_idempotency_key(channel_id=channel_id, file_id=file_id)
+    try:
+        service = get_shared_credit_service()
+        remaining = service.deduct(
+            firm_id,
+            amount=units,
+            reason="delivery",
+            idempotency_key=idem,
+        )
+        return {"credits_used": units, "credits_remaining": int(remaining)}
+    except Exception:  # noqa: BLE001 — billing must not undo a successful delivery
+        # Delivery already succeeded, so we do NOT raise. But on the durable
+        # (Firestore) path a swallowed deduct silently loses a real charge —
+        # log LOUD with the idempotency key so the charge is recoverable, and
+        # the deduct can be safely replayed later (idempotent per ``idem``).
+        logger.error(
+            "CREDIT CHARGE LOST: delivery deduct failed firm=%s units=%s idem=%s "
+            "— delivery kept, replay this idempotency key to recover the charge",
+            firm_id,
+            units,
+            idem,
+            exc_info=True,
+        )
+        return None
