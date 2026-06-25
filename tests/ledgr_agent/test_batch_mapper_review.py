@@ -50,6 +50,33 @@ def test_map_engine_batch_groups_account_flags() -> None:
     assert batch.soft_warnings[0].count == 5
 
 
+def test_map_engine_batch_groups_reconcile_failures_across_sub_invoices() -> None:
+    """Three sub-invoices with identical reconcile notes → two grouped warnings, not nine bullets."""
+    note = (
+        "subtotal: lines=65.00 vs doc=60.19 (diff=+4.81, tol=2c); "
+        "gst: lines=0.00 vs doc=4.81 (diff=-4.81, tol=2c); "
+        "needs review: missing CreditorCode, AccNo"
+    )
+    docs = [_doc(note) for _ in range(3)]
+    engine = EngineBatchResult(docs=docs, errors=[], workbooks={})
+
+    batch = map_engine_batch_to_contract(
+        engine,
+        client=_Client(),
+        source_files=["/tmp/multi.pdf"],
+        missing_files=[],
+    )
+
+    assert batch.status == "needs_review"
+    assert batch.review_requests == []
+    assert len(batch.soft_warnings) == 2
+    by_id = {w.id: w for w in batch.soft_warnings}
+    assert by_id["reconcile_mismatch_group"].count == 3
+    assert "3 documents have line/total mismatches" in by_id["reconcile_mismatch_group"].message
+    assert by_id["missing_fields_group"].count == 3
+    assert "CreditorCode" in by_id["missing_fields_group"].message
+
+
 def test_map_engine_batch_does_not_review_reconciled_ok_note() -> None:
     engine = EngineBatchResult(
         docs=[_doc("Lines total $700.00 · Footer $700.00 · OK", reconciled=True)],

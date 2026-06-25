@@ -42,6 +42,33 @@ def test_approval_summary_lists_review_and_soft_warnings() -> None:
     assert "2 lines low COA confidence" in summary
 
 
+def test_approval_summary_shows_grouped_reconcile_warnings_not_per_doc_bullets() -> None:
+    summary = approval_summary_from_batch(
+        {
+            "review_requests": [],
+            "soft_warnings": [
+                {
+                    "id": "reconcile_mismatch_group",
+                    "message": "3 documents have line/total mismatches — review before posting.",
+                    "count": 3,
+                },
+                {
+                    "id": "missing_fields_group",
+                    "message": (
+                        "3 documents missing required fields (CreditorCode, AccNo) — "
+                        "review before posting."
+                    ),
+                    "count": 3,
+                },
+            ],
+        }
+    )
+    assert summary.count("•") == 2
+    assert "3 documents have line/total mismatches" in summary
+    assert "CreditorCode" in summary
+    assert "subtotal:" not in summary
+
+
 def test_ledger_rows_to_edit_lines_maps_qbs_columns() -> None:
     lines = ledger_rows_to_edit_lines(
         {
