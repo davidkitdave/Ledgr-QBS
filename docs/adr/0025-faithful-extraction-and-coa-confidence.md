@@ -1,6 +1,11 @@
 # 0025 — Faithful multi-document extraction & COA confidence (WS-0/2/3)
 
-- **Status:** Accepted (2026-06-21)
+> **ℹ️ Amended by [ADR-0026](0026-ai-reads-rules-apply-on-a-lean-llmagent.md) (2026-06-24).**
+> The faithful-extraction and COA-confidence decisions stand. *Superseded:* §WS-0.4's choice
+> of the ADK `RequestInput` graph node as the COA HITL primitive — COA review now flows through
+> the batch tool's `pending_reviews` + the `hitl.py` Firestore bridge (graph retired).
+
+- **Status:** Accepted (2026-06-21) — §WS-0.4 HITL primitive superseded by ADR-0026
 - **Date:** 2026-06-21
 - **Deciders:** Ledgr team
 - **Plan:** `docs/superpowers/plans/2026-06-21-intelligent-extraction-implementation.md`

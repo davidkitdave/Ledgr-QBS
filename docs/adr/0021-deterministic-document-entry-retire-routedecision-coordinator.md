@@ -1,6 +1,12 @@
 # ADR-0021: Deterministic document entry; retire the LLM `RouteDecision` coordinator
 
-Status: Accepted (2026-06-19)
+> **ℹ️ Amended by [ADR-0026](0026-ai-reads-rules-apply-on-a-lean-llmagent.md) (2026-06-24).**
+> *Retained:* deterministic document entry — no LLM `RouteDecision`; in Slack the file event
+> still deterministically triggers processing. *Superseded:* `root_agent = document_workflow`
+> — the discoverable root is now the lean `ledgr_agent` `LlmAgent`, which calls the engine via
+> the `process_document_batch` tool (the `Workflow` graph is retired).
+
+Status: Accepted (2026-06-19) — root reassignment superseded by ADR-0026
 Builds on (does NOT supersede) ADR-0008 (chat lane as a standalone root agent).
 Supersedes the "unified chat-coordinator that delegates to the task document workflow"
 ambition in the IDP→ERP plan (`bubbly-sniffing-flurry.md`, WS3 / draft ADR-0021).

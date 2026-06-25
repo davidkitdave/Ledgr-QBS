@@ -1,5 +1,13 @@
 # Clean ADK Accountant Agent Implementation Plan
 
+> **⚠️ Status correction (2026-06-24):** the progress table below marks Plans 1–6 "Done",
+> but QA (`ultraqa-clean-agent-holes-2026-06-24`) found several are **scaffolded, not
+> verified/live** (eval false-green, credit lifecycle no-op, Plan-4 validators dead,
+> cutover flag still off). The remaining work — de-false-green + the real cutover — is
+> tracked in **[2026-06-24-clean-agent-finish-and-cutover.md](2026-06-24-clean-agent-finish-and-cutover.md)**,
+> governed by **[ADR-0026](../../adr/0026-ai-reads-rules-apply-on-a-lean-llmagent.md)**.
+> This document remains the historical build record (it details Plans 1–2 in full).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the new clean `ledgr_agent/` ADK accountant brain beside the current live Slack runtime, prove it with tests/eval, then migrate traffic safely.
