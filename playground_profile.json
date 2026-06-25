@@ -7,6 +7,8 @@
   "base_currency": "MYR",
   "tax_registered": true,
   "fye_month": 12,
+  "firm_id": "T_PLAYGROUND",
+  "slack_team_id": "T_PLAYGROUND",
   "coa": [
     {
       "key": "500-010",

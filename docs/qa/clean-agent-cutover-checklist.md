@@ -12,6 +12,7 @@ References:
 
 - Plan: `docs/superpowers/plans/2026-06-24-clean-adk-accountant-agent-implementation.md`
 - Spec: `docs/superpowers/specs/2026-06-24-clean-adk-accountant-agent-design.md`
+- Dev runbook (credits + flag-on): [clean-agent-dev-qa-runbook.md](./clean-agent-dev-qa-runbook.md)
 
 ## Preconditions
 
@@ -207,8 +208,30 @@ uv run pytest -q
 Change `LEDGR_USE_CLEAN_AGENT` default to on in dev manifest only. Production
 flip is a separate operator action, gated on this checklist passing.
 
+## Programmatic QA Evidence (2026-06-25)
+
+Tier 1 (hermetic suite) and Tier 2 (agents-cli / CLI playground, real Gemini) run
+green. Tier 3 (live Slack 7-check drive) is pending a user-present session.
+
+- Full suite (`uv run pytest`, CI parity): **2243 passed, 2 skipped, 0 failed**.
+- `ruff check .`: clean. ADR-0015 eval gate (`tests/eval/test_f_extract_direction.py -m eval`): 13 passed.
+- Credit gate stays live; the prior order-dependent false-green (leaked
+  `document_tools._credit_service_factory`) is fixed test-side — passes in any order.
+- `scripts/qa_adk_playground_cli.sh`: **Check 6 (zero-credit block) PASS** —
+  `status=blocked`, `credits_used=0`, no LLM call; `read_credit_balance` PASS.
+- `scripts/qa_credit_accuracy_localtest.py` on real SG invoices (GST SR:ZR set):
+  real extraction, `doc_type=invoice`; both routed to `needs_review` with 0 charge
+  (playground profile has no COA → low COA confidence → soft review → not delivered
+  → not charged; `block_reason=null`). Checks 1 & 7 *logic* covered by the suite.
+- Dev bot restarted from HEAD: `LEDGR_USE_CLEAN_AGENT=1`,
+  `LEDGR_DEV_CREDIT_GRANTS=T0B59UG473K:50`, AI Studio; "⚡️ Bolt app is running!".
+
+Still to run live in Slack: checks 1 (happy-path charge end-to-end), 2-3 (grouped
+review + Approve), 4 (chat amend confirm), 5 (AutoCount/SQL xlsx columns), 7
+(dedup-after-charge). These need COA-seeded dev channels.
+
 ## Sign-Off
 
 QA lead: ___
 Date: ___
-Workspace: ___
+Workspace: ___ (dev team T0B59UG473K)

@@ -25,6 +25,21 @@ language, and routes to the right branch. "Make the agent a teammate" means: sto
 being a silent file-processor and start answering and acting on messages. The
 Teammate *talks and routes*; it does **not** itself extract data.
 
+## Accountant agent (the "clean agent")
+The rebuilt, lean `ledgr_agent` ADK `LlmAgent`. The phrase "clean agent" names
+**two surfaces**, and they must not be conflated:
+- the **accountant LlmAgent** — the conversational / `adk web` / agents-cli / eval
+  surface, where the agent itself orchestrates; and
+- the **document spine + tool** — the production document-processing path, a
+  deterministic spine that calls the agent's `process_document_batch` tool
+  directly. **In production the LlmAgent does not orchestrate.**
+
+So "is the clean agent in prod?" is answered at the *tool/spine* level, not the
+LlmAgent level. Governing principle (ADR-0026): the **LLM reads** (extraction via
+the tool) and **deterministic Python applies** tax treatment and COA codes — the
+LLM never decides tax codes. The legacy [[Engine]] graph (`accounting_agents`) is
+the thing being retired in favour of this.
+
 ## Engine (processing pipeline)
 The document-processing path: classify → **understand** → categorise → tax →
 workbook. It is **intelligent at the document boundary, deterministic after**.

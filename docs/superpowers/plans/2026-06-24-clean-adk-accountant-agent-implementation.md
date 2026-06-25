@@ -1,4 +1,4 @@
-# Clean ADK Accountant Agent Implementation Plan
+# aClean ADK Accountant Agent Implementation Plan
 
 > **⚠️ Status correction (2026-06-24):** the progress table below marks Plans 1–6 "Done",
 > but QA (`ultraqa-clean-agent-holes-2026-06-24`) found several are **scaffolded, not
@@ -37,14 +37,16 @@ This document fully details **Plan 1** (complete — commit `12c6b36`) and **Pla
 
 ## Progress
 
-| Plan | Status | Notes |
-|------|--------|-------|
-| 1 — Contract + Eval Shell | **Done** | `ledgr_agent/`, schemas, SG/MY YAML, root agent, smoke eval |
-| 2 — Document Tool Wrapper | **Done** | `process_document_batch`, `batch_mapper.py`, 12 pytest cases, smoke eval |
-| 3 — HITL + Review Cleanup | **Done** | Hard/soft split, grouped warnings, `hitl_noise_score`, `_approval_summary` consumes `partition_and_group_reasons` |
-| 4 — Multi-ERP + Tax Policy | **Done** | Policy validators (rate lookup + GST/SST registration gates), `sg-policy`/`my-policy` eval suites, `tax_validity_code` metric, ERP golden tests |
-| 5 — Credit Integration | **Done** | `CreditService` + `InMemoryCreditStore` per ADR-0016, `_credit_gate` blocks before LLM, `credits.json` eval, `credit_charge_code` metric |
-| 6 — Cutover + Retirement | **Done** | Accountant chat action tools (`explain_tax_treatment` read-only, `amend_ledger_row` w/ confirmation), 5 core eval datasets + 8-metric `eval_config_core.yaml`, `LEDGR_USE_CLEAN_AGENT` feature flag (default off), QA checklist at `docs/qa/clean-agent-cutover-checklist.md` |
+
+| Plan                       | Status   | Notes                                                                                                                                                                                                                                                                         |
+| -------------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1 — Contract + Eval Shell  | **Done** | `ledgr_agent/`, schemas, SG/MY YAML, root agent, smoke eval                                                                                                                                                                                                                   |
+| 2 — Document Tool Wrapper  | **Done** | `process_document_batch`, `batch_mapper.py`, 12 pytest cases, smoke eval                                                                                                                                                                                                      |
+| 3 — HITL + Review Cleanup  | **Done** | Hard/soft split, grouped warnings, `hitl_noise_score`, `_approval_summary` consumes `partition_and_group_reasons`                                                                                                                                                             |
+| 4 — Multi-ERP + Tax Policy | **Done** | Policy validators (rate lookup + GST/SST registration gates), `sg-policy`/`my-policy` eval suites, `tax_validity_code` metric, ERP golden tests                                                                                                                               |
+| 5 — Credit Integration     | **Done** | `CreditService` + `InMemoryCreditStore` per ADR-0016, `_credit_gate` blocks before LLM, `credits.json` eval, `credit_charge_code` metric                                                                                                                                      |
+| 6 — Cutover + Retirement   | **Done** | Accountant chat action tools (`explain_tax_treatment` read-only, `amend_ledger_row` w/ confirmation), 5 core eval datasets + 8-metric `eval_config_core.yaml`, `LEDGR_USE_CLEAN_AGENT` feature flag (default off), QA checklist at `docs/qa/clean-agent-cutover-checklist.md` |
+
 
 ---
 
@@ -133,6 +135,7 @@ Plan 1 is complete only when:
 ## Task 1: Create Package Shell
 
 **Files:**
+
 - Create: `ledgr_agent/__init__.py`
 - Create: `ledgr_agent/schemas/__init__.py`
 - Create: `ledgr_agent/policies/__init__.py`
@@ -197,6 +200,7 @@ Expected:
 ## Task 2: Define Batch, Review, And Credit Schemas
 
 **Files:**
+
 - Create: `ledgr_agent/schemas/review.py`
 - Create: `ledgr_agent/schemas/credit.py`
 - Create: `ledgr_agent/schemas/batch_result.py`
@@ -406,6 +410,7 @@ Expected:
 ## Task 3: Add SG/MY Policy YAML And Loader
 
 **Files:**
+
 - Create: `ledgr_agent/policies/jurisdictions/sg.yaml`
 - Create: `ledgr_agent/policies/jurisdictions/my.yaml`
 - Create: `ledgr_agent/policies/loader.py`
@@ -587,6 +592,7 @@ Expected:
 ## Task 4: Add Policy Inspection Tool
 
 **Files:**
+
 - Create: `ledgr_agent/tools/policy_tools.py`
 - Modify: `ledgr_agent/tools/__init__.py`
 - Test: `tests/ledgr_agent/test_policy_tool.py`
@@ -675,6 +681,7 @@ Expected:
 ## Task 5: Add Clean Root Agent
 
 **Files:**
+
 - Create: `ledgr_agent/agent.py`
 - Test: `tests/ledgr_agent/test_root_agent.py`
 
@@ -752,6 +759,7 @@ root_accountant_agent
 ## Task 6: Add BatchResult Eval Metrics
 
 **Files:**
+
 - Create: `ledgr_agent/metrics/batch_result_metrics.py`
 - Modify: `ledgr_agent/metrics/__init__.py`
 - Test: `tests/ledgr_agent/test_batch_result_metrics.py`
@@ -932,6 +940,7 @@ Expected:
 ## Task 7: Add Clean Root Eval Dataset And Config
 
 **Files:**
+
 - Create: `tests/eval/datasets/clean-root-smoke.json`
 - Create: `tests/eval/eval_config_clean_root.yaml`
 
@@ -1014,6 +1023,7 @@ Expected: command exits with status `0`.
 ## Task 8: Smoke Test With Agents CLI
 
 **Files:**
+
 - Modify: `agents-cli-manifest.yaml`
 
 - [ ] **Step 1: Run direct app smoke without changing manifest**
@@ -1091,6 +1101,7 @@ tests/eval/eval_config_clean_root.yaml is tracked as a new intended config.
 ## Task 9: Plan 1 Final Verification
 
 **Files:**
+
 - No new files.
 
 - [ ] **Step 1: Run focused tests**
@@ -1166,6 +1177,7 @@ No tests/eval_invoices or scratch files listed.
 ### Plan 2 Acceptance Gates
 
 Plan 2 is complete only when:
+
 - `uv run pytest tests/ledgr_agent -q` passes.
 - `agents-cli eval generate --dataset tests/eval/datasets/clean-root-smoke.json --output artifacts/traces/clean-root-smoke.json` runs and generates traces showing that `process_document_batch` is called when requested.
 - `agents-cli eval grade --traces artifacts/traces/clean-root-smoke.json --config tests/eval/eval_config_clean_root.yaml` passes with a score of 1.0.
@@ -1174,6 +1186,7 @@ Plan 2 is complete only when:
 ### Task 2.1: Implement the Document Tool Wrapper
 
 **Files:**
+
 - Create: `ledgr_agent/tools/document_tools.py`
 - Modify: `ledgr_agent/tools/__init__.py`
 
@@ -1332,14 +1345,17 @@ __all__ = [
 - [ ] **Step 3: Run ruff check**
 
 Run:
+
 ```bash
 uv run ruff check ledgr_agent/tools/document_tools.py
 ```
+
 Expected: All checks passed!
 
 ### Task 2.2: Register Document Tool with Root Agent
 
 **Files:**
+
 - Modify: `ledgr_agent/agent.py`
 
 - [ ] **Step 1: Add the tool to agent.py**
@@ -1372,14 +1388,17 @@ root_agent = Agent(
 - [ ] **Step 2: Run ruff check on agent.py**
 
 Run:
+
 ```bash
 uv run ruff check ledgr_agent/agent.py
 ```
+
 Expected: All checks passed!
 
 ### Task 2.3: Write Document Tool Contract Tests
 
 **Files:**
+
 - Create: `tests/ledgr_agent/test_document_tool_contract.py`
 
 - [ ] **Step 1: Create the contract tests**
@@ -1448,14 +1467,17 @@ def test_process_document_batch_converts_engine_output(client_fye3, tmp_path) ->
 - [ ] **Step 2: Run contract tests**
 
 Run:
+
 ```bash
 uv run pytest tests/ledgr_agent/test_document_tool_contract.py -q
 ```
+
 Expected: 1 passed.
 
 ### Task 2.4: Add Eval Case for Document Processing
 
 **Files:**
+
 - Modify: `tests/eval/datasets/clean-root-smoke.json`
 - Modify: `tests/eval/eval_config_clean_root.yaml`
 
@@ -1543,6 +1565,7 @@ custom_metrics:
 ### Task 2.5: Final Verification and Lints
 
 **Files:**
+
 - None.
 
 - [ ] **Step 1: Create a tiny stub PDF for the eval run**
@@ -1550,6 +1573,7 @@ custom_metrics:
 Before generating the eval, create a dummy pdf at `/Users/davidkitdave/Projects/Ledgr-QBS/tests/eval_invoices/stub.pdf` so that it exists and does not fail because of a missing file.
 
 Run:
+
 ```bash
 mkdir -p tests/eval_invoices && echo "%PDF-1.4 stub" > tests/eval_invoices/stub.pdf
 ```
@@ -1557,33 +1581,41 @@ mkdir -p tests/eval_invoices && echo "%PDF-1.4 stub" > tests/eval_invoices/stub.
 - [ ] **Step 2: Run focused tests**
 
 Run:
+
 ```bash
 uv run pytest tests/ledgr_agent -q
 ```
+
 Expected: 12 passed.
 
 - [ ] **Step 3: Run eval trace generation**
 
 Run:
+
 ```bash
 agents-cli eval generate --dataset tests/eval/datasets/clean-root-smoke.json --output artifacts/traces/clean-root-smoke.json
 ```
+
 Expected: Completion of all 3 eval cases.
 
 - [ ] **Step 4: Run eval grading**
 
 Run:
+
 ```bash
 agents-cli eval grade --traces artifacts/traces/clean-root-smoke.json --config tests/eval/eval_config_clean_root.yaml --output artifacts/grade_results/
 ```
+
 Expected: Mean score is 1.0.
 
 - [ ] **Step 5: Run ruff check**
 
 Run:
+
 ```bash
 uv run ruff check ledgr_agent tests/ledgr_agent
 ```
+
 Expected: All checks passed!
 
 ---
@@ -1608,6 +1640,7 @@ Expected: All checks passed!
 ### Task 3.1: Review Reason Classifier
 
 **Files:**
+
 - Create: `ledgr_agent/review/__init__.py`
 - Create: `ledgr_agent/review/classifier.py`
 - Test: `tests/ledgr_agent/test_review_classifier.py`
@@ -1703,6 +1736,7 @@ git commit -m "feat: classify HITL reasons as hard stop or soft warning"
 ### Task 3.2: Group Repeated Account Warnings
 
 **Files:**
+
 - Create: `ledgr_agent/review/grouping.py`
 - Test: `tests/ledgr_agent/test_review_grouping.py`
 
@@ -1828,6 +1862,7 @@ git commit -m "feat: group repeated COA review warnings"
 ### Task 3.3: Wire Grouping Into batch_mapper And document_tools
 
 **Files:**
+
 - Modify: `ledgr_agent/tools/batch_mapper.py`
 - Modify: `ledgr_agent/tools/document_tools.py`
 - Test: `tests/ledgr_agent/test_batch_mapper_review.py`
@@ -1899,6 +1934,7 @@ git commit -m "feat: map engine output through grouped review contract"
 ### Task 3.4: Share Grouping With Slack approval_summary
 
 **Files:**
+
 - Modify: `accounting_agents/nodes.py:1902-1913`
 - Create: `tests/test_review_grouping.py`
 
@@ -1959,6 +1995,7 @@ git commit -m "fix: group HITL account warnings in Slack approval summary"
 ### Task 3.5: Add hitl_noise_score Metric And Eval Dataset
 
 **Files:**
+
 - Modify: `ledgr_agent/metrics/batch_result_metrics.py`
 - Modify: `ledgr_agent/metrics/__init__.py`
 - Create: `tests/eval/datasets/hitl-review.json`
@@ -2153,6 +2190,7 @@ git commit -m "feat: add hitl_noise_score metric and eval shell"
 ### Task 4.1: Expand SG/MY Policy YAML To Full Spec
 
 **Files:**
+
 - Modify: `ledgr_agent/policies/jurisdictions/sg.yaml`
 - Modify: `ledgr_agent/policies/jurisdictions/my.yaml`
 - Modify: `tests/ledgr_agent/test_policy_loader.py`
@@ -2193,6 +2231,7 @@ git commit -m "feat: expand SG/MY jurisdiction policy YAML"
 ### Task 4.2: Policy Validators (Rate Lookup And Registration Gates)
 
 **Files:**
+
 - Create: `ledgr_agent/policies/validators.py`
 - Modify: `ledgr_agent/policies/__init__.py`
 - Test: `tests/ledgr_agent/test_policy_validators.py`
@@ -2292,6 +2331,7 @@ git commit -m "feat: add SG/MY policy validators"
 ### Task 4.3: Wire Policy Version Into BatchResult
 
 **Files:**
+
 - Modify: `ledgr_agent/tools/batch_mapper.py`
 - Modify: `ledgr_agent/tools/document_tools.py`
 - Test: `tests/ledgr_agent/test_policy_version_in_batch.py`
@@ -2343,6 +2383,7 @@ git commit -m "feat: stamp BatchResult with tax_policy_version"
 ### Task 4.4: Policy Eval Suites And tax_validity_code Metric
 
 **Files:**
+
 - Create: `tests/eval/datasets/sg-policy.json`
 - Create: `tests/eval/datasets/my-policy.json`
 - Create: `tests/eval/eval_config_policy.yaml`
@@ -2439,6 +2480,7 @@ git commit -m "feat: add policy eval suites and tax_validity_code"
 ### Task 5.1: Credit Service (Slice 1)
 
 **Files:**
+
 - Create: `app/credit_service.py`
 - Create: `accounting_agents/admin.py` (grant/list-firms CLI)
 - Create: `tests/test_credit_service.py`
@@ -2493,6 +2535,7 @@ git commit -m "feat: add credit service with hermetic store seam"
 ### Task 5.2: Gate process_document_batch Before Engine
 
 **Files:**
+
 - Modify: `ledgr_agent/tools/document_tools.py`
 - Test: `tests/ledgr_agent/test_credit_gate.py`
 
@@ -2544,6 +2587,7 @@ git commit -m "feat: block document batch on zero credit before LLM"
 ### Task 5.3: Credits Eval Suite And credit_charge_code Metric
 
 **Files:**
+
 - Create: `tests/eval/datasets/credits.json`
 - Create: `tests/eval/eval_config_credits.yaml`
 - Modify: `ledgr_agent/metrics/batch_result_metrics.py`
@@ -2606,6 +2650,7 @@ git commit -m "feat: add credit eval suite and credit_charge_code metric"
 ### Task 6.1: Accountant Chat Action Tools On Root Agent
 
 **Files:**
+
 - Create: `ledgr_agent/tools/chat_action_tools.py`
 - Modify: `ledgr_agent/agent.py`
 - Modify: `ledgr_agent/tools/__init__.py`
@@ -2660,6 +2705,7 @@ git commit -m "feat: expose accountant chat actions on clean root agent"
 ### Task 6.2: Expand Core Eval Suites (8 Suites Target)
 
 **Files:**
+
 - Create: `tests/eval/datasets/core-documents.json`
 - Create: `tests/eval/datasets/mixed-batch.json`
 - Create: `tests/eval/datasets/multi-erp.json`
@@ -2711,6 +2757,7 @@ git commit -m "test: add core eval suites for clean agent cutover gate"
 ### Task 6.3: Feature-Flagged Slack Cutover
 
 **Files:**
+
 - Modify: `accounting_agents/slack_runner.py`
 - Create: `tests/test_clean_agent_cutover_flag.py`
 
@@ -2754,6 +2801,7 @@ git commit -m "feat: add feature flag for clean agent Slack cutover"
 ### Task 6.4: Retirement Checklist And Live QA
 
 **Files:**
+
 - Create: `docs/qa/clean-agent-cutover-checklist.md`
 - Modify: `docs/superpowers/specs/2026-06-24-clean-adk-accountant-agent-design.md` (status → Implemented)
 
@@ -2763,12 +2811,14 @@ Seven manual Slack checks: normal invoice no HITL, grouped COA review, approve g
 
 - [ ] **Step 2: Classify retirement candidates**
 
-| Path | Classification | Action after green QA |
-|------|----------------|------------------------|
-| `accounting_agents/agent.py` document graph | legacy-reference | Deprecate; keep until flag default flips |
-| `accounting_agents/nodes.py` review paths | live | Shrink after shared review module proven |
-| `eval/` scripts | legacy-reference | Delete when pytest/agents-cli parity exists |
-| `legacy/` | safe-to-remove | Delete after import scan |
+
+| Path                                        | Classification   | Action after green QA                       |
+| ------------------------------------------- | ---------------- | ------------------------------------------- |
+| `accounting_agents/agent.py` document graph | legacy-reference | Deprecate; keep until flag default flips    |
+| `accounting_agents/nodes.py` review paths   | live             | Shrink after shared review module proven    |
+| `eval/` scripts                             | legacy-reference | Delete when pytest/agents-cli parity exists |
+| `legacy/`                                   | safe-to-remove   | Delete after import scan                    |
+
 
 - [ ] **Step 3: Run import scan before any deletion**
 
@@ -2794,22 +2844,24 @@ git commit -m "docs: add clean agent cutover QA checklist"
 
 ### Spec coverage (all 6 plans)
 
-| Spec section | Plan | Task |
-|--------------|------|------|
-| `ledgr_agent/` package structure | 1 | Done |
-| `BatchResult` contract | 1-2 | Done |
-| `process_document_batch` tool | 2 | Done |
-| SG/MY policy YAML | 1, 4 | 4.1 |
-| Policy validators (Python enforces YAML) | 4 | 4.2 |
-| HITL hard/soft split + grouping | 3 | 3.1-3.4 |
-| `hitl_noise_score` | 3 | 3.5 |
-| Multi-ERP golden tests | 4 | 4.4 |
-| Credit gate/deduct | 5 | 5.1-5.3 |
-| Accountant chat actions + confirmation | 6 | 6.1 |
-| 8 eval suites | 6 | 6.2 |
-| Slack cutover + retirement | 6 | 6.3-6.4 |
-| Cost/performance metrics | 1, 3-5 | existing + extended |
-| No live traffic change until proven | 1-5 | global safety rule |
+
+| Spec section                             | Plan   | Task                |
+| ---------------------------------------- | ------ | ------------------- |
+| `ledgr_agent/` package structure         | 1      | Done                |
+| `BatchResult` contract                   | 1-2    | Done                |
+| `process_document_batch` tool            | 2      | Done                |
+| SG/MY policy YAML                        | 1, 4   | 4.1                 |
+| Policy validators (Python enforces YAML) | 4      | 4.2                 |
+| HITL hard/soft split + grouping          | 3      | 3.1-3.4             |
+| `hitl_noise_score`                       | 3      | 3.5                 |
+| Multi-ERP golden tests                   | 4      | 4.4                 |
+| Credit gate/deduct                       | 5      | 5.1-5.3             |
+| Accountant chat actions + confirmation   | 6      | 6.1                 |
+| 8 eval suites                            | 6      | 6.2                 |
+| Slack cutover + retirement               | 6      | 6.3-6.4             |
+| Cost/performance metrics                 | 1, 3-5 | existing + extended |
+| No live traffic change until proven      | 1-5    | global safety rule  |
+
 
 ### Placeholder scan
 
