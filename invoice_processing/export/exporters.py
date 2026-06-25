@@ -277,13 +277,18 @@ def _doc_sign(inv: NormalizedInvoice) -> int:
 def _line_net_amount(line: InvoiceLine, inv: NormalizedInvoice) -> float:
     """Exportable line subtotal (sign-adjusted for credit notes).
 
-    GST-registered clients: ex-GST net. Non-registered clients absorb irrecoverable
-    input GST into the line cost (no separate tax column on export).
-    Credit notes: result is negated so amounts reduce the books rather than add to them.
+    GST-registered clients: ex-GST net for domestic SR lines. Non-registered clients
+    absorb irrecoverable input GST into the line cost (no separate tax column).
+    Cross-border OS (and any non-SR treatment): foreign tax on the document is part
+    of the line cost — not claimable as local input tax (ADR-0024).
+    Credit notes: result is negated so amounts reduce the books rather than add.
     """
     net = float(line.net_amount or 0.0)
-    if not inv.our_gst_registered:
-        raw = round(net + float(line.gst_amount or 0.0), 2)
+    gst = float(line.gst_amount or 0.0)
+    treatment = (line.tax_treatment or "").strip().upper()
+    absorb_gst = not inv.our_gst_registered or treatment != "SR"
+    if absorb_gst:
+        raw = round(net + gst, 2)
     else:
         raw = round(net, 2)
     return round(raw * _doc_sign(inv), 2)

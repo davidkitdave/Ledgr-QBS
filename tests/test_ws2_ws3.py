@@ -127,6 +127,57 @@ class TestNonRegisteredGstAbsorption:
         assert float(rows[1]["*UnitAmount"]) == 1000.0
 
 
+class TestCrossBorderExportAmounts:
+    """ADR-0024: foreign tax on cross-border OS lines is part of line cost."""
+
+    def _cross_border_os_invoice(self) -> NormalizedInvoice:
+        inv = NormalizedInvoice(
+            doc_type="purchase",
+            invoice_number="STAR-001",
+            invoice_date=date(2024, 9, 1),
+            currency="SGD",
+            supplier=PartyInfo(name="StarHub", country="SG"),
+            our_gst_registered=True,
+            doc_total=763.0,
+            lines=[
+                InvoiceLine(
+                    description="Consulting fee",
+                    net_amount=500.0,
+                    gst_amount=45.0,
+                    tax_treatment="OS",
+                    account_code="500",
+                ),
+                InvoiceLine(
+                    description="Software licence",
+                    net_amount=200.0,
+                    gst_amount=18.0,
+                    tax_treatment="OS",
+                    account_code="500",
+                ),
+            ],
+        )
+        return inv
+
+    def test_qbs_os_absorbs_foreign_gst_for_registered_client(self):
+        inv = self._cross_border_os_invoice()
+        rows = QbsLedgerExporter().rows([inv], "purchase")
+        assert len(rows) == 2
+        assert rows[0]["Sub Total"] == 545.0  # 500 + 45 foreign GST
+        assert rows[0]["Tax Amount"] == 0.0
+        assert rows[0]["Total Amount"] == 545.0
+        assert rows[1]["Sub Total"] == 218.0  # 200 + 18
+        assert rows[1]["Total Amount"] == 218.0
+
+    def test_xero_os_absorbs_foreign_gst_for_registered_client(self):
+        inv = self._cross_border_os_invoice()
+        rows = XeroLedgerExporter().rows([inv], "purchase")
+        assert len(rows) == 2
+        assert float(rows[0]["*UnitAmount"]) == 545.0
+        assert rows[0]["TaxAmount"] == 0.0
+        assert rows[0]["*TaxType"] == "No Tax"  # Xero maps OS → No Tax
+        assert float(rows[1]["*UnitAmount"]) == 218.0
+
+
 # =========================================================================== #
 # WS3 — Xero Total per-line rule
 # =========================================================================== #

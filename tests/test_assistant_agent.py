@@ -1130,6 +1130,20 @@ def _invoice_rows_two_months() -> list[dict]:
     ]
 
 
+def _qbs_invoice_rows_two_months() -> list[dict]:
+    """Same layout as _invoice_rows_two_months but with real QBS export headers."""
+    return [
+        {"_sheet": "Purchase", "_row": 2, "Invoice Date": "05/09/2025",
+         "Invoice Number": "INV-P1", "Description": "AWS", "Source Amount": 100.0},
+        {"_sheet": "Purchase", "_row": 3, "Invoice Date": "20/09/2025",
+         "Invoice Number": "INV-P2", "Description": "Zoom", "Source Amount": 50.0},
+        {"_sheet": "Sales", "_row": 2, "Invoice Date": "10/09/2025",
+         "Invoice Number": "INV-S1", "Description": "Consulting", "Source Amount": 500.0},
+        {"_sheet": "Purchase", "_row": 4, "Invoice Date": "03/10/2025",
+         "Invoice Number": "INV-P3", "Description": "AWS Oct", "Source Amount": 120.0},
+    ]
+
+
 from accounting_agents.assistant import replace_recorded_month, PENDING_WRITE_KEY
 
 
@@ -1162,6 +1176,17 @@ class TestReplaceRecordedMonth:
         assert "September 2025" in hint
         # Nothing written to state.
         assert PENDING_WRITE_KEY not in ctx.state
+
+    def test_turn1_counts_qbs_invoice_date_rows(self):
+        """QBS workbooks use 'Invoice Date', not 'Date' — must still count rows."""
+        ctx = _FakeToolContextWithConfirm(
+            self._state(rows=_qbs_invoice_rows_two_months())
+        )
+        replace_recorded_month(ctx, "September 2025")
+        assert ctx.confirmation_requested is not None
+        hint = ctx.confirmation_requested["hint"]
+        assert "2 Purchase" in hint
+        assert "1 Sales" in hint
 
     def test_turn1_no_match_returns_message(self):
         ctx = _FakeToolContextWithConfirm(self._state())
