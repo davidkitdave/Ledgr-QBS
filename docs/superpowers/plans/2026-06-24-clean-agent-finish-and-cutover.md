@@ -33,8 +33,8 @@ Do not start D until Stream 0 is green.
 | Stream | Status | Gate |
 |--------|--------|------|
 | 0 — Golden eval + de-false-green | ✅ GREEN (0.3 + 0.4 done 2026-06-25) | tool actually invoked (live `function_calls=[process_document_batch]`); field-match scorer (54 tests) + de-false-green lock (22 tests); batch asserted non-null; live grade non-vacuous |
-| A — Read layer (regex → structured output) | ✅ A.1+A.2 DONE (2026-06-25); A.3 open | read layer already structured (kept); SST/GST+totals now `required` + described; doc_type enum-enforced; A.3 SOA fan-out deferred |
-| B — Rule-data → YAML | ◐ B.1+B.2 DONE (2026-06-25); B.3 left | SG+AutoCount/SQL tax codes non-blank ✅; SR bug already-fixed ✅; ERP YAML port (B.3) outstanding |
+| A — Read layer (regex → structured output) | ◐ A.1+A.2+A.4 DONE (2026-06-25); A.3 open | SST/GST+totals now `required`; doc_type enum-enforced; dead capture cluster deleted; **A.4 direction→LLM DONE (Opus-verified, 2184/0)**. A.3 SOA fan-out deferred |
+| B — Rule-data → YAML | ◐ B.1+B.2 DONE (2026-06-25); B.3+B.4 left | SG+AutoCount/SQL tax codes non-blank ✅; SR bug already-fixed ✅; B.3 ERP YAML port + **B.4 (surfaced 2026-06-25): tax-label keyword ladder → YAML alias** outstanding |
 | C — Guard (after_tool) | ✅ DONE (2026-06-25, reviewed) | Plan-4 validators fail-loud: inline surfaces errors + invalid_tax_code; after_tool callback guards the boundary (STRICT raises); 20 tests |
 | D — Cutover + retirement | ☐ Not started (blocked on 0) | credits real; Slack delivery wired; HITL re-homed; flag flipped; graph deleted |
 
@@ -56,8 +56,10 @@ Do not start D until Stream 0 is green.
 
 - [x] **A.1** **DONE 2026-06-25.** Audit found the read layer is ALREADY structured-output (not regex): `document_classifier.py` already classifies via `response_schema=ClassificationResult`; `categorizer.py` is already deterministic-first (§9 cost guardrail) + LLM fallback — both KEPT. Hardening applied: `ClassificationResult.doc_type` is now a server-enforced `Literal` enum (= `ALLOWED_DOC_TYPES`); post-LLM clamp + `free_type` preserved.
 - [x] **A.2** **DONE 2026-06-25.** Tightened `ExtractedInvoice`: `gst_total`/`subtotal`/`total` now **required** `float` with precise descriptions ("never omit a printed SST/GST total; 0.0 only when no tax shown") — the under-capture fix; `issuer_tax_system` now required `Literal["GST","SST","VAT","NONE"]`. Country fields deliberately LEFT optional (unbounded → no closed enum). Ripple: 44 constructor sites across 13 test files updated + `ledger_extract.py` fallback. New `tests/test_extraction_schema.py` (16 assertions) locks the contract. Also fixed a pre-existing stale assertion in `test_eval_routing.py` (`document_workflow`→`root_accountant_agent`, ADR-0026 cutover). Full suite **~2180 passed, 0 failed**.
-- **Note — A.3 (derived, OPEN):** teach extraction to fan out SOA *summary rows* (each listed invoice row = 1 doc); ATOM(14)/Auto Lab(6) remain known-failing golden cases until this lands. Bigger engine change, deferred.
-- **Gate:** ✅ schema forces SST/GST + totals capture (server-side required); classification enum-enforced; full suite green, no regressions. (Live extraction-quality lift measurable once 0.4 line-projection lands.)
+- **Note — A.3 (derived, OPEN):** teach extraction to fan out SOA *summary rows* (each listed invoice row = 1 doc); Bolt Auto Supply(14)/Gearbox Lab(6) remain known-failing golden cases until this lands. Bigger engine change, deferred.
+- [x] **A.4** **DONE 2026-06-25 (Sonnet executor + Opus verify).** Clean-agent direction (purchase/sales) was still read by `difflib` and silently mis-booked unknowns as "purchase". **FIX** (`ledgr_agent/tools/document_engine.py`): the invoice lane now passes `direction="auto"` so the extraction LLM's `direction_for_client` decides (matching the live Slack graph), and the resolved direction is derived per-doc from `normalized.doc_type` for `validate_required_fields` / `route_document` / `ProcessedDoc.direction`. **Unknown AND self_referential now flag needs-review** (→ `skipped_documents`) instead of a silent clean purchase — verifier proved via real-engine trace this is an *improvement* (the old difflib path was the silent-misbook). TDD: 2 stub + **2 causal real-chain tests** (monkeypatch `EXTRACT_LEDGER_FN`, proven to FAIL if reverted to concrete "purchase"). `resolve_direction` kept in `document_classifier.py` (no longer called by the engine). Full suite **2184/0**; ruff clean. Design doc: [2026-06-25-clean-agent-direction-llm-cutover.md](2026-06-25-clean-agent-direction-llm-cutover.md).
+- **Cleanup (DONE 2026-06-25):** deleted the dead `DocumentRecord` capture cluster that made the engine *look* regex-heavy but was unreachable from both runtimes (tests/eval only): `record_merge.py`, `verify.py`, `document_record.py`, `document_extractor.py`, `book.py`, `export/line_grouping.py` + `_is_soa_summary_invoice` / `to_normalized_bundle` + dead `nodes.py` seams. Verified (live imports + suite green); the live SOA gate (`_drop_soa_cover_documents`) and reconcile (`validate_extracted_document`) are untouched. Pre-clears part of Stream D's `nodes.py` retirement.
+- **Gate:** A.1/A.2/A.4 ✅ schema forces SST/GST + totals capture (server-side required); classification enum-enforced; direction now LLM-decided + HITL-flagged on unknown/self_referential. **A.3 (SOA fan-out) is the remaining read-layer item before A is fully green.** (Live extraction-quality lift measurable once 0.4 line-projection lands.)
 
 ## Stream B — Rule-data → YAML (keep the apply-logic deterministic)
 
@@ -66,7 +68,8 @@ Do not start D until Stream 0 is green.
 - [x] **B.1** **DONE 2026-06-25.** Added explicit `autocount:` + `sql_account:` blocks to `sg_gst.yaml` `code_map`, grounded in `docs/research/sg-gst-tax-codes.md` §7.2 (IRAS SG short-code convention, rate-invariant): purchase `SR→TX, ZR→ZR, ES→ES, OS→NT, IM→IM, NT→NT`; sales `SR→SR, …`. SG client on AutoCount/SQL now resolves real codes (was BLANK). Locked by `TestSgErpCodeResolution` (8 tests) in `test_tax_classifier.py`. Golden updated: SG telco `erp_codes` `BLANK(hole B.1)`→`TX`/`ZR` in both `/tmp/ledgr_golden/golden_truth.json` and `tests/eval/datasets/golden_v2_sample.json`. Suite: 160 (tax/erp/jurisdiction) + 139 (ledgr_agent) green, no regressions.
 - [x] **B.2** **ALREADY DONE (pre-existing, verified 2026-06-25).** `tax_classifier.py` already has the master gate `if not inv.our_gst_registered: return "NT"` in BOTH `_classify_purchase` (line ~363) and the sales branch (line ~447); fed from `client.tax_registered` in `pipeline.py:277`. Covered by `test_tax_classifier.py` (non-reg client → NT for purchase/sales/ZR-signal/explicit-keyword, lines ~372–411). Memory note about the SR bug was stale.
 - [ ] **B.3** Port `Ledgr-Agentic/ledgr-agent/app/skills/erp_export_skill/assets/*.yaml` (QBS Ledger, Xero, AutoCount, SQL Account) into `ledgr_agent/skills/` as declarative ERP column maps. *(Remaining — larger port; not golden-tested; lower priority.)*
-- **Gate:** B.1/B.2 ✅ tax codes non-blank on SG+MY; SR bug closed; ERP/tax suites green. B.3 outstanding.
+- [ ] **B.4** **(OPEN — surfaced 2026-06-25.)** Move the **tax-label normalization DATA to YAML**, keep the decision deterministic. `tax_classifier.py:377-406` (`_classify_purchase`) + `458-487` (`_classify_sales`) + `_sr_tax_keyword_match` (280-285) still hardcode an English keyword ladder (`kw.startswith("zr")`, `"exempt" in kw`, `"out of scope" in kw`, …) to map the LLM's verbatim `tax_keyword` → canonical treatment (SR/ZR/ES/OS/NT). Replace the ladder with a data-driven `tax_label_aliases:` table in `sg_gst.yaml`/`my_sst.yaml` (e.g. `ZR: [zr, zero, "0%"]`). Honors the line-that-doesn't-move — the **decision stays Python/YAML, the LLM never picks the code** — and removes English-only brittleness. Eval-gated (changes tax-code output). Was only referenced as "a separate plan" elsewhere; recorded here so it isn't lost.
+- **Gate:** B.1/B.2 ✅ tax codes non-blank on SG+MY; SR bug closed; ERP/tax suites green. B.3 + B.4 outstanding.
 
 ## Stream C — Guard (wire the dead validators)
 
@@ -93,23 +96,23 @@ Do not start D until Stream 0 is green.
 
 Golden ground-truth v2 authored by independent PDF analysis (16 logical docs, real client data,
 held at `/tmp/ledgr_golden/golden_truth.json` — NOT in repo). Found Antigravity's machine manifest
-wrong on 5/12 docs (ATOM total 2580→6315, Auto Lab 280→5783, GDEX 4.32→75.55, Yau Lee tax 0→SST-8%,
-M-Premium/SC-Custom multi-invoice merges). User decisions:
+wrong on 5/12 docs (Bolt Auto Supply total 2580→6315, Gearbox Lab 280→5783, Swift Courier 4.32→75.55, Apex Motor tax 0→SST-8%,
+Prime Euro Parts/Custom-Styling multi-invoice merges). User decisions:
 
 - **SOA = book each listed invoice row as 1 document + 1 credit** (reverses skip-cover). → **new
   Stream-A item A.3**: teach extraction to fan out SOA *summary rows* (not only bundled full-invoice
-  pages). ATOM (14) / Auto Lab (6) are **known-failing eval cases** until A.3 lands.
-- **ERP = author both AutoCount + SQL renderings** (SV-8/SV, SV-6/SV, S-10/ST5…); JBI `400-x`
+  pages). Bolt Auto Supply (14) / Gearbox Lab (6) are **known-failing eval cases** until A.3 lands.
+- **ERP = author both AutoCount + SQL renderings** (SV-8/SV, SV-6/SV, S-10/ST5…); Acme `400-x`
   creditor codes asserted on MY lines; COA is the shared dimension; SG cases assert COA+GST only.
 - **B.1 confirmed**: SG AutoCount/SQL tax codes are BLANK (`sg_gst.yaml` lacks those code_map blocks).
 - **Credit model** (user-confirmed): `credits = max(page_count, unique_document_count)` per file —
   1 page=1 credit (bank=all pages), but a page with multiple distinct receipts charges per unique doc
   (multi-receipt 35pg→87). Set totals **162 credits**. → **engine item D.2b**: change charge from
   `posted_count` (doc count only) to `max(pages, reconciled_docs)` in `document_tools.py` (gate already
-  uses pages). OPEN: Starhub 18pg=18 credits for one bill — confirm whether multi-page single docs cap.
+  uses pages). OPEN: TelcoTwo 18pg=18 credits for one bill — confirm whether multi-page single docs cap.
 - **0.3 scorer** must assert: `documents_processed==N`, `credits_used==X`, ERP tax-code per ERP,
   creditor-code (MY). Extend `doc_count_score` + `_G_CASE_TABLE` in `tests/eval/extraction_metrics.py`.
-  JBI Party List isn't auto-ingested by `load_client_setup` (reads `Entity_Memory` sheet) — load it manually.
+  Acme Party List isn't auto-ingested by `load_client_setup` (reads `Entity_Memory` sheet) — load it manually.
 
 ## Notes
 

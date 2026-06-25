@@ -116,17 +116,15 @@ def _process_one_path(
             )
         ]
 
-    direction = direction_fn(
-        classification,
-        client_name=client.client_name,
-        client_uen=client.client_uen,
-    )
-    effective_direction = direction if direction in ("purchase", "sales") else "purchase"
+    # Pass direction="auto" so the extraction LLM's direction_for_client field
+    # decides purchase vs sales (mirrors the proven Slack graph path).
+    # The difflib direction_fn is intentionally not used for booking; it is
+    # still accepted as a parameter for backward-compat with existing callers.
     result = invoice_process_fn(
         path.read_bytes(),
         mime_for(path),
         doc_type=doc_type,
-        direction=effective_direction,
+        direction="auto",
         our_gst_registered=client.tax_registered,
         base_currency=client.base_currency,
         client_name=client.client_name,
@@ -136,18 +134,25 @@ def _process_one_path(
     state = client.to_state()
     docs: list[ProcessedDoc] = []
     for index, normalized in enumerate(result.normalized, start=1):
+        # Derive resolved direction per-doc from the engine output.
+        # extracted_document_to_normalized sets normalized.doc_type to
+        # "sales" or "purchase" via _effective_direction(direction="auto").
+        # When the LLM cannot resolve direction it sets reconciled=False and
+        # appends a direction-review note via append_direction_review_note —
+        # we read doc_type for routing/validation but do not overwrite those flags.
+        resolved_direction = normalized.doc_type  # "sales" | "purchase"
         _categorize_and_validate(
             normalized,
             client=client,
             categorize_fn=categorize_fn,
             state=state,
-            effective_direction=effective_direction,
+            effective_direction=resolved_direction,
         )
         route = _route_normalized(
             normalized,
             client=client,
             source_path=path,
-            direction=direction,
+            direction=resolved_direction,
             fye_month=fye_month,
             index=index,
         )
@@ -158,7 +163,7 @@ def _process_one_path(
             ProcessedDoc(
                 path=str(path),
                 doc_type=normalized.document_kind or doc_type,
-                direction=direction,
+                direction=resolved_direction,
                 normalized=normalized,
                 bank=None,
                 route=route,
