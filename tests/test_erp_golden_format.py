@@ -15,6 +15,7 @@ Also validates:
 
 from __future__ import annotations
 
+import os as _os
 import tempfile
 from datetime import date
 from pathlib import Path
@@ -37,8 +38,6 @@ MY_CLF = get_tax_classifier("my_sst.yaml")
 # Real template paths — tests skip gracefully when running in CI without the local files.
 # The client folder segment is supplied at runtime (real local data, not committed);
 # defaults to a generic placeholder so no client name lives in the path literal.
-import os as _os
-
 _LOCAL_DATA_ROOT = Path(_os.getenv("LEDGR_LOCAL_DATA_ROOT", str(Path.home() / "Desktop/LocalTest")))
 _CLIENT_FOLDER = _os.getenv("LEDGR_CLIENT_FOLDER", "Acme Auto Enterprise")
 _AUTOCOUNT_DIR = _LOCAL_DATA_ROOT / "header template/Autocount Template"
@@ -418,7 +417,6 @@ class TestClientCreditorResolution:
     @pytest.mark.skipif(not _CLIENT_COA.exists(), reason="Acme COA not on this machine")
     def test_client_creditor_code_in_autocount_row(self):
         """With Acme entity memory loaded, AutoCount AP row has CreditorCode=400-A0001."""
-        from invoice_processing.export.code_resolver import resolve_creditor_code
 
         wb = load_workbook(str(_CLIENT_COA))
         ws = wb["Party List"]

@@ -58,6 +58,8 @@ def playground_default_context():
         "tax_registered": True,
         "partial_exempt": False,
         "fye_month": 12,
+        "firm_id": "T_PLAYGROUND",
+        "slack_team_id": "T_PLAYGROUND",
     }
 
     # Env-var overrides (string -> typed coercion).
@@ -69,6 +71,8 @@ def playground_default_context():
         "software": ("LEDGR_PLAYGROUND_SOFTWARE", str),
         "base_currency": ("LEDGR_PLAYGROUND_CURRENCY", str),
         "fye_month": ("LEDGR_PLAYGROUND_FYE_MONTH", int),
+        "firm_id": ("LEDGR_PLAYGROUND_FIRM_ID", str),
+        "slack_team_id": ("LEDGR_PLAYGROUND_FIRM_ID", str),
     }
     for key, (var, caster) in env_map.items():
         raw = _os.environ.get(var)
@@ -149,6 +153,8 @@ def playground_default_context():
         client_id=defaults["client_id"],
         client_name=defaults["client_name"],
         client_uen=defaults["client_uen"] or None,
+        firm_id=defaults.get("firm_id"),
+        slack_team_id=defaults.get("slack_team_id") or defaults.get("firm_id"),
         region=defaults["region"],
         accounting_software=defaults["software"],
         base_currency=defaults["base_currency"],

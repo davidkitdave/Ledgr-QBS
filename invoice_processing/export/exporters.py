@@ -35,7 +35,10 @@ from .client_context import EntityMemoryEntry
 from .models import BankStatement, InvoiceLine, NormalizedInvoice
 from .tax_classifier import TaxClassifier, classify_invoice
 
-_ERP_PROFILES_DIR = Path(__file__).resolve().parent.parent / "shared_libraries" / "erp_profiles"
+# Data-driven ERP import column maps ("skills") live here — one YAML per ERP.
+# This is the single source of truth for every exporter's column ordering and
+# column→logical-field mapping (QBS/Xero "builtin" + AutoCount/SQL "profile").
+_SKILLS_DIR = Path(__file__).resolve().parents[2] / "ledgr_agent" / "skills"
 
 # Preview-only marker for low-confidence COA picks on Slack delivery cards (WS-3.4).
 ACCOUNT_FLAGGED_PREVIEW_MARKER = " ⚠️"
@@ -83,24 +86,90 @@ _NUMERIC_CONTEXT_KEYS = frozenset({
     "discount",
 })
 
-_ERP_PROFILE_FILES: dict[str, str] = {
+# Canonical exporter key → skill filename under _SKILLS_DIR.
+_SKILL_FILES: dict[str, str] = {
+    "qbs": "qbs.yaml",
+    "xero": "xero.yaml",
     "autocount": "autocount.yaml",
     "sql_account": "sql_account.yaml",
 }
 
+# Required top-level keys every skill file must declare. A skill missing any of
+# these is malformed and must fail loud at load (never silently emit wrong cols).
+_SKILL_REQUIRED_KEYS = ("software_name", "system", "purchase_cols", "sales_cols")
+
+# Import-time cache so each skill YAML is parsed once.
+_SKILL_CACHE: dict[str, dict[str, Any]] = {}
+
+
+class ExportSkillError(RuntimeError):
+    """Raised when an ERP export skill file is missing or malformed.
+
+    Fail-loud guard: a bad/absent skill must crash at load rather than silently
+    produce an export with wrong or empty columns.
+    """
+
+
+def load_export_skill(system: str) -> dict[str, Any]:
+    """Load (cached) the data-driven export skill for canonical *system*.
+
+    Reads ``ledgr_agent/skills/<system>.yaml`` and validates it carries the
+    required keys with the right shapes.  Raises :class:`ExportSkillError` on a
+    missing file, a parse error, a non-mapping document, a missing required key,
+    or a ``system`` value that disagrees with the requested key — so a broken
+    skill can never reach the exporter as a half-built column map.
+    """
+    cached = _SKILL_CACHE.get(system)
+    if cached is not None:
+        return cached
+
+    filename = _SKILL_FILES.get(system)
+    if filename is None:
+        raise ExportSkillError(
+            f"no export skill registered for system '{system}'; "
+            f"have {sorted(_SKILL_FILES)}"
+        )
+    path = _SKILLS_DIR / filename
+    if not path.is_file():
+        raise ExportSkillError(f"export skill file missing: {path}")
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+    except yaml.YAMLError as exc:  # malformed YAML
+        raise ExportSkillError(f"export skill '{path}' is not valid YAML: {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise ExportSkillError(f"export skill '{path}' must be a YAML mapping, got {type(data).__name__}")
+    for key in _SKILL_REQUIRED_KEYS:
+        if key not in data:
+            raise ExportSkillError(f"export skill '{path}' is missing required key '{key}'")
+    if not isinstance(data["purchase_cols"], list) or not isinstance(data["sales_cols"], list):
+        raise ExportSkillError(f"export skill '{path}' purchase_cols/sales_cols must be lists")
+    declared = data["system"]
+    if declared != system:
+        raise ExportSkillError(
+            f"export skill '{path}' declares system '{declared}' but is registered as '{system}'"
+        )
+
+    _SKILL_CACHE[system] = data
+    return data
+
 
 def _load_erp_profile(profile_name: str) -> dict[str, Any]:
-    path = _ERP_PROFILES_DIR / profile_name
-    with open(path, encoding="utf-8") as f:
-        return yaml.safe_load(f)
+    """Back-compat shim: load a profile skill by its ``<system>.yaml`` filename."""
+    system = Path(profile_name).stem
+    return load_export_skill(system)
 
 
 def load_erp_profile_for_system(system: str) -> dict[str, Any] | None:
-    """Load the declarative ERP profile YAML for *system*, or ``None``."""
-    profile_file = _ERP_PROFILE_FILES.get(system)
-    if not profile_file:
+    """Load the declarative ERP profile skill for *system*, or ``None``.
+
+    Only the profile-driven ERPs (AutoCount, SQL Account) carry a full
+    field-map profile; the builtin ERPs (QBS, Xero) return ``None`` here.
+    """
+    if system not in ("autocount", "sql_account"):
         return None
-    return _load_erp_profile(profile_file)
+    return load_export_skill(system)
 
 
 def preview_columns_from_profile(profile: dict, sheet: str) -> list[PreviewColumn]:
@@ -382,43 +451,27 @@ class LedgerExporter:
         return path
 
 
+_QBS_SKILL = load_export_skill("qbs")
+
+
 class QbsLedgerExporter(LedgerExporter):
-    """Native QBS Ledger format (no tax-code column; Tax Amount carries SR 9% / ZR 0)."""
+    """Native QBS Ledger format (no tax-code column; Tax Amount carries SR 9% / ZR 0).
+
+    Column ordering and the column→logical-field map are loaded from the
+    data-driven ``ledgr_agent/skills/qbs.yaml`` skill (cached at import).
+    """
 
     system = "qbs"
-    software_name = "QBS Ledger"
-    purchase_cols = [
-        "Invoice Number", "Invoice Date", "Vendor Name", "Entity Tax ID", "Description",
-        "Source Amount", "Currency", "Currency Rate", "Sub Total", "Tax Amount",
-        "Total Amount", "Account Code / COA",
-    ]
-    sales_cols = [
-        "Invoice Date", "Invoice Number", "Customer Name", "Description", "Source Amount",
-        "Currency", "Currency Rate", "Amount", "Tax Amount", "Total", "Account Code / COA",
-    ]
+    software_name = _QBS_SKILL["software_name"]
+    purchase_cols = list(_QBS_SKILL["purchase_cols"])
+    sales_cols = list(_QBS_SKILL["sales_cols"])
     # Logical-field map: column name → logical name. Used by column_for_field to
     # find the real column a logical field is written to (e.g. compose_confident_note
     # needs to render "reconciles to $X" using whichever column carries the line
     # net for the current doc_type). "Amount" on the sales sheet is the line net
     # (not a per-unit amount) so it maps to sub_total, same as "Sub Total" on
     # the purchase sheet.
-    _LOGICAL_FIELDS = {
-        "Invoice Number": "invoice_number",
-        "Invoice Date": "invoice_date",
-        "Vendor Name": "vendor_name",
-        "Customer Name": "customer_name",
-        "Entity Tax ID": "entity_tax_id",
-        "Description": "description",
-        "Source Amount": "source_amount",
-        "Currency": "currency",
-        "Currency Rate": "currency_rate",
-        "Sub Total": "sub_total",
-        "Amount": "sub_total",  # QBS sales: "Amount" carries the line net
-        "Tax Amount": "tax_amount",
-        "Total Amount": "total",
-        "Total": "total",
-        "Account Code / COA": "account_code",
-    }
+    _LOGICAL_FIELDS = dict(_QBS_SKILL["logical_fields"])
 
     def required_fields(self, doc_type: str) -> list[str]:
         if doc_type == "sales":
@@ -473,50 +526,25 @@ class QbsLedgerExporter(LedgerExporter):
         }
 
 
+_XERO_SKILL = load_export_skill("xero")
+
+
 class XeroLedgerExporter(LedgerExporter):
-    """Xero Ledger format: Xero import columns + Source File ID / [AI Status], explicit *TaxType."""
+    """Xero Ledger format: Xero import columns + Source File ID / [AI Status], explicit *TaxType.
+
+    Column ordering and the column→logical-field map are loaded from the
+    data-driven ``ledgr_agent/skills/xero.yaml`` skill (cached at import).
+    """
 
     system = "xero"
-    software_name = "Xero Ledger"
-    _XERO_PURCHASE = [
-        "*ContactName", "EmailAddress", "POAddressLine1", "POAddressLine2", "POAddressLine3",
-        "POAddressLine4", "POCity", "PORegion", "POPostalCode", "POCountry", "*InvoiceNumber",
-        "*InvoiceDate", "*DueDate", "Total", "InventoryItemCode", "Description", "*Quantity",
-        "*UnitAmount", "*AccountCode", "*TaxType", "TaxAmount", "TrackingName1", "TrackingOption1",
-        "TrackingName2", "TrackingOption2", "Currency",
-    ]
-    _XERO_SALES = [
-        "*ContactName", "EmailAddress", "POAddressLine1", "POAddressLine2", "POAddressLine3",
-        "POAddressLine4", "POCity", "PORegion", "POPostalCode", "POCountry", "*InvoiceNumber",
-        "Reference", "*InvoiceDate", "*DueDate", "Total", "InventoryItemCode", "*Description",
-        "*Quantity", "*UnitAmount", "Discount", "*AccountCode", "*TaxType", "TaxAmount",
-        "TrackingName1", "TrackingOption1", "TrackingName2", "TrackingOption2", "Currency",
-        "BrandingTheme",
-    ]
-    purchase_cols = list(_XERO_PURCHASE)
-    sales_cols = list(_XERO_SALES)
+    software_name = _XERO_SKILL["software_name"]
+    purchase_cols = list(_XERO_SKILL["purchase_cols"])
+    sales_cols = list(_XERO_SKILL["sales_cols"])
     # Logical-field map for column_for_field. Note: Xero's "*UnitAmount" is a
     # PER-UNIT amount, not a per-line net — so it maps to "unit_amount", not
     # "sub_total". Anything that wants a "reconciles to $X" total must compute
     # it (qty × *UnitAmount) or accept that Xero has no per-line sub_total.
-    _LOGICAL_FIELDS = {
-        "*ContactName": "contact_name",
-        "*InvoiceNumber": "invoice_number",
-        "Reference": "reference",
-        "*InvoiceDate": "invoice_date",
-        "*DueDate": "due_date",
-        "Total": "total",
-        "InventoryItemCode": "inventory_item_code",
-        "Description": "description",
-        "*Description": "description",
-        "*Quantity": "quantity",
-        "*UnitAmount": "unit_amount",
-        "Discount": "discount",
-        "*AccountCode": "account_code",
-        "*TaxType": "tax_code",
-        "TaxAmount": "tax_amount",
-        "Currency": "currency",
-    }
+    _LOGICAL_FIELDS = dict(_XERO_SKILL["logical_fields"])
 
     def required_fields(self, doc_type: str) -> list[str]:
         """Xero-required columns = the `*`-marked headers."""
@@ -763,12 +791,12 @@ class ProfileLedgerExporter(LedgerExporter):
 
 class AutoCountExporter(ProfileLedgerExporter):
     def __init__(self, classifier: Optional[TaxClassifier] = None):
-        super().__init__(_load_erp_profile("autocount.yaml"), classifier)
+        super().__init__(load_export_skill("autocount"), classifier)
 
 
 class SqlAccountExporter(ProfileLedgerExporter):
     def __init__(self, classifier: Optional[TaxClassifier] = None):
-        super().__init__(_load_erp_profile("sql_account.yaml"), classifier)
+        super().__init__(load_export_skill("sql_account"), classifier)
 
 
 EXPORTERS = {

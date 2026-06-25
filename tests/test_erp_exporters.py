@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from datetime import date
 
-import pytest
 
 from invoice_processing.export.client_context import EntityMemoryEntry
 from invoice_processing.export.code_resolver import (

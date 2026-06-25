@@ -49,6 +49,7 @@ packages = ["accounting_agents", "app", "invoice_processing", "ledgr_agent"]
 [tool.hatch.build.targets.wheel.force-include]
 "invoice_processing/shared_libraries/sg_gst.yaml" = "invoice_processing/shared_libraries/sg_gst.yaml"
 "app/data/standard_sg_sme_coa.json" = "app/data/standard_sg_sme_coa.json"
+"ledgr_agent/skills" = "ledgr_agent/skills"
 
 [dependency-groups]
 dev = [
