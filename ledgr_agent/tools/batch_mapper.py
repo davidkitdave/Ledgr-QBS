@@ -10,7 +10,7 @@ from invoice_processing.pipeline import ProcessedDoc
 from ledgr_agent.schemas.batch_result import BatchResult, BatchStatus
 from ledgr_agent.schemas.credit import CreditSummary
 from ledgr_agent.schemas.review import ReviewRequest, SoftWarning
-from ledgr_agent.review.grouping import partition_and_group_reasons
+from ledgr_agent.review.grouping import merge_soft_warnings, partition_and_group_reasons
 
 
 def per_file_summary(doc: ProcessedDoc) -> dict[str, object]:
@@ -216,6 +216,8 @@ def map_engine_batch_to_contract(
             review_requests.append(
                 ReviewRequest(id=rule_id, severity=severity, message=message, file_name=file_name)
             )
+
+    soft_warnings = merge_soft_warnings(soft_warnings)
 
     status = determine_batch_status(
         blocked_reason=blocked_reason,
