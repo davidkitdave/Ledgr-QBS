@@ -1,7 +1,7 @@
 # adk web QA findings — 2026-06-19
 
 Live pass on a freshly-restarted `adk web` (from HEAD, `LEDGR_FIRESTORE_NAMESPACE=dev`
-so the run wrote to isolated `dev_*` collections). Probe document: a real **StarHub
+so the run wrote to isolated `dev_*` collections). Probe document: a real **TelcoTwo
 Singapore telco bill** (`scratch/qa_docs/` — gitignored), run once as a Malaysian client
 and once as a Singapore client.
 
@@ -26,12 +26,12 @@ and once as a Singapore client.
 
 > **Resolved 2026-06-19.** Cross-border purchases now auto-book as out-of-scope (foreign tax
 > recorded as shown, not claimable), escalating only genuine ambiguity (partially-exempt SG
-> client, AMBIGUOUS jurisdiction). Live re-verified: the same MY-client StarHub bill went from
+> client, AMBIGUOUS jurisdiction). Live re-verified: the same MY-client TelcoTwo bill went from
 > a HITL stop (2 flagged lines) to `CROSS_BORDER/OS`, `flagged_lines=0`, `auto_approved`,
 > delivered. See ADR-0024. Original finding below for the record.
 
 
-Same StarHub bill, **Malaysian** client: `tax_jurisdiction=CROSS_BORDER`,
+Same TelcoTwo bill, **Malaysian** client: `tax_jurisdiction=CROSS_BORDER`,
 `tax_system=OS` (out of scope), **both lines flagged**, HITL stop with reason
 *"CROSS_BORDER: jurisdiction=CROSS_BORDER (no jurisdiction rule); HITL review required"*.
 

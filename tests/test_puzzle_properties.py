@@ -127,6 +127,8 @@ class TestFooterReconcile:
             ],
             subtotal=757.85,
             total=995.11,
+        gst_total=0.0,
+        issuer_tax_system="NONE",
         )
         ok, note = reconcile(
             ex,
@@ -146,6 +148,8 @@ class TestFooterReconcile:
             ],
             subtotal=757.85,
             total=823.05,
+        gst_total=0.0,
+        issuer_tax_system="NONE",
         )
         ok, _ = reconcile(
             ex,
@@ -161,6 +165,8 @@ class TestFooterReconcile:
             lines=[ExtractedLine(description="a", net_amount=100.0, gst_amount=0.0)],
             gst_total=9.0,
             total=100.0,
+        issuer_tax_system="NONE",
+        subtotal=0.0,
         )
         ok, _ = reconcile(ex, tax_visible_on_document=False, subtotal_in_capture=False)
         assert ok is True

@@ -1,34 +1,44 @@
 """Shared invoice extraction orchestrator — graph nodes and eval harness.
 
 Single entry for the invoice/receipt lane so ``nodes.py`` and eval do not
-duplicate routing between capture→book→verify, understand-extract, and legacy.
+duplicate routing. Production always uses the understand/faithful-array path
+(``extract_document_ledger``).
 """
 
 from __future__ import annotations
 
+import logging
+import os
 from dataclasses import dataclass, field
-from datetime import date
 from typing import Any, Callable, Optional
 
 from ..export.models import NormalizedInvoice
-from .book import BOOK_FROM_CAPTURE_FN, BookingProposal, booking_to_extracted_invoice, slim_booking_proposal_for_state
-from .document_extractor import extract_document_bundle
-from .document_normalizer import normalize_document_bundle
-from .document_record import DocumentRecordBundle
-from .invoice_extractor import to_normalized
 from .ledger_extract import (
-    DocumentLedgerExtract,
+    ExtractedDocumentBundle,
+    _drop_soa_cover_documents,
     extract_document_ledger,
-    ledger_extract_to_normalized,
-    should_use_legacy_extract,
-    use_capture_book_pipeline,
-    validate_ledger_extract,
+    extracted_document_to_normalized,
+    validate_extracted_document,
 )
-from .verify import verify_extracted_invoice
+from .partial_failure import build_partial_failure_warnings
+from .segmentation_gates import (
+    apply_segmentation_uncertain_flag,
+    count_input_pages,
+    validate_bundle_page_coverage,
+)
 
-EXTRACT_LEDGER_FN: Callable[..., DocumentLedgerExtract] = extract_document_ledger
-EXTRACT_DOCUMENT_FN = extract_document_bundle
-NORMALIZE_DOCUMENT_FN = normalize_document_bundle
+logger = logging.getLogger(__name__)
+
+EXTRACT_LEDGER_FN: Callable[..., ExtractedDocumentBundle] = extract_document_ledger
+
+SEGMENTATION_RETRY_HINT_MARKER = "Re-segment:"
+SEGMENTATION_RETRY_HINT = (
+    "Re-segment: every non-skipped page must appear in exactly one document "
+    "page_range; SOA cover pages belong in skipped_pages only, not documents[]"
+)
+
+_RETIRED_LEGACY_ENV = "LEDGR_LEGACY_SOA"
+_RETIRED_CAPTURE_BOOK_ENV = "LEDGR_CAPTURE_BOOK"
 
 
 @dataclass
@@ -36,65 +46,67 @@ class InvoiceProcessResult:
     """Outcome of ``process_invoice_document``."""
 
     normalized: list[NormalizedInvoice]
-    extraction_path: str  # "capture_book" | "understand" | "legacy"
+    extraction_path: str  # "understand"
     summary_table: list[dict[str, str]] = field(default_factory=list)
     ledger_extract: Optional[dict[str, Any]] = None
-    document_records: Optional[list[dict]] = None
     skipped_pages: Optional[list[int]] = None
     document_read_notes: Optional[str] = None
     booking_proposals: Optional[list[dict]] = None
+    input_page_count: Optional[int] = None
+    partial_failure_warnings: list[str] = field(default_factory=list)
 
 
-def _parse_iso_date(value: Optional[str]) -> Optional[date]:
-    if not value:
-        return None
-    try:
-        return date.fromisoformat(value[:10])
-    except ValueError:
-        return None
+def _is_segmentation_retry_hint(hint: Optional[str]) -> bool:
+    return bool(hint and SEGMENTATION_RETRY_HINT_MARKER in hint)
 
 
-def _process_capture_book(
-    bundle: DocumentRecordBundle,
+def _build_segmentation_retry_hint(base_hint: Optional[str]) -> str:
+    if base_hint:
+        return f"{base_hint.strip()}\n\n{SEGMENTATION_RETRY_HINT}"
+    return SEGMENTATION_RETRY_HINT
+
+
+def _warn_if_retired_legacy_flags_set() -> None:
+    """Log when deprecated env flags are set; routing ignores them."""
+    legacy_raw = os.environ.get(_RETIRED_LEGACY_ENV, "0").strip().lower()
+    if legacy_raw in ("1", "true", "yes", "on"):
+        logger.warning(
+            "%s is set but legacy SOA extraction is retired; "
+            "using understand path instead.",
+            _RETIRED_LEGACY_ENV,
+        )
+    capture_raw = os.environ.get(_RETIRED_CAPTURE_BOOK_ENV, "0").strip().lower()
+    if capture_raw in ("1", "true", "yes", "on"):
+        logger.warning(
+            "%s is set but Capture→Book→Verify is retired; "
+            "using understand path instead.",
+            _RETIRED_CAPTURE_BOOK_ENV,
+        )
+
+
+def _normalize_ledger_bundle(
+    bundle: ExtractedDocumentBundle,
     *,
     direction: str,
     our_gst_registered: bool,
     base_currency: str,
-    client_name: Optional[str],
-    client_uen: Optional[str],
-    model: Optional[str],
-) -> tuple[list[NormalizedInvoice], list[dict]]:
+) -> list[NormalizedInvoice]:
     normalized: list[NormalizedInvoice] = []
-    proposals_dump: list[dict] = []
     for doc in bundle.documents:
-        proposal: BookingProposal = BOOK_FROM_CAPTURE_FN(
+        inv = extracted_document_to_normalized(
             doc,
-            model=model,
-            client_name=client_name,
-            client_uen=client_uen,
-        )
-        proposals_dump.append(slim_booking_proposal_for_state(proposal))
-        ex = booking_to_extracted_invoice(proposal, doc)
-        ok, note = verify_extracted_invoice(ex, doc)
-        effective_direction = direction
-        if direction in ("auto", "") and proposal.direction_for_client != "unknown":
-            effective_direction = proposal.direction_for_client
-        elif not direction and proposal.direction_for_client != "unknown":
-            effective_direction = proposal.direction_for_client
-        inv = to_normalized(
-            ex,
-            direction=effective_direction or "purchase",
+            direction=direction,
             our_gst_registered=our_gst_registered,
             base_currency=base_currency,
         )
-        inv.invoice_date = inv.invoice_date or _parse_iso_date(proposal.document_date)
-        inv.tax_visible_on_document = proposal.tax_visible_on_document
-        inv.direction_reason = proposal.direction_reason
-        inv.doc_total = proposal.document_total
-        inv.reconciled = ok
-        inv.reconcile_note = note
+        ok, note = validate_extracted_document(doc)
+        if not ok:
+            inv.reconciled = False
+            inv.reconcile_note = note
+        elif inv.reconciled:
+            inv.reconcile_note = note
         normalized.append(inv)
-    return normalized, proposals_dump
+    return normalized
 
 
 def process_invoice_document(
@@ -110,86 +122,66 @@ def process_invoice_document(
     hint: Optional[str] = None,
     model: Optional[str] = None,
 ) -> InvoiceProcessResult:
-    """Classify-routed extraction: capture→book→verify, understand, or legacy."""
-    if should_use_legacy_extract(doc_type):
-        bundle: DocumentRecordBundle = EXTRACT_DOCUMENT_FN(
-            data, mime_type, model=model, hint=hint
-        )
-        normalized = NORMALIZE_DOCUMENT_FN(
-            bundle,
-            direction=direction,
-            our_gst_registered=our_gst_registered,
-            base_currency=base_currency,
-            client_name=client_name,
-            client_uen=client_uen,
-        )
-        from .document_normalizer import slim_document_record_for_state
+    """Single orchestrated extraction via the understand/faithful-array path."""
+    _warn_if_retired_legacy_flags_set()
+    input_page_count = count_input_pages(data, mime_type)
 
-        return InvoiceProcessResult(
-            normalized=normalized,
-            extraction_path="legacy",
-            document_records=[
-                slim_document_record_for_state(doc) for doc in bundle.documents
-            ],
-            skipped_pages=bundle.skipped_pages,
-            document_read_notes=bundle.notes,
-        )
-
-    if use_capture_book_pipeline():
-        bundle: DocumentRecordBundle = EXTRACT_DOCUMENT_FN(
-            data, mime_type, model=model, hint=hint
-        )
-        normalized, proposals = _process_capture_book(
-            bundle,
-            direction=direction,
-            our_gst_registered=our_gst_registered,
-            base_currency=base_currency,
-            client_name=client_name,
-            client_uen=client_uen,
-            model=model,
-        )
-        from .document_normalizer import slim_document_record_for_state
-
-        return InvoiceProcessResult(
-            normalized=normalized,
-            extraction_path="capture_book",
-            document_records=[
-                slim_document_record_for_state(doc) for doc in bundle.documents
-            ],
-            skipped_pages=bundle.skipped_pages,
-            document_read_notes=bundle.notes,
-            booking_proposals=proposals,
-        )
-
-    extract = EXTRACT_LEDGER_FN(
-        data,
-        mime_type,
-        model=model,
-        hint=hint,
-        client_name=client_name,
-        client_uen=client_uen,
+    extract_kwargs = {
+        "model": model,
+        "client_name": client_name,
+        "client_uen": client_uen,
+    }
+    bundle = EXTRACT_LEDGER_FN(data, mime_type, hint=hint, **extract_kwargs)
+    normalized = _normalize_ledger_bundle(
+        bundle,
+        direction=direction,
+        our_gst_registered=our_gst_registered,
+        base_currency=base_currency,
     )
-    normalized = [
-        ledger_extract_to_normalized(
-            extract,
-            direction=direction,
-            our_gst_registered=our_gst_registered,
-            base_currency=base_currency,
-        )
-    ]
-    ok, note = validate_ledger_extract(extract)
-    if not ok and normalized:
-        inv = normalized[0]
-        inv.reconciled = False
-        inv.reconcile_note = note
 
-    summary_table = [
-        {"category": row.category, "details": row.details}
-        for row in extract.summary_table
-    ]
+    total_pages = input_page_count
+    page_ok, page_detail = validate_bundle_page_coverage(bundle, total_pages=total_pages)
+
+    if not page_ok and not _is_segmentation_retry_hint(hint):
+        retry_hint = _build_segmentation_retry_hint(hint)
+        retry_bundle = EXTRACT_LEDGER_FN(
+            data,
+            mime_type,
+            hint=retry_hint,
+            **extract_kwargs,
+        )
+        retry_bundle = _drop_soa_cover_documents(retry_bundle)
+        retry_page_ok, retry_page_detail = validate_bundle_page_coverage(
+            retry_bundle,
+            total_pages=total_pages,
+        )
+        if retry_page_ok:
+            bundle = retry_bundle
+            normalized = _normalize_ledger_bundle(
+                bundle,
+                direction=direction,
+                our_gst_registered=our_gst_registered,
+                base_currency=base_currency,
+            )
+            page_ok = retry_page_ok
+            page_detail = retry_page_detail
+
+    if not page_ok:
+        apply_segmentation_uncertain_flag(normalized, page_detail)
+
+    partial_warnings = build_partial_failure_warnings(
+        normalized,
+        page_coverage_ok=page_ok,
+        page_coverage_detail=page_detail,
+        input_page_count=input_page_count,
+    )
+
     return InvoiceProcessResult(
         normalized=normalized,
         extraction_path="understand",
-        summary_table=summary_table,
-        ledger_extract=extract.model_dump(),
+        skipped_pages=bundle.skipped_pages,
+        document_read_notes=bundle.notes,
+        ledger_extract=bundle.model_dump(),
+        input_page_count=input_page_count,
+        partial_failure_warnings=partial_warnings,
     )

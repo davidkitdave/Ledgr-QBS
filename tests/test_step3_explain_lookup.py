@@ -17,9 +17,17 @@ from accounting_agents.assistant import (
     assistant_agent,
     explain_categorization,
     explain_tax_treatment,
+    ledger_analyst,
+    ledger_corrections,
     list_recent_documents,
     lookup_row,
     summarize_recent_activity,
+)
+from accounting_agents.assistant.tools.introspect import (
+    diagnose_assistant_context,
+    get_document_processing_detail,
+    list_pending_reviews,
+    list_processing_history,
 )
 from invoice_processing.export.models import InvoiceLine, NormalizedInvoice, PartyInfo
 from invoice_processing.export.tax_classifier import TaxClassifier
@@ -128,7 +136,7 @@ def test_explain_categorization_unresolved():
 
 
 def test_explain_tax_treatment_sr_purchase_registered():
-    ctx = _ctx(tax_registered=True)
+    ctx = _ctx(tax_registered=True, region="SINGAPORE", base_currency="SGD")
     raw = explain_tax_treatment(
         ctx,
         line_description="Office supplies",
@@ -145,7 +153,7 @@ def test_explain_tax_treatment_sr_purchase_registered():
 
 
 def test_explain_tax_treatment_nt_master_gate():
-    ctx = _ctx(tax_registered=False)
+    ctx = _ctx(tax_registered=False, region="SINGAPORE", base_currency="SGD")
     raw = explain_tax_treatment(
         ctx,
         line_description="Office supplies with GST shown",
@@ -162,7 +170,7 @@ def test_explain_tax_treatment_nt_master_gate():
 
 
 def test_explain_tax_treatment_zr_zero_rated():
-    ctx = _ctx(tax_registered=True)
+    ctx = _ctx(tax_registered=True, region="SINGAPORE", base_currency="SGD")
     raw = explain_tax_treatment(
         ctx,
         line_description="International freight",
@@ -178,7 +186,7 @@ def test_explain_tax_treatment_zr_zero_rated():
 
 
 def test_explain_tax_uses_canonical_field_names():
-    ctx = _ctx(tax_registered=True)
+    ctx = _ctx(tax_registered=True, region="SINGAPORE", base_currency="SGD")
     clf = TaxClassifier()
     line = InvoiceLine(description="Telco IDD", tax_keyword="ZR", net_amount=50.0, gst_amount=0.0)
     inv = NormalizedInvoice(
@@ -450,19 +458,21 @@ def test_assistant_agent_has_twenty_four_tools():
     # get_document_processing_detail, list_pending_reviews) → 22;
     # explain_posted_line → 23; learn_mapping counted with gated writes → 24.
     assert assistant_agent.mode is None
-    assert len(assistant_agent.tools) == 24
+    assert len(assistant_agent.sub_agents) == 2
+    assert len(ledger_analyst.tools) == 19
+    assert len(ledger_corrections.tools) == 6
 
 
 def test_assistant_instruction_mentions_new_tools():
-    """P5-slim: instruction carries routing bullets, not a full tool catalog."""
-    for name in (
-        "diagnose_assistant_context",
-        "get_document_processing_detail",
-        "list_processing_history",
-        "list_pending_reviews",
-        "list_recent_documents",
-        "lookup_row",
+    """WS6b: routing lives in tool docstrings; base instruction stays slim."""
+    assert "diagnose_assistant_context" in _BASE_INSTRUCTION
+    assert "Routing guidelines:" not in _BASE_INSTRUCTION
+    for tool, needle in (
+        (diagnose_assistant_context, "Call this **first**"),
+        (get_document_processing_detail, "processing_log"),
+        (list_processing_history, "list_recent_documents"),
+        (list_pending_reviews, "pending_reviews"),
+        (list_recent_documents, "list_processing_history"),
+        (lookup_row, "explain_categorization"),
     ):
-        assert name in _BASE_INSTRUCTION
-    assert "explain_categorization" in _BASE_INSTRUCTION
-    assert "lookup_row" in _BASE_INSTRUCTION
+        assert needle in (tool.__doc__ or "")

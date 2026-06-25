@@ -31,6 +31,7 @@ Client Setup workbook schema (verified against a sample client's files):
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Protocol
@@ -62,6 +63,7 @@ class EntityMemoryEntry:
     mapping_code: Optional[str] = None        # account code/name
     role: Optional[str] = None
     tax_code: Optional[str] = None
+    creditor_code: Optional[str] = None       # ERP creditor/vendor code (purchases)
 
 
 @dataclass
@@ -73,15 +75,16 @@ class ClientContext:
     slack_team_id: Optional[str] = None
     firm_id: Optional[str] = None
     status: Optional[str] = None
-    region: str = "SINGAPORE"
+    region: str = ""
     accounting_software: str = "QBS Ledger"
-    base_currency: str = "SGD"
-    tax_registered: bool = True
+    base_currency: str = ""
+    tax_registered: Optional[bool] = None
     partial_exempt: bool = False
     fye_month: Optional[int] = None
     coa: list[CoaAccount] = field(default_factory=list)
     category_mapping: dict[str, Optional[str]] = field(default_factory=dict)  # category -> account_code | null
     entity_memory: list[EntityMemoryEntry] = field(default_factory=list)
+    tax_codes: list[dict] = field(default_factory=list)                       # client ERP tax-code master
     sys_config: dict[str, str] = field(default_factory=dict)                  # kept for back-compat; not populated from Firestore
 
     def to_state(self) -> dict:
@@ -90,6 +93,8 @@ class ClientContext:
             "client_id": self.client_id,
             "client_name": self.client_name,
             "client_uen": self.client_uen,
+            "firm_id": self.firm_id,
+            "slack_team_id": self.slack_team_id,
             "region": self.region,
             "tax_registered": self.tax_registered,
             "partial_exempt": self.partial_exempt,
@@ -116,9 +121,11 @@ class ClientContext:
                     "mapping_code": e.mapping_code,
                     "role": e.role,
                     "tax_code": e.tax_code,
+                    "creditor_code": e.creditor_code,
                 }
                 for e in self.entity_memory
             ],
+            "tax_codes": list(self.tax_codes),
         }
 
 
@@ -237,6 +244,7 @@ def load_client_setup(xlsx_path: str | Path, client_id: Optional[str] = None) ->
                 i_map = _header_index(header, "Mapping Code")
                 i_role = _header_index(header, "Role (Debtor / Creditor)", "Role")
                 i_tax = _header_index(header, "Tax Code")
+                i_cred = _header_index(header, "Creditor Code", "Vendor Code")
                 for row in rows[1:]:
                     if _row_is_empty(row):
                         continue
@@ -253,7 +261,33 @@ def load_client_setup(xlsx_path: str | Path, client_id: Optional[str] = None) ->
                         mapping_code=_s(cell(i_map)),
                         role=_s(cell(i_role)),
                         tax_code=_s(cell(i_tax)),
+                        creditor_code=_s(cell(i_cred)),
                     ))
+
+        # --- Tax_Codes (optional) ---
+        if "Tax_Codes" in sheets:
+            rows = list(wb["Tax_Codes"].iter_rows(values_only=True))
+            if rows:
+                header = rows[0]
+                i_code = _header_index(header, "Code") or 0
+                i_desc = _header_index(header, "Description")
+                i_treat = _header_index(header, "Treatment")
+                for row in rows[1:]:
+                    if _row_is_empty(row):
+                        continue
+                    code = _s(row[i_code] if i_code < len(row) else None)
+                    if not code:
+                        continue
+                    entry = {"code": code}
+                    if i_desc is not None and i_desc < len(row):
+                        desc = _s(row[i_desc])
+                        if desc:
+                            entry["description"] = desc
+                    if i_treat is not None and i_treat < len(row):
+                        treat = _s(row[i_treat])
+                        if treat:
+                            entry["treatment"] = treat
+                    ctx.tax_codes.append(entry)
 
         return ctx
     finally:
@@ -277,6 +311,18 @@ def coa_from_state(state: dict) -> list[CoaAccount]:
     return out
 
 
+def coa_keys_from_state(state: dict) -> set[str] | None:
+    """Return the set of valid COA keys for export validation, or None if absent."""
+    try:
+        coa = coa_from_state(state)
+    except Exception:
+        return None
+    if not coa:
+        return None
+    keys = {entry.key for entry in coa if entry.key}
+    return keys or None
+
+
 def entity_memory_from_state(state: dict) -> list[EntityMemoryEntry]:
     out: list[EntityMemoryEntry] = []
     for d in state.get("entity_memory") or []:
@@ -286,29 +332,111 @@ def entity_memory_from_state(state: dict) -> list[EntityMemoryEntry]:
             mapping_code=d.get("mapping_code"),
             role=d.get("role"),
             tax_code=d.get("tax_code"),
+            creditor_code=d.get("creditor_code"),
         ))
     return out
+
+
+def tax_codes_from_state(state: dict) -> list[dict]:
+    raw = state.get("tax_codes") or []
+    if isinstance(raw, dict):
+        return [{"code": code, "description": desc} for code, desc in raw.items()]
+    return [dict(entry) for entry in raw]
 
 
 def category_mapping_from_state(state: dict) -> dict[str, Optional[str]]:
     return dict(state.get("category_mapping") or {})
 
 
+def _profile_tax_registered(profile: dict) -> Optional[bool]:
+    """Map profile gst_registered / tax_registered to Optional[bool] (None = unknown)."""
+    if "gst_registered" in profile:
+        return bool(profile["gst_registered"])
+    if "tax_registered" in profile:
+        val = profile["tax_registered"]
+        if val is None:
+            return None
+        return bool(val)
+    return None
+
+
+def _jurisdiction_helpers():
+    from accounting_agents.jurisdiction import REGION_REGISTRY, _norm_region
+    return REGION_REGISTRY, _norm_region
+
+
+def _profile_region_and_currency(profile: dict) -> tuple[str, str]:
+    """Resolve region + base_currency from a profile dict (Firestore/onboarding)."""
+    REGION_REGISTRY, _norm_region = _jurisdiction_helpers()
+    raw_region = profile.get("region")
+    if raw_region:
+        region = _norm_region(raw_region)
+        currency = REGION_REGISTRY.get(region, {}).get("currency") or ""
+        if not currency:
+            stored = profile.get("base_currency")
+            currency = str(stored).strip().upper() if stored else ""
+        return region, currency
+
+    if profile.get("legacy_profile") or profile.get("legacy"):
+        stored_currency = profile.get("base_currency")
+        currency = str(stored_currency).strip().upper() if stored_currency else ""
+        return "", currency
+
+    default_region = os.environ.get("LEDGR_DEFAULT_REGION", "").strip().upper()
+    if default_region in REGION_REGISTRY:
+        return default_region, REGION_REGISTRY[default_region]["currency"]
+
+    stored_currency = profile.get("base_currency")
+    currency = str(stored_currency).strip().upper() if stored_currency else ""
+    return "", currency
+
+
+def _state_region_and_currency(state: dict) -> tuple[str, str]:
+    """Resolve region + base_currency from session state."""
+    REGION_REGISTRY, _norm_region = _jurisdiction_helpers()
+    raw_region = state.get("region") or state.get("client_region") or ""
+    region = _norm_region(raw_region) if raw_region else ""
+    if not region:
+        default_region = os.environ.get("LEDGR_DEFAULT_REGION", "").strip().upper()
+        if default_region in REGION_REGISTRY:
+            region = default_region
+
+    if region and region in REGION_REGISTRY:
+        return region, REGION_REGISTRY[region]["currency"]
+
+    raw_currency = state.get("base_currency")
+    currency = str(raw_currency).strip().upper() if raw_currency else ""
+    return region, currency
+
+
+def _state_tax_registered(state: dict) -> Optional[bool]:
+    if "tax_registered" not in state:
+        return None
+    val = state.get("tax_registered")
+    if val is None:
+        return None
+    return bool(val)
+
+
 def client_context_from_state(state: dict) -> ClientContext:
     """Rebuild a :class:`ClientContext` from a plain ``to_state()`` dict."""
+    region, base_currency = _state_region_and_currency(state)
     return ClientContext(
         client_id=state.get("client_id"),
         client_name=state.get("client_name"),
         client_uen=state.get("client_uen"),
-        region=state.get("region") or "SINGAPORE",
+        firm_id=state.get("firm_id") or state.get("slack_team_id"),
+        slack_team_id=state.get("slack_team_id"),
+        region=region,
         accounting_software=state.get("software") or "QBS Ledger",
-        base_currency=state.get("base_currency") or "SGD",
-        tax_registered=bool(state.get("tax_registered", True)),
+        base_currency=base_currency,
+        tax_registered=_state_tax_registered(state),
         partial_exempt=bool(state.get("partial_exempt", False)),
         fye_month=state.get("fye_month"),
         coa=coa_from_state(state),
         category_mapping=category_mapping_from_state(state),
         entity_memory=entity_memory_from_state(state),
+        tax_codes=tax_codes_from_state(state),
     )
 
 
@@ -371,9 +499,7 @@ class InMemoryClientStore:
     def save_profile(self, profile: dict) -> None:
         """Build a ClientContext from a spec §1 profile dict and store it."""
         client_id = profile["client_id"]
-        tax_registered = bool(
-            profile.get("gst_registered", profile.get("tax_registered", True))
-        )
+        region, base_currency = _profile_region_and_currency(profile)
         ctx = ClientContext(
             client_id=client_id,
             client_name=profile.get("client_name"),
@@ -382,10 +508,10 @@ class InMemoryClientStore:
             slack_team_id=profile.get("slack_team_id"),
             firm_id=profile.get("firm_id"),
             fye_month=int(profile["fye_month"]) if profile.get("fye_month") is not None else None,
-            region=profile.get("region") or "SINGAPORE",
+            region=region,
             accounting_software=profile.get("accounting_software") or "QBS Ledger",
-            base_currency=profile.get("base_currency") or "SGD",
-            tax_registered=tax_registered,
+            base_currency=base_currency,
+            tax_registered=_profile_tax_registered(profile),
             partial_exempt=bool(profile.get("partial_exempt", False)),
             status=profile.get("status"),
             category_mapping=dict(profile.get("category_mapping") or {}),
@@ -421,8 +547,9 @@ class InMemoryClientStore:
 
     def add_correction(self, *, client_id: str, vendor: str,
                        account_code: Optional[str] = None,
-                       tax_code: Optional[str] = None) -> None:
-        """Upsert a per-client vendor -> {account_code, tax_code} Correction.
+                       tax_code: Optional[str] = None,
+                       creditor_code: Optional[str] = None) -> None:
+        """Upsert a per-client vendor -> {account_code, tax_code, creditor_code} Correction.
 
         Mirrors :meth:`FirestoreClientStore.add_correction` for the in-process
         store so tests / local dev can exercise the HITL learning hook
@@ -440,9 +567,14 @@ class InMemoryClientStore:
                     e.mapping_code = account_code
                 if tax_code:
                     e.tax_code = tax_code
+                if creditor_code:
+                    e.creditor_code = creditor_code
                 return
         ctx.entity_memory.append(EntityMemoryEntry(
-            name=vendor, mapping_code=account_code, tax_code=tax_code,
+            name=vendor,
+            mapping_code=account_code,
+            tax_code=tax_code,
+            creditor_code=creditor_code,
         ))
 
     # ---------------------------------------------------------------------- #
@@ -679,11 +811,7 @@ class FirestoreClientStore:
             return None
         data = snap.to_dict() or {}
 
-        # tax_registered is the internal name; profile stores it as gst_registered.
-        # Fall back to legacy tax_registered key; default True if absent.
-        tax_registered = bool(
-            data.get("gst_registered", data.get("tax_registered", True))
-        )
+        region, base_currency = _profile_region_and_currency(data)
 
         ctx = ClientContext(
             client_id=client_id,
@@ -693,14 +821,15 @@ class FirestoreClientStore:
             slack_team_id=data.get("slack_team_id"),
             firm_id=data.get("firm_id"),
             fye_month=int(data["fye_month"]) if data.get("fye_month") is not None else None,
-            region=data.get("region") or "SINGAPORE",
+            region=region,
             accounting_software=data.get("accounting_software") or "QBS Ledger",
-            base_currency=data.get("base_currency") or "SGD",
-            tax_registered=tax_registered,
+            base_currency=base_currency,
+            tax_registered=_profile_tax_registered(data),
             partial_exempt=bool(data.get("partial_exempt", False)),
             status=data.get("status"),
             # category_mapping is a map field on the client doc (spec §1), not a subcollection.
             category_mapping=dict(data.get("category_mapping") or {}),
+            tax_codes=list(data.get("tax_codes") or []),
             # sys_config kept as empty dict for back-compat; profile fields are now explicit above.
             sys_config={},
         )
@@ -729,6 +858,7 @@ class FirestoreClientStore:
                 mapping_code=d.get("mapping_code"),
                 role=d.get("role"),
                 tax_code=d.get("tax_code"),
+                creditor_code=d.get("creditor_code"),
             ))
 
         return ctx
@@ -828,8 +958,9 @@ class FirestoreClientStore:
 
     def add_correction(self, *, client_id: str, vendor: str,
                        account_code: Optional[str] = None,
-                       tax_code: Optional[str] = None) -> None:
-        """Upsert a per-client vendor -> {account_code, tax_code} Correction.
+                       tax_code: Optional[str] = None,
+                       creditor_code: Optional[str] = None) -> None:
+        """Upsert a per-client vendor -> {account_code, tax_code, creditor_code} Correction.
 
         ADR-0004: when a human edits an extracted invoice's account_code or
         tax_code, that mapping is persisted as a Correction under
@@ -852,6 +983,8 @@ class FirestoreClientStore:
             patch["mapping_code"] = account_code
         if tax_code:
             patch["tax_code"] = tax_code
+        if creditor_code:
+            patch["creditor_code"] = creditor_code
         ref.set(patch, merge=True)
 
     # ---------------------------------------------------------------------- #

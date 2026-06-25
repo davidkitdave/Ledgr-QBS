@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Live probe: run the Company-A B6 question and print tool trajectory + reply.
 
-Mirrors what you asked in Slack (#auditair-international-pte-ltd) without
+Mirrors what you asked in Slack (#skyline-international-pte-ltd) without
 needing the bot. Uses the same chat eval App + session state as B6.
 
 Usage::

@@ -80,7 +80,12 @@ class LocalLedgerStore:
 
     @staticmethod
     def _exporter_for(software: str):
-        return get_exporter(software or "qbs")
+        from invoice_processing.export.axis_resolvers import resolve_software
+
+        res = resolve_software(software)
+        if res.flagged or not res.value:
+            raise ValueError(res.reason or "software not resolved")
+        return get_exporter(res.value)
 
     def _fresh_invoice_workbook(self, software: str) -> Workbook:
         exporter = self._exporter_for(software)

@@ -223,3 +223,52 @@ the name-matching guesswork entirely.
 8. Live QA on a dev firm: grant → upload-gate at 0 → process → verify
    delivery line, App Home, and ledger audit rows.
 ```
+
+## Amendment — Grilling resolutions (2026-06-20)
+
+A `/grill-with-docs` session resolved the open questions and the conflict between this
+ADR and `docs/superpowers/specs/2026-06-17-slack-credit-system-design.md`. **This ADR
+governs; that spec is superseded on every point below.** The reconciled, execution-ready
+plan lives at `docs/superpowers/plans/2026-06-20-slack-credit-system.md`.
+
+1. **Firm = workspace `team_id`, confirmed.** The spec's "Firm = installer user `U…`" is
+   rejected: a workspace is permanent, an installer can leave or a different admin can
+   reinstall, and per-installer keying would split one firm's balance. The installer is
+   captured as **identity metadata only** (`installer_user_id`, `installer_name`), never as
+   the key. *Verified live 2026-06-20:* `users.info` on the stored per-workspace bot token
+   resolves real installer names for all existing installs — no reinstall, with the
+   `users:read` scope already held.
+
+2. **No firm-record bootstrap hook; `ensure_firm(team_id)` is lazy + idempotent.** The
+   `grant` CLI calls it, so granting an already-installed firm creates its record on demand
+   from the `workspaces/{key}` doc. This replaces §7's "enrich at OAuth-success callback"
+   and removes any backfill script — `list-firms` reads `workspaces/*` (the real install
+   list) left-joined to `firms/*` for balance.
+
+3. **Email is forward-only.** `users:read.email` is added to scopes for *new* installs;
+   existing firms are **never** forced to reinstall. Name + workspace name + the
+   account-ID-on-invoice convention identify a firm without it.
+
+4. **Gate = `balance ≤ 0` refuse, then a free page-count ceiling** (`page_count > balance`
+   → refuse). The spec's Gemini-Flash-Lite segmentation probe is dropped: the charge is on
+   delivery anyway, so the gate only needs a deterministic upper bound, and the bank page
+   count is reused as the bank billable unit (computed once).
+
+5. **Bank charge = every source-PDF page** (not just extracted pages) — keeps the gate
+   estimate and the final charge identical and trivially auditable.
+
+6. **Percentage low-balance alerts (supersedes the absolute ≤50/≤10/0 in §6/the spec).**
+   Denominator = `cycle_start` (balance immediately after the most recent top-up). DM the
+   installer once each at **50 / 25 / 10 / 0%** of `cycle_start`, debounced via an
+   `alerts_sent` set on the credits doc; a top-up resets `cycle_start` and clears
+   `alerts_sent`. The **10% and 0%** alerts are **also mirrored to
+   `LEDGR_OPERATOR_CHANNEL_ID`** so follow-up is pushed, not merely visible. Schema gains
+   `firms/{teamId}/credits.cycle_start` and `.alerts_sent`.
+
+7. **App Home is net-new** (no `app_home` block or `app_home_opened` event exists today;
+   neither needs a new OAuth scope → no reinstall): hero balance + a 50/25/10 %-remaining
+   bar + **per-client usage** (free from each deduction row's `channel_id`) + recent
+   activity + the account ID + a Request-top-up action posting to the operator channel.
+
+8. **No FIFO buckets, no auto-grant-on-install invites, one `accounting_agents.admin` CLI**
+   (not the spec's three scripts) — `install_invites` and `creditBuckets` are dropped.

@@ -1,0 +1,61 @@
+{
+  "eval_cases": [
+    {
+      "eval_case_id": "zero_balance_gate_blocked",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "Process this batch even though the firm has 0 credits left. Confirm the gate blocks before any LLM call."
+          }
+        ]
+      },
+      "metadata": {
+        "expect_block_reason": "zero_credit",
+        "expect_llm_call_count": 0
+      }
+    },
+    {
+      "eval_case_id": "delivery_charge",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "Process a single-page invoice batch and charge credits on delivery to the ledger."
+          }
+        ]
+      },
+      "metadata": {
+        "expect_credit_status": "charged"
+      }
+    },
+    {
+      "eval_case_id": "dedup_no_double_charge",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "Re-submit a batch whose idempotency key was already charged. Confirm the dedup path does not double-charge."
+          }
+        ]
+      },
+      "metadata": {
+        "expect_credit_status": "not_billable"
+      }
+    },
+    {
+      "eval_case_id": "reextract_no_charge",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "Re-extract a previously-processed batch from cache. Confirm no additional credits are charged."
+          }
+        ]
+      },
+      "metadata": {
+        "expect_credit_status": "not_billable"
+      }
+    }
+  ]
+}

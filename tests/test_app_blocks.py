@@ -67,21 +67,42 @@ class TestOnboardingModal:
     def test_submit_label(self):
         assert self._modal()["submit"]["text"] == "Save"
 
-    def test_exactly_four_input_blocks(self):
+    def test_exactly_five_input_blocks(self):
         blocks = self._modal()["blocks"]
         input_blocks = [b for b in blocks if b["type"] == "input"]
-        assert len(input_blocks) == 4
+        assert len(input_blocks) == 5
 
     def test_block_ids(self):
         blocks = self._modal()["blocks"]
         block_ids = [b["block_id"] for b in blocks if b["type"] == "input"]
-        assert block_ids == ["client_name", "fye_month", "accounting_software", "gst_registered"]
+        assert block_ids == [
+            "client_name",
+            "region",
+            "fye_month",
+            "accounting_software",
+            "gst_registered",
+        ]
 
     def test_action_ids_are_val(self):
         blocks = self._modal()["blocks"]
         for block in blocks:
             if block["type"] == "input":
                 assert block["element"]["action_id"] == "val"
+
+    def test_region_is_static_select_with_supported_regions(self):
+        from accounting_agents.jurisdiction import supported_regions
+
+        block = next(b for b in self._modal()["blocks"] if b.get("block_id") == "region")
+        assert block["element"]["type"] == "static_select"
+        option_values = [o["value"] for o in block["element"]["options"]]
+        assert option_values == supported_regions()
+
+    def test_prefill_region_sets_initial_option(self):
+        modal = self._modal(prefill={"region": "MALAYSIA"})
+        block = next(b for b in modal["blocks"] if b.get("block_id") == "region")
+        initial = block["element"].get("initial_option")
+        assert initial is not None
+        assert initial["value"] == "MALAYSIA"
 
     def test_client_name_is_plain_text_input(self):
         block = next(b for b in self._modal()["blocks"] if b.get("block_id") == "client_name")
@@ -568,6 +589,29 @@ class TestInvoiceEditModal:
             "acct_0", "tax_0", "amt_0",
             "acct_1", "tax_1", "amt_1",
         ]
+
+    def test_flagged_line_shows_alternatives_and_unmapped(self):
+        """WS-3.5: flagged lines get alternative_codes + UNMAPPED, not full COA."""
+        view = invoice_edit_modal(
+            op_id="OP1",
+            lines=[{
+                "description": "Supplies",
+                "account_code": "6001",
+                "account_flagged": True,
+                "account_alternative_codes": ["6200", "6001"],
+                "tax_treatment": "SR",
+                "net_amount": 50.0,
+            }],
+            coa_options=[
+                ("6001", "6001 — Office Expenses"),
+                ("6200", "6200 — Travel"),
+                ("6999", "6999 — Misc"),
+            ],
+        )
+        acct_block = next(b for b in view["blocks"] if b.get("block_id") == "acct_0")
+        values = [o["value"] for o in acct_block["element"]["options"]]
+        assert values == ["6001", "6200", ""]
+        assert "6999" not in values
 
 
 # --------------------------------------------------------------------------- #
@@ -1265,10 +1309,11 @@ class TestPreviewColumnSpec:
         spec_qbs = preview_column_spec(software="qbs_ledger", sheet="DBS MYR")
         assert spec_xero == spec_qbs  # bank spec is software-agnostic
 
-    def test_unknown_software_defaults_to_qbs_ledger_shape(self):
+    def test_unknown_software_returns_empty_preview_spec(self):
         spec_unknown = preview_column_spec(software="some_future_tool", sheet="Purchase")
         spec_qbs = preview_column_spec(software="qbs_ledger", sheet="Purchase")
-        assert spec_unknown == spec_qbs
+        assert spec_unknown == []
+        assert spec_qbs
 
     def test_normalised_software_strings_resolve(self):
         # "qbs" and "QBS Ledger" and "qbs_ledger" all map to the same spec.
@@ -1286,6 +1331,94 @@ class TestPreviewColumnSpec:
         spec = preview_column_spec(software="qbs_ledger", sheet="OCBC SGD")
         num_keys = {c.row_key for c in spec if c.cell_type == "raw_number"}
         assert {"Withdrawal", "Deposit", "Balance"} == num_keys
+
+
+class TestPreviewColumnSpecSlackLimit:
+    """WS-5.2 fix: Slack's data_table block allows at most 20 columns. The
+    AutoCount full export list is 21 cols, so the preview must use a curated
+    ≤20-col subset that still includes the amount/total column."""
+
+    @pytest.mark.parametrize("software", ["autocount", "sql_account", "xero", "qbs_ledger"])
+    @pytest.mark.parametrize("sheet", ["Purchase", "Sales"])
+    def test_preview_spec_at_most_20_cols(self, software, sheet):
+        spec = preview_column_spec(software=software, sheet=sheet)
+        assert len(spec) <= 20, (
+            f"{software}/{sheet} preview has {len(spec)} cols — Slack rejects >20"
+        )
+
+    def test_autocount_purchase_preview_keeps_amount_and_identity(self):
+        spec = preview_column_spec(software="autocount", sheet="Purchase")
+        headers = [c.header for c in spec]
+        # AutoCount col #21 (Amount) is the most important preview column.
+        assert "Amount" in headers
+        assert "DocNo" in headers
+        assert "DocDate" in headers
+        assert "CreditorCode" in headers
+
+    def test_autocount_sales_preview_keeps_amount_and_identity(self):
+        spec = preview_column_spec(software="autocount", sheet="Sales")
+        headers = [c.header for c in spec]
+        assert "Amount" in headers
+        assert "DocNo" in headers
+        assert "DocDate" in headers
+        assert "DebtorCode" in headers
+
+    def test_autocount_preview_is_curated_subset_of_export_cols(self):
+        # Preview row_keys must be a subset of the full export columns so the
+        # exporter row dicts actually carry a value for every preview column.
+        from invoice_processing.export.exporters import load_erp_profile_for_system
+
+        profile = load_erp_profile_for_system("autocount")
+        for sheet, full_key in (("Purchase", "purchase_cols"), ("Sales", "sales_cols")):
+            spec = preview_column_spec(software="autocount", sheet=sheet)
+            full = set(profile[full_key])
+            assert {c.row_key for c in spec} <= full
+
+    def test_autocount_amount_is_numeric_cell(self):
+        spec = preview_column_spec(software="autocount", sheet="Purchase")
+        amount = next(c for c in spec if c.header == "Amount")
+        assert amount.cell_type == "raw_number"
+
+
+# AutoCount exporter row shape (full 21-col export dict, keyed by ERP column).
+_AUTOCOUNT_PURCHASE_ROWS = [
+    {
+        "DocNo": "<<New>>", "DocDate": "01/06/2024", "CreditorCode": "400-A0001",
+        "SupplierInvoiceNo": "INV-JBI-001", "JournalType": "PURCHASE",
+        "DisplayTerm": "", "PurchaseAgent": "", "Description": "Auto parts",
+        "CurrencyRate": "", "RefNo2": "", "Note": "", "InclusiveTax": "F",
+        "AccNo": "510-000", "ToAccountRate": "", "DetailDescription": "Auto parts",
+        "ProjNo": "", "DeptNo": "", "TaxType": "SV-6", "TaxableAmt": 1000.0,
+        "TaxAdjustment": "", "Amount": 1000.0,
+    },
+]
+
+
+class TestLedgerPreviewDataTableSlackLimit:
+    """The assembled data_table must never carry >20 cells per row."""
+
+    @pytest.fixture(autouse=True)
+    def _force_native(self, monkeypatch):
+        monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
+
+    def test_autocount_data_table_rows_at_most_20_cells(self):
+        blocks = ledger_preview_data_table(
+            rows=_AUTOCOUNT_PURCHASE_ROWS, workbook_name="Ledger_FY2024.xlsx",
+            fy=2024, sheet="Purchase", software="autocount",
+        )
+        table = next(b for b in blocks if b["type"] == "data_table")
+        for row in table["rows"]:
+            assert len(row) <= 20, f"data_table row has {len(row)} cells (>20)"
+
+    def test_autocount_data_table_header_includes_amount(self):
+        blocks = ledger_preview_data_table(
+            rows=_AUTOCOUNT_PURCHASE_ROWS, workbook_name="Ledger_FY2024.xlsx",
+            fy=2024, sheet="Purchase", software="autocount",
+        )
+        table = next(b for b in blocks if b["type"] == "data_table")
+        header_texts = [c["text"] for c in table["rows"][0]]
+        assert "Amount" in header_texts
+        assert "DocNo" in header_texts
 
 
 class TestLedgerPreviewDataTableNative:
@@ -1483,6 +1616,300 @@ class TestLedgerPreviewDataTableNative:
         )
         table = next(b for b in blocks if b["type"] == "data_table")
         assert "QBS Ledger" in table["caption"]
+
+
+# --------------------------------------------------------------------------- #
+# AutoCount / SQL Account — preview_column_spec + software_label
+# --------------------------------------------------------------------------- #
+
+from app.blocks import software_label
+
+
+class TestPreviewColumnSpecAutoCountSQL:
+
+    def test_autocount_purchase_first_col_matches_profile(self):
+        from invoice_processing.export.exporters import load_erp_profile_for_system
+
+        profile = load_erp_profile_for_system("autocount")
+        spec = preview_column_spec(software="AutoCount", sheet="Purchase")
+        assert spec[0].row_key == profile["purchase_cols"][0]
+
+    def test_autocount_purchase_row_keys_match_curated_preview_cols(self):
+        # WS-5.2 fix: the AutoCount preview uses the curated ≤20-col
+        # `purchase_preview_cols` subset (the full 21-col `purchase_cols` export
+        # list exceeds Slack's data_table limit), and every preview key is a
+        # real export column so the exporter rows carry a value for it.
+        from invoice_processing.export.exporters import load_erp_profile_for_system
+
+        profile = load_erp_profile_for_system("autocount")
+        spec = preview_column_spec(software="AutoCount", sheet="Purchase")
+        assert [c.row_key for c in spec] == profile["purchase_preview_cols"]
+        assert {c.row_key for c in spec} <= set(profile["purchase_cols"])
+        assert len(spec) <= 20
+
+    def test_autocount_purchase_has_creditor_col(self):
+        spec = preview_column_spec(software="AutoCount", sheet="Purchase")
+        row_keys = [c.row_key for c in spec]
+        assert "CreditorCode" in row_keys
+
+    def test_autocount_sales_has_debtor_col(self):
+        spec = preview_column_spec(software="AutoCount", sheet="Sales")
+        row_keys = [c.row_key for c in spec]
+        assert "DebtorCode" in row_keys
+
+    def test_autocount_sales_curated_preview_drops_currency_code(self):
+        # CurrencyCode is a non-key export column trimmed from the curated Slack
+        # preview to fit the 20-col limit; it remains in the full .xlsx export.
+        from invoice_processing.export.exporters import load_erp_profile_for_system
+
+        profile = load_erp_profile_for_system("autocount")
+        spec = preview_column_spec(software="AutoCount", sheet="Sales")
+        row_keys = [c.row_key for c in spec]
+        assert "CurrencyCode" not in row_keys
+        assert "CurrencyCode" in profile["sales_cols"]
+
+    def test_autocount_sales_row_keys_match_curated_preview_cols(self):
+        from invoice_processing.export.exporters import load_erp_profile_for_system
+
+        profile = load_erp_profile_for_system("autocount")
+        spec = preview_column_spec(software="AutoCount", sheet="Sales")
+        assert [c.row_key for c in spec] == profile["sales_preview_cols"]
+        assert {c.row_key for c in spec} <= set(profile["sales_cols"])
+        assert len(spec) <= 20
+
+    def test_sql_account_purchase_row_keys_match_profile_cols(self):
+        from invoice_processing.export.exporters import load_erp_profile_for_system
+
+        profile = load_erp_profile_for_system("sql_account")
+        spec = preview_column_spec(software="SQL Account", sheet="Purchase")
+        assert [c.row_key for c in spec] == profile["purchase_cols"]
+
+    def test_sql_account_purchase_has_code10_col(self):
+        spec = preview_column_spec(software="SQL Account", sheet="Purchase")
+        row_keys = [c.row_key for c in spec]
+        assert "CODE(10)" in row_keys
+
+    def test_sql_account_sales_has_code10_col(self):
+        spec = preview_column_spec(software="SQL Account", sheet="Sales")
+        row_keys = [c.row_key for c in spec]
+        assert "CODE(10)" in row_keys
+
+    def test_sql_account_purchase_first_col_row_key_is_docno(self):
+        spec = preview_column_spec(software="SQL Account", sheet="Purchase")
+        assert spec[0].row_key == "DOCNO(20)"
+
+    def test_profile_numeric_cols_use_raw_number(self):
+        from invoice_processing.export.exporters import load_erp_profile_for_system
+
+        load_erp_profile_for_system("sql_account")  # smoke: profile loads from skill
+        spec = preview_column_spec(software="SQL Account", sheet="Purchase")
+        by_key = {c.row_key: c.cell_type for c in spec}
+        assert by_key["_TAXAMT"] == "raw_number"
+        assert by_key["_AMOUNT"] == "raw_number"
+        assert by_key["CODE(10)"] == "raw_text"
+
+    def test_autocount_and_sql_bank_sheet_returns_bank_cols(self):
+        # Bank sheets always return the 6-col bank spec, regardless of software.
+        spec_ac = preview_column_spec(software="AutoCount", sheet="OCBC SGD")
+        spec_sql = preview_column_spec(software="SQL Account", sheet="DBS MYR")
+        assert len(spec_ac) == 6
+        assert len(spec_sql) == 6
+
+
+class TestSoftwareLabel:
+
+    def test_autocount_label(self):
+        assert software_label("AutoCount") == "AutoCount"
+
+    def test_sql_account_label(self):
+        assert software_label("SQL Account") == "SQL Account"
+
+    def test_xero_label(self):
+        assert software_label("Xero") == "Xero"
+
+    def test_qbs_ledger_label(self):
+        assert software_label("QBS Ledger") == "QBS Ledger"
+
+    def test_empty_returns_unknown_erp(self):
+        assert software_label("") == "Unknown ERP"
+
+
+# --------------------------------------------------------------------------- #
+# software_label empty_label= (delivery summary path)
+# --------------------------------------------------------------------------- #
+
+from invoice_processing.export.exporters import software_label as canonical_software_label
+
+
+class TestSoftwareLabelForSummary:
+
+    def test_autocount(self):
+        assert canonical_software_label("AutoCount", empty_label="") == "AutoCount"
+
+    def test_sql_account(self):
+        assert canonical_software_label("SQL Account", empty_label="") == "SQL Account"
+
+    def test_xero(self):
+        assert canonical_software_label("Xero", empty_label="") == "Xero"
+
+    def test_qbs_ledger(self):
+        assert canonical_software_label("QBS Ledger", empty_label="") == "QBS Ledger"
+
+    def test_empty_string_returns_empty(self):
+        assert canonical_software_label("", empty_label="") == ""
+
+    def test_none_equivalent_returns_empty(self):
+        assert canonical_software_label(None, empty_label="") == ""  # type: ignore[arg-type]
+
+
+# --------------------------------------------------------------------------- #
+# Readiness-note block appended for AutoCount/SQL purchase deliveries
+# --------------------------------------------------------------------------- #
+
+class TestDeliveryCardReadinessBlock:
+    """Unit-test the import-readiness branch in _post_delivery_card.
+
+    We verify the logic directly on the function that builds the ``blocks``
+    list — no real Slack API is called.
+    """
+
+    def _make_payload(self, *, software: str, doc_type: str, import_readiness: dict | None) -> dict:
+        return {
+            "software": software,
+            "doc_type": doc_type,
+            "fy": 2025,
+            "kind": "invoice",
+            "import_readiness": import_readiness,
+            "delivered": True,
+            "batches": [],
+        }
+
+    def test_autocount_purchase_with_readiness_appends_context_block(self, monkeypatch):
+        from accounting_agents import nodes
+
+        # Patch format_import_readiness_note so it returns a known string.
+        monkeypatch.setattr(nodes, "format_import_readiness_note", lambda r: "Ready to import")
+
+        from app.blocks import confident_note_block, delivery_card_blocks
+
+        # Simulate the logic inside _post_delivery_card.
+        software = "AutoCount"
+        doc_type = "purchase"
+        payload = self._make_payload(
+            software=software, doc_type=doc_type,
+            import_readiness={"ready": True},
+        )
+
+        blocks: list = delivery_card_blocks("summary", [])
+
+        if doc_type not in ("expense_claim", "other"):
+            from invoice_processing.export.exporters import normalize_software_key as _nsk
+            if _nsk(software) in ("autocount", "sql_account"):
+                rnote = nodes.format_import_readiness_note(payload.get("import_readiness"))
+                if rnote:
+                    blocks.append(confident_note_block(rnote))
+
+        context_blocks = [b for b in blocks if b.get("type") == "context"]
+        assert len(context_blocks) == 1
+        assert "Ready to import" in context_blocks[0]["elements"][0]["text"]
+
+    def test_sql_account_purchase_with_readiness_appends_context_block(self, monkeypatch):
+        from accounting_agents import nodes
+        monkeypatch.setattr(nodes, "format_import_readiness_note", lambda r: "Import checklist done")
+
+        from app.blocks import confident_note_block, delivery_card_blocks
+
+        software = "SQL Account"
+        doc_type = "purchase"
+        payload = self._make_payload(
+            software=software, doc_type=doc_type,
+            import_readiness={"ready": True},
+        )
+
+        blocks: list = delivery_card_blocks("summary", [])
+        if doc_type not in ("expense_claim", "other"):
+            from invoice_processing.export.exporters import normalize_software_key as _nsk
+            if _nsk(software) in ("autocount", "sql_account"):
+                rnote = nodes.format_import_readiness_note(payload.get("import_readiness"))
+                if rnote:
+                    blocks.append(confident_note_block(rnote))
+
+        context_blocks = [b for b in blocks if b.get("type") == "context"]
+        assert len(context_blocks) == 1
+        assert "Import checklist done" in context_blocks[0]["elements"][0]["text"]
+
+    def test_qbs_software_does_not_append_readiness_block(self, monkeypatch):
+        from accounting_agents import nodes
+        monkeypatch.setattr(nodes, "format_import_readiness_note", lambda r: "Should not appear")
+
+        from app.blocks import confident_note_block, delivery_card_blocks
+
+        software = "QBS Ledger"
+        doc_type = "purchase"
+        payload = self._make_payload(
+            software=software, doc_type=doc_type,
+            import_readiness={"ready": True},
+        )
+
+        blocks: list = delivery_card_blocks("summary", [])
+        if doc_type not in ("expense_claim", "other"):
+            from invoice_processing.export.exporters import normalize_software_key as _nsk
+            if _nsk(software) in ("autocount", "sql_account"):
+                rnote = nodes.format_import_readiness_note(payload.get("import_readiness"))
+                if rnote:
+                    blocks.append(confident_note_block(rnote))
+
+        context_blocks = [b for b in blocks if b.get("type") == "context"]
+        assert len(context_blocks) == 0
+
+    def test_expense_claim_doc_type_skips_readiness_block(self, monkeypatch):
+        from accounting_agents import nodes
+        monkeypatch.setattr(nodes, "format_import_readiness_note", lambda r: "Should not appear")
+
+        from app.blocks import confident_note_block, delivery_card_blocks
+
+        software = "AutoCount"
+        doc_type = "expense_claim"
+        payload = self._make_payload(
+            software=software, doc_type=doc_type,
+            import_readiness={"ready": True},
+        )
+
+        blocks: list = delivery_card_blocks("summary", [])
+        # Simulate: readiness block only added when doc_type NOT in expense_claim/other
+        if doc_type not in ("expense_claim", "other"):
+            from invoice_processing.export.exporters import normalize_software_key as _nsk
+            if _nsk(software) in ("autocount", "sql_account"):
+                rnote = nodes.format_import_readiness_note(payload.get("import_readiness"))
+                if rnote:
+                    blocks.append(confident_note_block(rnote))
+
+        context_blocks = [b for b in blocks if b.get("type") == "context"]
+        assert len(context_blocks) == 0
+
+    def test_empty_readiness_note_does_not_append_block(self, monkeypatch):
+        from accounting_agents import nodes
+        monkeypatch.setattr(nodes, "format_import_readiness_note", lambda r: "")
+
+        from app.blocks import confident_note_block, delivery_card_blocks
+
+        software = "AutoCount"
+        doc_type = "purchase"
+        payload = self._make_payload(
+            software=software, doc_type=doc_type,
+            import_readiness=None,
+        )
+
+        blocks: list = delivery_card_blocks("summary", [])
+        if doc_type not in ("expense_claim", "other"):
+            from invoice_processing.export.exporters import normalize_software_key as _nsk
+            if _nsk(software) in ("autocount", "sql_account"):
+                rnote = nodes.format_import_readiness_note(payload.get("import_readiness"))
+                if rnote:
+                    blocks.append(confident_note_block(rnote))
+
+        context_blocks = [b for b in blocks if b.get("type") == "context"]
+        assert len(context_blocks) == 0
 
 
 class TestLedgerPreviewDataTableFallback:
@@ -2005,4 +2432,50 @@ def test_processing_plan_headline_single_vs_multi():
     assert processing_plan_headline(total=1) == "Processing document"
     assert processing_plan_headline(total=2) == "Processing batch (2 documents)"
     assert processing_plan_headline(total=1, title="Custom") == "Custom"
+
+
+# --------------------------------------------------------------------------- #
+# Regression: review_card_blocks never emits an empty body.text
+# --------------------------------------------------------------------------- #
+
+
+class TestReviewCardBlocksNeverEmptyBody:
+    """review_card_blocks must never produce an empty body / section text,
+    even when question is empty or whitespace-only (fixes SlackApiError crash)."""
+
+    def test_empty_string_native_body_is_non_empty(self, monkeypatch):
+        monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
+        blocks = review_card_blocks(question="", op_id="RV-1")
+        card = next(b for b in blocks if b["type"] == "card")
+        body_text = card["body"]["text"]
+        assert body_text and body_text.strip(), (
+            "native card body.text must not be empty when question=''"
+        )
+
+    def test_whitespace_string_native_body_is_non_empty(self, monkeypatch):
+        monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
+        blocks = review_card_blocks(question="   ", op_id="RV-1")
+        card = next(b for b in blocks if b["type"] == "card")
+        body_text = card["body"]["text"]
+        assert body_text and body_text.strip(), (
+            "native card body.text must not be empty when question is whitespace-only"
+        )
+
+    def test_empty_string_fallback_section_is_non_empty(self, monkeypatch):
+        monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "0")
+        blocks = review_card_blocks(question="", op_id="RV-1")
+        section = next(b for b in blocks if b["type"] == "section")
+        text = section["text"]["text"]
+        assert text and text.strip(), (
+            "fallback section text must not be empty when question=''"
+        )
+
+    def test_whitespace_string_fallback_section_is_non_empty(self, monkeypatch):
+        monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "0")
+        blocks = review_card_blocks(question="   ", op_id="RV-1")
+        section = next(b for b in blocks if b["type"] == "section")
+        text = section["text"]["text"]
+        assert text and text.strip(), (
+            "fallback section text must not be empty when question is whitespace-only"
+        )
 

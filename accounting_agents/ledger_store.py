@@ -46,6 +46,7 @@ from accounting_agents.lease_lock import FirestoreLeaseLock
 
 from invoice_processing.export.exporters import (
     BankStatementExporter,
+    ProfileLedgerExporter,
     get_exporter,
 )
 
@@ -340,7 +341,27 @@ class SlackLedgerStore:
     @staticmethod
     def _exporter_for(software: str):
         """Return the invoice exporter matching the client's accounting software."""
-        return get_exporter(software or "qbs")
+        from invoice_processing.export.axis_resolvers import resolve_software
+
+        res = resolve_software(software)
+        if res.flagged or not res.value:
+            raise ValueError(res.reason or "software not resolved")
+        return get_exporter(res.value)
+
+    @staticmethod
+    def _invoice_identity_column(exporter: Any, sheet_name: str) -> str:
+        """Workbook column used to match invoice rows on replace (MAP5).
+
+        AutoCount AP uses ``SupplierInvoiceNo`` because ``DocNo`` is always
+        the constant ``<<New>>``; QBS/Xero use ``Invoice Number``.
+        """
+        if isinstance(exporter, ProfileLedgerExporter):
+            doc_type = "sales" if sheet_name == "Sales" else "purchase"
+            for field in ("invoice_number", "supplier_invoice_no"):
+                col = exporter.column_for_field(field, doc_type)
+                if col:
+                    return col
+        return "Invoice Number"
 
     def _fresh_invoice_workbook(self, software: str) -> Workbook:
         """Create an empty invoice workbook (Purchase + Sales sheets, headers only).
@@ -913,18 +934,19 @@ class SlackLedgerStore:
             # ------------------------------------------------------------------ #
             replaced_count = 0
             if replace and kind == "invoice" and sheet_name in _INVOICE_SHEETS:
-                # Collect the invoice numbers carried by the incoming batch.
+                identity_col = self._invoice_identity_column(exporter, sheet_name)
+                # Collect supplier/reference invoice numbers carried by the batch.
                 batch_inv_nums: set[str] = {
-                    str(r.get("Invoice Number", "")).strip()
+                    str(r.get(identity_col, "")).strip()
                     for r in rows
-                    if r.get("Invoice Number") not in (None, "")
+                    if r.get(identity_col) not in (None, "")
                 }
 
                 if batch_inv_nums and sheet_name in wb.sheetnames:
                     ws = wb[sheet_name]
                     if ws.max_row >= 2:
                         col_map = self._header_col_map(ws)
-                        inv_col = col_map.get("Invoice Number")
+                        inv_col = col_map.get(identity_col) or col_map.get("Invoice Number")
                         if inv_col is not None:
                             # Collect matching row indices (ascending) then delete bottom-up.
                             matching_rows: list[int] = []

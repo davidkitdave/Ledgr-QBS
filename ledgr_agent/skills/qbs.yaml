@@ -1,0 +1,55 @@
+software_name: QBS Ledger
+system: qbs
+exporter: builtin
+# Native QBS Ledger format (no tax-code column; Tax Amount carries SR 9% / ZR 0).
+
+purchase_cols:
+  - Invoice Number
+  - Invoice Date
+  - Vendor Name
+  - Entity Tax ID
+  - Description
+  - Source Amount
+  - Currency
+  - Currency Rate
+  - Sub Total
+  - Tax Amount
+  - Total Amount
+  - Account Code / COA
+
+sales_cols:
+  - Invoice Date
+  - Invoice Number
+  - Customer Name
+  - Description
+  - Source Amount
+  - Currency
+  - Currency Rate
+  - Amount
+  - Tax Amount
+  - Total
+  - Account Code / COA
+
+# Logical-field map: column name -> logical name. Used by column_for_field to
+# find the real column a logical field is written to (e.g. compose_confident_note
+# needs to render "reconciles to $X" using whichever column carries the line
+# net for the current doc_type). "Amount" on the sales sheet is the line net
+# (not a per-unit amount) so it maps to sub_total, same as "Sub Total" on
+# the purchase sheet. One map covers both sheets (column names are distinct
+# enough that a shared map is unambiguous).
+logical_fields:
+  Invoice Number: invoice_number
+  Invoice Date: invoice_date
+  Vendor Name: vendor_name
+  Customer Name: customer_name
+  Entity Tax ID: entity_tax_id
+  Description: description
+  Source Amount: source_amount
+  Currency: currency
+  Currency Rate: currency_rate
+  Sub Total: sub_total
+  Amount: sub_total      # QBS sales: "Amount" carries the line net
+  Tax Amount: tax_amount
+  Total Amount: total
+  Total: total
+  Account Code / COA: account_code

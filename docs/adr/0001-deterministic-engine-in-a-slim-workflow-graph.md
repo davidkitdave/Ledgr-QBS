@@ -1,5 +1,13 @@
 # 0001 — Deterministic Engine as one node in a slim Workflow graph
 
+> **⚠️ Superseded in part by [ADR-0026](0026-ai-reads-rules-apply-on-a-lean-llmagent.md) (2026-06-24).**
+> *Retained:* the engine is deterministic and is never re-expanded into per-step LLM nodes.
+> *Superseded:* "the runtime root is a slim `Workflow` graph" — the root is now the lean
+> `ledgr_agent` `LlmAgent` and the engine is a **tool**, not a graph node. The "bare
+> `LlmAgent` root, Engine as a tool" alternative rejected below is the one now adopted,
+> because the Firestore interrupt bridge (`hitl.py`) — not a graph `RequestInput` node —
+> provides HITL pause/resume.
+
 - **Status:** Accepted — **consolidation implemented 2026-06-14** (see "Implementation" below)
 - **Date:** 2026-06-13
 - **Deciders:** Ledgr team

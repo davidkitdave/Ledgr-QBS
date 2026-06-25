@@ -59,15 +59,18 @@ def _build_app() -> App:
 
 
 def _tripped_state(channel: str) -> dict:
-    # An unreconciled invoice trips detect_struggle. A low tax_confidence line
-    # ALSO trips the terminal approval_gate, so both pauses can fire.
+    # An unreconciled invoice trips detect_struggle. Low classify confidence is
+    # mixed in so WS4 (unreconciled-only auto re-read) does NOT fire — these
+    # roundtrips intentionally exercise the mid-flow review HITL pause. A low
+    # tax_confidence line ALSO trips the terminal approval_gate.
     inv = NormalizedInvoice(
         invoice_number="INV-LO",
         invoice_date=__import__("datetime").date(2025, 1, 15),
         doc_total=109.0,
         reconciled=False,
         reconcile_note="totals do not reconcile",
-        lines=[InvoiceLine(description="ambiguous charge", tax_confidence=0.40)],
+        lines=[InvoiceLine(description="ambiguous charge", tax_confidence=0.40,
+                            account_code="6100")],
     )
     return {
         "op_id": f"{channel}:F1",
@@ -77,7 +80,10 @@ def _tripped_state(channel: str) -> dict:
         "tax_registered": True,
         nodes.ARTIFACT_NAME_KEY: nodes.ARTIFACT_NAME_FMT.format(file_id="F1"),
         nodes.DOC_TYPE_KEY: "invoice",
-        nodes.CLASSIFY_CONFIDENCE_KEY: 0.95,
+        nodes.CLASSIFY_CONFIDENCE_KEY: 0.50,
+        # WS-1.5: pre-set tax_jurisdiction so the jurisdiction_unresolved
+        # flag does NOT fire by default.
+        nodes.TAX_JURISDICTION_KEY: "SINGAPORE",
         nodes.NORMALIZED_KEY: [nodes._inv_to_dict(inv)],
     }
 
@@ -85,7 +91,7 @@ def _tripped_state(channel: str) -> dict:
 def _fake_clean_bundle(*_a, **_k):
     from tests.test_nodes import _legacy_result_from_ex_bundle
 
-    return _legacy_result_from_ex_bundle(
+    result = _legacy_result_from_ex_bundle(
         ExtractedInvoiceBundle(
             invoices=[
                 ExtractedInvoice(
@@ -99,10 +105,17 @@ def _fake_clean_bundle(*_a, **_k):
                     subtotal=100.0,
                     gst_total=9.0,
                     total=109.0,
+                    issuer_tax_system="NONE",
                 )
             ]
         )
     )
+    # WS-1.5: simulate categorize_node filling in account_code on the line
+    # so the blank_account_code flag does not fire on the post-extract state.
+    for inv in result.normalized:
+        for ln in inv.lines:
+            ln.account_code = "6100"
+    return result
 
 
 def _force_clarify(state, reasons, *, model):
@@ -127,6 +140,7 @@ def setup_function(_):
                     subtotal=100.0,
                     gst_total=9.0,
                     total=109.0,
+                    issuer_tax_system="NONE",
                 )
             ]
         )
@@ -320,6 +334,7 @@ def _unreconciled_bundle(*_a, **_k):
                     subtotal=100.0,
                     gst_total=9.0,
                     total=999.0,  # deliberately wrong → reconcile fails
+                    issuer_tax_system="NONE",
                 )
             ]
         )
@@ -339,7 +354,17 @@ def _driver_state(channel: str) -> dict:
         "client_id": "drv-client",
         "region": "SINGAPORE",
         "base_currency": "SGD",
+        # WS-1.5: pre-set tax_jurisdiction so the jurisdiction_unresolved
+        # flag does not fire by default. resolve_jurisdiction_node would
+        # normally set this from `region` but the test driver runs against
+        # a stub workflow that may not invoke it.
+        nodes.TAX_JURISDICTION_KEY: "SINGAPORE",
         nodes.ARTIFACT_NAME_KEY: nodes.ARTIFACT_NAME_FMT.format(file_id="F1"),
+        # Minimal COA so categorize_node resolves "Goods" lines without account_flagged
+        # (WS-3.5: flagged COA now pauses at the terminal approval_gate).
+        "coa": [
+            {"code": "6100", "description": "Office Expenses", "keywords": "goods,office"},
+        ],
     }
 
 
@@ -397,7 +422,9 @@ def test_driver_full_pass_both_interrupts_side_effects_once():
 
     def _count_classify(data, mime, *, model):
         counters["classify"] += 1
-        return ClassificationResult(doc_type="invoice", confidence=0.95, reason="test")
+        # Mixed signal (low confidence + unreconciled) so WS4 reconcile re-read
+        # does not consume an extra extract before the review HITL pause.
+        return ClassificationResult(doc_type="invoice", confidence=0.50, reason="test")
 
     def _count_extract(*a, **k):
         counters["extract"] += 1
@@ -441,9 +468,9 @@ def test_driver_full_pass_both_interrupts_side_effects_once():
         assert got.state.get("review_clarify_action") == "confirm_as_is"
         assert got.state.get("delivered") is True
 
-        # The make-or-break invariant: side-effecting nodes ran EXACTLY ONCE
-        # across the two resumes (ctx.run_node fast-forwards checkpointed nodes).
-        assert counters["extract"] == 1
+        # Side-effecting nodes: initial extract plus one WS4 reconcile re-read at
+        # the terminal gate when totals are still the only flag after review.
+        assert counters["extract"] == 2
         assert counters["consolidate"] == 1
         assert counters["classify"] == 1
     finally:

@@ -36,10 +36,13 @@ def _make_invoice(
     invoice_number: str = "INV-001",
     invoice_date: str = "2024-05-15",
     due_date: str | None = None,
-    total: float = 109.00,
+    total: float | None = 109.00,
     currency: str = "SGD",
 ) -> ExtractedInvoice:
-    return ExtractedInvoice(
+    # total is required (float) in the schema; construct with a valid float then
+    # override to None post-construction when the caller wants to test the
+    # "absent doc_total" code path (Pydantic v2 does not validate on assignment).
+    ex = ExtractedInvoice(
         doc_type="invoice",
         invoice_number=invoice_number,
         invoice_date=invoice_date,
@@ -57,8 +60,12 @@ def _make_invoice(
         ],
         subtotal=100.00,
         gst_total=9.00,
-        total=total,
+        total=total if total is not None else 109.00,
+        issuer_tax_system="NONE",
     )
+    if total is None:
+        ex.total = None  # type: ignore[assignment]
+    return ex
 
 
 def _xero_rows(inv: NormalizedInvoice, doc_type: str = "purchase") -> list[dict]:

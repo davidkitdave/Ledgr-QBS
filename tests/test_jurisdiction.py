@@ -1,6 +1,6 @@
 """Tests for the multi-country jurisdiction router + tax reasoning.
 
-Covers the YAU LEE Malaysia session gap (plan Phase 5 §P0):
+Covers the Apex Motor Malaysia session gap (plan Phase 5 §P0):
 
 * ``resolve_jurisdiction`` returns SINGAPORE for SG/SGD profile.
 * ``resolve_jurisdiction`` returns MALAYSIA for MY/MYR profile (with the
@@ -29,14 +29,17 @@ from accounting_agents.jurisdiction import (
     JURISDICTION_AMBIGUOUS,
     JURISDICTION_CROSS_BORDER,
     REGION_MALAYSIA,
+    REGION_REGISTRY,
     REGION_SINGAPORE,
     TAX_JURISDICTION_KEY,
     TAX_SYSTEM_GST,
     TAX_SYSTEM_HINT_KEY,
     TAX_SYSTEM_OUT_OF_SCOPE,
     TAX_SYSTEM_SST,
+    registration_threshold_for_region,
     resolve_jurisdiction,
     resolution_from_state,
+    supported_regions,
     write_to_state,
 )
 from invoice_processing.export.models import InvoiceLine, NormalizedInvoice, PartyInfo
@@ -54,8 +57,8 @@ class TestResolveJurisdiction:
         assert res.jurisdiction.standard_rate == pytest.approx(0.09)
         assert res.jurisdiction.flag_for_human is False
 
-    def test_malaysia_jbi_plus_profile(self):
-        """YAU LEE scenario: client=MALAYSIA, base_currency=MYR."""
+    def test_malaysia_acme_profile(self):
+        """Apex Motor scenario: client=MALAYSIA, base_currency=MYR."""
         res = resolve_jurisdiction(
             {"region": "MALAYSIA", "base_currency": "MYR"}
         )
@@ -65,6 +68,14 @@ class TestResolveJurisdiction:
         assert res.jurisdiction.standard_rate == pytest.approx(0.08)
         assert res.jurisdiction.rate_band_label == "8% SST"
         assert res.jurisdiction.flag_for_human is False
+
+    def test_malaysia_pre_2024_flat_6pct_service_tax(self):
+        """Regime 1: flat 6% service tax before 2024-03-01."""
+        from accounting_agents.jurisdiction import _current_standard_rate
+
+        rate, label = _current_standard_rate("my_sst.yaml", on=date(2023, 6, 1))
+        assert rate == pytest.approx(0.06)
+        assert "6%" in label
 
     def test_cross_border_sg_client_my_supplier_auto_books(self):
         """SG client + MY supplier → CROSS_BORDER, auto-book (flag_for_human=False)."""
@@ -146,6 +157,125 @@ class TestResolveJurisdiction:
 
 
 # --------------------------------------------------------------------------- #
+# WS1 characterization — SG/MY must match pre-refactor branches exactly
+# --------------------------------------------------------------------------- #
+class TestResolveJurisdictionCharacterization:
+    """Explicit snapshots of every supported resolve_jurisdiction branch."""
+
+    def test_registry_covers_sg_and_my(self):
+        assert set(supported_regions()) == {REGION_SINGAPORE, REGION_MALAYSIA}
+        assert REGION_REGISTRY[REGION_SINGAPORE]["yaml"] == "sg_gst.yaml"
+        assert REGION_REGISTRY[REGION_MALAYSIA]["yaml"] == "my_sst.yaml"
+
+    def test_sg_domestic_full_rule(self):
+        res = resolve_jurisdiction(
+            {"region": "SINGAPORE", "base_currency": "SGD", "supplier_country": "SG"}
+        )
+        j = res.jurisdiction
+        assert j.code == REGION_SINGAPORE
+        assert j.region == REGION_SINGAPORE
+        assert j.tax_system == TAX_SYSTEM_GST
+        assert j.reference_yaml == "sg_gst.yaml"
+        assert j.standard_rate == pytest.approx(0.09)
+        assert j.rate_band_label == "9% GST"
+        assert j.cross_border is False
+        assert j.flag_for_human is False
+        assert res.client_currency == "SGD"
+
+    def test_my_domestic_full_rule(self):
+        res = resolve_jurisdiction(
+            {"region": "MALAYSIA", "base_currency": "MYR", "supplier_country": "MY"}
+        )
+        j = res.jurisdiction
+        assert j.code == REGION_MALAYSIA
+        assert j.region == REGION_MALAYSIA
+        assert j.tax_system == TAX_SYSTEM_SST
+        assert j.reference_yaml == "my_sst.yaml"
+        assert j.standard_rate == pytest.approx(0.08)
+        assert j.rate_band_label == "8% SST"
+        assert j.cross_border is False
+        assert j.flag_for_human is False
+        assert res.client_currency == "MYR"
+
+    def test_sg_cross_border_auto_book_notes(self):
+        res = resolve_jurisdiction(
+            {"region": "SINGAPORE", "base_currency": "SGD", "supplier_country": "MY"}
+        )
+        j = res.jurisdiction
+        assert j.code == JURISDICTION_CROSS_BORDER
+        assert j.tax_system == TAX_SYSTEM_OUT_OF_SCOPE
+        assert j.reference_yaml == "sg_gst.yaml"
+        assert j.standard_rate is None
+        assert j.cross_border is True
+        assert j.flag_for_human is False
+        assert "Foreign counterparty" in (j.notes or "")
+        assert "not claimable" in (j.notes or "")
+
+    def test_sg_cross_border_partial_exempt_flags(self):
+        res = resolve_jurisdiction(
+            {
+                "region": "SINGAPORE",
+                "base_currency": "SGD",
+                "supplier_country": "MY",
+                "partial_exempt": True,
+            }
+        )
+        assert res.jurisdiction.flag_for_human is True
+        assert "reverse-charge" in (res.jurisdiction.notes or "").lower()
+
+    def test_my_cross_border_auto_book_notes(self):
+        res = resolve_jurisdiction(
+            {"region": "MALAYSIA", "base_currency": "MYR", "supplier_country": "SG"}
+        )
+        j = res.jurisdiction
+        assert j.code == JURISDICTION_CROSS_BORDER
+        assert j.tax_system == TAX_SYSTEM_OUT_OF_SCOPE
+        assert j.reference_yaml == "my_sst.yaml"
+        assert j.flag_for_human is False
+        assert "SST" in (j.notes or "")
+
+    def test_ambiguous_no_region_no_sgd_fallback(self):
+        """C10: missing region + currency must not silently default to SGD."""
+        res = resolve_jurisdiction({})
+        assert res.jurisdiction.code == JURISDICTION_AMBIGUOUS
+        assert res.client_currency is None
+        assert res.jurisdiction.flag_for_human is True
+
+    def test_registration_threshold_from_yaml(self):
+        """C7: thresholds live in jurisdiction YAML, not Python constants."""
+        sg_amount, sg_cur, sg_label = registration_threshold_for_region(REGION_SINGAPORE)
+        assert sg_amount == pytest.approx(1_000_000.0)
+        assert sg_cur == "SGD"
+        assert "GST" in sg_label
+
+        my_amount, my_cur, my_label = registration_threshold_for_region(REGION_MALAYSIA)
+        assert my_amount == pytest.approx(500_000.0)
+        assert my_cur == "MYR"
+        assert "SST" in my_label
+
+
+# --------------------------------------------------------------------------- #
+# C4 — is_overseas relative to client home country
+# --------------------------------------------------------------------------- #
+class TestPartyIsOverseasFor:
+    def test_sg_supplier_domestic_for_sg_client(self):
+        party = PartyInfo(country="SG")
+        assert party.is_overseas_for("SG") is False
+
+    def test_sg_supplier_overseas_for_my_client(self):
+        party = PartyInfo(country="SG")
+        assert party.is_overseas_for("MY") is True
+
+    def test_my_supplier_domestic_for_my_client(self):
+        party = PartyInfo(country="MY")
+        assert party.is_overseas_for("MY") is False
+
+    def test_my_supplier_overseas_for_sg_client(self):
+        party = PartyInfo(country="MY")
+        assert party.is_overseas_for("SG") is True
+
+
+# --------------------------------------------------------------------------- #
 # Pure-function: tax_reasoning (with stubbed LLM)
 # --------------------------------------------------------------------------- #
 class _StubGenAIPart:
@@ -197,8 +327,8 @@ def _inv_with_one_line(
         invoice_date=inv_date or date(2024, 6, 1),
         our_gst_registered=our_gst,
         supplier=PartyInfo(
-            name="YAU LEE MOTOR",
-            gst_regno="202301011111",
+            name="Apex Motor",
+            gst_regno="200012346A",
             country=supplier_country,
         ),
     )
@@ -207,8 +337,8 @@ def _inv_with_one_line(
 
 
 class TestTaxReasoningLLMPath:
-    def test_yau_lee_malaysia_8pct_sst_passes(self, monkeypatch):
-        """YAU LEE: net=60.19, gst=4.81 (8% SST). Must NOT flag SR 9% mismatch."""
+    def test_apex_motor_malaysia_8pct_sst_passes(self, monkeypatch):
+        """Apex Motor: net=60.19, gst=4.81 (8% SST). Must NOT flag SR 9% mismatch."""
         _install_stub_llm(
             monkeypatch,
             {
@@ -304,16 +434,59 @@ class TestTaxReasoningLLMPath:
         assert outcome.used_llm is False
         assert outcome.flagged_count == 1
 
-    def test_ambiguous_region_forces_nt_with_flag(self):
-        """No region in state → AMBIGUOUS → NT, flagged, no LLM call."""
+    def test_ambiguous_region_forces_nt_without_line_flags(self):
+        """No region in state → AMBIGUOUS → NT, not line-flagged; doc-level HITL."""
         from accounting_agents.tax_reasoning import reason_one_invoice
 
         inv = _inv_with_one_line()
         outcome = reason_one_invoice(inv, state={})
         line = inv.lines[0]
         assert line.tax_treatment == "NT"
-        assert line.tax_flagged is True
+        assert line.tax_flagged is False
         assert outcome.used_llm is False
+        assert outcome.flagged_count == 0
+
+    def test_ambiguous_jurisdiction_single_needs_review_reason(self):
+        """AMBIGUOUS jurisdiction → one doc-level reason, not N line tax flags."""
+        from accounting_agents.jurisdiction import JURISDICTION_REVIEW_REASON_KEY
+        from accounting_agents.nodes import _needs_review
+
+        inv = _inv_with_one_line()
+        inv.lines.append(
+            InvoiceLine(description="Second line", net_amount=10.0, gst_amount=0.0)
+        )
+        state = {
+            TAX_JURISDICTION_KEY: JURISDICTION_AMBIGUOUS,
+            FLAG_FOR_HUMAN_KEY: True,
+            JURISDICTION_REVIEW_REASON_KEY: (
+                "Client tax region not set — please confirm region in client settings"
+            ),
+            "normalized_invoices": [
+                {
+                    "invoice_number": "INV-1",
+                    "reconciled": True,
+                    "lines": [
+                        {
+                            "description": "Workshop labour",
+                            "tax_flagged": False,
+                            "tax_confidence": 0.5,
+                            "tax_reason": "AMBIGUOUS: client region not set",
+                        },
+                        {
+                            "description": "Second line",
+                            "tax_flagged": False,
+                            "tax_confidence": 0.5,
+                            "tax_reason": "AMBIGUOUS: client region not set",
+                        },
+                    ],
+                }
+            ],
+        }
+        needs_review, reasons = _needs_review(state)
+        assert needs_review is True
+        assert len(reasons) == 1
+        assert "Client tax region not set" in reasons[0]
+        assert "flagged for tax review" not in reasons[0]
 
     def test_sg_path_falls_back_to_classifier_when_llm_unavailable(self, monkeypatch):
         """SG invoice + LLM failure → fall back to deterministic SG classifier."""
@@ -375,7 +548,7 @@ def _build_normalized_for_state(supplier_country: str = "MY"):
         invoice_date=date(2024, 6, 1),
         our_gst_registered=True,
         supplier=PartyInfo(
-            name="YAU LEE MOTOR", gst_regno="202301011111", country=supplier_country,
+            name="Apex Motor", gst_regno="200012346A", country=supplier_country,
         ),
     )
     inv.lines.append(InvoiceLine(description="Workshop labour", net_amount=60.19, gst_amount=4.81))
@@ -409,8 +582,8 @@ class TestTaxNodeWritesJurisdiction:
             "region": "MALAYSIA",
             "base_currency": "MYR",
             "tax_registered": True,
-            "client_id": "jbi-plus-auto",
-            "client_name": "JBI PLUS AUTO SDN BHD",
+            "client_id": "acme-auto",
+            "client_name": "Acme Auto Sdn Bhd",
             "normalized_invoices": [invoice_to_dict(_build_normalized_for_state("MY"))],
         }
         ctx = FakeContext(state)

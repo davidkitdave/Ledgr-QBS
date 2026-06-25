@@ -1,0 +1,38 @@
+{
+  "eval_cases": [
+    {
+      "eval_case_id": "invoice_processing_success",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "For client_id playground, process the file at tests/eval_invoices/invoice_8.pdf with process_document_batch. Confirm status=success."
+          }
+        ]
+      },
+      "metadata": {
+        "expect_status": "success",
+        "expect_doc_type": "invoice",
+        "expect_tax_policy_version": "sg-2026-01",
+        "max_llm_call_count": 2
+      }
+    },
+    {
+      "eval_case_id": "invoice_processing_success_2",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "For client_id playground, process the file at tests/eval_invoices/invoice_9.pdf with process_document_batch. Confirm status=success."
+          }
+        ]
+      },
+      "metadata": {
+        "expect_status": "success",
+        "expect_doc_type": "invoice",
+        "expect_tax_policy_version": "sg-2026-01",
+        "max_llm_call_count": 2
+      }
+    }
+  ]
+}

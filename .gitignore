@@ -29,6 +29,8 @@ invoice_processing/data/agent_output/
 invoice_processing/data/alf_output/
 # Generated eval results + QA screenshots (build output — never commit)
 artifacts/grade_results/
+# Generated agent traces (eval run output, may carry extracted doc data — never commit)
+artifacts/traces/
 
 # Local eval data (real invoices — never commit, see no-real-client-data rule)
 tests/eval_invoices/
@@ -36,6 +38,11 @@ tests/eval_invoices/
 scratch/
 # Local playground profile may carry a real client name — never commit
 playground_profile.json
+# Subagent-driven-development scratch (task briefs, progress ledger) — local only
+.superpowers/
+# Machine-extracted golden manifest carries real vendor names + superseded by
+# golden_v2_sample.json (synthetic) — never commit
+tests/eval/datasets/golden_manifest.json
 # Knowledge-graph tooling output
 graphify-out/
 .qa_tmp/

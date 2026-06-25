@@ -79,7 +79,7 @@ Three places the build used to be Python-rigid and is now LLM-first:
    receives the resolved jurisdiction + reference YAML rate band via state
    templating; Python only does the math guard (rate ± tolerance).
 2. **Country / tax-system extraction** (`invoice_extractor.py` /
-   `ledger_extract.py`) — was null for YAU LEE. Now extracts
+   `ledger_extract.py`) — was null for Apex Motor. Now extracts
    `supplier.country` / `customer.country` + `tax_system_hint` and threads
    them into `NormalizedInvoice.party.country` so the jurisdiction router
    can pick the right rule set.
@@ -153,6 +153,6 @@ doc-type → lane mapping:
 | Where does the "is this a receipt or invoice" decision happen? | `classify_node` → `document_classifier.classify_document` (LLM). Result in `state[DOC_TYPE_KEY]`. |
 | Where does "is this purchase or sales" decide? | `extract_invoice_document_node` → `process_invoice_document` → understand-extract LLM emits `direction_for_client`. Result in `state[DIRECTION_KEY]`. |
 | Where does "which tax code" decide? | `tax_node` → `tax_reasoning.reason_one_invoice` (LLM-first). Pure rate guard in Python. Result per-line in `line.tax_treatment` + `state["tax_jurisdiction"]`. |
-| Where does "which GL account" decide? | `categorize_node` → `categorizer._llm_match_lines` (LLM, only for unresolved lines). Result in `line.account_code`. Empty COA in state means the LLM is skipped (YAU LEE bug). |
+| Where does "which GL account" decide? | `categorize_node` → `categorizer._llm_match_lines` (LLM, only for unresolved lines). Result in `line.account_code`. Empty COA in state means the LLM is skipped (Apex Motor bug). |
 | Where does HITL pause? | `approval_gate` (terminal) or `review_extraction_node` (mid-flow) — both yield `RequestInput` events. |
 | Where does the chat lane route? | `assistant_app` (separate App, multi-turn `LlmAgent`). Not in the document graph. |

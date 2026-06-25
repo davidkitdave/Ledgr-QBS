@@ -1,6 +1,6 @@
 name: "ledgr-qbs"
 acli_version: "0.4.0"
-agent_directory: "accounting_agents"
+agent_directory: "ledgr_agent"
 # Chat-lane eval (cluster B) — session-state-heavy; use eval/ledgr_eval_generate.py
 # or point agents-cli at this directory for prompt-only smoke tests.
 chat_agent_directory: "accounting_agents/chat_eval"

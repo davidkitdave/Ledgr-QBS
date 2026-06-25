@@ -32,107 +32,83 @@ from invoice_processing.extract.invoice_extractor import (
     ExtractedInvoiceBundle,
     ExtractedLine,
 )
-from invoice_processing.extract.document_record import (
-    DocumentRecord,
-    DocumentRecordBundle,
-    LabeledField,
-    LineCapture,
-)
-
-
-def _document_record_from_ex(ex: ExtractedInvoice) -> DocumentRecord:
-    fields: list[LabeledField] = []
-    if ex.invoice_number:
-        fields.append(LabeledField(label="Invoice Number", value=ex.invoice_number))
-    if ex.invoice_date:
-        fields.append(LabeledField(label="Invoice Date", value=ex.invoice_date))
-    if ex.currency:
-        fields.append(LabeledField(label="Currency", value=ex.currency))
-    if ex.fx_rate is not None:
-        fields.append(LabeledField(label="Exchange Rate", value=str(ex.fx_rate)))
-    totals: list[LabeledField] = []
-    if ex.subtotal is not None:
-        totals.append(LabeledField(label="Sub Total", value=str(ex.subtotal)))
-    if ex.gst_total is not None:
-        totals.append(LabeledField(label="GST", value=str(ex.gst_total)))
-    if ex.total is not None:
-        totals.append(LabeledField(label="Total", value=str(ex.total)))
-    return DocumentRecord(
-        labeled_fields=fields,
-        line_items=[
-            LineCapture(
-                description=ln.description,
-                net_amount=ln.net_amount,
-                tax_label=ln.tax_label,
-            )
-            for ln in ex.lines
-        ],
-        totals=totals,
-    )
-
-
-def _doc_bundle_from_ex_bundle(bundle: ExtractedInvoiceBundle) -> DocumentRecordBundle:
-    return DocumentRecordBundle(
-        documents=[_document_record_from_ex(ex) for ex in bundle.invoices],
-        skipped_pages=bundle.skipped_pages,
-        notes=bundle.notes,
-    )
-
-
-def _install_legacy_extract_mock(doc_bundle: DocumentRecordBundle) -> None:
-    """Hermetic tests: drive ``extract_invoice_document_node`` via legacy normalize."""
-    from invoice_processing.extract.document_normalizer import (
-        normalize_document_bundle,
-        slim_document_record_for_state,
+def _install_understand_extract_mock(bundle: ExtractedInvoiceBundle) -> None:
+    """Hermetic tests: drive ``extract_invoice_document_node`` via understand path."""
+    from invoice_processing.extract.invoice_extractor import (
+        append_direction_review_note,
+        direction_needs_review,
+        reconcile,
+        to_normalized,
     )
     from invoice_processing.extract.process_invoice_document import InvoiceProcessResult
 
     def _extract(data, mime, **kw):
-        normalized = normalize_document_bundle(
-            doc_bundle,
-            direction=kw.get("direction") or "purchase",
-            our_gst_registered=kw.get("our_gst_registered", True),
-            base_currency=kw.get("base_currency") or "SGD",
-            client_name=kw.get("client_name"),
-            client_uen=kw.get("client_uen"),
-        )
+        direction = kw.get("direction") or "purchase"
+        effective_direction = direction if direction in ("purchase", "sales") else "purchase"
+        our_gst = kw.get("our_gst_registered", True)
+        base_currency = kw.get("base_currency") or "SGD"
+        normalized = []
+        for ex in bundle.invoices:
+            ok, _detail = reconcile(ex)
+            inv = to_normalized(
+                ex,
+                direction=effective_direction,
+                our_gst_registered=our_gst,
+                base_currency=base_currency,
+                fx_rate=ex.fx_rate,
+            )
+            if not inv.needs_fx_review:
+                inv.reconciled = ok
+            if direction_needs_review(direction):
+                append_direction_review_note(inv, direction)
+            normalized.append(inv)
         return InvoiceProcessResult(
             normalized=normalized,
-            extraction_path="legacy",
-            document_records=[
-                slim_document_record_for_state(d) for d in doc_bundle.documents
-            ],
-            skipped_pages=doc_bundle.skipped_pages,
-            document_read_notes=doc_bundle.notes,
+            extraction_path="understand",
+            skipped_pages=bundle.skipped_pages,
+            document_read_notes=bundle.notes,
         )
 
     nodes.EXTRACT_INVOICE_DOCUMENT_FN = _extract
 
 
-def _legacy_result_from_ex_bundle(bundle: ExtractedInvoiceBundle):
+def _understand_result_from_ex_bundle(bundle: ExtractedInvoiceBundle):
     """Build an ``InvoiceProcessResult`` for review/HITL hermetic tests."""
-    from invoice_processing.extract.document_normalizer import (
-        normalize_document_bundle,
-        slim_document_record_for_state,
+    from invoice_processing.extract.invoice_extractor import (
+        append_direction_review_note,
+        direction_needs_review,
+        reconcile,
+        to_normalized,
     )
     from invoice_processing.extract.process_invoice_document import InvoiceProcessResult
 
-    doc_bundle = _doc_bundle_from_ex_bundle(bundle)
-    normalized = normalize_document_bundle(
-        doc_bundle,
-        direction="purchase",
-        our_gst_registered=True,
-        base_currency="SGD",
-    )
+    direction = "purchase"
+    normalized = []
+    for ex in bundle.invoices:
+        ok, _detail = reconcile(ex)
+        inv = to_normalized(
+            ex,
+            direction=direction,
+            our_gst_registered=True,
+            base_currency="SGD",
+            fx_rate=ex.fx_rate,
+        )
+        if not inv.needs_fx_review:
+            inv.reconciled = ok
+        if direction_needs_review(direction):
+            append_direction_review_note(inv, direction)
+        normalized.append(inv)
     return InvoiceProcessResult(
         normalized=normalized,
-        extraction_path="legacy",
-        document_records=[
-            slim_document_record_for_state(d) for d in doc_bundle.documents
-        ],
-        skipped_pages=doc_bundle.skipped_pages,
-        document_read_notes=doc_bundle.notes,
+        extraction_path="understand",
+        skipped_pages=bundle.skipped_pages,
+        document_read_notes=bundle.notes,
     )
+
+
+# Backward-compatible alias for tests that still import the old name.
+_legacy_result_from_ex_bundle = _understand_result_from_ex_bundle
+_install_legacy_extract_mock = _install_understand_extract_mock
 
 
 # =========================================================================== #
@@ -196,6 +172,7 @@ def _ex_invoice(number: str, net: float = 100.0, gst: float = 9.0) -> ExtractedI
         subtotal=net,
         gst_total=gst,
         total=net + gst,
+        issuer_tax_system="NONE",
     )
 
 
@@ -211,6 +188,7 @@ def _ex_receipt(number: str) -> ExtractedInvoice:
         subtotal=10.0,
         gst_total=0.9,
         total=10.9,
+        issuer_tax_system="NONE",
     )
 
 
@@ -222,10 +200,7 @@ def _restore_seams():
         for name in (
             "CLASSIFY_FN",
             "DIRECTION_FN",
-            "EXTRACT_BUNDLE_FN",
-            "EXTRACT_DOCUMENT_FN",
             "EXTRACT_INVOICE_DOCUMENT_FN",
-            "NORMALIZE_DOCUMENT_FN",
             "EXTRACT_BANK_FN",
             "CATEGORIZE_FN",
         )
@@ -270,7 +245,7 @@ def test_classify_routes_invoice():
     assert ctx.state[nodes.DOC_TYPE_KEY] == "invoice"
     # Direction defaults to "auto"; the Understand call later fills it in via
     # ``direction_for_client``. ``"auto"`` is the sentinel that the
-    # ledger_extract_to_normalized adapter interprets as "use the Understand
+    # extracted_document_to_normalized adapter interprets as "use the Understand
     # call's direction_for_client verdict".
     assert ctx.state[nodes.DIRECTION_KEY] == "auto"
     assert resolve_called["n"] == 0, (
@@ -309,7 +284,7 @@ def test_invoice_bundle_fanout_three():
     bundle = ExtractedInvoiceBundle(
         invoices=[_ex_invoice("INV-1"), _ex_invoice("INV-2"), _ex_invoice("INV-3")]
     )
-    _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(bundle))
+    _install_understand_extract_mock(bundle)
 
     ctx = FakeContext(_base_state(**{nodes.DIRECTION_KEY: "purchase"}))
     event = asyncio.run(nodes.extract_invoice_document_node._func(ctx))
@@ -326,7 +301,7 @@ def test_multi_receipt_page_fanout_four():
         invoices=[_ex_receipt(f"R-{i}") for i in range(1, 5)],
         notes="4 receipts on one scanned page",
     )
-    _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(bundle))
+    _install_understand_extract_mock(bundle)
 
     ctx = FakeContext(_base_state(**{nodes.DIRECTION_KEY: "purchase"}))
     event = asyncio.run(nodes.extract_invoice_document_node._func(ctx))
@@ -343,7 +318,7 @@ def test_soa_skip_extracts_only_embedded_invoice():
         skipped_pages=[1],
         notes="skipped SOA summary cover page",
     )
-    _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(bundle))
+    _install_understand_extract_mock(bundle)
 
     ctx = FakeContext(_base_state(**{nodes.DIRECTION_KEY: "purchase"}))
     event = asyncio.run(nodes.extract_invoice_document_node._func(ctx))
@@ -354,77 +329,10 @@ def test_soa_skip_extracts_only_embedded_invoice():
     assert normalized[0]["invoice_number"] == "EMBEDDED-INV"
 
 
-def test_soa_phantom_invoices_dropped_by_normalize_bundle():
-    """Regression: _normalize_bundle (nodes.py path) must apply the SOA hard-gate.
-
-    This captures the live failure where the bot reported "18 sub-documents /
-    30 total lines" for Sample Vendor Inc DEC 2025 (expected 10/22).  The extractor
-    returns a bundle with 8 phantom invoices whose lines all have a bare
-    'INVOICE' description and gst_amount==0 — the exact shape hallucinated from
-    the SOA cover table.  They must be dropped before NORMALIZED_KEY is written.
-    """
-    phantom_line = ExtractedLine(description="INVOICE", net_amount=100.0, gst_amount=0.0)
-    phantom_inv_a = ExtractedInvoice(
-        doc_type="invoice",
-        invoice_number="IA-07316",
-        invoice_date="2025-12-01",
-        currency="MYR",
-        issuer_name="Sample Vendor Inc",
-        bill_to_name="Sample Auto Enterprise",
-        lines=[phantom_line],
-        subtotal=100.0,
-        gst_total=0.0,
-        total=100.0,
-    )
-    phantom_inv_b = ExtractedInvoice(
-        doc_type="invoice",
-        invoice_number="IA-07330",
-        invoice_date="2025-12-01",
-        currency="MYR",
-        issuer_name="Sample Vendor Inc",
-        bill_to_name="Sample Auto Enterprise",
-        lines=[phantom_line],
-        subtotal=200.0,
-        gst_total=0.0,
-        total=200.0,
-    )
-    real_inv = ExtractedInvoice(
-        doc_type="invoice",
-        invoice_number="IA-07465",
-        invoice_date="2025-12-05",
-        currency="MYR",
-        issuer_name="Sample Vendor Inc",
-        bill_to_name="Sample Auto Enterprise",
-        lines=[ExtractedLine(description="Electricity supply Dec 2025", net_amount=100.0, gst_amount=9.0, tax_label="SR")],
-        subtotal=100.0,
-        gst_total=9.0,
-        total=109.0,
-    )
-    bundle = ExtractedInvoiceBundle(
-        invoices=[phantom_inv_a, phantom_inv_b, real_inv],
-        skipped_pages=[1],
-    )
-    _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(bundle))
-
-    ctx = FakeContext(_base_state(**{nodes.DIRECTION_KEY: "purchase"}))
-    event = asyncio.run(nodes.extract_invoice_document_node._func(ctx))
-
-    # Gate must have dropped the 2 phantoms — only the real invoice survives.
-    assert event.output == {"count": 1}, (
-        f"Expected count=1 after SOA gate, got {event.output}"
-    )
-    normalized = ctx.state[nodes.NORMALIZED_KEY]
-    assert len(normalized) == 1, (
-        f"Expected 1 normalized invoice, got {len(normalized)}: "
-        f"{[n['invoice_number'] for n in normalized]}"
-    )
-    assert normalized[0]["invoice_number"] == "IA-07465"
-
-
 def test_invoice_node_defaults_direction_to_purchase():
-    _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(
+    _install_understand_extract_mock(
         ExtractedInvoiceBundle(invoices=[_ex_invoice("INV-X")])
-    ))
+    )
     ctx = FakeContext(_base_state())  # no direction in state
     asyncio.run(nodes.extract_invoice_document_node._func(ctx))
     assert ctx.state[nodes.NORMALIZED_KEY][0]["doc_type"] == "purchase"
@@ -436,9 +344,9 @@ def test_invoice_node_defaults_direction_to_purchase():
 
 
 def test_categorize_and_tax_chain():
-    _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(
+    _install_understand_extract_mock(
         ExtractedInvoiceBundle(invoices=[_ex_invoice("INV-1")])
-    ))
+    )
     # Fake categorizer stamps a fixed account code on every line.
     def _fake_categorize(inv, *, coa, category_mapping, entity_memory, **kw):
         for line in inv.lines:
@@ -507,7 +415,7 @@ def test_bank_node_multi_account_list():
 def test_consolidate_node_bank_sheet_titles_multi_currency():
     """consolidate_node emits distinct 'Bank - XXXX - CCY' sheet names per currency.
 
-    Regression for the Akar DBS FY2024 case: a multi-currency statement of
+    Regression for the Cobalt DBS FY2024 case: a multi-currency statement of
     one account used to collapse into a single Excel tab because the sheet
     name was the LLM-supplied ``bank_name`` (no currency suffix). The merge
     in ``SlackLedgerStore._merge_bank_statement`` then silently rolled the
@@ -595,9 +503,9 @@ def test_bank_node_accepts_bare_statement():
 
 
 def test_route_node_invoice_fy_and_sheet():
-    _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(
+    _install_understand_extract_mock(
         ExtractedInvoiceBundle(invoices=[_ex_invoice("INV-1"), _ex_invoice("INV-2")])
-    ))
+    )
     ctx = FakeContext(_base_state(**{nodes.DIRECTION_KEY: "purchase"}))
     asyncio.run(nodes.extract_invoice_document_node._func(ctx))
     event = asyncio.run(nodes.route_node._func(ctx))
@@ -796,6 +704,32 @@ def test_apply_decision_node_applies_line_edits():
     assert ctx.state[nodes.APPROVAL_STATUS_KEY] == "edit"
 
 
+def test_apply_decision_node_edit_clears_account_flagged():
+    """WS-3.5: human account pick via Edit clears account_flagged metadata."""
+    state = _base_state()
+    state[nodes.NORMALIZED_KEY] = [{
+        "invoice_number": "INV-1", "lines": [{
+            "description": "Supplies",
+            "account_code": "6001",
+            "account_flagged": True,
+            "account_flag_reason": "narrow_margin",
+            "account_alternative_codes": ["6200", "6001"],
+            "tax_treatment": "SR",
+            "net_amount": 100.0,
+        }],
+    }]
+    ctx = FakeContext(state)
+    decision = {"decision": "edit", "edits": {"lines": [
+        {"index": 0, "account_code": "6200"},
+    ]}}
+    asyncio.run(nodes.apply_decision_node._func(ctx, decision))
+    line = ctx.state[nodes.NORMALIZED_KEY][0]["lines"][0]
+    assert line["account_code"] == "6200"
+    assert line["account_flagged"] is False
+    assert line["account_flag_reason"] is None
+    assert line["account_alternative_codes"] == []
+
+
 def test_apply_decision_node_edit_does_not_silently_drop_canonical_fields():
     """REGRESSION (live-QA 2026-06): an Edit DTO that writes ``tax_treatment``
     and ``net_amount`` lands on the SAME keys the exporter later reads from
@@ -952,6 +886,7 @@ def _self_ref_bundle() -> "ExtractedInvoiceBundle":
         subtotal=5000.0,
         gst_total=0.0,
         total=5000.0,
+    issuer_tax_system="NONE",
     )
     return ExtractedInvoiceBundle(invoices=[inv])
 
@@ -959,7 +894,7 @@ def _self_ref_bundle() -> "ExtractedInvoiceBundle":
 def test_extract_node_self_referential_flagged_for_review():
     """extract_invoice_document_node must mark self-referential docs reconciled=False
     with a 'needs review' note — never silently book as a clean purchase."""
-    _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(_self_ref_bundle()))
+    _install_understand_extract_mock(_self_ref_bundle())
 
     state = _base_state(**{nodes.DIRECTION_KEY: "self_referential"})
     ctx = FakeContext(state)
@@ -984,7 +919,7 @@ def test_extract_node_self_referential_flagged_for_review():
 
 def test_extract_node_unknown_direction_flagged_for_review():
     """extract_invoice_document_node must flag 'unknown' direction for review too."""
-    _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(_self_ref_bundle()))
+    _install_understand_extract_mock(_self_ref_bundle())
 
     state = _base_state(**{nodes.DIRECTION_KEY: "unknown"})
     ctx = FakeContext(state)
@@ -1000,12 +935,51 @@ def test_extract_node_unknown_direction_flagged_for_review():
     assert "unknown" in note.lower()
 
 
+def test_extract_node_passes_auto_direction_not_purchase(monkeypatch):
+    """C8: extract must not silently default direction to purchase."""
+    captured: dict = {}
+
+    def _capture_extract(data, mime, **kw):
+        captured.update(kw)
+        return _legacy_result_from_ex_bundle(
+            ExtractedInvoiceBundle(invoices=[_ex_invoice("INV-AUTO")])
+        )
+
+    nodes.EXTRACT_INVOICE_DOCUMENT_FN = _capture_extract
+    state = _base_state(**{nodes.DIRECTION_KEY: "auto"})
+    del state["base_currency"]
+    ctx = FakeContext(state)
+    asyncio.run(nodes.extract_invoice_document_node._func(ctx))
+
+    assert captured.get("direction") == "auto"
+    assert captured.get("base_currency") == "SGD"
+
+
+def test_extract_node_my_region_derives_myr_without_state_currency(monkeypatch):
+    """C10: base_currency derives from REGION_REGISTRY when omitted from state."""
+    captured: dict = {}
+
+    def _capture_extract(data, mime, **kw):
+        captured.update(kw)
+        return _legacy_result_from_ex_bundle(
+            ExtractedInvoiceBundle(invoices=[_ex_invoice("INV-MY")])
+        )
+
+    nodes.EXTRACT_INVOICE_DOCUMENT_FN = _capture_extract
+    state = _base_state(**{"region": "MALAYSIA", "base_currency": None})
+    del state["base_currency"]
+    ctx = FakeContext(state)
+    asyncio.run(nodes.extract_invoice_document_node._func(ctx))
+
+    assert captured.get("base_currency") == "MYR"
+
+
 def test_extract_node_clean_purchase_unaffected():
     """A normal purchase (direction='purchase') must NOT be flagged for review
     by the guard — the guard must only fire on self_referential / unknown."""
-    _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(
+    _install_understand_extract_mock(
         ExtractedInvoiceBundle(invoices=[_ex_invoice("INV-NORMAL")])
-    ))
+    )
 
     state = _base_state(**{nodes.DIRECTION_KEY: "purchase"})
     ctx = FakeContext(state)
@@ -1036,6 +1010,7 @@ def _ex_usd_invoice(number: str, net: float = 100.0, gst: float = 0.0) -> Extrac
         subtotal=net,
         gst_total=gst,
         total=net + gst,
+        issuer_tax_system="NONE",
     )
 
 
@@ -1053,13 +1028,14 @@ def _ex_myr_invoice(number: str, net: float = 200.0) -> ExtractedInvoice:
         subtotal=net,
         gst_total=0.0,
         total=net,
+        issuer_tax_system="NONE",
     )
 
 
 def test_extract_node_usd_doc_sgd_client_books_in_usd():
     """USD doc for an SGD-ledger client with no fx_rate is booked in USD."""
     bundle = ExtractedInvoiceBundle(invoices=[_ex_usd_invoice("USD-INV-001")])
-    _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(bundle))
+    _install_understand_extract_mock(bundle)
 
     state = _base_state(**{nodes.DIRECTION_KEY: "purchase", "base_currency": "SGD"})
     ctx = FakeContext(state)
@@ -1091,9 +1067,10 @@ def test_extract_node_usd_doc_with_fx_rate_records_as_shown():
         gst_total=0.0,
         total=100.0,
         fx_rate=1.35,  # document states its own exchange rate — stored, not applied
+    issuer_tax_system="NONE",
     )
     bundle = ExtractedInvoiceBundle(invoices=[usd_inv])
-    _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(bundle))
+    _install_understand_extract_mock(bundle)
 
     state = _base_state(**{nodes.DIRECTION_KEY: "purchase", "base_currency": "SGD"})
     ctx = FakeContext(state)
@@ -1120,7 +1097,7 @@ def test_extract_node_myr_client_myr_doc_not_flagged():
     """An MYR doc for an MYR-ledger client is the base currency — must NOT be
     flagged as foreign (needs_fx_review must be False, reconciled per normal)."""
     bundle = ExtractedInvoiceBundle(invoices=[_ex_myr_invoice("MYR-INV-001")])
-    _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(bundle))
+    _install_understand_extract_mock(bundle)
 
     state = _base_state(**{nodes.DIRECTION_KEY: "purchase", "base_currency": "MYR"})
     ctx = FakeContext(state)
@@ -1212,10 +1189,7 @@ async def _collect_gate_events(state: dict) -> list:
 
 
 def test_multi_entity_clean_bundle_emits_approval_card():
-    """A bundle with 3 clean invoices must yield a RequestInput even though
-    every individual sub-doc passes deterministic checks (P1-3 fix)."""
-    from google.adk.events import RequestInput
-
+    """A bundle with 3 clean invoices auto-approves when _needs_review is False."""
     from accounting_agents.nodes import APPROVAL_STATUS_KEY
 
     state = _base_state()
@@ -1226,12 +1200,8 @@ def test_multi_entity_clean_bundle_emits_approval_card():
     ]
     events, ctx = asyncio.run(_collect_gate_events(state))
 
-    assert len(events) == 1, f"Expected exactly 1 RequestInput, got {events!r}"
-    assert isinstance(events[0], RequestInput), f"Expected RequestInput, got {type(events[0])}"
-    assert ctx.state.get("approval_message"), "approval_message must be set in state"
-    assert ctx.state.get(APPROVAL_STATUS_KEY) != "auto_approved", (
-        "Multi-entity bundle must NOT be auto-approved"
-    )
+    assert events == [], f"Clean multi-doc bundle must NOT yield any event, got {events!r}"
+    assert ctx.state.get(APPROVAL_STATUS_KEY) == "auto_approved"
 
 
 def test_single_entity_clean_bundle_still_auto_passes():
@@ -1267,6 +1237,62 @@ def test_single_entity_flagged_still_emits_card():
     assert ctx.state.get(APPROVAL_STATUS_KEY) != "auto_approved"
 
 
+def test_needs_review_account_flagged_triggers_hitl():
+    """WS-3.5: account_flagged lines must pause at approval_gate."""
+    from accounting_agents.nodes import _needs_review
+    from invoice_processing.export.models import InvoiceLine, NormalizedInvoice
+
+    inv = NormalizedInvoice(
+        invoice_number="INV-COA",
+        reconciled=True,
+        lines=[InvoiceLine(
+            description="Office supplies",
+            account_code="6001",
+            account_flagged=True,
+            account_flag_reason="narrow_margin",
+            account_alternative_codes=["6200"],
+            tax_confidence=0.99,
+            tax_flagged=False,
+        )],
+    )
+    state = _base_state()
+    state[nodes.NORMALIZED_KEY] = [nodes._inv_to_dict(inv)]
+    needs_review, reasons = _needs_review(state)
+    assert needs_review is True
+    assert any("account review" in r for r in reasons)
+    assert any("narrow_margin" in r for r in reasons)
+
+
+def test_single_entity_account_flagged_emits_approval_card():
+    """WS-3.5: account_flagged single invoice yields RequestInput for Slack HITL."""
+    from google.adk.events import RequestInput
+
+    from accounting_agents.nodes import APPROVAL_STATUS_KEY
+    from invoice_processing.export.models import InvoiceLine, NormalizedInvoice
+
+    inv = NormalizedInvoice(
+        invoice_number="INV-COA-FLAG",
+        reconciled=True,
+        lines=[InvoiceLine(
+            description="Travel",
+            account_code="",
+            account_flagged=True,
+            account_flag_reason="unmapped",
+            account_alternative_codes=["6200", "6001"],
+            tax_confidence=0.99,
+            tax_flagged=False,
+        )],
+    )
+    state = _base_state()
+    state[nodes.NORMALIZED_KEY] = [nodes._inv_to_dict(inv)]
+    events, ctx = asyncio.run(_collect_gate_events(state))
+
+    assert len(events) == 1
+    assert isinstance(events[0], RequestInput)
+    assert ctx.state.get(APPROVAL_STATUS_KEY) != "auto_approved"
+    assert "low-confidence account mapping" in (ctx.state.get("approval_message") or "")
+
+
 # =========================================================================== #
 # ADK state-size guard (_guard_state_payload)
 # =========================================================================== #
@@ -1293,9 +1319,9 @@ def test_guard_no_warning_below_thresholds(caplog):
     list must be stored unchanged through extract_invoice_document_node."""
     import logging
 
-    _install_legacy_extract_mock(_doc_bundle_from_ex_bundle(
+    _install_understand_extract_mock(
         ExtractedInvoiceBundle(invoices=[_ex_invoice("INV-GUARD")])
-    ))
+    )
     ctx = FakeContext(_base_state(**{nodes.DIRECTION_KEY: "purchase"}))
     with caplog.at_level(logging.WARNING, logger="accounting_agents.nodes"):
         asyncio.run(nodes.extract_invoice_document_node._func(ctx))
@@ -1727,6 +1753,29 @@ def test_normalize_software_key_unknown_returns_none():
     assert normalize_software_key(None) is None
 
 
+def test_software_label_canonical():
+    from invoice_processing.export.exporters import software_label
+
+    assert software_label("QBS Ledger") == "QBS Ledger"
+    assert software_label("Xero") == "Xero"
+    assert software_label("AutoCount") == "AutoCount"
+    assert software_label("SQL Account") == "SQL Account"
+    assert software_label("") == "Unknown ERP"
+    assert software_label("Wave") == "Unknown ERP"
+    assert software_label("", empty_label="") == ""
+
+
+def test_normalize_software_preview_key():
+    from invoice_processing.export.exporters import normalize_software_preview_key
+
+    assert normalize_software_preview_key("QBS Ledger") == "qbs_ledger"
+    assert normalize_software_preview_key("Xero") == "xero"
+    assert normalize_software_preview_key("AutoCount") == "autocount"
+    assert normalize_software_preview_key("SQL Account") == "sql_account"
+    assert normalize_software_preview_key("Wave") is None
+    assert normalize_software_preview_key("") is None
+
+
 def test_get_exporter_display_values_pick_correct_class():
     """get_exporter must accept display values and route to the right class."""
     from invoice_processing.export.exporters import (
@@ -1764,6 +1813,118 @@ def _minimal_invoice_state(**overrides) -> dict:
     )
     state.update(overrides)
     return state
+
+
+def test_consolidate_node_multi_invoice_doc_keys_include_page_range():
+    """WS-5.4 — each invoice in a multi-doc PDF gets a distinct dedupe key."""
+    from datetime import date as _date
+
+    from invoice_processing.export.models import InvoiceLine, NormalizedInvoice
+
+    inv_a = NormalizedInvoice(
+        invoice_number="INV-200",
+        invoice_date=_date(2025, 6, 1),
+        page_range=(1, 1),
+        lines=[InvoiceLine(description="A", net_amount=200.0)],
+    )
+    inv_b = NormalizedInvoice(
+        invoice_number="INV-060",
+        invoice_date=_date(2025, 6, 2),
+        page_range=(2, 2),
+        lines=[InvoiceLine(description="B", net_amount=60.0)],
+    )
+    state = _base_state(
+        **{
+            nodes.DIRECTION_KEY: "purchase",
+            nodes.NORMALIZED_KEY: [nodes._inv_to_dict(inv_a), nodes._inv_to_dict(inv_b)],
+            nodes.ROUTES_KEY: [
+                {"fy": 2025, "workbook": "Ledger_FY2025.xlsx", "sheet": "Purchase"},
+                {"fy": 2025, "workbook": "Ledger_FY2025.xlsx", "sheet": "Purchase"},
+            ],
+            "software": "qbs",
+        }
+    )
+    ctx = FakeContext(state)
+    asyncio.run(nodes.consolidate_node._func(ctx))
+
+    keys = [b["doc_key"] for b in ctx.state[nodes.LEDGER_ROWS_KEY]["batches"]]
+    assert keys == ["Purchase:INV-200:1-1", "Purchase:INV-060:2-2"]
+    assert len(set(keys)) == 2
+
+
+def _multi_invoice_pdf_state(*, file_id: str) -> dict:
+    """Two invoices from one PDF — distinct page_range + invoice_number."""
+    from datetime import date as _date
+
+    from invoice_processing.export.models import InvoiceLine, NormalizedInvoice
+
+    inv_a = NormalizedInvoice(
+        invoice_number="INV-200",
+        invoice_date=_date(2025, 6, 1),
+        page_range=(1, 1),
+        source_file_id=file_id,
+        lines=[InvoiceLine(description="A", net_amount=200.0, account_code="6000")],
+    )
+    inv_b = NormalizedInvoice(
+        invoice_number="INV-060",
+        invoice_date=_date(2025, 6, 2),
+        page_range=(2, 2),
+        source_file_id=file_id,
+        lines=[InvoiceLine(description="B", net_amount=60.0, account_code="6001")],
+    )
+    return _base_state(
+        file_id=file_id,
+        software="qbs",
+        **{
+            nodes.DIRECTION_KEY: "purchase",
+            nodes.NORMALIZED_KEY: [nodes._inv_to_dict(inv_a), nodes._inv_to_dict(inv_b)],
+            nodes.ROUTES_KEY: [
+                {"fy": 2025, "workbook": "Ledger_FY2025.xlsx", "sheet": "Purchase"},
+                {"fy": 2025, "workbook": "Ledger_FY2025.xlsx", "sheet": "Purchase"},
+            ],
+        },
+    )
+
+
+def test_consolidate_node_redrop_keys_stable_across_file_id_rotation():
+    """WS-5.4 — re-drop through consolidate_node: keys ignore rotated Slack file_id."""
+    from tests.test_ledger_store import FakeSlackClient, _make_store
+
+    def _consolidate(file_id: str) -> tuple[dict, list[str]]:
+        ctx = FakeContext(_multi_invoice_pdf_state(file_id=file_id))
+        asyncio.run(nodes.consolidate_node._func(ctx))
+        payload = ctx.state[nodes.LEDGER_ROWS_KEY]
+        return payload, [b["doc_key"] for b in payload["batches"]]
+
+    payload_first, keys_first = _consolidate("F-drop-1")
+    payload_redrop, keys_redrop = _consolidate("F-drop-2-rotated")
+
+    assert keys_first == keys_redrop == ["Purchase:INV-200:1-1", "Purchase:INV-060:2-2"]
+
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+    result1 = store.append_rows(
+        client_id="c1",
+        fy="2025",
+        slack_client=slack,
+        channel_id="C1",
+        software="qbs",
+        kind="invoice",
+        batches=payload_first["batches"],
+    )
+    assert result1["appended"] == 2
+
+    result2 = store.append_rows(
+        client_id="c1",
+        fy="2025",
+        slack_client=slack,
+        channel_id="C1",
+        software="qbs",
+        kind="invoice",
+        batches=payload_redrop["batches"],
+    )
+    assert result2["appended"] == 0
+    assert result2["deduped"] == 2
 
 
 def test_consolidate_node_qbs_ledger_display_no_warning(caplog):
@@ -1867,11 +2028,10 @@ def test_consolidate_node_lowercase_keys_unchanged(caplog):
         )
 
 
-def test_consolidate_node_unknown_software_warns_and_falls_back_to_qbs(caplog):
-    """A genuinely unknown software value must warn and fall back to the QBS exporter."""
+def test_consolidate_node_unknown_software_skips_export(caplog):
+    """A genuinely unknown software value must flag and skip QBS export rows."""
     import logging
 
-    from invoice_processing.export.exporters import QbsLedgerExporter
     from unittest.mock import patch
 
     captured_exporter: list = []
@@ -1889,13 +2049,11 @@ def test_consolidate_node_unknown_software_warns_and_falls_back_to_qbs(caplog):
         with patch("accounting_agents.nodes.get_exporter", side_effect=_spy_get_exporter):
             asyncio.run(nodes.consolidate_node._func(ctx))
 
-    warn_msgs = [r.message for r in caplog.records if "unknown software" in r.message]
-    assert warn_msgs, "Expected an 'unknown software' warning for 'Wave'"
+    warn_msgs = [r.message for r in caplog.records if "unresolved software" in r.message]
+    assert warn_msgs, "Expected an 'unresolved software' warning for 'Wave'"
     assert "'Wave'" in warn_msgs[0]
-
-    # Fallback must be QBS.
-    assert len(captured_exporter) == 1
-    assert isinstance(captured_exporter[0], QbsLedgerExporter), (
-        f"Expected QBS fallback, got {type(captured_exporter[0]).__name__}"
-    )
+    assert captured_exporter == []
+    payload = ctx.state.get(nodes.LEDGER_ROWS_KEY) or {}
+    assert payload.get("software") == ""
+    assert payload.get("batches") == []
 

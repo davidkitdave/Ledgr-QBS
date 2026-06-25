@@ -48,8 +48,13 @@ class _FakeToolContext:
         self.state = state
 
 
-def _ctx(rows: list[dict]) -> _FakeToolContext:
-    return _FakeToolContext({LEDGER_DATA_KEY: rows})
+def _ctx(rows: list[dict], *, region: str = "SINGAPORE") -> _FakeToolContext:
+    currency = "SGD" if region == "SINGAPORE" else "MYR"
+    return _FakeToolContext({
+        LEDGER_DATA_KEY: rows,
+        "region": region,
+        "base_currency": currency,
+    })
 
 
 def _empty_ctx() -> _FakeToolContext:
@@ -263,6 +268,13 @@ class TestGstThresholdCheck:
         result = gst_threshold_check(_ctx(rows))
         data = json.loads(result)
         assert data["taxable_turnover"] == pytest.approx(800_000.0)
+
+    def test_unknown_region_fails_loud(self):
+        ctx = _FakeToolContext({LEDGER_DATA_KEY: [{"Source Amount": 100.0, "Tax Rate": "SR"}]})
+        result = gst_threshold_check(ctx)
+        data = json.loads(result)
+        assert data["status"] == "unknown_region"
+        assert "region" in data["message"].lower()
 
 
 # --------------------------------------------------------------------------- #
@@ -489,21 +501,23 @@ def test_assistant_agent_is_root_multi_turn():
     diagnostic / introspection tools; thread follow-up (2026-06-17) adds
     ``lookup_coa_account`` and ``explain_posted_line``.
     """
-    from accounting_agents.assistant import assistant_agent
+    from accounting_agents.assistant import assistant_agent, ledger_analyst, ledger_corrections
 
     assert assistant_agent.mode is None
-    assert len(assistant_agent.tools) == 24
+    assert len(assistant_agent.sub_agents) == 2
+    assert len(ledger_analyst.tools) == 19
+    assert len(ledger_corrections.tools) == 6
 
 
 def test_write_tools_registered_with_confirmation():
     """The two write tools are registered as FunctionTools requiring confirmation."""
     from google.adk.tools import FunctionTool
 
-    from accounting_agents.assistant import assistant_agent
+    from accounting_agents.assistant import ledger_corrections
 
     write_tools = {
         t.func.__name__: t
-        for t in assistant_agent.tools
+        for t in ledger_corrections.tools
         if isinstance(t, FunctionTool)
         and getattr(t, "func", None) is not None
         and t.func.__name__ in ("amend_ledger_row", "remove_ledger_row")
@@ -629,8 +643,12 @@ def _qbs_ledger_rows() -> list[dict]:
 
 def _write_ctx(rows=None, *, tax_registered=True) -> _WriteToolContext:
     return _WriteToolContext(
-        {LEDGER_DATA_KEY: rows if rows is not None else _qbs_ledger_rows(),
-         "tax_registered": tax_registered}
+        {
+            LEDGER_DATA_KEY: rows if rows is not None else _qbs_ledger_rows(),
+            "tax_registered": tax_registered,
+            "region": "SINGAPORE",
+            "base_currency": "SGD",
+        }
     )
 
 
@@ -1050,11 +1068,10 @@ def test_learn_mapping_registered_as_plain_function_not_confirmed():
     """learn_mapping must be registered as a plain function tool (no require_confirmation)."""
     from google.adk.tools import FunctionTool
 
-    from accounting_agents.assistant import assistant_agent
+    from accounting_agents.assistant import ledger_corrections, learn_mapping as _lm_fn
 
-    # Collect all FunctionTool entries that wrap learn_mapping.
     confirmed_learn = [
-        t for t in assistant_agent.tools
+        t for t in ledger_corrections.tools
         if isinstance(t, FunctionTool)
         and getattr(t, "func", None) is not None
         and t.func.__name__ == "learn_mapping"
@@ -1064,12 +1081,8 @@ def test_learn_mapping_registered_as_plain_function_not_confirmed():
         "learn_mapping must NOT be registered with require_confirmation=True"
     )
 
-    # Also confirm it IS present in the tools list (either as bare function or
-    # as a FunctionTool without require_confirmation).
-    from accounting_agents.assistant import learn_mapping as _lm_fn
-
     tool_fns = set()
-    for t in assistant_agent.tools:
+    for t in ledger_corrections.tools:
         if callable(t) and not isinstance(t, FunctionTool):
             tool_fns.add(t)
         elif isinstance(t, FunctionTool) and getattr(t, "func", None) is not None:
@@ -1312,10 +1325,10 @@ def test_reextract_registered_in_tool_list_with_confirmation():
     """re_extract_document is registered as a FunctionTool requiring confirmation."""
     from google.adk.tools import FunctionTool
 
-    from accounting_agents.assistant import assistant_agent
+    from accounting_agents.assistant import ledger_corrections
 
     tool = next(
-        t for t in assistant_agent.tools
+        t for t in ledger_corrections.tools
         if isinstance(t, FunctionTool)
         and getattr(t, "func", None) is not None
         and t.func.__name__ == "re_extract_document"
@@ -1835,11 +1848,11 @@ def test_explain_posted_line_combines_ledger_and_coa():
 def test_diagnostic_tools_registered_on_assistant_agent():
     """Introspection + COA tools must be wired up to ``assistant_agent``."""
 
-    from accounting_agents.assistant import assistant_agent
+    from accounting_agents.assistant import ledger_analyst
 
     tool_names = {
         getattr(t, "func", t).__name__
-        for t in assistant_agent.tools
+        for t in ledger_analyst.tools
     }
     for name in (
         "diagnose_assistant_context",
@@ -1891,11 +1904,14 @@ def test_assistant_instruction_includes_diagnostic_counts_in_preamble():
 
 
 def test_base_instruction_has_diagnostic_routing_decision_tree():
-    """P3: the base instruction should include explicit routing guidelines."""
+    """WS6b: routing lives in tool docstrings; base instruction stays slim."""
     from accounting_agents.assistant import _BASE_INSTRUCTION
+    from accounting_agents.assistant.tools.introspect import diagnose_assistant_context
+    from accounting_agents.assistant.tools.read_tools import lookup_coa_account, lookup_row
 
     assert "diagnose_assistant_context" in _BASE_INSTRUCTION
-    assert "Routing guidelines:" in _BASE_INSTRUCTION
-    assert "lookup_row" in _BASE_INSTRUCTION
-    assert "lookup_coa_account" in _BASE_INSTRUCTION
+    assert "Routing guidelines:" not in _BASE_INSTRUCTION
+    assert "explain_categorization" in (lookup_row.__doc__ or "")
+    assert "explain_posted_line" in (lookup_coa_account.__doc__ or "")
+    assert "Call this **first**" in (diagnose_assistant_context.__doc__ or "")
 

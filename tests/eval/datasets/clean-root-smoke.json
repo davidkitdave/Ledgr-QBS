@@ -1,0 +1,37 @@
+{
+  "eval_cases": [
+    {
+      "eval_case_id": "clean_root_capabilities",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "What can the Ledgr accountant agent do, and what market policies can it inspect?"
+          }
+        ]
+      }
+    },
+    {
+      "eval_case_id": "inspect_sg_policy",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "Inspect the Singapore market policy."
+          }
+        ]
+      }
+    },
+    {
+      "eval_case_id": "process_playground_batch",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "For client_id playground, process the file tests/fixtures/stub-invoice.pdf with process_document_batch and summarize the BatchResult status."
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -66,6 +66,7 @@ class TestTripComDiscountReconcile:
             subtotal=461.94,
             gst_total=0.0,
             total=461.94,
+            issuer_tax_system="NONE",
         )
 
     def test_tripcom_reconcile_passes(self):
@@ -121,6 +122,7 @@ class TestTripComDiscountReconcile:
             subtotal=450.00,    # 500 − 50
             gst_total=40.50,    # 45 − 4.50
             total=490.50,       # 450 + 40.50
+        issuer_tax_system="NONE",
         )
         ok, detail = reconcile(ex)
         assert ok is True, f"GST discount reconcile failed: {detail}"
@@ -167,6 +169,7 @@ class TestAgodaTaxChargesReconcile:
             subtotal=963.14,
             gst_total=0.0,
             total=963.14,
+            issuer_tax_system="NONE",
         )
 
     def test_agoda_reconcile_passes_with_tax_line(self):
@@ -196,6 +199,7 @@ class TestAgodaTaxChargesReconcile:
             subtotal=963.14,
             gst_total=0.0,
             total=963.14,
+        issuer_tax_system="NONE",
         )
         ok, detail = reconcile(ex)
         assert ok is False, "Expected reconcile to FAIL when tax/service line is dropped"
@@ -241,6 +245,7 @@ class TestGenuineMismatchFails:
             subtotal=377.88,
             gst_total=0.0,
             total=999.99,   # wildly wrong — not rounding, not discount
+        issuer_tax_system="NONE",
         )
         ok, detail = reconcile(ex)
         assert ok is False, "Expected genuine mismatch to fail reconcile"
@@ -263,6 +268,7 @@ class TestGenuineMismatchFails:
             subtotal=461.94,
             gst_total=0.0,
             total=600.00,
+        issuer_tax_system="NONE",
         )
         ok, detail = reconcile(ex)
         assert ok is False, "Expected residual error after discount to still fail reconcile"
@@ -282,6 +288,7 @@ class TestGenuineMismatchFails:
             subtotal=100.00,
             gst_total=9.00,
             total=109.01,   # 0.01 rounding — within tolerance
+        issuer_tax_system="NONE",
         )
         ok, detail = reconcile(ex)
         assert ok is True, f"Tiny rounding gap should pass, got: {detail}"
@@ -303,6 +310,7 @@ class TestGenuineMismatchFails:
             total=109.10,   # 0.10 > tol_abs=0.05 and > tol_rel=0.01*109=1.09? No.
             # tol = max(0.05, 0.01*109.10) = max(0.05, 1.091) = 1.091 → 0.10 < 1.091 → PASSES
             # So let's use a doc where abs diff > tol_rel too:
+        issuer_tax_system="NONE",
         )
         # With tol_rel=0.01: tol = max(0.05, 0.01*109.10) = 1.091 → 0.10 < 1.091 → PASSES.
         # We need a small total where tol_abs dominates:
@@ -331,6 +339,7 @@ class TestGenuineMismatchFails:
             subtotal=200.00,
             gst_total=0.0,
             total=300.00,   # diff=100, tol=max(0.05, 0.01*300)=3.0 → 100 >> 3 → fail
+        issuer_tax_system="NONE",
         )
         ok, detail = reconcile(ex)
         assert ok is False, "Expected genuine 100-unit gap to fail reconcile"
@@ -359,6 +368,7 @@ class TestEdgeCases:
             subtotal=100.00,
             gst_total=9.00,
             total=109.00,
+        issuer_tax_system="NONE",
         )
         ok, detail = reconcile(ex)
         assert ok is True, f"None amounts should be zero-valued, got: {detail}"
@@ -379,6 +389,7 @@ class TestEdgeCases:
             subtotal=200.00,
             gst_total=0.0,
             total=200.00,
+        issuer_tax_system="NONE",
         )
         ok, detail = reconcile(ex)
         assert ok is True, f"Zero discount should still reconcile: {detail}"
@@ -400,6 +411,7 @@ class TestEdgeCases:
             subtotal=520.00,
             gst_total=0.0,
             total=520.00,
+        issuer_tax_system="NONE",
         )
         ok, detail = reconcile(ex)
         assert ok is True, f"Multiple discounts should reconcile: {detail}"

@@ -68,6 +68,7 @@ def _party_from_dict(d: Optional[dict[str, Any]]) -> PartyInfo:
         country=d.get("country"),
         gst_regno=d.get("gst_regno"),
         email=d.get("email"),
+        vendor_code=d.get("vendor_code"),
     )
 
 
@@ -88,7 +89,17 @@ def invoice_to_dict(inv: NormalizedInvoice) -> dict[str, Any]:
     # `date` instances are not JSON-serialisable; convert to ISO strings.
     d["invoice_date"] = inv.invoice_date.isoformat() if inv.invoice_date else None
     d["due_date"] = inv.due_date.isoformat() if inv.due_date else None
+    if inv.page_range is not None:
+        d["page_range"] = [inv.page_range[0], inv.page_range[1]]
+    else:
+        d["page_range"] = None
     return d
+
+
+def _page_range_from_dict(value: Any) -> Optional[tuple[int, int]]:
+    if not value or not isinstance(value, (list, tuple)) or len(value) < 2:
+        return None
+    return int(value[0]), int(value[1])
 
 
 def dict_to_invoice(d: dict[str, Any]) -> NormalizedInvoice:
@@ -120,6 +131,8 @@ def dict_to_invoice(d: dict[str, Any]) -> NormalizedInvoice:
         tax_visible_on_document=d.get("tax_visible_on_document"),
         direction_reason=d.get("direction_reason"),
         document_kind=d.get("document_kind"),
+        page_range=_page_range_from_dict(d.get("page_range")),
+        source_file_id=d.get("source_file_id"),
     )
 
 

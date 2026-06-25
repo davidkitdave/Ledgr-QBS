@@ -16,15 +16,208 @@ row mapper.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
+import yaml
 from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
 
+from .categorizer import UNMAPPED_ACCOUNT_CODE
+from .code_resolver import (
+    resolve_creditor_code,
+    resolve_rate_for_line,
+    resolve_tax_code,
+)
+from .client_context import EntityMemoryEntry
 from .models import BankStatement, InvoiceLine, NormalizedInvoice
 from .tax_classifier import TaxClassifier, classify_invoice
+
+# Data-driven ERP import column maps ("skills") live here — one YAML per ERP.
+# This is the single source of truth for every exporter's column ordering and
+# column→logical-field mapping (QBS/Xero "builtin" + AutoCount/SQL "profile").
+_SKILLS_DIR = Path(__file__).resolve().parents[2] / "ledgr_agent" / "skills"
+
+# Preview-only marker for low-confidence COA picks on Slack delivery cards (WS-3.4).
+ACCOUNT_FLAGGED_PREVIEW_MARKER = " ⚠️"
+
+# Slack's `data_table` block rejects rows with more than 20 columns
+# (`invalid_blocks: no more than 20 items allowed`). Every Slack preview column
+# spec must stay at or under this, independent of the .xlsx export width.
+SLACK_DATA_TABLE_MAX_COLS = 20
+
+
+@dataclass(frozen=True)
+class PreviewColumn:
+    """Spec for one column in a ledger preview data_table."""
+
+    header: str    # shown in the data_table column header
+    row_key: str   # dict key on each exporter row (ERP column name)
+    cell_type: str  # "raw_text" or "raw_number"
+
+
+def _cap_preview_columns(cols: list[PreviewColumn]) -> list[PreviewColumn]:
+    """Hard-cap a preview column spec at the Slack data_table limit.
+
+    Defensive guard so a wide ERP export list can never produce a >20-column
+    Slack preview.  When a cap is applied we keep the first 19 columns plus the
+    LAST column — the last column is typically the amount/total, the single most
+    important value to keep visible — rather than blindly dropping the tail.
+    """
+    if len(cols) <= SLACK_DATA_TABLE_MAX_COLS:
+        return cols
+    return [*cols[: SLACK_DATA_TABLE_MAX_COLS - 1], cols[-1]]
+
+
+# Logical context keys whose values are numeric in exporter row dicts.
+_NUMERIC_CONTEXT_KEYS = frozenset({
+    "sub_total",
+    "tax_amount",
+    "unit_price",
+    "qty",
+    "quantity",
+    "unit_amount",
+    "total_amount",
+    "total",
+    "currency_rate",
+    "source_amount",
+    "discount",
+})
+
+# Canonical exporter key → skill filename under _SKILLS_DIR.
+_SKILL_FILES: dict[str, str] = {
+    "qbs": "qbs.yaml",
+    "xero": "xero.yaml",
+    "autocount": "autocount.yaml",
+    "sql_account": "sql_account.yaml",
+}
+
+# Required top-level keys every skill file must declare. A skill missing any of
+# these is malformed and must fail loud at load (never silently emit wrong cols).
+_SKILL_REQUIRED_KEYS = ("software_name", "system", "purchase_cols", "sales_cols")
+
+# Import-time cache so each skill YAML is parsed once.
+_SKILL_CACHE: dict[str, dict[str, Any]] = {}
+
+
+class ExportSkillError(RuntimeError):
+    """Raised when an ERP export skill file is missing or malformed.
+
+    Fail-loud guard: a bad/absent skill must crash at load rather than silently
+    produce an export with wrong or empty columns.
+    """
+
+
+def load_export_skill(system: str) -> dict[str, Any]:
+    """Load (cached) the data-driven export skill for canonical *system*.
+
+    Reads ``ledgr_agent/skills/<system>.yaml`` and validates it carries the
+    required keys with the right shapes.  Raises :class:`ExportSkillError` on a
+    missing file, a parse error, a non-mapping document, a missing required key,
+    or a ``system`` value that disagrees with the requested key — so a broken
+    skill can never reach the exporter as a half-built column map.
+    """
+    cached = _SKILL_CACHE.get(system)
+    if cached is not None:
+        return cached
+
+    filename = _SKILL_FILES.get(system)
+    if filename is None:
+        raise ExportSkillError(
+            f"no export skill registered for system '{system}'; "
+            f"have {sorted(_SKILL_FILES)}"
+        )
+    path = _SKILLS_DIR / filename
+    if not path.is_file():
+        raise ExportSkillError(f"export skill file missing: {path}")
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+    except yaml.YAMLError as exc:  # malformed YAML
+        raise ExportSkillError(f"export skill '{path}' is not valid YAML: {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise ExportSkillError(f"export skill '{path}' must be a YAML mapping, got {type(data).__name__}")
+    for key in _SKILL_REQUIRED_KEYS:
+        if key not in data:
+            raise ExportSkillError(f"export skill '{path}' is missing required key '{key}'")
+    if not isinstance(data["purchase_cols"], list) or not isinstance(data["sales_cols"], list):
+        raise ExportSkillError(f"export skill '{path}' purchase_cols/sales_cols must be lists")
+    declared = data["system"]
+    if declared != system:
+        raise ExportSkillError(
+            f"export skill '{path}' declares system '{declared}' but is registered as '{system}'"
+        )
+
+    _SKILL_CACHE[system] = data
+    return data
+
+
+def _load_erp_profile(profile_name: str) -> dict[str, Any]:
+    """Back-compat shim: load a profile skill by its ``<system>.yaml`` filename."""
+    system = Path(profile_name).stem
+    return load_export_skill(system)
+
+
+def load_erp_profile_for_system(system: str) -> dict[str, Any] | None:
+    """Load the declarative ERP profile skill for *system*, or ``None``.
+
+    Only the profile-driven ERPs (AutoCount, SQL Account) carry a full
+    field-map profile; the builtin ERPs (QBS, Xero) return ``None`` here.
+    """
+    if system not in ("autocount", "sql_account"):
+        return None
+    return load_export_skill(system)
+
+
+def preview_columns_from_profile(profile: dict, sheet: str) -> list[PreviewColumn]:
+    """Derive Slack preview columns from an ERP profile (same source as Excel export).
+
+    Column order/headers come from the curated ``purchase_preview_cols`` /
+    ``sales_preview_cols`` list when present (a ≤20-col key-column subset, e.g.
+    AutoCount whose full 21-col export list exceeds Slack's data_table limit),
+    otherwise from the full ``purchase_cols`` / ``sales_cols`` export list.  Cell
+    type (numeric vs text) is always inferred from ``purchase_fields`` /
+    ``sales_fields``.  Each ``PreviewColumn.row_key`` is the ERP column name
+    emitted by :class:`ProfileLedgerExporter` row dicts.
+
+    Regardless of source, the result is hard-capped at
+    :data:`SLACK_DATA_TABLE_MAX_COLS` as a defensive Slack-limit guard.
+    """
+    if sheet == "Purchase":
+        cols = list(profile.get("purchase_preview_cols") or profile.get("purchase_cols") or [])
+        field_map = dict(profile.get("purchase_fields") or {})
+    elif sheet == "Sales":
+        cols = list(profile.get("sales_preview_cols") or profile.get("sales_cols") or [])
+        field_map = dict(profile.get("sales_fields") or {})
+    else:
+        return []
+
+    out: list[PreviewColumn] = []
+    for col in cols:
+        ctx_key = field_map.get(col, "")
+        cell_type = "raw_number" if ctx_key in _NUMERIC_CONTEXT_KEYS else "raw_text"
+        out.append(PreviewColumn(header=col, row_key=col, cell_type=cell_type))
+    return _cap_preview_columns(out)
+
+
+def preview_columns_from_logical_fields(
+    cols: list[str],
+    logical_fields: dict[str, str],
+    *,
+    header_overrides: dict[str, str] | None = None,
+) -> list[PreviewColumn]:
+    """Build preview columns from an exporter's column list + logical-field map."""
+    overrides = header_overrides or {}
+    out: list[PreviewColumn] = []
+    for col in cols:
+        ctx_key = logical_fields.get(col, "")
+        cell_type = "raw_number" if ctx_key in _NUMERIC_CONTEXT_KEYS else "raw_text"
+        header = overrides.get(col, col)
+        out.append(PreviewColumn(header=header, row_key=col, cell_type=cell_type))
+    return out
 
 
 def _fmt_date(d) -> str:
@@ -37,6 +230,39 @@ def _fmt_date(d) -> str:
 
 def _num(x: Optional[float]) -> Optional[float]:
     return None if x is None else round(float(x), 2)
+
+
+@dataclass(frozen=True)
+class ExportAccountCodeValidation:
+    """Result of zero-tolerance COA validation at the export boundary."""
+
+    account_code: str
+    flagged: bool
+    reason: str | None = None
+
+
+def validate_export_account_code(
+    account_code: str | None,
+    *,
+    coa_keys: set[str],
+) -> ExportAccountCodeValidation:
+    """Blank and flag account codes that are not in the client's COA key set.
+
+    ``UNMAPPED`` is treated as abstention (blank + flagged). Empty input is
+    left blank without a not-in-COA flag. This is the last-line defense before
+    rows are written to the workbook — enum-constraint and categorizer
+    post-validation may already have nulled bad codes upstream.
+    """
+    code = (account_code or "").strip()
+    if not code:
+        return ExportAccountCodeValidation(account_code="", flagged=False)
+    if code == UNMAPPED_ACCOUNT_CODE or code not in coa_keys:
+        return ExportAccountCodeValidation(
+            account_code="",
+            flagged=True,
+            reason=f"account_code_not_in_coa: {code}",
+        )
+    return ExportAccountCodeValidation(account_code=code, flagged=False)
 
 
 def _doc_sign(inv: NormalizedInvoice) -> int:
@@ -99,14 +325,82 @@ class LedgerExporter:
     purchase_cols: list[str] = []
     sales_cols: list[str] = []
 
+    # Per-class column → logical-field map. Subclasses can override to declare
+    # which logical fields (e.g. "sub_total", "currency", "account_code") are
+    # exposed under which column name. This is the source-of-truth that
+    # ``column_for_field`` (and any preview/note/import-readiness code that
+    # wants to look up the real column for a logical field) reads from.
+    #
+    # ProfileLedgerExporter ignores this attribute — its YAML `purchase_fields`
+    # / `sales_fields` map is authoritative (see ProfileLedgerExporter.column_for_field).
+    _LOGICAL_FIELDS: dict[str, str] = {}
+
     def __init__(self, classifier: Optional[TaxClassifier] = None):
         self.clf = classifier or TaxClassifier()
+        self._coa_keys: set[str] | None = None
+        self._client_tax_codes: list[dict] | dict[str, str] | None = None
+
+    def configure_client_context(
+        self,
+        *,
+        tax_codes: list[dict] | dict[str, str] | None = None,
+        entity_memory: list[EntityMemoryEntry] | None = None,
+        coa_keys: set[str] | None = None,
+    ) -> None:
+        """Attach client COA keys for zero-tolerance export validation."""
+        self._coa_keys = coa_keys
+        if tax_codes is not None:
+            self._client_tax_codes = tax_codes
+
+    def _sanitize_row_account_code(
+        self,
+        row: dict,
+        doc_type: str,
+        *,
+        line: InvoiceLine | None = None,
+    ) -> dict:
+        if line and line.account_flagged:
+            row["_account_flagged"] = True
+            if line.account_flag_reason:
+                row["_account_flag_reason"] = line.account_flag_reason
+        if not self._coa_keys:
+            return row
+        col = self.column_for_field("account_code", doc_type)
+        if not col:
+            return row
+        validated = validate_export_account_code(row.get(col, ""), coa_keys=self._coa_keys)
+        row[col] = validated.account_code
+        if validated.flagged:
+            row["_account_flagged"] = True
+            row["_account_flag_reason"] = validated.reason or row.get("_account_flag_reason")
+        return row
 
     def required_fields(self, doc_type: str) -> list[str]:
         """Column names that must be non-empty in every exported row for this
         software. Subclasses override; used by the pipeline to flag (not drop)
         documents that would export half-filled rows."""
         return []
+
+    def column_for_field(self, field_name: str, doc_type: str) -> str | None:
+        """Return the actual column name for a logical *field_name* in *doc_type*.
+
+        Used by delivery notes, import-readiness, and any preview surface that
+        needs to look up the real column a logical field is written to (e.g. to
+        render a "reconciles to $X" total, we need the real column for
+        ``sub_total`` — which is "Amount" for AutoCount, "_AMOUNT" for SQL
+        Account, "Sub Total" for QBS purchase, "Amount" for QBS sales, and None
+        for Xero because Xero stores per-unit amount, not per-line net).
+
+        Returns ``None`` when the field is not emitted for this doc_type (e.g.
+        ``currency`` on a profile-driven purchase sheet that has no currency
+        column). Callers must handle ``None`` (typically: skip the field rather
+        than guess a literal column name).
+        """
+        cols = self.sales_cols if doc_type == "sales" else self.purchase_cols
+        for col in cols:
+            if self._LOGICAL_FIELDS.get(col) == field_name:
+                return col
+        return None
 
     # subclasses implement the per-line row dicts
     def _purchase_row(self, inv: NormalizedInvoice, line: InvoiceLine) -> dict:
@@ -126,7 +420,11 @@ class LedgerExporter:
         out = []
         for inv in invoices:
             for line in inv.lines:
-                out.append(builder(inv, line))
+                out.append(
+                    self._sanitize_row_account_code(
+                        builder(inv, line), doc_type, line=line
+                    )
+                )
         return out
 
     def write_workbook(
@@ -153,20 +451,27 @@ class LedgerExporter:
         return path
 
 
+_QBS_SKILL = load_export_skill("qbs")
+
+
 class QbsLedgerExporter(LedgerExporter):
-    """Native QBS Ledger format (no tax-code column; Tax Amount carries SR 9% / ZR 0)."""
+    """Native QBS Ledger format (no tax-code column; Tax Amount carries SR 9% / ZR 0).
+
+    Column ordering and the column→logical-field map are loaded from the
+    data-driven ``ledgr_agent/skills/qbs.yaml`` skill (cached at import).
+    """
 
     system = "qbs"
-    software_name = "QBS Ledger"
-    purchase_cols = [
-        "Invoice Number", "Invoice Date", "Vendor Name", "Entity Tax ID", "Description",
-        "Source Amount", "Currency", "Currency Rate", "Sub Total", "Tax Amount",
-        "Total Amount", "Account Code / COA",
-    ]
-    sales_cols = [
-        "Invoice Date", "Invoice Number", "Customer Name", "Description", "Source Amount",
-        "Currency", "Currency Rate", "Amount", "Tax Amount", "Total", "Account Code / COA",
-    ]
+    software_name = _QBS_SKILL["software_name"]
+    purchase_cols = list(_QBS_SKILL["purchase_cols"])
+    sales_cols = list(_QBS_SKILL["sales_cols"])
+    # Logical-field map: column name → logical name. Used by column_for_field to
+    # find the real column a logical field is written to (e.g. compose_confident_note
+    # needs to render "reconciles to $X" using whichever column carries the line
+    # net for the current doc_type). "Amount" on the sales sheet is the line net
+    # (not a per-unit amount) so it maps to sub_total, same as "Sub Total" on
+    # the purchase sheet.
+    _LOGICAL_FIELDS = dict(_QBS_SKILL["logical_fields"])
 
     def required_fields(self, doc_type: str) -> list[str]:
         if doc_type == "sales":
@@ -221,28 +526,25 @@ class QbsLedgerExporter(LedgerExporter):
         }
 
 
+_XERO_SKILL = load_export_skill("xero")
+
+
 class XeroLedgerExporter(LedgerExporter):
-    """Xero Ledger format: Xero import columns + Source File ID / [AI Status], explicit *TaxType."""
+    """Xero Ledger format: Xero import columns + Source File ID / [AI Status], explicit *TaxType.
+
+    Column ordering and the column→logical-field map are loaded from the
+    data-driven ``ledgr_agent/skills/xero.yaml`` skill (cached at import).
+    """
 
     system = "xero"
-    software_name = "Xero Ledger"
-    _XERO_PURCHASE = [
-        "*ContactName", "EmailAddress", "POAddressLine1", "POAddressLine2", "POAddressLine3",
-        "POAddressLine4", "POCity", "PORegion", "POPostalCode", "POCountry", "*InvoiceNumber",
-        "*InvoiceDate", "*DueDate", "Total", "InventoryItemCode", "Description", "*Quantity",
-        "*UnitAmount", "*AccountCode", "*TaxType", "TaxAmount", "TrackingName1", "TrackingOption1",
-        "TrackingName2", "TrackingOption2", "Currency",
-    ]
-    _XERO_SALES = [
-        "*ContactName", "EmailAddress", "POAddressLine1", "POAddressLine2", "POAddressLine3",
-        "POAddressLine4", "POCity", "PORegion", "POPostalCode", "POCountry", "*InvoiceNumber",
-        "Reference", "*InvoiceDate", "*DueDate", "Total", "InventoryItemCode", "*Description",
-        "*Quantity", "*UnitAmount", "Discount", "*AccountCode", "*TaxType", "TaxAmount",
-        "TrackingName1", "TrackingOption1", "TrackingName2", "TrackingOption2", "Currency",
-        "BrandingTheme",
-    ]
-    purchase_cols = list(_XERO_PURCHASE)
-    sales_cols = list(_XERO_SALES)
+    software_name = _XERO_SKILL["software_name"]
+    purchase_cols = list(_XERO_SKILL["purchase_cols"])
+    sales_cols = list(_XERO_SKILL["sales_cols"])
+    # Logical-field map for column_for_field. Note: Xero's "*UnitAmount" is a
+    # PER-UNIT amount, not a per-line net — so it maps to "unit_amount", not
+    # "sub_total". Anything that wants a "reconciles to $X" total must compute
+    # it (qty × *UnitAmount) or accept that Xero has no per-line sub_total.
+    _LOGICAL_FIELDS = dict(_XERO_SKILL["logical_fields"])
 
     def required_fields(self, doc_type: str) -> list[str]:
         """Xero-required columns = the `*`-marked headers."""
@@ -251,7 +553,15 @@ class XeroLedgerExporter(LedgerExporter):
 
     def _xero_common(self, inv, line):
         party = inv.counterparty
-        tax_type = self.clf.tax_code(line.tax_treatment, inv.doc_type, "xero")
+        rate = resolve_rate_for_line(self.clf, line, inv)
+        tax_type = resolve_tax_code(
+            line.tax_treatment,
+            rate=rate,
+            doc_type=inv.doc_type,
+            software=self.system,
+            client_tax_codes=self._client_tax_codes,
+            classifier=self.clf,
+        )
         qty = line.quantity if line.quantity is not None else 1
         # *UnitAmount must satisfy Quantity × UnitAmount = the line's post-discount net,
         # so the invoice ties out on Xero import. Prefer the effective amount derived from
@@ -290,35 +600,274 @@ class XeroLedgerExporter(LedgerExporter):
         return row
 
 
-EXPORTERS = {"qbs": QbsLedgerExporter, "xero": XeroLedgerExporter}
+class ProfileLedgerExporter(LedgerExporter):
+    """Generic exporter driven by a declarative ERP profile YAML.
+
+    Profile schema extensions supported here:
+    - ``purchase_sheet`` / ``sales_sheet``: worksheet names (default "Purchase"/"Sales").
+    - ``purchase_constants`` / ``sales_constants``: column→value pairs applied after
+      field mapping so fixed ERP values (DocNo=<<New>>, JournalType, _QTY, _UOM …)
+      are always present regardless of the invoice data.
+    - ``_row_context`` now carries ``supplier_invoice_no``, ``unit_price``, ``qty``,
+      ``uom``, ``source_file_id``, ``ai_status``, ``ai_note`` for ERP columns that
+      need them.
+    """
+
+    def __init__(
+        self,
+        profile: dict[str, Any],
+        classifier: Optional[TaxClassifier] = None,
+    ):
+        super().__init__(classifier)
+        self._profile = profile
+        self.system = profile["system"]
+        self.software_name = profile["software_name"]
+        self.purchase_cols = list(profile["purchase_cols"])
+        self.sales_cols = list(profile["sales_cols"])
+        self._purchase_fields = dict(profile.get("purchase_fields") or {})
+        self._sales_fields = dict(profile.get("sales_fields") or {})
+        self._purchase_constants: dict[str, Any] = dict(profile.get("purchase_constants") or {})
+        self._sales_constants: dict[str, Any] = dict(profile.get("sales_constants") or {})
+        self._purchase_sheet: str = profile.get("purchase_sheet") or "Purchase"
+        self._sales_sheet: str = profile.get("sales_sheet") or "Sales"
+        self._client_tax_codes: list[dict] | dict[str, str] | None = None
+        self._entity_memory: list[EntityMemoryEntry] = []
+
+    def configure_client_context(
+        self,
+        *,
+        tax_codes: list[dict] | dict[str, str] | None = None,
+        entity_memory: list[EntityMemoryEntry] | None = None,
+        coa_keys: set[str] | None = None,
+    ) -> None:
+        super().configure_client_context(
+            tax_codes=tax_codes,
+            entity_memory=entity_memory,
+            coa_keys=coa_keys,
+        )
+        if tax_codes is not None:
+            self._client_tax_codes = tax_codes
+        self._entity_memory = list(entity_memory or [])
+
+    def required_fields(self, doc_type: str) -> list[str]:
+        key = "required_sales" if doc_type == "sales" else "required_purchase"
+        return list(self._profile.get(key) or [])
+
+    def _field_map(self, doc_type: str) -> dict[str, str]:
+        return self._sales_fields if doc_type == "sales" else self._purchase_fields
+
+    def _constants(self, doc_type: str) -> dict[str, Any]:
+        return self._sales_constants if doc_type == "sales" else self._purchase_constants
+
+    def _row_context(
+        self,
+        inv: NormalizedInvoice,
+        line: InvoiceLine,
+        doc_type: str,
+    ) -> dict[str, Any]:
+        rate = resolve_rate_for_line(self.clf, line, inv)
+        tax_code = resolve_tax_code(
+            line.tax_treatment,
+            rate=rate,
+            doc_type=doc_type,
+            software=self.system,
+            client_tax_codes=self._client_tax_codes,
+            classifier=self.clf,
+        )
+        party = inv.counterparty
+        creditor_code = ""
+        debtor_code = ""
+        if doc_type == "purchase":
+            creditor_code = (
+                party.vendor_code
+                or resolve_creditor_code(party.name, party.gst_regno, self._entity_memory)
+            )
+        else:
+            debtor_code = (
+                party.vendor_code
+                or resolve_creditor_code(party.name, party.gst_regno, self._entity_memory)
+            )
+        net = _line_net_amount(line, inv)
+        tax = _tax_amount(line, inv, self.clf)
+        fx = inv.fx_rate if inv.fx_rate is not None else ""
+        qty = line.quantity if line.quantity is not None else 1
+        unit_price = round(net / qty, 2) if qty else net
+        # Provenance fields: populated when available on the invoice metadata
+        source_file_id: str = getattr(inv, "source_file_id", None) or ""
+        ai_status: str = getattr(inv, "ai_status", None) or ""
+        ai_note: str = getattr(inv, "ai_note", None) or ""
+        return {
+            "invoice_number": inv.invoice_number or "",
+            "invoice_date": _fmt_date(inv.invoice_date),
+            "due_date": _fmt_date(inv.due_date or inv.invoice_date),
+            "vendor_name": inv.supplier.name or "",
+            "customer_name": inv.customer.name or "",
+            "entity_tax_id": party.gst_regno or "",
+            "description": line.description,
+            "sub_total": net,
+            # Taxable base for ERP columns that derive tax as rate × base (e.g.
+            # AutoCount TaxableAmt). Under tax-exclusive import (InclusiveTax=F)
+            # this equals the line net — a distinct logical field from sub_total
+            # so column_for_field("sub_total") stays unambiguously the Amount column.
+            "taxable_amount": net,
+            "tax_amount": tax,
+            "total_amount": round(net + tax, 2),
+            "account_code": line.account_code or "",
+            "tax_code": tax_code,
+            "creditor_code": creditor_code,
+            "debtor_code": debtor_code,
+            "currency": inv.currency,
+            "currency_rate": fx,
+            # New fields for real ERP column layouts
+            "supplier_invoice_no": inv.invoice_number or "",
+            "unit_price": unit_price,
+            "qty": qty,
+            "uom": "UNIT",
+            "source_file_id": source_file_id,
+            "ai_status": ai_status,
+            "ai_note": ai_note,
+        }
+
+    def _profile_row(self, inv: NormalizedInvoice, line: InvoiceLine, doc_type: str) -> dict:
+        context = self._row_context(inv, line, doc_type)
+        field_map = self._field_map(doc_type)
+        cols = self.sales_cols if doc_type == "sales" else self.purchase_cols
+        row = {col: context.get(field_map.get(col, ""), "") for col in cols}
+        # Apply per-doc-type constants last (override field-mapped values)
+        for col, val in self._constants(doc_type).items():
+            if col in row:
+                row[col] = val
+        return row
+
+    def column_for_field(self, field_name: str, doc_type: str) -> str | None:
+        """Return the actual ERP column name for a logical *field_name* in *doc_type*.
+
+        Inverts the profile ``purchase_fields`` / ``sales_fields`` map (which is
+        ``{column: context_key}``) to find the column whose context_key equals
+        *field_name*.  Returns ``None`` when the field has no mapped column for
+        this doc type (e.g. ``creditor_code`` on a sales sheet).
+        """
+        field_map = self._field_map(doc_type)
+        for col, ctx_key in field_map.items():
+            if ctx_key == field_name:
+                return col
+        return None
+
+    def _purchase_row(self, inv, line):
+        return self._profile_row(inv, line, "purchase")
+
+    def _sales_row(self, inv, line):
+        return self._profile_row(inv, line, "sales")
+
+    def write_workbook(
+        self,
+        path: str | Path,
+        purchases: Optional[list[NormalizedInvoice]] = None,
+        sales: Optional[list[NormalizedInvoice]] = None,
+    ) -> Path:
+        """Write a workbook with per-doc-type sheet names from the profile.
+
+        Overrides the base class to use ``_purchase_sheet`` / ``_sales_sheet``
+        from the profile YAML instead of the hardcoded "Purchase"/"Sales" titles,
+        so AutoCount gets "AP Invoice"/"AR Invoice" and SQL Account gets
+        "SLPH_Invoice_Cash_Debit_Credit".
+        """
+        purchases, sales = purchases or [], sales or []
+        wb = Workbook()
+        for i, (title, cols, invs, doc) in enumerate([
+            (self._purchase_sheet, self.purchase_cols, purchases, "purchase"),
+            (self._sales_sheet, self.sales_cols, sales, "sales"),
+        ]):
+            sheet = wb.active if i == 0 else wb.create_sheet(title)
+            sheet.title = title
+            sheet.append(cols)
+            for row in self.rows(invs, doc):
+                sheet.append([row.get(c, "") for c in cols])
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        wb.save(path)
+        return path
+
+
+class AutoCountExporter(ProfileLedgerExporter):
+    def __init__(self, classifier: Optional[TaxClassifier] = None):
+        super().__init__(load_export_skill("autocount"), classifier)
+
+
+class SqlAccountExporter(ProfileLedgerExporter):
+    def __init__(self, classifier: Optional[TaxClassifier] = None):
+        super().__init__(load_export_skill("sql_account"), classifier)
+
+
+EXPORTERS = {
+    "qbs": QbsLedgerExporter,
+    "xero": XeroLedgerExporter,
+    "autocount": AutoCountExporter,
+    "sql_account": SqlAccountExporter,
+}
 
 # Maps every known display/alias form (lowercased, stripped) to the canonical exporter key.
 _SOFTWARE_ALIASES: dict[str, str] = {
     "qbs": "qbs",
     "qbs ledger": "qbs",
     "qbsledger": "qbs",
+    "qbs_ledger": "qbs",
     "xero": "xero",
     "xero ledger": "xero",
     "xeroledger": "xero",
+    "autocount": "autocount",
+    "sql account": "sql_account",
+    "sql_account": "sql_account",
+    "sqlaccount": "sql_account",
+}
+
+# Human-readable labels keyed by canonical exporter key (WS-5.3 single label site).
+_SOFTWARE_LABELS: dict[str, str] = {
+    "qbs": "QBS Ledger",
+    "xero": "Xero",
+    "autocount": "AutoCount",
+    "sql_account": "SQL Account",
+}
+
+# Preview-column spec keys differ from exporter keys for some ERPs.
+_PREVIEW_SOFTWARE_KEYS: dict[str, str] = {
+    "qbs": "qbs_ledger",
 }
 
 
 def normalize_software_key(value: Optional[str]) -> Optional[str]:
-    """Return the canonical exporter key ("qbs" or "xero") for *value*, or None.
+    """Return the canonical exporter key for *value*, or None.
 
+    Recognised keys: ``"qbs"``, ``"xero"``, ``"autocount"``, ``"sql_account"``.
     Accepts any casing and surrounding whitespace.  Callers decide the fallback
     when None is returned (genuinely unrecognised software name).
     """
     return _SOFTWARE_ALIASES.get((value or "").strip().lower())
 
 
+def software_label(value: Optional[str], *, empty_label: str = "Unknown ERP") -> str:
+    """Human-readable ERP label from a raw alias or canonical software key."""
+    if not (value or "").strip():
+        return empty_label
+    key = normalize_software_key(value)
+    if key is None:
+        return "Unknown ERP"
+    return _SOFTWARE_LABELS[key]
+
+
+def normalize_software_preview_key(value: Optional[str]) -> Optional[str]:
+    """Return preview-column spec key, or None when software is unknown/unset."""
+    key = normalize_software_key(value)
+    if key is None:
+        return None
+    return _PREVIEW_SOFTWARE_KEYS.get(key, key)
+
+
 def get_exporter(system: str, classifier: Optional[TaxClassifier] = None) -> LedgerExporter:
     key = normalize_software_key(system)
-    if key == "xero":
-        return XeroLedgerExporter(classifier)
-    if key == "qbs":
-        return QbsLedgerExporter(classifier)
-    raise ValueError(f"unknown export system '{system}'; have {list(EXPORTERS)}")
+    if key is None:
+        raise ValueError(f"unknown export system '{system}'; have {list(EXPORTERS)}")
+    return EXPORTERS[key](classifier)
 
 
 # Map exporter column headers to readable snake_case names for review notes.
@@ -331,6 +880,11 @@ _FIELD_LABELS = {
     "Invoice Number": "invoice_number", "Invoice Date": "invoice_date",
     "Sub Total": "sub_total", "Total Amount": "total", "Amount": "amount", "Total": "total",
     "Account Code / COA": "account_code",
+    "Tax Code": "tax_code",
+    "Creditor Code": "creditor_code",
+    "Debtor Code": "debtor_code",
+    "Acc No": "account_code",
+    "Account Code": "account_code",
 }
 
 
@@ -378,6 +932,398 @@ def validate_required_fields(
             for i in empty_lines:
                 missing.append(f"{label} (line {i})")
     return missing
+
+
+def collect_export_unmapped_summary(
+    batches: list[dict],
+    exporter: LedgerExporter,
+) -> dict:
+    """Collect export rows with blank required tax/creditor columns."""
+    details: list[dict] = []
+    for batch in batches:
+        sheet = batch.get("sheet") or "Purchase"
+        row_doc_type = "sales" if sheet == "Sales" else "purchase"
+        required = exporter.required_fields(row_doc_type)
+        # Resolve the actual invoice_number column name for this exporter/doc_type.
+        inv_col: str | None = None
+        if isinstance(exporter, ProfileLedgerExporter):
+            inv_col = exporter.column_for_field("invoice_number", row_doc_type)
+        for idx, row in enumerate(batch.get("rows") or [], start=1):
+            missing = [col for col in required if _is_empty(row.get(col, ""))]
+            if missing:
+                # Try profile-derived column first, then legacy fallbacks.
+                invoice_number = (
+                    (row.get(inv_col) if inv_col else None)
+                    or row.get("Doc No")
+                    or row.get("Invoice Number")
+                    or row.get("*InvoiceNumber")
+                    or row.get("DocNo")
+                    or row.get("DOCNO(20)")
+                    or ""
+                )
+                details.append(
+                    {
+                        "sheet": sheet,
+                        "row": idx,
+                        "missing": missing,
+                        "invoice_number": invoice_number,
+                    }
+                )
+    return {"count": len(details), "details": details}
+
+
+def collect_account_flagged_summary(batches: list[dict]) -> dict:
+    """Count export rows carrying ``_account_flagged`` metadata (WS-3.4)."""
+    details: list[dict] = []
+    for batch in batches:
+        sheet = batch.get("sheet") or "Purchase"
+        for idx, row in enumerate(batch.get("rows") or [], start=1):
+            if not isinstance(row, dict) or not row.get("_account_flagged"):
+                continue
+            details.append(
+                {
+                    "sheet": sheet,
+                    "row": idx,
+                    "reason": row.get("_account_flag_reason") or "low_confidence",
+                }
+            )
+    return {"count": len(details), "details": details}
+
+
+def format_account_flagged_note(summary: dict | None) -> str:
+    """Human-readable note when COA resolution flagged account codes."""
+    if not summary:
+        return ""
+    count = int(summary.get("count") or 0)
+    if count <= 0:
+        return ""
+    noun = "line has" if count == 1 else "lines have"
+    return f"⚠️ {count} {noun} a low-confidence account code — review before import."
+
+
+def _account_code_column(exporter: LedgerExporter, doc_type: str) -> str | None:
+    col = exporter.column_for_field("account_code", doc_type)
+    if col:
+        return col
+    # Legacy QBS/Xero fallbacks when column_for_field is unavailable.
+    return "Account Code / COA" if doc_type == "purchase" else "Account Code / COA"
+
+
+def decorate_preview_account_flags(
+    rows: list[dict],
+    exporter: LedgerExporter,
+    doc_type: str,
+) -> list[dict]:
+    """Return shallow row copies with flagged account codes marked for Slack preview."""
+    account_col = _account_code_column(exporter, doc_type)
+    if not account_col:
+        return list(rows)
+    decorated: list[dict] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            decorated.append(row)
+            continue
+        copy = dict(row)
+        code = (copy.get(account_col) or "").strip()
+        if copy.get("_account_flagged") and code:
+            copy[account_col] = f"{code}{ACCOUNT_FLAGGED_PREVIEW_MARKER}"
+        decorated.append(copy)
+    return decorated
+
+
+def format_unmapped_export_note(summary: dict | None) -> str:
+    """Human-readable note for approval / delivery cards."""
+    if not summary:
+        return ""
+    count = int(summary.get("count") or 0)
+    if count <= 0:
+        return ""
+    noun = "row" if count == 1 else "rows"
+    return f"{count} {noun} need creditor or tax codes before ERP import"
+
+
+def compute_doc_flag_breakdown(
+    batches: list[dict],
+    exporter: LedgerExporter,
+) -> dict:
+    """Per-document reconcile status + flag-reason counts (WS-1.4).
+
+    Returns a dict:
+        {
+          "reconciles": bool,            # True iff no flags raised
+          "n_total": int,                # total rows across all batches
+          "reasons": {
+            "blank_account": int,        # rows with empty account_code column
+            "missing_tax": int,          # rows with empty tax_code column
+            "missing_creditor": int,     # rows with empty creditor_code/debtor_code column
+            "missing_invoice_number": int,
+          }
+        }
+
+    A doc "reconciles" iff none of the three primary flag reasons fired
+    (blank account / missing tax / missing creditor). TaxType is NOT in the
+    formal ``required_*`` list for profile ERPs (it can be blank and the line
+    still imports), but a blank tax code is a "tax-unresolved" signal the
+    user wants surfaced — so we count it as a flag even though the row
+    wouldn't fail the strict required-field check. A doc with all flags
+    zero renders as ✓ reconciled on the delivery card.
+
+    Used by the batch delivery card to surface per-doc visibility (✓/✗ + reason
+    breakdown) — previously the unmapped count was rendered but the per-reason
+    breakdown was discarded. Now a multi-file dropper sees exactly which rows
+    need attention and why.
+    """
+    if not isinstance(exporter, ProfileLedgerExporter):
+        # QBS / Xero: required-field check via the legacy literal columns.
+        # (These exporters don't expose column_for_field for all required fields,
+        # but the required_fields() list still drives the unmapped summary.)
+        legacy = {"blank_account": 0, "missing_tax": 0, "missing_creditor": 0,
+                  "missing_invoice_number": 0, "low_confidence_account": 0}
+        n_total = 0
+        for batch in batches:
+            sheet = batch.get("sheet") or "Purchase"
+            row_doc_type = "sales" if sheet == "Sales" else "purchase"
+            required = exporter.required_fields(row_doc_type)
+            account_col = exporter.column_for_field("account_code", row_doc_type)
+            for row in batch.get("rows") or []:
+                n_total += 1
+                if row.get("_account_flagged"):
+                    acct_val = (row.get(account_col or "Account Code / COA") or "").strip()
+                    if acct_val:
+                        legacy["low_confidence_account"] += 1
+                for col in required:
+                    if _is_empty(row.get(col, "")):
+                        # Map legacy column names to per-reason buckets.
+                        if col in ("Account Code / COA", "Account Code", "*AccountCode", "AccNo", "Acc No", "_ACCOUNT(10)"):
+                            legacy["blank_account"] += 1
+        return {
+            "reconciles": sum(legacy.values()) == 0,
+            "n_total": n_total,
+            "reasons": legacy,  # not fully decomposed for legacy exporters
+        }
+
+    reasons = {"blank_account": 0, "missing_tax": 0, "missing_creditor": 0,
+               "missing_invoice_number": 0, "low_confidence_account": 0}
+    n_total = 0
+
+    for batch in batches:
+        sheet = batch.get("sheet") or "Purchase"
+        row_doc_type = "sales" if sheet == "Sales" else "purchase"
+        account_col = exporter.column_for_field("account_code", row_doc_type)
+        tax_col = exporter.column_for_field("tax_code", row_doc_type)
+        creditor_col = exporter.column_for_field("creditor_code", row_doc_type)
+        debtor_col = exporter.column_for_field("debtor_code", row_doc_type)
+        inv_col = exporter.column_for_field("invoice_number", row_doc_type)
+
+        for row in batch.get("rows") or []:
+            n_total += 1
+            # Decompose per-reason counts. A single row can contribute to
+            # multiple reasons (e.g. blank account + blank tax).
+            if account_col and _is_empty(row.get(account_col, "")):
+                reasons["blank_account"] += 1
+            elif row.get("_account_flagged") and account_col and not _is_empty(row.get(account_col, "")):
+                reasons["low_confidence_account"] += 1
+            if tax_col and _is_empty(row.get(tax_col, "")):
+                reasons["missing_tax"] += 1
+            if (creditor_col and _is_empty(row.get(creditor_col, ""))) or \
+               (debtor_col and _is_empty(row.get(debtor_col, ""))):
+                reasons["missing_creditor"] += 1
+            if inv_col and _is_empty(row.get(inv_col, "")):
+                reasons["missing_invoice_number"] += 1
+
+    # ✓ reconciled iff none of the three primary flag reasons fired.
+    reconciles = (
+        reasons["blank_account"] == 0
+        and reasons["missing_tax"] == 0
+        and reasons["missing_creditor"] == 0
+        and reasons["low_confidence_account"] == 0
+    )
+    return {
+        "reconciles": reconciles,
+        "n_total": n_total,
+        "reasons": reasons,
+    }
+
+
+def format_flag_breakdown_note(breakdown: dict | None) -> str:
+    """Human-readable flag-reason breakdown for a single doc (WS-1.4).
+
+    Returns a short string like:
+        "✓ reconciled"     (when reconciles=True)
+        "✗ 2 blank accounts · 1 missing tax code"  (when reconciles=False)
+    """
+    if not breakdown:
+        return ""
+    if breakdown.get("reconciles"):
+        return "✓ reconciled"
+    reasons = breakdown.get("reasons") or {}
+    parts: list[str] = []
+    if reasons.get("blank_account"):
+        n = reasons["blank_account"]
+        parts.append(f"{n} blank account{'s' if n != 1 else ''}")
+    if reasons.get("missing_tax"):
+        n = reasons["missing_tax"]
+        parts.append(f"{n} missing tax code{'s' if n != 1 else ''}")
+    if reasons.get("missing_creditor"):
+        n = reasons["missing_creditor"]
+        parts.append(f"{n} missing creditor/debtor code{'s' if n != 1 else ''}")
+    if reasons.get("missing_invoice_number"):
+        n = reasons["missing_invoice_number"]
+        parts.append(f"{n} missing invoice number{'s' if n != 1 else ''}")
+    if reasons.get("low_confidence_account"):
+        n = reasons["low_confidence_account"]
+        parts.append(f"{n} low-confidence account{'s' if n != 1 else ''}")
+    if not parts:
+        return "✗ not reconciled"
+    return "✗ " + " · ".join(parts)
+
+
+def format_extraction_doc_count_note(doc_count: int, page_count: int) -> str:
+    """G3 delivery-card line: extracted N documents from M pages (WS-2.4).
+
+    Returns ``""`` when counts are missing or invalid so older sessions without
+    extraction metadata stay silent instead of showing a broken line.
+    """
+    if doc_count < 1 or page_count < 1:
+        return ""
+    doc_word = "document" if doc_count == 1 else "documents"
+    page_word = "page" if page_count == 1 else "pages"
+    return f"Extracted {doc_count} {doc_word} from {page_count} {page_word}"
+
+
+def collect_import_readiness(
+    batches: list[dict],
+    exporter: LedgerExporter,
+    *,
+    unmapped: dict | None = None,
+) -> dict:
+    """Collect distinct ERP codes referenced across all export rows.
+
+    Only meaningful for :class:`ProfileLedgerExporter` (code-keyed ERPs like
+    AutoCount and SQL Account).  For QBS / Xero exporters returns an empty dict.
+
+    Returns a dict with keys:
+      - ``software``: display name of the ERP (e.g. "AutoCount")
+      - ``tax_codes``: sorted list of distinct non-empty tax code values
+      - ``party_codes``: sorted list of distinct non-empty creditor/debtor codes
+      - ``account_codes``: sorted list of distinct non-empty GL account codes
+      - ``unmapped``: the result of ``collect_export_unmapped_summary`` (reused)
+    """
+    if not isinstance(exporter, ProfileLedgerExporter):
+        return {}
+
+    tax_codes: set[str] = set()
+    party_codes: set[str] = set()
+    account_codes: set[str] = set()
+    account_flagged_count = 0
+
+    for batch in batches:
+        sheet = batch.get("sheet") or "Purchase"
+        row_doc_type = "sales" if sheet == "Sales" else "purchase"
+
+        tax_col = exporter.column_for_field("tax_code", row_doc_type)
+        creditor_col = exporter.column_for_field("creditor_code", row_doc_type)
+        debtor_col = exporter.column_for_field("debtor_code", row_doc_type)
+        account_col = exporter.column_for_field("account_code", row_doc_type)
+
+        for row in batch.get("rows") or []:
+            if row.get("_account_flagged"):
+                account_flagged_count += 1
+            if tax_col:
+                v = (row.get(tax_col) or "").strip()
+                if v:
+                    tax_codes.add(v)
+            if creditor_col:
+                v = (row.get(creditor_col) or "").strip()
+                if v:
+                    party_codes.add(v)
+            if debtor_col:
+                v = (row.get(debtor_col) or "").strip()
+                if v:
+                    party_codes.add(v)
+            if account_col:
+                v = (row.get(account_col) or "").strip()
+                if v:
+                    account_codes.add(v)
+
+    return {
+        "software": exporter.software_name,
+        "tax_codes": sorted(tax_codes),
+        "party_codes": sorted(party_codes),
+        "account_codes": sorted(account_codes),
+        "account_flagged_count": account_flagged_count,
+        "unmapped": unmapped or {},
+    }
+
+
+def format_import_readiness_note(readiness: dict | None) -> str:
+    """Concise human-readable checklist for the delivery card.
+
+    Returns ``""`` when *readiness* is empty or not applicable (QBS/Xero).
+
+    Example output:
+        "AutoCount import — needs these codes in your company: tax SV-6, SV-8
+         · creditors 400-G0001, 400-T0001 · accounts 610-0000. If your company
+         uses different tax-code names, upload your tax-code list and we'll
+         match it. ⚠️ 2 rows need a creditor code first (see above)."
+    """
+    if not readiness:
+        return ""
+    software = (readiness.get("software") or "").strip()
+    if not software:
+        return ""
+
+    _MAX_CODES = 8
+
+    def _fmt_list(codes: list[str]) -> str:
+        if len(codes) <= _MAX_CODES:
+            return ", ".join(codes)
+        shown = ", ".join(codes[:_MAX_CODES])
+        extra = len(codes) - _MAX_CODES
+        return f"{shown} …+{extra} more"
+
+    parts: list[str] = []
+    tax_codes = readiness.get("tax_codes") or []
+    party_codes = readiness.get("party_codes") or []
+    account_codes = readiness.get("account_codes") or []
+
+    if tax_codes:
+        parts.append(f"tax {_fmt_list(tax_codes)}")
+    if party_codes:
+        parts.append(f"creditors/debtors {_fmt_list(party_codes)}")
+    if account_codes:
+        parts.append(f"accounts {_fmt_list(account_codes)}")
+
+    flagged_count = int(readiness.get("account_flagged_count") or 0)
+
+    if not parts:
+        if flagged_count <= 0:
+            return ""
+        noun = "line has" if flagged_count == 1 else "lines have"
+        return (
+            f"{software} import — ⚠️ {flagged_count} {noun} a low-confidence "
+            "account code (marked ⚠️ in the preview)."
+        )
+
+    codes_str = " · ".join(parts)
+    note = (
+        f"{software} import — needs these codes to exist in your company: "
+        f"{codes_str}. "
+        "If your company uses different tax-code names, upload your tax-code "
+        "list and we'll match it."
+    )
+    unmapped = readiness.get("unmapped") or {}
+    unmapped_count = int(unmapped.get("count") or 0)
+    if unmapped_count > 0:
+        noun = "row needs" if unmapped_count == 1 else "rows need"
+        note = f"{note} ⚠️ {unmapped_count} {noun} a creditor code first (see above)."
+    if flagged_count > 0:
+        noun = "line has" if flagged_count == 1 else "lines have"
+        note = (
+            f"{note} ⚠️ {flagged_count} {noun} a low-confidence account code "
+            "(marked ⚠️ in the preview)."
+        )
+    return note
 
 
 _SHEET_INVALID = str.maketrans({c: None for c in "[]:*?/\\"})
@@ -430,7 +1376,7 @@ def bank_sheet_title(
     """
     label = _bank_label(bank_name)
     last4 = _last4_digits(account_number, bank_name)
-    ccy = (currency or "SGD").upper()
+    ccy = (currency or "?").strip().upper() or "?"
     return _sheet_title(f"{label} - {last4} - {ccy}")
 
 
@@ -783,7 +1729,7 @@ class BankStatementExporter:
                 bank_sheet_title(
                     bank_name=stmt.bank_name,
                     account_number=stmt.account_number,
-                    currency=stmt.currency or "SGD",
+                    currency=stmt.currency or "",
                 ),
                 [],
             ).append(stmt)

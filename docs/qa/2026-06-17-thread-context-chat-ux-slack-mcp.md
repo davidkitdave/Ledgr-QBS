@@ -1,7 +1,7 @@
 # Thread context + chat UX — Slack MCP live QA
 
 Date: 2026-06-17  
-Channel: `#auditair-international-pte-ltd` (`C0BASC8U551`)  
+Channel: `#skyline-international-pte-ltd` (`C0BASC8U551`)  
 Scope: Thread delivery context (Phases 1–3) + agentic chat UX (Phase 4). No Chrome.
 
 ## Preconditions
@@ -29,7 +29,7 @@ Use these MCP tools (Cursor Slack plugin):
 | Delivery thread | `slack_read_thread(channel_id=C0BASC8U551, message_ts=<summary_ts>)` | Parent = delivery card; replies include user Q + bot A |
 | Eyes ack | same thread read | User question message has 👀 reaction (or ✅ after reply) |
 | Bot answer | same thread read | Bot message mentions account code / 6-3000 / 25-D15 |
-| Channel search | `slack_search_public_and_private(query="in:#auditair-international-pte-ltd 25-D15")` | Finds delivery + thread replies |
+| Channel search | `slack_search_public_and_private(query="in:#skyline-international-pte-ltd 25-D15")` | Finds delivery + thread replies |
 
 ## Regression flags (fail if present in bot reply)
 

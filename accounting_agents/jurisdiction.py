@@ -1,8 +1,8 @@
 """Multi-country jurisdiction routing for the ADK document lane.
 
-The YAU LEE Malaysia session (c92951d1) proved that the previous build was
-implicitly Singapore-only: ``tax_node`` always loaded ``sg_gst.yaml`` regardless
-of the client profile's ``region``. This module is the single source of truth
+A past Malaysia session proved that the previous build was implicitly
+Singapore-only: ``tax_node`` always loaded ``sg_gst.yaml`` regardless of
+the client profile's ``region``. This module is the single source of truth
 for **which tax system / rate band applies** based on session state, and is
 designed to be consumed by:
 
@@ -22,9 +22,10 @@ Per ADK best practices (Sessions/State, Function tools, Dynamic workflows docs):
 * Keep Python guards thin (math, tolerance, HITL flag). LLM is the brain.
 
 New jurisdictions are added by:
-1. Adding a ``JurisdictionRule`` entry below.
-2. Adding a per-jurisdiction reference YAML under
-   ``invoice_processing/shared_libraries/{region_code}.yaml`` (rates + code_map).
+1. Adding a row to ``REGION_REGISTRY`` (currency, yaml, tax_system,
+   cross_border_flag_policy).
+2. Dropping a per-jurisdiction reference YAML under
+   ``invoice_processing/shared_libraries/{yaml_name}`` (rates + code_map).
 3. Optionally adding jurisdiction-specific signal lexicons in the YAML.
 """
 
@@ -33,10 +34,13 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any, Optional
 
 import yaml
+
+from invoice_processing.export.tax_classifier import _bands_active_on, _is_standard_scope
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +53,7 @@ CUSTOMER_COUNTRY_KEY = "customer_country"
 TAX_SYSTEM_HINT_KEY = "tax_system_hint"
 JURISDICTION_RATES_KEY = "jurisdiction_rates"
 FLAG_FOR_HUMAN_KEY = "flag_for_human"
+JURISDICTION_REVIEW_REASON_KEY = "jurisdiction_review_reason"
 CROSS_BORDER_KEY = "cross_border"
 
 # --------------------------------------------------------------------------- #
@@ -66,11 +71,64 @@ TAX_SYSTEM_GST = "GST"
 TAX_SYSTEM_SST = "SST"
 TAX_SYSTEM_OUT_OF_SCOPE = "OS"
 
-# Default currency by region (used as a sanity check when state is missing).
-_REGION_DEFAULT_CURRENCY = {
-    REGION_SINGAPORE: "SGD",
-    REGION_MALAYSIA: "MYR",
+# Per-region registry — single source for currency, YAML, tax system, cross-border policy.
+# Adding a jurisdiction = drop a YAML + one row here (WS3 onboarding reads supported_regions()).
+REGION_REGISTRY: dict[str, dict[str, str]] = {
+    REGION_SINGAPORE: {
+        "currency": "SGD",
+        "yaml": "sg_gst.yaml",
+        "tax_system": TAX_SYSTEM_GST,
+        "home_country": "SG",
+        "cross_border_flag_policy": "partial_exempt",
+    },
+    REGION_MALAYSIA: {
+        "currency": "MYR",
+        "yaml": "my_sst.yaml",
+        "tax_system": TAX_SYSTEM_SST,
+        "home_country": "MY",
+        "cross_border_flag_policy": "never",
+    },
 }
+
+
+def supported_regions() -> list[str]:
+    """Canonical region codes with a registry row (for onboarding dropdowns)."""
+    return list(REGION_REGISTRY.keys())
+
+
+def registration_threshold_for_region(region: str) -> tuple[float, str, str]:
+    """Return (amount, currency, label) from the region's reference YAML."""
+    entry = REGION_REGISTRY.get(region)
+    if not entry:
+        return 0.0, "", ""
+    data = _load_reference(entry["yaml"])
+    reg = data.get("registration_threshold") or {}
+    amount = float(reg.get("amount") or 0)
+    currency = str(reg.get("currency") or entry["currency"]).strip().upper()
+    label = str(reg.get("label") or f"{region} tax registration").strip()
+    return amount, currency, label
+
+
+def _resolve_client_currency(state: dict, client_region: str) -> Optional[str]:
+    """Derive client currency from state or registry — never silently default to SGD."""
+    raw = state.get("base_currency")
+    if raw:
+        return str(raw).strip().upper()
+    if client_region and client_region in REGION_REGISTRY:
+        return REGION_REGISTRY[client_region]["currency"]
+    return None
+
+
+def _cross_border_flag_for_human(
+    policy: str,
+    *,
+    partial_exempt: bool,
+) -> bool:
+    if policy == "partial_exempt":
+        return partial_exempt
+    if policy == "never":
+        return False
+    return True
 
 
 @dataclass
@@ -115,7 +173,7 @@ class JurisdictionResolution:
 
     jurisdiction: JurisdictionRule
     client_region: str
-    client_currency: str
+    client_currency: Optional[str]
     supplier_country: Optional[str]
     customer_country: Optional[str]
 
@@ -167,17 +225,25 @@ def clear_jurisdiction_cache() -> None:
     _YAML_CACHE.clear()
 
 
-def _current_standard_rate(yaml_name: Optional[str]) -> tuple[Optional[float], Optional[str]]:
-    """Pick the current (latest) standard rate from the YAML's ``rate_by_date`` bands."""
+def _current_standard_rate(
+    yaml_name: Optional[str],
+    on: Optional[date] = None,
+) -> tuple[Optional[float], Optional[str]]:
+    """Pick the standard (non-carve-out) rate from ``rate_by_date`` bands."""
     if not yaml_name:
         return None, None
     data = _load_reference(yaml_name)
     bands = data.get("rate_by_date") or []
     if not bands:
         return None, None
-    last = bands[-1]
-    rate = last.get("rate")
-    label = f"{int(rate * 100)}% {data.get('tax_system', '')}".strip()
+    ref_date = on or date.today()
+    active = _bands_active_on(bands, ref_date)
+    if not active:
+        active = bands
+    standard = [b for b in active if _is_standard_scope(b.get("scope"))]
+    pool = standard if standard else active
+    rate = max(float(b["rate"]) for b in pool)
+    label = f"{int(round(rate * 100))}% {data.get('tax_system', '')}".strip()
     return rate, label
 
 
@@ -249,30 +315,20 @@ def resolve_jurisdiction(state: dict) -> JurisdictionResolution:
       jurisdictions and the counterparty is in the SAME country → that
       jurisdiction, NOT cross-border.
     * When client region + counterparty country differ → CROSS_BORDER with
-      ``flag_for_human=True`` (reverse charge / import review).
+      per-region cross_border_flag_policy (SG: partial_exempt only; MY: auto-book).
     * When client region is unknown or unsupported → AMBIGUOUS, flag for human.
     """
     raw_region = state.get("client_region") or state.get("region") or ""
     client_region = _norm_region(raw_region)
-    client_currency = str(
-        state.get("base_currency") or _REGION_DEFAULT_CURRENCY.get(client_region, "") or "SGD"
-    ).strip().upper()
+    client_currency = _resolve_client_currency(state, client_region)
 
     supplier_country = _norm_country(state.get(SUPPLIER_COUNTRY_KEY))
     customer_country = _norm_country(state.get(CUSTOMER_COUNTRY_KEY))
 
-    # Partially-exempt flag: SG clients with imported-service reverse-charge exposure.
     partial_exempt = bool(state.get("partial_exempt"))
-
-    # Counterparty = supplier for purchases, customer for sales. The state key
-    # the extract node sets depends on direction; the router node downstream of
-    # extract (categorize / tax) normalizes this. For jurisdiction routing we
-    # treat EITHER country as a counterparty signal — the dominant one wins.
     counterparty_country = supplier_country or customer_country
 
     if not client_region:
-        # No region in state — ambiguous; flag for human so we don't apply
-        # Singapore math to a non-SG client (or vice versa).
         return JurisdictionResolution(
             jurisdiction=JurisdictionRule(
                 code=JURISDICTION_AMBIGUOUS,
@@ -281,23 +337,46 @@ def resolve_jurisdiction(state: dict) -> JurisdictionResolution:
                 flag_for_human=True,
                 notes="client region not set in state; cannot pick a rule set",
             ),
-            client_region=client_region or "",
+            client_region="",
             client_currency=client_currency,
             supplier_country=supplier_country,
             customer_country=customer_country,
         )
 
-    # Cross-border: client + counterparty in different countries.
-    # Routine case: foreign-supplier purchase → out of scope for local GST/SST
-    # (foreign tax is a cost, not claimable as input tax). Auto-book; no HITL.
-    # Exception: SG partially-exempt client + imported service needs RC review.
-    if counterparty_country and client_region == REGION_SINGAPORE and counterparty_country != "SG":
-        sg_flag = partial_exempt  # True only when RC review is warranted
-        if sg_flag:
-            sg_notes = "Partially-exempt Singapore client + imported service; reverse-charge (RC) treatment needs review."
+    entry = REGION_REGISTRY.get(client_region)
+    if not entry:
+        return JurisdictionResolution(
+            jurisdiction=JurisdictionRule(
+                code=JURISDICTION_AMBIGUOUS,
+                region=client_region,
+                tax_system="",
+                flag_for_human=True,
+                notes=f"region={client_region} is not in REGION_REGISTRY; cannot pick a rule set",
+            ),
+            client_region=client_region,
+            client_currency=client_currency,
+            supplier_country=supplier_country,
+            customer_country=customer_country,
+        )
+
+    home_country = entry["home_country"]
+    reference_yaml = entry["yaml"]
+
+    if counterparty_country and counterparty_country != home_country:
+        flag = _cross_border_flag_for_human(
+            entry["cross_border_flag_policy"],
+            partial_exempt=partial_exempt,
+        )
+        tax_label = entry["tax_system"]
+        if flag:
+            notes = (
+                f"Partially-exempt {client_region} client + imported service; "
+                "reverse-charge (RC) treatment needs review."
+            )
         else:
-            sg_notes = (
-                f"Foreign counterparty (country={counterparty_country}); out of scope for local GST"
+            notes = (
+                f"Foreign counterparty (country={counterparty_country}); "
+                f"out of scope for local {tax_label}"
                 " — foreign tax recorded as shown, not claimable as input tax."
             )
         return JurisdictionResolution(
@@ -305,30 +384,29 @@ def resolve_jurisdiction(state: dict) -> JurisdictionResolution:
                 code=JURISDICTION_CROSS_BORDER,
                 region=client_region,
                 tax_system=TAX_SYSTEM_OUT_OF_SCOPE,
-                reference_yaml="sg_gst.yaml",
+                reference_yaml=reference_yaml,
                 standard_rate=None,
-                flag_for_human=sg_flag,
+                flag_for_human=flag,
                 cross_border=True,
-                notes=sg_notes,
+                notes=notes,
             ),
             client_region=client_region,
             client_currency=client_currency,
             supplier_country=supplier_country,
             customer_country=customer_country,
         )
-    if counterparty_country and client_region == REGION_MALAYSIA and counterparty_country != "MY":
+
+    expected_currency = entry["currency"]
+    if client_currency != expected_currency:
         return JurisdictionResolution(
             jurisdiction=JurisdictionRule(
-                code=JURISDICTION_CROSS_BORDER,
+                code=JURISDICTION_AMBIGUOUS,
                 region=client_region,
-                tax_system=TAX_SYSTEM_OUT_OF_SCOPE,
-                reference_yaml="my_sst.yaml",
-                standard_rate=None,
-                flag_for_human=False,  # MY cross-border: always auto-book
-                cross_border=True,
+                tax_system="",
+                flag_for_human=True,
                 notes=(
-                    f"Foreign counterparty (country={counterparty_country}); out of scope for local SST"
-                    " — foreign tax recorded as shown, not claimable as input tax."
+                    f"region={client_region} but base_currency={client_currency}; "
+                    "cannot pick a rule set without confirmation"
                 ),
             ),
             client_region=client_region,
@@ -337,53 +415,15 @@ def resolve_jurisdiction(state: dict) -> JurisdictionResolution:
             customer_country=customer_country,
         )
 
-    # Domestic routes (one rule per supported region).
-    if client_region == REGION_SINGAPORE and client_currency == "SGD":
-        rate, label = _current_standard_rate("sg_gst.yaml")
-        return JurisdictionResolution(
-            jurisdiction=JurisdictionRule(
-                code=REGION_SINGAPORE,
-                region=client_region,
-                tax_system=TAX_SYSTEM_GST,
-                reference_yaml="sg_gst.yaml",
-                standard_rate=rate,
-                rate_band_label=label,
-            ),
-            client_region=client_region,
-            client_currency=client_currency,
-            supplier_country=supplier_country,
-            customer_country=customer_country,
-        )
-
-    if client_region == REGION_MALAYSIA and client_currency == "MYR":
-        rate, label = _current_standard_rate("my_sst.yaml")
-        return JurisdictionResolution(
-            jurisdiction=JurisdictionRule(
-                code=REGION_MALAYSIA,
-                region=client_region,
-                tax_system=TAX_SYSTEM_SST,
-                reference_yaml="my_sst.yaml",
-                standard_rate=rate,
-                rate_band_label=label,
-            ),
-            client_region=client_region,
-            client_currency=client_currency,
-            supplier_country=supplier_country,
-            customer_country=customer_country,
-        )
-
-    # Region known but currency mismatch (e.g. SG client, MYR base currency)
-    # — flag rather than silently picking a wrong rate.
+    rate, label = _current_standard_rate(reference_yaml)
     return JurisdictionResolution(
         jurisdiction=JurisdictionRule(
-            code=JURISDICTION_AMBIGUOUS,
+            code=client_region,
             region=client_region,
-            tax_system="",
-            flag_for_human=True,
-            notes=(
-                f"region={client_region} but base_currency={client_currency}; "
-                "cannot pick a rule set without confirmation"
-            ),
+            tax_system=entry["tax_system"],
+            reference_yaml=reference_yaml,
+            standard_rate=rate,
+            rate_band_label=label,
         ),
         client_region=client_region,
         client_currency=client_currency,
@@ -453,11 +493,7 @@ def resolution_from_state(state: dict) -> JurisdictionResolution:
     client_region = _norm_region(
         state.get("client_region") or state.get("region") or ""
     )
-    client_currency = str(
-        state.get("base_currency")
-        or _REGION_DEFAULT_CURRENCY.get(client_region, "")
-        or "SGD"
-    ).strip().upper()
+    client_currency = _resolve_client_currency(state, client_region)
 
     return JurisdictionResolution(
         jurisdiction=rule,

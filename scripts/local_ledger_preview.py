@@ -25,9 +25,7 @@ from invoice_processing.export.categorizer import categorize_invoice
 from invoice_processing.export.client_context import ClientContext, CoaAccount
 from invoice_processing.export.exporters import QbsLedgerExporter, validate_required_fields
 from invoice_processing.export.tax_classifier import TaxClassifier
-from invoice_processing.extract.document_extractor import extract_document_file
-from invoice_processing.extract.document_normalizer import normalize_document_bundle
-from invoice_processing.extract.record_merge import merge_document_records
+from invoice_processing.extract.process_invoice_document import process_invoice_document
 
 SAMPLE_TEST_CLIENT_CTX = ClientContext(
     client_id="company-a",
@@ -86,14 +84,16 @@ def _coa_args(client: ClientContext) -> dict:
 
 
 def process_pdf(path: Path, client: ClientContext) -> dict:
-    bundle = merge_document_records(extract_document_file(path))
-    invoices = normalize_document_bundle(
-        bundle,
+    data = path.read_bytes()
+    result = process_invoice_document(
+        data,
+        "application/pdf",
         direction="purchase",
         our_gst_registered=client.tax_registered,
         base_currency=client.base_currency,
         client_name=client.client_name,
     )
+    invoices = result.normalized
 
     tax = TaxClassifier()
     exporter = QbsLedgerExporter()
@@ -128,7 +128,9 @@ def process_pdf(path: Path, client: ClientContext) -> dict:
 
     return {
         "file": path.name,
-        "phase1_documents": len(bundle.documents),
+        # ``InvoiceProcessResult`` no longer exposes a pre-normalization document
+        # list; report the normalized invoice count (was a stale ``bundle.documents``).
+        "phase1_documents": len(invoices),
         "invoice_count": len(invoices),
         "qbs_row_count": len(all_rows),
         "qbs_columns": exporter.purchase_cols,

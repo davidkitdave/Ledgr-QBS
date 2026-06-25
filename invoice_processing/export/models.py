@@ -12,6 +12,11 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Optional
 
+_HOME_COUNTRY_EQUIVALENTS: dict[str, set[str]] = {
+    "SG": {"SG", "SGP", "SINGAPORE"},
+    "MY": {"MY", "MYS", "MALAYSIA", "MSIA", "M'SIA"},
+}
+
 
 @dataclass
 class PartyInfo:
@@ -21,6 +26,7 @@ class PartyInfo:
     country: Optional[str] = None          # "SG" or an overseas country/None if unknown
     gst_regno: Optional[str] = None        # GST registration number / UEN if shown
     email: Optional[str] = None
+    vendor_code: Optional[str] = None      # creditor code for purchases (from entity memory)
 
     @property
     def gst_registered(self) -> bool:
@@ -29,9 +35,31 @@ class PartyInfo:
 
     @property
     def is_overseas(self) -> Optional[bool]:
+        """Whether this party is outside Singapore (legacy default home country).
+
+        .. deprecated::
+            Prefer :meth:`is_overseas_for` with the client's home country so MY
+            clients do not treat SG suppliers as domestic.
+
+        WARNING: hard-coded to SG.  Callers that serve non-SG clients MUST use
+        ``is_overseas_for(home_country)`` instead, or SG suppliers will be
+        incorrectly treated as domestic for e.g. a Malaysian client.
+        """
+        return self.is_overseas_for("SG")
+
+    def is_overseas_for(self, home_country: str) -> Optional[bool]:
+        """True when ``country`` is outside the client's home jurisdiction."""
         if not self.country:
             return None
-        return self.country.strip().upper() not in ("SG", "SINGAPORE")
+        if not home_country:
+            return None
+        party = self.country.strip().upper()
+        home = home_country.strip().upper()
+        home_codes = _HOME_COUNTRY_EQUIVALENTS.get(home, {home})
+        party_codes = _HOME_COUNTRY_EQUIVALENTS.get(party, {party})
+        if party_codes & home_codes:
+            return False
+        return True
 
 
 @dataclass
@@ -44,6 +72,9 @@ class InvoiceLine:
     net_amount: Optional[float] = None     # line amount, ex-tax
     gst_amount: Optional[float] = None     # GST on this line (0 for ZR/ES/OS)
     account_code: Optional[str] = None     # COA code from categorization (later phase)
+    account_flagged: bool = False          # low-confidence / unresolved COA pick (WS-3.4)
+    account_flag_reason: Optional[str] = None  # e.g. low_avg_logprobs, unresolved
+    account_alternative_codes: list[str] = field(default_factory=list)  # LLM runner-ups (WS-3.5)
     item_code: Optional[str] = None
     tax_keyword: Optional[str] = None      # explicit per-line tax wording from extraction (e.g. "SR","ZR","9%","0%","exempt") — a hint for the tax classifier
 
@@ -62,7 +93,7 @@ class NormalizedInvoice:
     invoice_number: Optional[str] = None
     invoice_date: Optional[date] = None
     due_date: Optional[date] = None
-    currency: str = "SGD"
+    currency: str = ""
     po_number: Optional[str] = None
 
     supplier: PartyInfo = field(default_factory=PartyInfo)   # used when doc_type=purchase
@@ -105,6 +136,11 @@ class NormalizedInvoice:
     # to apply the credit-note sign-flip (negative amounts on export).
     document_kind: Optional[str] = None  # classify doc_type: invoice/credit_note/receipt/... (NOT direction)
 
+    # Provenance from extraction (WS-5.4): page span within the source PDF and
+    # the Slack file id for this processing run (not used in dedupe keys).
+    page_range: Optional[tuple[int, int]] = None
+    source_file_id: Optional[str] = None
+
     @property
     def counterparty(self) -> PartyInfo:
         """The other party: supplier for purchases, customer for sales."""
@@ -131,7 +167,7 @@ class BankStatement:
 
     bank_name: str = ""                  # -> Excel sheet title (e.g. "OCBC - 5001")
     account_number: Optional[str] = None
-    currency: str = "SGD"
+    currency: str = ""
     statement_period: Optional[str] = None
     opening_balance: Optional[float] = None
     closing_balance: Optional[float] = None

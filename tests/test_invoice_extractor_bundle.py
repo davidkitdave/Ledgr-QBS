@@ -1,9 +1,8 @@
-"""Tests for multi-receipt bundle splitting + FX conversion in the invoice extractor.
+"""Tests for FX conversion + per-doc reconcile in the invoice extractor.
 
 All tests are hermetic — no Gemini / network calls.  We build ExtractedInvoice
-and ExtractedInvoiceBundle fixtures directly and test the pure-Python logic in
+fixtures directly and test the pure-Python logic in
   • to_normalized()  — FX fields populated when currency != base_currency
-  • to_normalized_bundle() — splits bundle into N NormalizedInvoices, skips SOA
   • reconcile()       — per-doc reconcile still passes for each split doc
 
 TDD: these tests were written BEFORE the implementation.
@@ -15,12 +14,10 @@ import pytest
 
 from invoice_processing.extract.invoice_extractor import (
     ExtractedInvoice,
-    ExtractedInvoiceBundle,
     ExtractedLine,
     _parse_date,
     reconcile,
     to_normalized,
-    to_normalized_bundle,
 )
 from invoice_processing.export.models import NormalizedInvoice
 
@@ -63,106 +60,8 @@ def _make_receipt(
         subtotal=subtotal,
         gst_total=gst_total,
         total=total,
+        issuer_tax_system="NONE",
     )
-
-
-def _make_bundle(*receipts: ExtractedInvoice, skipped_pages=None, notes=None) -> ExtractedInvoiceBundle:
-    return ExtractedInvoiceBundle(
-        invoices=list(receipts),
-        skipped_pages=skipped_pages,
-        notes=notes,
-    )
-
-
-# =========================================================================== #
-# A — Bundle splitting: multi-receipt → N NormalizedInvoices
-# =========================================================================== #
-
-class TestBundleSplit:
-    """A bundled multi-receipt input splits into N NormalizedInvoices, each reconciling."""
-
-    def test_single_receipt_bundle_returns_one(self):
-        """Single-entry bundle degrades gracefully to one NormalizedInvoice."""
-        receipt = _make_receipt(invoice_number="R-001", currency="SGD", total=100.0, subtotal=100.0)
-        bundle = _make_bundle(receipt)
-        results = to_normalized_bundle(bundle, direction="purchase", base_currency="SGD")
-        assert len(results) == 1
-        assert results[0].invoice_number == "R-001"
-
-    def test_two_receipt_bundle_returns_two(self):
-        """Two receipts in bundle → two NormalizedInvoices."""
-        r1 = _make_receipt(invoice_number="R-001", currency="SGD", total=100.0, subtotal=100.0)
-        r2 = _make_receipt(invoice_number="R-002", currency="SGD", total=200.0, subtotal=200.0)
-        bundle = _make_bundle(r1, r2)
-        results = to_normalized_bundle(bundle, direction="purchase", base_currency="SGD")
-        assert len(results) == 2
-        nums = {r.invoice_number for r in results}
-        assert nums == {"R-001", "R-002"}
-
-    def test_four_receipt_bundle_returns_four(self):
-        """Four receipts on one scanned page → four NormalizedInvoices."""
-        receipts = [
-            _make_receipt(invoice_number=f"R-00{i}", currency="SGD", total=float(i * 10), subtotal=float(i * 10))
-            for i in range(1, 5)
-        ]
-        bundle = _make_bundle(*receipts)
-        results = to_normalized_bundle(bundle, direction="purchase", base_currency="SGD")
-        assert len(results) == 4
-
-    def test_each_doc_reconciles(self):
-        """Each split NormalizedInvoice must individually reconcile (lines == totals)."""
-        r1 = _make_receipt(invoice_number="R-001", currency="SGD", total=500.0, subtotal=500.0, net_amount=500.0)
-        r2 = _make_receipt(invoice_number="R-002", currency="SGD", total=750.0, subtotal=750.0, net_amount=750.0)
-        bundle = _make_bundle(r1, r2)
-        results = to_normalized_bundle(bundle, direction="purchase", base_currency="SGD")
-        for inv in results:
-            assert inv.reconciled, f"Invoice {inv.invoice_number} failed reconcile: {inv.reconcile_note}"
-
-    def test_empty_bundle_returns_empty_list(self):
-        """An empty bundle (no invoices) returns an empty list without crashing."""
-        bundle = ExtractedInvoiceBundle(invoices=[])
-        results = to_normalized_bundle(bundle, direction="purchase", base_currency="SGD")
-        assert results == []
-
-    def test_bundle_direction_purchase_sets_doc_type(self):
-        """direction='purchase' → each NormalizedInvoice.doc_type == 'purchase'."""
-        r = _make_receipt(invoice_number="R-001", currency="SGD", total=100.0, subtotal=100.0)
-        bundle = _make_bundle(r)
-        results = to_normalized_bundle(bundle, direction="purchase", base_currency="SGD")
-        assert results[0].doc_type == "purchase"
-
-    def test_bundle_direction_sales_sets_doc_type(self):
-        """direction='sales' → each NormalizedInvoice.doc_type == 'sales'."""
-        r = _make_receipt(invoice_number="I-001", currency="SGD", total=100.0, subtotal=100.0)
-        bundle = _make_bundle(r)
-        results = to_normalized_bundle(bundle, direction="sales", base_currency="SGD")
-        assert results[0].doc_type == "sales"
-
-
-# =========================================================================== #
-# B — SOA cover-page skipping
-# =========================================================================== #
-
-class TestSoaSkipping:
-    """An SOA cover-page-only bundle (no real invoices) produces zero NormalizedInvoices."""
-
-    def test_soa_bundle_with_no_invoices_returns_empty(self):
-        """SOA package where only the cover was found → empty list; skipped_pages recorded."""
-        bundle = ExtractedInvoiceBundle(
-            invoices=[],
-            skipped_pages=[1],
-            notes="SOA cover page skipped; no embedded invoices found",
-        )
-        results = to_normalized_bundle(bundle, direction="purchase", base_currency="SGD")
-        assert results == []
-
-    def test_soa_bundle_real_invoices_only(self):
-        """SOA package: cover skipped (page 1), two embedded invoices extracted."""
-        r1 = _make_receipt(invoice_number="INV-2024-001", currency="SGD", total=300.0, subtotal=300.0)
-        r2 = _make_receipt(invoice_number="INV-2024-002", currency="SGD", total=450.0, subtotal=450.0)
-        bundle = _make_bundle(r1, r2, skipped_pages=[1])
-        results = to_normalized_bundle(bundle, direction="purchase", base_currency="SGD")
-        assert len(results) == 2
 
 
 # =========================================================================== #
@@ -340,19 +239,6 @@ class TestFxNoRate:
         inv = to_normalized(r, direction="purchase", base_currency="SGD")
         assert inv.needs_fx_review is False
 
-    def test_bundle_with_mixed_currencies_no_rate_not_flagged(self):
-        """Separate single-currency docs in a bundle are not flagged."""
-        r_sgd = _make_receipt(invoice_number="R-SGD", currency="SGD", total=100.0, subtotal=100.0)
-        r_usd = _make_receipt(invoice_number="R-USD", currency="USD", total=50.0, subtotal=50.0)
-        r_idr = _make_receipt(invoice_number="R-IDR", currency="IDR", total=50000.0, subtotal=50000.0)
-        bundle = _make_bundle(r_sgd, r_usd, r_idr)
-        results = to_normalized_bundle(bundle, direction="purchase", base_currency="SGD")
-        assert len(results) == 3
-        by_num = {r.invoice_number: r for r in results}
-        assert by_num["R-SGD"].needs_fx_review is False
-        assert by_num["R-USD"].needs_fx_review is False
-        assert by_num["R-IDR"].needs_fx_review is False
-
 
 # =========================================================================== #
 # E — Reconcile still works per-doc after split
@@ -379,6 +265,7 @@ class TestReconcilePerDoc:
             subtotal=974470.0,
             gst_total=0.0,
             total=605500.0,  # wrong — causes the reconcile failure from the task description
+        issuer_tax_system="NONE",
         )
         ok, detail = reconcile(r)
         assert ok is False

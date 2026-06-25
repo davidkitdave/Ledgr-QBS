@@ -102,14 +102,14 @@ class TestLoadClientSetupNoSysConfig:
         assert em.role == "Creditor"
         assert em.tax_code == "SR"
 
-    def test_profile_fields_are_defaults(self, tmp_path):
+    def test_profile_fields_are_empty_defaults(self, tmp_path):
         path = _make_workbook(tmp_path)
         ctx = load_client_setup(path, client_id="test-client-1")
 
-        assert ctx.region == "SINGAPORE"
+        assert ctx.region == ""
         assert ctx.accounting_software == "QBS Ledger"
-        assert ctx.base_currency == "SGD"
-        assert ctx.tax_registered is True
+        assert ctx.base_currency == ""
+        assert ctx.tax_registered is None
 
     def test_client_id_from_param(self, tmp_path):
         path = _make_workbook(tmp_path)

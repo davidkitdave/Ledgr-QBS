@@ -3,34 +3,17 @@
 from __future__ import annotations
 
 import urllib.parse
-from dataclasses import dataclass
 
 from app.native_blocks_compat import supports_native_blocks
-
-
-@dataclass(frozen=True)
-class PreviewColumn:
-    """Spec for one column in a ledger preview data_table."""
-
-    header: str    # shown in the data_table column header
-    row_key: str   # dict key on each exporter row
-    cell_type: str  # "raw_text" or "raw_number"
-
-
-def _normalize_software(software: str) -> str:
-    """Normalise assorted software strings to ``"xero"`` or ``"qbs_ledger"``."""
-    s = (software or "").strip().lower()
-    if "xero" in s:
-        return "xero"
-    # "qbs", "qbs_ledger", "qbs ledger", "QBS Ledger" all map to qbs_ledger.
-    return "qbs_ledger"
-
-
-def software_label(software: str) -> str:
-    """Human-readable label for a software key (normalised or raw)."""
-    if _normalize_software(software) == "xero":
-        return "Xero"
-    return "QBS Ledger"
+from accounting_agents.jurisdiction import supported_regions
+from invoice_processing.export.exporters import (
+    SLACK_DATA_TABLE_MAX_COLS,
+    PreviewColumn,
+    load_erp_profile_for_system,
+    normalize_software_preview_key,
+    preview_columns_from_profile,
+    software_label,
+)
 
 
 def _enc(val: str | None) -> str:
@@ -95,19 +78,25 @@ _BANK_COLS: list[PreviewColumn] = [
     PreviewColumn("Currency",    "Currency",    "raw_text"),
 ]
 
-
 def preview_column_spec(*, software: str, sheet: str) -> list[PreviewColumn]:
     """Return the curated preview columns for a (software, sheet) combination.
 
     Bank sheets (anything other than ``"Purchase"`` or ``"Sales"``) always
-    use the 6-col bank spec regardless of software.  Unknown software defaults
-    to the QBS Ledger shape.
+    use the 6-col bank spec regardless of software.  Unresolved software
+    returns an empty spec (caller should flag for review).
     """
     if sheet not in ("Purchase", "Sales"):
         return _BANK_COLS
-    norm = _normalize_software(software)
+    norm = normalize_software_preview_key(software)
+    if norm is None:
+        return []
     if norm == "xero":
         return _XERO_PURCHASE_COLS if sheet == "Purchase" else _XERO_SALES_COLS
+    if norm in ("autocount", "sql_account"):
+        profile = load_erp_profile_for_system(norm)
+        if profile is not None:
+            return preview_columns_from_profile(profile, sheet)
+        return []
     # qbs_ledger (default)
     return _QBS_PURCHASE_COLS if sheet == "Purchase" else _QBS_SALES_COLS
 
@@ -388,7 +377,7 @@ _MONTHS = [
     (9, "September"), (10, "October"), (11, "November"), (12, "December"),
 ]
 
-_SOFTWARE_OPTIONS = ["QBS Ledger", "Xero"]
+_SOFTWARE_OPTIONS = ["QBS Ledger", "Xero", "AutoCount", "SQL Account"]
 
 
 def welcome_blocks() -> list:
@@ -420,11 +409,12 @@ def welcome_blocks() -> list:
 
 
 def onboarding_modal(prefill: dict | None = None) -> dict:
-    """Build the 4-field onboarding modal view dict.
+    """Build the onboarding modal view dict.
 
     Args:
-        prefill: optional dict with keys client_name, fye_month, accounting_software,
-                 gst_registered (bool) to pre-populate the modal for /ledgr settings.
+        prefill: optional dict with keys client_name, region, fye_month,
+                 accounting_software, gst_registered (bool) to pre-populate the
+                 modal for /ledgr settings.
     """
     p = prefill or {}
 
@@ -440,7 +430,31 @@ def onboarding_modal(prefill: dict | None = None) -> dict:
         },
     }
 
-    # --- block 2: fye_month ---
+    # --- block 2: region ---
+    region_initial = None
+    if p.get("region") in supported_regions():
+        region_val = p["region"]
+        region_initial = {
+            "text": {"type": "plain_text", "text": region_val.title()},
+            "value": region_val,
+        }
+
+    region_block = {
+        "type": "input",
+        "block_id": "region",
+        "label": {"type": "plain_text", "text": "Client tax region"},
+        "element": {
+            "type": "static_select",
+            "action_id": "val",
+            "options": [
+                {"text": {"type": "plain_text", "text": code.title()}, "value": code}
+                for code in supported_regions()
+            ],
+            **({"initial_option": region_initial} if region_initial else {}),
+        },
+    }
+
+    # --- block 3: fye_month ---
     fye_initial = None
     if p.get("fye_month") is not None:
         month_num = int(p["fye_month"])
@@ -463,7 +477,7 @@ def onboarding_modal(prefill: dict | None = None) -> dict:
         },
     }
 
-    # --- block 3: accounting_software ---
+    # --- block 4: accounting_software ---
     sw_initial = None
     if p.get("accounting_software") in _SOFTWARE_OPTIONS:
         sw_val = p["accounting_software"]
@@ -484,7 +498,7 @@ def onboarding_modal(prefill: dict | None = None) -> dict:
         },
     }
 
-    # --- block 4: gst_registered ---
+    # --- block 5: gst_registered ---
     gst_registered = p.get("gst_registered")
     gst_initial = None
     if gst_registered is True:
@@ -512,7 +526,7 @@ def onboarding_modal(prefill: dict | None = None) -> dict:
         "callback_id": "ledgr_onboarding",
         "title": {"type": "plain_text", "text": "Set up client"},
         "submit": {"type": "plain_text", "text": "Save"},
-        "blocks": [client_name_block, fye_block, software_block, gst_block],
+        "blocks": [client_name_block, region_block, fye_block, software_block, gst_block],
     }
 
 
@@ -561,11 +575,11 @@ def needs_setup_blocks() -> list:
     ]
 
 
-def _fmt_money(amount: float | None, currency: str = "SGD") -> str:
-    """Format a document total with its currency, e.g. '$1,234.50' / 'SGD 1,234.50'."""
+def _fmt_money(amount: float | None, currency: str = "") -> str:
+    """Format a document total with its currency, e.g. 'SGD 1,234.50'."""
     if amount is None:
         return "—"
-    cur = (currency or "SGD").strip().upper()
+    cur = (currency or "?").strip().upper()
     return f"{cur} {amount:,.2f}"
 
 
@@ -626,7 +640,7 @@ def _per_doc_line(doc) -> str:
     inv_no = getattr(norm, "invoice_number", None)
     inv_date = getattr(norm, "invoice_date", None)
     total = getattr(norm, "doc_total", None)
-    currency = getattr(norm, "currency", None) or "SGD"
+    currency = (getattr(norm, "currency", None) or "").strip().upper() or "?"
 
     parts = [f"*{counterparty}*"]
     if inv_no:
@@ -713,7 +727,7 @@ def _per_doc_card_native(doc, *, actions: list[str], op_id: str | None) -> list[
             inv_no = _doc_get(doc, "invoice_number")
             inv_date = _doc_get(doc, "invoice_date")
             date_str = str(inv_date) if inv_date else ""
-            currency = _doc_get(doc, "currency") or "SGD"
+            currency = (_doc_get(doc, "currency") or "").strip().upper() or "?"
             total = _doc_get(doc, "total")
             tax_code = _doc_get(doc, "tax_code")
             account_code = _doc_get(doc, "account_code")
@@ -731,7 +745,7 @@ def _per_doc_card_native(doc, *, actions: list[str], op_id: str | None) -> list[
             date_str = (
                 inv_date.isoformat() if inv_date and hasattr(inv_date, "isoformat") else str(inv_date)
             ) if inv_date else ""
-            currency = getattr(norm, "currency", None) or "SGD"
+            currency = (getattr(norm, "currency", None) or "").strip().upper() or "?"
             total = getattr(norm, "doc_total", None)
             tax_code = None
             account_code = None
@@ -1635,6 +1649,11 @@ def approval_outcome_blocks(summary: str, decision: str) -> list:
     ]
 
 
+_REVIEW_CARD_DEFAULT_QUESTION = (
+    "This document needs your review before it's added to the ledger."
+)
+
+
 def review_card_blocks(
     question: str,
     op_id: str,
@@ -1664,6 +1683,10 @@ def review_card_blocks(
                   the bullets section.
         channel_id: Used by supports_native_blocks() for per-channel probe.
     """
+    question = question.strip() if question else ""
+    if not question:
+        question = _REVIEW_CARD_DEFAULT_QUESTION
+
     reextract_btn = {
         "type": "button",
         "text": {"type": "plain_text", "text": "Re-extract with a hint", "emoji": True},
@@ -1965,6 +1988,46 @@ def coa_prompt_blocks() -> list:
     ]
 
 
+_UNMAPPED_ACCT_OPTION = {
+    "text": {"type": "plain_text", "text": "UNMAPPED — assign later"},
+    "value": "",
+}
+
+
+def _line_account_select_options(
+    ln: dict,
+    coa_options: list[tuple[str, str]],
+) -> list[dict]:
+    """Build static_select options for one invoice line (WS-3.5).
+
+    Flagged lines show LLM ``account_alternative_codes`` plus an UNMAPPED
+    abstention option. Other lines use the full client COA list.
+    """
+    by_code = {code: lbl for code, lbl in coa_options}
+    if ln.get("account_flagged"):
+        seen: set[str] = set()
+        options: list[dict] = []
+        current = (ln.get("account_code") or "").strip()
+        if current and current not in seen:
+            lbl = by_code.get(current, current)
+            options.append({"text": {"type": "plain_text", "text": lbl[:75]}, "value": current})
+            seen.add(current)
+        for code in ln.get("account_alternative_codes") or []:
+            if not code or code in seen:
+                continue
+            seen.add(code)
+            lbl = by_code.get(code, code)
+            options.append({"text": {"type": "plain_text", "text": lbl[:75]}, "value": code})
+        options.append(dict(_UNMAPPED_ACCT_OPTION))
+        return options
+    if not coa_options:
+        return []
+    return [
+        {"text": {"type": "plain_text", "text": lbl[:75]}, "value": code}
+        for code, lbl in coa_options
+    ]
+
+
 def invoice_edit_modal(op_id: str, lines: list[dict], coa_options: list[tuple[str, str]]) -> dict:
     """Modal to correct each flagged line's account code / tax treatment / net amount.
 
@@ -1976,8 +2039,6 @@ def invoice_edit_modal(op_id: str, lines: list[dict], coa_options: list[tuple[st
     extractor's actual output and a round-tripped edit lands on the canonical
     keys the exporter writes from.
     """
-    coa = [{"text": {"type": "plain_text", "text": lbl[:75]}, "value": code}
-           for code, lbl in coa_options]
     tax_opts = [{"text": {"type": "plain_text", "text": t}, "value": t}
                 for t in ("SR", "ZR", "ES", "TX", "OS")]
     blocks: list = []
@@ -1991,12 +2052,13 @@ def invoice_edit_modal(op_id: str, lines: list[dict], coa_options: list[tuple[st
         # Slack rejects a static_select with empty options, which would make the
         # whole modal fail to open. When the client has no COA, omit the
         # account-code block entirely — tax and amount stay editable.
-        if coa:
-            acct_initial = next((o for o in coa if o["value"] == ln.get("account_code")), None)
+        line_coa = _line_account_select_options(ln, coa_options)
+        if line_coa:
+            acct_initial = next((o for o in line_coa if o["value"] == ln.get("account_code")), None)
             blocks.append({
                 "type": "input", "block_id": f"acct_{i}", "optional": True,
                 "label": {"type": "plain_text", "text": "Account code"},
-                "element": {"type": "static_select", "action_id": "v", "options": coa,
+                "element": {"type": "static_select", "action_id": "v", "options": line_coa,
                             **({"initial_option": acct_initial} if acct_initial else {})},
             })
         tax_initial = next((o for o in tax_opts if o["value"] == ln.get("tax_treatment")), None)
@@ -2194,7 +2256,13 @@ def ledger_preview_data_table(
     if not rows:
         return []
 
+    # Belt-and-suspenders: never emit a data_table wider than Slack's 20-column
+    # limit, no matter what the spec source produced. When capping, keep the
+    # first 19 columns plus the LAST (typically the amount/total) rather than
+    # dropping the tail.
     col_spec = preview_column_spec(software=software, sheet=sheet)
+    if len(col_spec) > SLACK_DATA_TABLE_MAX_COLS:
+        col_spec = [*col_spec[: SLACK_DATA_TABLE_MAX_COLS - 1], col_spec[-1]]
     sw_label = software_label(software)
     effective_max = min(max_rows, _DATA_TABLE_MAX_ROWS)
     preview = rows[:effective_max]

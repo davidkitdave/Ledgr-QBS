@@ -1,0 +1,86 @@
+software_name: Xero Ledger
+system: xero
+exporter: builtin
+# Xero Ledger format: Xero import columns + Source File ID / [AI Status],
+# explicit *TaxType string carried per line.
+
+purchase_cols:
+  - "*ContactName"
+  - EmailAddress
+  - POAddressLine1
+  - POAddressLine2
+  - POAddressLine3
+  - POAddressLine4
+  - POCity
+  - PORegion
+  - POPostalCode
+  - POCountry
+  - "*InvoiceNumber"
+  - "*InvoiceDate"
+  - "*DueDate"
+  - Total
+  - InventoryItemCode
+  - Description
+  - "*Quantity"
+  - "*UnitAmount"
+  - "*AccountCode"
+  - "*TaxType"
+  - TaxAmount
+  - TrackingName1
+  - TrackingOption1
+  - TrackingName2
+  - TrackingOption2
+  - Currency
+
+sales_cols:
+  - "*ContactName"
+  - EmailAddress
+  - POAddressLine1
+  - POAddressLine2
+  - POAddressLine3
+  - POAddressLine4
+  - POCity
+  - PORegion
+  - POPostalCode
+  - POCountry
+  - "*InvoiceNumber"
+  - Reference
+  - "*InvoiceDate"
+  - "*DueDate"
+  - Total
+  - InventoryItemCode
+  - "*Description"
+  - "*Quantity"
+  - "*UnitAmount"
+  - Discount
+  - "*AccountCode"
+  - "*TaxType"
+  - TaxAmount
+  - TrackingName1
+  - TrackingOption1
+  - TrackingName2
+  - TrackingOption2
+  - Currency
+  - BrandingTheme
+
+# Logical-field map for column_for_field. Note: Xero's "*UnitAmount" is a
+# PER-UNIT amount, not a per-line net — so it maps to "unit_amount", not
+# "sub_total". Anything that wants a "reconciles to $X" total must compute
+# it (qty x *UnitAmount) or accept that Xero has no per-line sub_total.
+logical_fields:
+  "*ContactName": contact_name
+  "*InvoiceNumber": invoice_number
+  Reference: reference
+  "*InvoiceDate": invoice_date
+  "*DueDate": due_date
+  Total: total
+  InventoryItemCode: inventory_item_code
+  Description: description
+  "*Description": description
+  "*Quantity": quantity
+  "*UnitAmount": unit_amount
+  Discount: discount
+  "*AccountCode": account_code
+  "*TaxType": tax_code
+  TaxAmount: tax_amount
+  Currency: currency

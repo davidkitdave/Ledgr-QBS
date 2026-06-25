@@ -12,7 +12,7 @@ Design:
 * :data:`DOC_TYPE_TO_LANE` is consulted by both ``classify_node`` (to pick
   the right ``Event(route=...)`` label) and ``document_workflow_driver``
   (to iterate the lane's node list). When the two consumers disagree, the
-  trace stops telling the truth — which was the YAU LEE review's "route
+  trace stops telling the truth — which was a past MY review's "route
   invoice vs doc_type receipt" gap.
 
 * Adding a new doc type (e.g. ``delivery_order``) is now ONE entry in

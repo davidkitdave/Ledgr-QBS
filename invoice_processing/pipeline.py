@@ -38,6 +38,7 @@ from .export.client_context import (
     ClientContext,
     category_mapping_from_state,
     coa_from_state,
+    coa_keys_from_state,
     entity_memory_from_state,
 )
 from .export.exporters import (
@@ -165,7 +166,7 @@ def _build_bank_workbook(
             bank_sheet_title(
                 bank_name=stmt.bank_name,
                 account_number=stmt.account_number,
-                currency=stmt.currency or "SGD",
+                currency=stmt.currency or "",
             ),
             [],
         ).append(stmt)
@@ -346,6 +347,7 @@ def process_document(
         # missing required field marks the doc for review.
         # ------------------------------------------------------------------ #
         exporter = get_exporter(client.accounting_software)
+        exporter.configure_client_context(coa_keys=coa_keys_from_state(state))
         missing = validate_required_fields(normalized, exporter, effective_direction)
         if missing:
             reconciled = False
@@ -464,6 +466,7 @@ def process_batch(
     # Build Ledger workbooks
     # ------------------------------------------------------------------ #
     exporter = get_exporter(client.accounting_software)
+    exporter.configure_client_context(coa_keys=coa_keys_from_state(client.to_state()))
     for wb_name, sheets in ledger_groups.items():
         purchases = sheets.get("Purchase", [])
         sales = sheets.get("Sales", [])

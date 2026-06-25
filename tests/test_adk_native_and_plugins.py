@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 
 from accounting_agents.agent import assistant_app
-from accounting_agents.assistant import assistant_agent
 from accounting_agents.chat_skills import load_chat_skills
 from accounting_agents.plugins.ledgr_reflect_retry import LedgrReflectRetryPlugin
 
@@ -15,18 +14,27 @@ def test_tools_py_not_imported_by_production_modules():
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1] / "accounting_agents"
-    for fname in ("agent.py", "assistant.py", "slack_runner.py"):
-        text = (root / fname).read_text(encoding="utf-8")
+    paths = [
+        root / "agent.py",
+        root / "assistant" / "__init__.py",
+        root / "assistant" / "agent_def.py",
+        root / "slack_runner.py",
+    ]
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
         assert "accounting_agents.tools" not in text
         assert "from .tools import" not in text
 
 
 def test_assistant_agent_has_no_builtin_gemini_tools():
     """ADR-0013: built-ins cannot coexist with custom ledger tools."""
+    from accounting_agents.assistant import ledger_analyst, ledger_corrections
+
     tool_names = []
-    for t in assistant_agent.tools:
-        name = getattr(t, "name", None) or getattr(t, "__name__", str(t))
-        tool_names.append(name)
+    for agent in (ledger_analyst, ledger_corrections):
+        for t in agent.tools:
+            name = getattr(t, "name", None) or getattr(t, "__name__", str(t))
+            tool_names.append(name)
     forbidden = {"google_search", "code_execution", "BuiltInCodeExecutor"}
     assert not forbidden.intersection(set(tool_names))
 

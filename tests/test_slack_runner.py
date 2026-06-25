@@ -1456,6 +1456,58 @@ def test_delivery_posts_ledger_preview_data_table(monkeypatch):
     assert data_row[7]["value"] == 1234.50
 
 
+def test_delivery_preview_marks_flagged_account_code(monkeypatch):
+    """WS-3.4: flagged COA pick shows ⚠️ on the account column in the data_table."""
+    state = {
+        nodes.LEDGER_ROWS_KEY: {
+            "client_id": "c1",
+            "fy": "2025",
+            "kind": "invoice",
+            "software": "qbs",
+            "client_name": "Acme",
+            "batches": [
+                {
+                    "sheet": "Purchase",
+                    "doc_key": "Purchase:INV-042",
+                    "rows": [
+                        {
+                            "Invoice Date": "2025-09-15",
+                            "Invoice Number": "INV-042",
+                            "Vendor Name": "Acme Trading",
+                            "Description": "Ambiguous charge",
+                            "Account Code / COA": "6090",
+                            "_account_flagged": True,
+                            "_account_flag_reason": "narrow_margin",
+                            "Sub Total": 100.0,
+                            "Tax Amount": 9.0,
+                            "Total Amount": 109.0,
+                        }
+                    ],
+                }
+            ],
+        },
+        nodes.DELIVER_SUMMARY_KEY: "Added 1 line to your FY2025 ledger.",
+    }
+    posts = _run_delivery_with_state(state, monkeypatch)
+    data_table_posts = [
+        p for p in posts
+        if any(b.get("type") == "data_table" for b in (p.get("blocks") or []))
+    ]
+    table_block = next(b for b in data_table_posts[0]["blocks"] if b["type"] == "data_table")
+    account_cell = table_block["rows"][1][4]
+    assert "6090" in account_cell["text"]
+    assert "⚠️" in account_cell["text"]
+    context_posts = [
+        el["text"]
+        for p in posts
+        for b in (p.get("blocks") or [])
+        if b.get("type") == "context"
+        for el in b.get("elements") or []
+        if el.get("type") == "mrkdwn"
+    ]
+    assert any("low-confidence account code" in t for t in context_posts)
+
+
 def test_delivery_two_batches_posts_two_preview_messages(monkeypatch):
     """Purchase + Sales batches appear as two data_tables in one delivery card."""
     state = {
@@ -2029,6 +2081,63 @@ def test_single_file_drop_keeps_processing_and_delivery_on_top_level_message():
     assert "thread_ts" not in slack.updates[-1]
 
 
+class _FailRichUpdateSlackClient(FakeSlackClient):
+    """Job-summary chat_update with blocks raises (simulates Slack
+    ``invalid_blocks``); the plain-text-only fallback succeeds."""
+
+    def chat_update(self, **kwargs):
+        if "blocks" in kwargs:
+            raise Exception("invalid_blocks: no more than 20 items allowed")
+        # Text-only fallback path records normally.
+        return super().chat_update(**kwargs)
+
+
+def test_batch_job_summary_falls_back_to_plain_text_on_invalid_blocks():
+    """WS-5.2: if the rich Job-summary chat_update is rejected (e.g.
+    invalid_blocks from a too-wide data_table), the card must NOT stay stuck on
+    'Processing batch …' — the handler retries with a plain-text-only update so
+    the user gets a clean delivery confirmation.
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from accounting_agents import slack_runner
+    from app.slack_app import _SeenEvents
+
+    slack_runner._seen = _SeenEvents()
+    slack = _FailRichUpdateSlackClient()
+    handler, _ = _capture_message_handler_with_slack_client(slack)
+
+    body = {"event_id": "Ev-batch-fallback"}
+    event = {
+        "type": "message",
+        "subtype": "file_share",
+        "ts": "333.001",
+        "channel": "C-fallback",
+        "files": [{"id": "FB1"}, {"id": "FB2"}],
+    }
+    fake_client = MagicMock()
+    mock_pfe = AsyncMock(side_effect=[
+        {"status": "delivered", "append": {"appended": 1, "software": "AutoCount", "fy": "2024"}},
+        {"status": "delivered", "append": {"appended": 1, "software": "AutoCount", "fy": "2024"}},
+    ])
+
+    with patch.object(slack_runner, "process_file_event", mock_pfe), \
+         patch.object(slack_runner, "download_pdf_bytes", return_value=b"%PDF fake"):
+        asyncio.run(handler(event=event, body=body, client=fake_client))
+
+    summary_ts = next(
+        p.get("ts") for p in slack._posts if not p.get("thread_ts")
+    )
+    # A text-only fallback chat_update must have landed on the summary message,
+    # so the card is never left stuck on "Processing batch …".
+    fallback_updates = [
+        u for u in slack.updates
+        if u.get("ts") == summary_ts and "blocks" not in u
+    ]
+    assert fallback_updates, "expected a plain-text fallback chat_update"
+    assert (fallback_updates[-1].get("text") or "").strip()
+
+
 def test_single_file_drop_uses_processing_document_headline(monkeypatch):
     """Single-file drops must not say 'Processing batch (1 document)'."""
     from unittest.mock import AsyncMock, MagicMock, patch
@@ -2087,11 +2196,11 @@ def test_single_file_coordinator_flushes_workbook_to_slack(monkeypatch):
     deferred = {
         "summary": "Added",
         "payload": {
-            "client_id": "c-akar",
+            "client_id": "c-cobalt",
             "fy": "2024",
             "kind": "bank",
             "software": "qbs",
-            "client_name": "Akar Enterprises Pte. Ltd.",
+            "client_name": "Cobalt Enterprises Pte. Ltd.",
         },
         "batches": [
             {
@@ -2156,7 +2265,7 @@ def test_single_file_re_drop_all_deduped_shows_delivery_preview_and_callout(monk
     store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
     doc_key = "DBS Bank Ltd - 5545 - SGD:5545:SGD:01 Apr 2024 - 30 Apr 2024"
     store.append_rows(
-        client_id="c-akar", fy="2024", slack_client=slack, channel_id="C-redrop",
+        client_id="c-cobalt", fy="2024", slack_client=slack, channel_id="C-redrop",
         kind="bank",
         batches=[{
             "sheet": "DBS Bank Ltd - 5545 - SGD",
@@ -2177,8 +2286,8 @@ def test_single_file_re_drop_all_deduped_shows_delivery_preview_and_callout(monk
     deferred = {
         "summary": "Added",
         "payload": {
-            "client_id": "c-akar", "fy": "2024", "kind": "bank",
-            "software": "qbs", "client_name": "Akar",
+            "client_id": "c-cobalt", "fy": "2024", "kind": "bank",
+            "software": "qbs", "client_name": "Cobalt",
         },
         "batches": [{
             "sheet": "DBS Bank Ltd - 5545 - SGD",
@@ -7029,6 +7138,282 @@ def test_batch_aggregate_n_docs_counts_documents_not_batches():
     assert "2 lines" in summary, f"expected 2 lines, got: {summary!r}"
 
 
+def test_batch_aggregate_includes_per_doc_confident_notes(monkeypatch):
+    """WS-1.3 / AR2 regression.
+
+    The multi-file drop path is the COMMON case. Before WS-1.3, the batch
+    aggregate card showed neither the confident note (with reconcile total)
+    nor the AutoCount/SQL import-readiness checklist. After the fix, each
+    deferred item that has a confident note or readiness payload contributes
+    its own ``confident_note_block`` to the returned blocks.
+    """
+    from accounting_agents.slack_runner import _build_batch_aggregate_blocks
+
+    monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
+    from app import native_blocks_compat as _nbc
+    _nbc._PROBE_CACHE.pop("C-test", None)
+
+    deferred = [
+        # Item 1: confident-note eligible (delivered=True, doc_type=other).
+        # Software "qbs" matches the normalize_software_key alias map.
+        {
+            "payload": {
+                "fy": "2026", "software": "qbs", "kind": "other",
+                "doc_type": "other", "delivered": True,
+                "client_name": "Acme Client",
+                "batches": [{"sheet": "Purchase",
+                             "rows": [{"Sub Total": 240.0,
+                                       "Account Code / COA": "6100",
+                                       "Currency": "MYR"}]}],
+                "doc_total": 240.0, "currency": "MYR",
+            },
+            "batches": [{"sheet": "Purchase",
+                         "rows": [{"Sub Total": 240.0,
+                                   "Account Code / COA": "6100",
+                                   "Currency": "MYR"}]}],
+            "workbook_name": "Ledger_FY2026.xlsx",
+        },
+        # Item 2: import-readiness eligible (AutoCount, doc_type=invoice).
+        # Uses the real collect_import_readiness schema (tax_codes / party_codes
+        # / account_codes), not the legacy checklist placeholders.
+        {
+            "payload": {
+                "fy": "2026", "software": "AutoCount", "kind": "invoice",
+                "doc_type": "invoice",
+                "client_name": "Acme Client",
+                "batches": [{"sheet": "AP Invoice",
+                             "rows": [{"Amount": 100.0, "AccNo": "510-100"}]}],
+                "import_readiness": {
+                    "software": "AutoCount",
+                    "tax_codes": ["SV-6"],
+                    "party_codes": ["400-X0001"],
+                    "account_codes": ["510-100"],
+                    "unmapped": {"count": 0},
+                },
+            },
+            "batches": [{"sheet": "AP Invoice",
+                         "rows": [{"Amount": 100.0, "AccNo": "510-100"}]}],
+            "workbook_name": "Ledger_FY2026.xlsx",
+        },
+    ]
+
+    _, blocks = _build_batch_aggregate_blocks(deferred, "C-test")
+    # The returned blocks must include the per-doc confident note (reconciles to
+    # 240 / MYR / coded to 6100) AND the import-readiness checklist. Notes
+    # render as ``context`` blocks (per confident_note_block in app/blocks.py).
+    all_texts: list[str] = []
+    for b in blocks:
+        if b.get("type") == "section" and isinstance(b.get("text"), dict):
+            all_texts.append(b["text"].get("text", ""))
+        elif b.get("type") == "context":
+            for el in b.get("elements", []):
+                if isinstance(el, dict) and el.get("type") == "mrkdwn":
+                    all_texts.append(el.get("text", ""))
+    all_text = " ".join(all_texts)
+    assert "240" in all_text, (
+        f"Batch must include the per-doc reconcile total in a confident note. "
+        f"Got: {all_texts!r}"
+    )
+    assert "MYR" in all_text, (
+        f"Batch must include the per-doc currency. Got: {all_texts!r}"
+    )
+    # AutoCount import-readiness renders as:
+    #   "AutoCount import — needs these codes to exist in your company: tax SV-6
+    #    · creditors/debtors 400-X0001 · accounts 510-100. ..."
+    assert "AutoCount import" in all_text and "510-100" in all_text, (
+        f"Batch must include the AutoCount import-readiness checklist. "
+        f"Got: {all_texts!r}"
+    )
+
+
+def test_batch_aggregate_per_doc_flag_breakdown(monkeypatch):
+    """WS-1.4 regression.
+
+    The batch card now surfaces per-doc ✓/✗ reconcile status + a per-reason
+    breakdown (blank account / missing tax / missing creditor) — previously
+    these counts were computed but discarded in the aggregate unmapped
+    total. Multi-file droppers can now see which file failed and why.
+    """
+    from accounting_agents.slack_runner import _build_batch_aggregate_blocks
+
+    monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
+    from app import native_blocks_compat as _nbc
+    _nbc._PROBE_CACHE.pop("C-test", None)
+
+    deferred = [
+        # Item 1: AutoCount invoice, all required fields filled → ✓ reconciled
+        {
+            "payload": {
+                "fy": "2026", "software": "AutoCount", "kind": "invoice",
+                "doc_type": "invoice",
+                "client_name": "Acme",
+                "workbook_label": "INV-001.pdf",
+                "batches": [{"sheet": "AP Invoice",
+                             "rows": [{"Amount": 100.0, "AccNo": "510-100",
+                                       "TaxType": "SV-6",
+                                       "CreditorCode": "400-X0001",
+                                       "DocNo": "<<New>>", "DocDate": "01/06/2026",
+                                       "JournalType": "PURCHASE",
+                                       "InclusiveTax": "F"}]}],
+                "import_readiness": {
+                    "software": "AutoCount",
+                    "tax_codes": ["SV-6"], "party_codes": ["400-X0001"],
+                    "account_codes": ["510-100"], "unmapped": {"count": 0},
+                },
+            },
+            "batches": [{"sheet": "AP Invoice",
+                         "rows": [{"Amount": 100.0, "AccNo": "510-100",
+                                   "TaxType": "SV-6",
+                                   "CreditorCode": "400-X0001",
+                                   "DocNo": "<<New>>", "DocDate": "01/06/2026",
+                                   "JournalType": "PURCHASE",
+                                   "InclusiveTax": "F"}]}],
+            "workbook_name": "Ledger_FY2026.xlsx",
+        },
+        # Item 2: AutoCount invoice, missing AccNo + missing TaxType on one row
+        # → ✗ with reason breakdown "1 blank account · 1 missing tax code"
+        {
+            "payload": {
+                "fy": "2026", "software": "AutoCount", "kind": "invoice",
+                "doc_type": "invoice",
+                "client_name": "Acme",
+                "workbook_label": "INV-002.pdf",
+                "batches": [{"sheet": "AP Invoice",
+                             "rows": [{"Amount": 50.0, "AccNo": "",
+                                       "TaxType": "",
+                                       "CreditorCode": "400-Y0001",
+                                       "DocNo": "<<New>>", "DocDate": "01/06/2026",
+                                       "JournalType": "PURCHASE",
+                                       "InclusiveTax": "F"}]}],
+                "import_readiness": {
+                    "software": "AutoCount",
+                    "tax_codes": [], "party_codes": ["400-Y0001"],
+                    "account_codes": [], "unmapped": {"count": 1},
+                },
+            },
+            "batches": [{"sheet": "AP Invoice",
+                         "rows": [{"Amount": 50.0, "AccNo": "",
+                                   "TaxType": "",
+                                   "CreditorCode": "400-Y0001",
+                                   "DocNo": "<<New>>", "DocDate": "01/06/2026",
+                                   "JournalType": "PURCHASE",
+                                   "InclusiveTax": "F"}]}],
+            "workbook_name": "Ledger_FY2026.xlsx",
+        },
+    ]
+
+    _, blocks = _build_batch_aggregate_blocks(deferred, "C-test")
+    block_texts: list[str] = []
+    for b in blocks:
+        if b.get("type") == "section" and isinstance(b.get("text"), dict):
+            block_texts.append(b["text"].get("text", ""))
+        elif b.get("type") == "context":
+            for el in b.get("elements", []):
+                if isinstance(el, dict) and el.get("type") == "mrkdwn":
+                    block_texts.append(el.get("text", ""))
+    all_text = " ".join(block_texts)
+
+    # Item 1: ✓ reconciled
+    assert "INV-001.pdf" in all_text and "✓ reconciled" in all_text, (
+        f"Doc 1 must show ✓ reconciled. Got: {block_texts!r}"
+    )
+    # Item 2: ✗ with reason breakdown
+    assert "INV-002.pdf" in all_text, f"Doc 2 must be labeled. Got: {block_texts!r}"
+    assert "✗" in all_text, f"Doc 2 must show ✗. Got: {block_texts!r}"
+    assert "blank account" in all_text, (
+        f"Reason breakdown must include 'blank account'. Got: {block_texts!r}"
+    )
+    assert "missing tax code" in all_text, (
+        f"Reason breakdown must include 'missing tax code'. Got: {block_texts!r}"
+    )
+
+
+def test_batch_aggregate_surfaces_extraction_doc_count(monkeypatch):
+    """WS-2.4 — G3 doc-count surface on the batch delivery card."""
+    from accounting_agents.slack_runner import _build_batch_aggregate_blocks
+
+    monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
+    from app import native_blocks_compat as _nbc
+    _nbc._PROBE_CACHE.pop("C-test", None)
+
+    deferred = [
+        {
+            "payload": {
+                "fy": "2026", "software": "Xero", "kind": "invoice",
+                "doc_type": "invoice",
+                "client_name": "Acme",
+                "workbook_label": "multi-invoice.pdf",
+                "extracted_doc_count": 2,
+                "input_page_count": 5,
+                "batches": [{"sheet": "Purchase",
+                             "rows": [{"Contact": "Vendor A", "Total": 100.0}]}],
+            },
+            "batches": [{"sheet": "Purchase",
+                         "rows": [{"Contact": "Vendor A", "Total": 100.0}]}],
+            "workbook_name": "Ledger_FY2026.xlsx",
+        },
+    ]
+
+    _, blocks = _build_batch_aggregate_blocks(deferred, "C-test")
+    block_texts: list[str] = []
+    for b in blocks:
+        if b.get("type") == "section" and isinstance(b.get("text"), dict):
+            block_texts.append(b["text"].get("text", ""))
+        elif b.get("type") == "context":
+            for el in b.get("elements", []):
+                if isinstance(el, dict) and el.get("type") == "mrkdwn":
+                    block_texts.append(el.get("text", ""))
+    all_text = " ".join(block_texts).lower()
+
+    assert "extracted 2 documents from 5 pages" in all_text, (
+        f"Batch card must show G3 doc-count line. Got: {block_texts!r}"
+    )
+
+
+def test_batch_aggregate_surfaces_partial_failure_warning(monkeypatch):
+    """WS-2.5 — G5 partial-failure warning on the batch delivery card."""
+    from accounting_agents.slack_runner import _build_batch_aggregate_blocks
+
+    monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
+    from app import native_blocks_compat as _nbc
+    _nbc._PROBE_CACHE.pop("C-test", None)
+
+    deferred = [
+        {
+            "payload": {
+                "fy": "2026", "software": "Xero", "kind": "invoice",
+                "doc_type": "invoice",
+                "client_name": "Acme",
+                "workbook_label": "multi-invoice.pdf",
+                "extracted_doc_count": 2,
+                "input_page_count": 3,
+                "partial_failure_warnings": [
+                    "partial extraction: 1 of 2 documents reconciled; 1 failed (INV-BAD)",
+                ],
+                "batches": [{"sheet": "Purchase",
+                             "rows": [{"Contact": "Vendor A", "Total": 100.0}]}],
+            },
+            "batches": [{"sheet": "Purchase",
+                         "rows": [{"Contact": "Vendor A", "Total": 100.0}]}],
+            "workbook_name": "Ledger_FY2026.xlsx",
+        },
+    ]
+
+    _, blocks = _build_batch_aggregate_blocks(deferred, "C-test")
+    block_texts: list[str] = []
+    for b in blocks:
+        if b.get("type") == "section" and isinstance(b.get("text"), dict):
+            block_texts.append(b["text"].get("text", ""))
+        elif b.get("type") == "context":
+            for el in b.get("elements", []):
+                if isinstance(el, dict) and el.get("type") == "mrkdwn":
+                    block_texts.append(el.get("text", ""))
+    all_text = " ".join(block_texts).lower()
+
+    assert "partial extraction" in all_text
+    assert "1 of 2" in all_text
+
+
 # =========================================================================== #
 # Phase 3C — summary table wired into HITL review/approval cards
 # =========================================================================== #
@@ -7451,34 +7836,26 @@ def test_batch_six_files_post_initial_native_plan_block(monkeypatch):
 # =========================================================================== #
 
 
-def test_document_ledger_extract_schema_has_party_and_direction():
-    """``DocumentLedgerExtract`` owns From/To parties + ``direction_for_client``."""
-    from invoice_processing.extract.ledger_extract import (
-        DocumentLedgerExtract,
-        PartyField,
-    )
+def test_extracted_document_schema_has_vendor_buyer_and_direction():
+    """``ExtractedDocument`` owns vendor/buyer parties + ``direction_for_client``."""
+    from invoice_processing.extract.ledger_extract import ExtractedDocument
 
-    extract = DocumentLedgerExtract(
-        vendor_name="Contractor Beta",
-        customer_name="Company-A",
-        document_reference="INV-26-001",
-        document_date="2026-06-01",
-        document_total=1200.0,
-        from_party=PartyField(
-            name="Contractor Beta", uen=None, role="issuer",
-        ),
-        to_party=PartyField(
-            name="Company-A",
-            uen="201700001A",
-            role="recipient",
-        ),
+    doc = ExtractedDocument(
+        doc_type="invoice",
+        page_range=[1, 1],
+        vendor="Contractor Beta",
+        buyer="Company-A",
+        reference="INV-26-001",
+        date="2026-06-01",
+        currency="SGD",
+        grand_total=1200.0,
+        vendor_tax_regno=None,
         direction_for_client="purchase",
     )
     # The Contractor Beta case: client is the recipient → "purchase" (not "sales").
-    assert extract.direction_for_client == "purchase"
-    assert extract.to_party.uen == "201700001A"
-    assert extract.to_party.role == "recipient"
-    assert extract.from_party.role == "issuer"
+    assert doc.direction_for_client == "purchase"
+    assert doc.buyer == "Company-A"
+    assert doc.vendor == "Contractor Beta"
 
 
 def test_understand_prompt_includes_client_context():
@@ -7508,34 +7885,32 @@ def test_understand_prompt_omits_client_context_when_absent():
     assert "direction_for_client as follows" not in prompt
 
 
-def test_ledger_extract_to_normalized_uses_direction_for_client_when_auto():
+def test_extracted_document_to_normalized_uses_direction_for_client_when_auto():
     """``direction="auto"`` causes the adapter to honor the Understand verdict."""
     from invoice_processing.extract.ledger_extract import (
-        DocumentLedgerExtract,
-        PartyField,
-        ledger_extract_to_normalized,
+        ExtractedDocument,
+        ExtractedDocumentLine,
+        extracted_document_to_normalized,
     )
 
-    extract = DocumentLedgerExtract(
-        vendor_name="Vendor Pte Ltd",
-        customer_name="Company-A",
-        document_reference="INV-1",
-        document_date="2026-06-01",
-        document_total=100.0,
-        from_party=PartyField(name="Vendor Pte Ltd", role="issuer"),
-        to_party=PartyField(
-            name="Company-A",
-            uen="201700001A",
-            role="recipient",
-        ),
+    doc = ExtractedDocument(
+        doc_type="invoice",
+        page_range=[1, 1],
+        vendor="Vendor Pte Ltd",
+        buyer="Company-A",
+        reference="INV-1",
+        date="2026-06-01",
+        currency="SGD",
+        grand_total=100.0,
+        lines=[ExtractedDocumentLine(description="Service", net_amount=100.0, gst_amount=0.0)],
         direction_for_client="purchase",
     )
-    normalized = ledger_extract_to_normalized(extract, direction="auto")
+    normalized = extracted_document_to_normalized(doc, direction="auto")
     assert normalized.doc_type == "purchase"
 
     # Flip direction_for_client → sales and the adapter should follow.
-    extract_sales = extract.model_copy(update={"direction_for_client": "sales"})
-    normalized_sales = ledger_extract_to_normalized(extract_sales, direction="auto")
+    doc_sales = doc.model_copy(update={"direction_for_client": "sales"})
+    normalized_sales = extracted_document_to_normalized(doc_sales, direction="auto")
     assert normalized_sales.doc_type == "sales"
 
 
@@ -7553,8 +7928,8 @@ def test_resolve_direction_from_extract_understand_verdict():
     ) == "self_referential"
     # Unknown passes through (caller escalates to HITL).
     assert _resolve_direction_from_extract({"direction_for_client": "unknown"}) == "unknown"
-    # Missing → fallback.
-    assert _resolve_direction_from_extract(None) == "purchase"
+    # Missing → unknown (HITL), never silent purchase.
+    assert _resolve_direction_from_extract(None) == "unknown"
     assert _resolve_direction_from_extract({}, fallback="sales") == "sales"
 
 

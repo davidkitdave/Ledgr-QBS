@@ -493,7 +493,7 @@
         {
           "invoice_number": null,
           "invoice_date": null,
-          "supplier": "Bluebird",
+          "supplier": "Skylark Placeholder",
           "currency": "SGD",
           "doc_total": null,
           "needs_fx_review": false,
@@ -504,7 +504,7 @@
         {
           "invoice_number": null,
           "invoice_date": null,
-          "supplier": "Bluebird",
+          "supplier": "Skylark Placeholder",
           "currency": "SGD",
           "doc_total": null,
           "needs_fx_review": false,
@@ -515,7 +515,7 @@
         {
           "invoice_number": null,
           "invoice_date": null,
-          "supplier": "PT LAUTAN TENANG JAYA",
+          "supplier": "PT Samudra Placeholder Jaya",
           "currency": "IDR",
           "doc_total": null,
           "needs_fx_review": true,
@@ -526,7 +526,7 @@
         {
           "invoice_number": null,
           "invoice_date": null,
-          "supplier": "CIMB NIAGA",
+          "supplier": "Sample Bank Placeholder",
           "currency": "SGD",
           "doc_total": 608400.0,
           "needs_fx_review": false,
@@ -585,7 +585,7 @@
         {
           "invoice_number": null,
           "invoice_date": null,
-          "supplier": "Bluebird",
+          "supplier": "Skylark Placeholder",
           "currency": "WIB",
           "doc_total": null,
           "needs_fx_review": true,
@@ -596,7 +596,7 @@
         {
           "invoice_number": null,
           "invoice_date": null,
-          "supplier": "Bluebird",
+          "supplier": "Skylark Placeholder",
           "currency": "WIB",
           "doc_total": null,
           "needs_fx_review": true,
@@ -607,7 +607,7 @@
         {
           "invoice_number": null,
           "invoice_date": null,
-          "supplier": "PT LAUTAN TENANG JAYA",
+          "supplier": "PT Samudra Placeholder Jaya",
           "currency": "IDR",
           "doc_total": null,
           "needs_fx_review": true,
@@ -618,7 +618,7 @@
         {
           "invoice_number": null,
           "invoice_date": null,
-          "supplier": "CIMB NIAGA",
+          "supplier": "Sample Bank Placeholder",
           "currency": "DEC",
           "doc_total": 608400.0,
           "needs_fx_review": true,

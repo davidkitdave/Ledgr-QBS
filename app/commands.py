@@ -68,12 +68,21 @@ def settings_prefill(client) -> Optional[dict]:
     if client is None:
         return None
 
-    gst = "yes" if client.tax_registered else "no"
+    gst = None
+    if client.tax_registered is True:
+        gst = "yes"
+    elif client.tax_registered is False:
+        gst = "no"
+
     fye = str(client.fye_month) if client.fye_month is not None else None
 
-    return {
+    prefill = {
         "client_name": client.client_name or "",
         "fye_month": fye,
         "accounting_software": client.accounting_software or "",
-        "gst_registered": gst,
     }
+    if client.region:
+        prefill["region"] = client.region
+    if gst is not None:
+        prefill["gst_registered"] = gst
+    return prefill

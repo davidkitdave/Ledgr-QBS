@@ -94,6 +94,14 @@ from app.blocks import (
 )
 from app.slack_app import _SeenEvents
 from invoice_processing.export.client_context import FirestoreClientStore
+from invoice_processing.export.exporters import (
+    collect_account_flagged_summary,
+    decorate_preview_account_flags,
+    format_account_flagged_note,
+    format_extraction_doc_count_note,
+    get_exporter,
+)
+from invoice_processing.extract.partial_failure import format_partial_failure_note
 
 def _strip_slack_mentions(text: str) -> str:
     import re
@@ -109,6 +117,22 @@ _file_futures: dict[str, asyncio.Future] = {}
 
 #: Default client store for profile seeding (overridable in tests).
 _DEFAULT_CLIENT_STORE = FirestoreClientStore()
+
+
+#: Truthy values accepted for feature flags (matches typical Slack-bot conventions).
+_FEATURE_FLAG_TRUTHY = frozenset({"1", "true", "yes"})
+
+
+def _use_clean_agent() -> bool:
+    """Return whether Slack traffic should route through the new ``ledgr_agent`` tools.
+
+    Controlled by the ``LEDGR_USE_CLEAN_AGENT`` environment variable. Default off
+    so the existing ``document_app`` graph keeps serving production unchanged. The
+    flag is the precondition for Plan 6 cutover — once eval + live QA pass it is
+    flipped on, then retired after a soak window. See Plan 6.3.
+    """
+    raw = os.environ.get("LEDGR_USE_CLEAN_AGENT", "")
+    return raw.strip().lower() in _FEATURE_FLAG_TRUTHY
 
 
 def _profile_state_delta(client_store, channel_id: str) -> dict:
@@ -127,6 +151,11 @@ def _profile_state_delta(client_store, channel_id: str) -> dict:
     if ctx is None:
         return {}
     delta = ctx.to_state()
+    from accounting_agents.credit_delivery import resolve_firm_id_from_client
+
+    resolved_firm = resolve_firm_id_from_client(ctx)
+    if resolved_firm:
+        delta["firm_id"] = resolved_firm
     # Inject familiarity map if the store supports it (InMemoryClientStore in
     # tests, FirestoreClientStore in production — both expose get_familiarity_map).
     try:
@@ -814,16 +843,51 @@ async def persist_and_deliver(
             slack_client=slack_client,
             channel_id=channel_id,
             batches=batches,
-            software=payload.get("software") or "qbs",
+            software=payload.get("software") or "",
             kind=payload.get("kind") or "invoice",
             client_name=payload.get("client_name") or "",
             replace=effective_replace,
         )
         # Carry context forward so the batch tally can label the destination
-        # accurately (bank statement vs ledger) without re-reading the payload.
+        # accurately (bank statement vs ledger) and so D.2 can bill on delivery.
         append_result.setdefault("kind", payload.get("kind") or "invoice")
         append_result.setdefault("software", payload.get("software") or "")
         append_result.setdefault("fy", str(payload.get("fy") or ""))
+        if not append_result.get("all_deduped"):
+            from accounting_agents.credit_delivery import (
+                charge_delivery_credits,
+                resolve_firm_id_from_state,
+            )
+
+            firm_id = resolve_firm_id_from_state(state)
+            if firm_id is None and client_store is not None:
+                from accounting_agents.credit_delivery import resolve_firm_id_from_client
+
+                # Billing firm-id lookup must never break delivery: a store/
+                # Firestore failure (e.g. credentials unavailable) falls back to
+                # an unresolved firm (no charge) rather than crashing the append.
+                try:
+                    ctx = client_store.get_by_channel(channel_id)
+                    firm_id = resolve_firm_id_from_client(ctx)
+                except Exception:  # noqa: BLE001 — billing must not break delivery
+                    logger.warning(
+                        "credit firm-id lookup failed for channel=%s (non-fatal); "
+                        "delivering without a billing firm",
+                        channel_id,
+                        exc_info=True,
+                    )
+                    firm_id = None
+            credit_info = charge_delivery_credits(
+                firm_id=firm_id,
+                channel_id=channel_id,
+                file_id=state.get("file_id") or payload.get("file_id"),
+                kind=str(payload.get("kind") or "invoice"),
+                payload=payload,
+                append_result=append_result,
+                input_page_count=state.get("input_page_count"),
+            )
+            if credit_info:
+                append_result.update(credit_info)
     elif batches and defer_ledger_persist:
         # Stash the ledger payload so the batch coordinator can merge with peers
         # and call ``append_rows`` once per FY workbook. The ``deferred_ledger``
@@ -1002,7 +1066,6 @@ def _record_processing_log(
         "delivered_at": datetime.now(timezone.utc).isoformat(),
         "row_count": row_count,
         "fy": str(payload.get("fy") or append_result.get("fy") or ""),
-        "soa_legacy_path": doc_type == "statement_of_account" or extraction_path == "legacy",
     }
     # Phase 2: thread-context linkage. Optional keys only — older entries (pre-fix)
     # simply lack them and the resolver skips.
@@ -1018,6 +1081,33 @@ def _record_processing_log(
         logger.exception(
             "processing_log write failed for client=%s file=%s", client_id, file_id
         )
+
+
+def _extraction_doc_count_blocks(
+    payload: dict,
+    *,
+    file_label: str | None = None,
+) -> list[dict]:
+    """WS-2.4 — G3 doc-count context block when extraction metadata exists."""
+    if (payload.get("kind") or "invoice") != "invoice":
+        return []
+    doc_count = payload.get("extracted_doc_count")
+    page_count = payload.get("input_page_count")
+    if doc_count is None or page_count is None:
+        return []
+    note = format_extraction_doc_count_note(int(doc_count), int(page_count))
+    if not note:
+        return []
+    if file_label:
+        note = f"📄 *{file_label}* — {note}"
+    blocks = [confident_note_block(note)]
+    partial = payload.get("partial_failure_warnings") or []
+    partial_note = format_partial_failure_note(partial)
+    if partial_note:
+        if file_label:
+            partial_note = f"📄 *{file_label}* — {partial_note}"
+        blocks.append(confident_note_block(partial_note))
+    return blocks
 
 
 def _post_delivery_card(
@@ -1039,15 +1129,30 @@ def _post_delivery_card(
         fy_int = 0
     software = str(payload.get("software") or "qbs_ledger")
     preview_blocks: list[dict] = []
+    try:
+        preview_exporter = get_exporter(software)
+    except Exception:  # noqa: BLE001 — preview decoration is cosmetic
+        preview_exporter = None
     for batch in batches:
         batch_rows = batch.get("rows") or []
         if not batch_rows:
             continue
         sheet = str(batch.get("sheet") or "Purchase")
+        row_doc_type = "sales" if sheet == "Sales" else "purchase"
+        preview_rows = batch_rows
+        if preview_exporter is not None:
+            try:
+                preview_rows = decorate_preview_account_flags(
+                    batch_rows, preview_exporter, row_doc_type
+                )
+            except Exception:  # noqa: BLE001 — preview decoration is cosmetic
+                logger.warning(
+                    "account-flag preview decoration failed (non-fatal)", exc_info=True
+                )
         try:
             preview_blocks.extend(
                 ledger_preview_data_table(
-                    rows=batch_rows,
+                    rows=preview_rows,
                     workbook_name=workbook_name,
                     fy=fy_int,
                     sheet=sheet,
@@ -1064,6 +1169,7 @@ def _post_delivery_card(
         if preview_blocks
         else [{"type": "section", "text": {"type": "mrkdwn", "text": summary}}]
     )
+    blocks.extend(_extraction_doc_count_blocks(payload))
     # Confident-path note (ADR-0017 Lever 1): only fires on the clean no-pause
     # delivery path.  ``payload["delivered"]`` is True only when deliver_node ran
     # (the clean path); the HITL-approve path bypasses deliver_node so the key is
@@ -1083,6 +1189,42 @@ def _post_delivery_card(
                 blocks.append(confident_note_block(note))
         except Exception:  # noqa: BLE001 — note is cosmetic
             logger.warning("confident note build failed (non-fatal)", exc_info=True)
+    # Import-readiness checklist for AutoCount / SQL Account purchase/sales deliveries.
+    # Skipped when doc_type is expense_claim/other (compose_confident_note already
+    # embeds the readiness note inside the confident note above).
+    if doc_type not in ("expense_claim", "other"):
+        try:
+            from invoice_processing.export.exporters import normalize_software_key as _nsk
+            if _nsk(software) in ("autocount", "sql_account"):
+                rnote = nodes.format_import_readiness_note(payload.get("import_readiness"))
+                if rnote:
+                    blocks.append(confident_note_block(rnote))
+        except Exception:  # noqa: BLE001 — readiness note is cosmetic
+            logger.warning("import readiness note build failed (non-fatal)", exc_info=True)
+    # WS-3.4 — surface low-confidence COA picks on QBS/Xero deliveries (profile
+    # ERPs embed the same warning inside format_import_readiness_note).
+    try:
+        from invoice_processing.export.exporters import normalize_software_key as _nsk
+
+        if _nsk(software) not in ("autocount", "sql_account"):
+            flagged_note = format_account_flagged_note(
+                collect_account_flagged_summary(batches)
+            )
+            if flagged_note:
+                blocks.append(confident_note_block(flagged_note))
+    except Exception:  # noqa: BLE001 — cosmetic
+        logger.warning("account-flagged delivery note failed (non-fatal)", exc_info=True)
+    credits_used = append_result.get("credits_used")
+    credits_remaining = append_result.get("credits_remaining")
+    if isinstance(credits_used, int) and isinstance(credits_remaining, int):
+        from accounting_agents.credit_delivery import credit_footer_block
+
+        blocks.append(
+            credit_footer_block(
+                credits_used=credits_used,
+                credits_remaining=credits_remaining,
+            )
+        )
     kwargs: dict = {"channel": channel_id, "text": summary, "blocks": blocks}
     if thread_ts:
         kwargs["thread_ts"] = thread_ts
@@ -1151,9 +1293,21 @@ def _build_batch_aggregate_blocks(
             fy_int = int(grp["fy"])
         except (TypeError, ValueError):
             fy_int = 0
+        sheet = str(grp.get("sheet") or "Purchase")
+        row_doc_type = "sales" if sheet == "Sales" else "purchase"
+        preview_rows = grp["rows"]
+        try:
+            batch_exporter = get_exporter(str(grp.get("software") or ""))
+            preview_rows = decorate_preview_account_flags(
+                grp["rows"], batch_exporter, row_doc_type
+            )
+        except Exception:  # noqa: BLE001 — preview decoration is cosmetic
+            logger.warning(
+                "batch account-flag preview decoration failed (non-fatal)", exc_info=True
+            )
         preview_blocks.extend(
             ledger_preview_data_table(
-                rows=grp["rows"],
+                rows=preview_rows,
                 workbook_name=grp["workbook_name"],
                 fy=fy_int,
                 sheet=grp["sheet"],
@@ -1167,6 +1321,87 @@ def _build_batch_aggregate_blocks(
         if preview_blocks
         else [{"type": "section", "text": {"type": "mrkdwn", "text": summary}}]
     )
+
+    # AR2 / WS-1.3 — render the per-doc confident note + import-readiness
+    # checklist on the batch-aggregate path too. The single-file path
+    # (_post_delivery_card) already does this; the multi-file drop is the
+    # COMMON path for the user, and previously showed neither a reconcile
+    # total nor a readiness note (the batch cards were "blind"). Iterate
+    # deferred_items in the order the user dropped them and append a
+    # confident_note_block per item that has one. Errors are non-fatal —
+    # the cosmetic notes never break delivery.
+    for item in deferred_items:
+        item_payload = item.get("payload") or {}
+        item_doc_type = str(item_payload.get("doc_type") or "").strip().lower()
+        item_software = str(item_payload.get("software") or "")
+        if not item_payload:
+            continue
+        try:
+            _label = (
+                item_payload.get("workbook_label")
+                or item_payload.get("source_file")
+                or None
+            )
+            blocks.extend(
+                _extraction_doc_count_blocks(
+                    item_payload,
+                    file_label=_label if len(deferred_items) > 1 else None,
+                )
+            )
+            if item_doc_type in ("expense_claim", "other") and item_payload.get("delivered"):
+                free_type = item_payload.get("free_type") or None
+                note = nodes.compose_confident_note(
+                    item_payload, doc_type=item_doc_type, free_type=free_type,
+                )
+                if note:
+                    blocks.append(confident_note_block(note))
+            elif item_doc_type not in ("expense_claim", "other"):
+                from invoice_processing.export.exporters import (
+                    compute_doc_flag_breakdown,
+                    format_flag_breakdown_note,
+                    get_exporter as _get_exporter,
+                    normalize_software_key as _nsk,
+                )
+                if _nsk(item_software) in ("autocount", "sql_account"):
+                    rnote = nodes.format_import_readiness_note(
+                        item_payload.get("import_readiness"),
+                    )
+                    if rnote:
+                        blocks.append(confident_note_block(rnote))
+                    # WS-1.4 — per-doc ✓/✗ reconcile status + flag-reason
+                    # breakdown. Counts were already computed by
+                    # ``collect_export_unmapped_summary`` for the readiness
+                    # path; we recompute here per-doc so the per-reason
+                    # counts (blank account / missing tax / missing
+                    # creditor) surface on the delivery card instead of
+                    # being discarded in the aggregate unmapped count.
+                    try:
+                        _exp = _get_exporter(item_software)
+                        _batches = item.get("batches") or item_payload.get("batches") or []
+                        _breakdown = compute_doc_flag_breakdown(_batches, _exp)
+                        _flag_note = format_flag_breakdown_note(_breakdown)
+                        if _flag_note:
+                            # Prepend the doc label so the user can see
+                            # which file each status applies to.
+                            _label = (
+                                item_payload.get("workbook_label")
+                                or item_payload.get("source_file")
+                                or item_payload.get("client_name")
+                                or "document"
+                            )
+                            blocks.append(confident_note_block(
+                                f"📄 *{_label}* — {_flag_note}"
+                            ))
+                    except Exception:  # noqa: BLE001 — flag breakdown is cosmetic
+                        logger.warning(
+                            "batch per-doc flag breakdown failed (non-fatal)",
+                            exc_info=True,
+                        )
+        except Exception:  # noqa: BLE001 — notes are cosmetic
+            logger.warning(
+                "batch per-item note build failed (non-fatal)", exc_info=True,
+            )
+
     return summary, blocks
 
 
@@ -1247,7 +1482,7 @@ def _stash_bank_dedup_replace(
         client_id=str(payload.get("client_id") or ""),
         fy=str(payload.get("fy") or ""),
         kind=str(payload.get("kind") or "bank"),
-        software=str(payload.get("software") or "qbs"),
+        software=str(payload.get("software") or ""),
         client_name=str(payload.get("client_name") or ""),
         batches=batches,
     )
@@ -1303,7 +1538,7 @@ async def _flush_deferred_ledger_writes(
         payload = item.get("payload") or {}
         client_id = payload.get("client_id") or "unknown"
         fy = str(payload.get("fy") or "unknown")
-        software = payload.get("software") or "qbs"
+        software = payload.get("software") or ""
         kind = payload.get("kind") or "invoice"
         key = (client_id, fy, software, kind)
         grp = groups.setdefault(
@@ -1869,6 +2104,132 @@ async def process_file_event(
                 "reason": rejection_reason,
             }
 
+        from accounting_agents.credit_delivery import (
+            credit_block_message,
+            credit_gate_for_bytes,
+            estimate_upload_pages,
+            flag_unresolved_firm_billing_anomaly,
+            require_firm_for_billing,
+            resolve_firm_id_from_state,
+        )
+
+        input_page_count = estimate_upload_pages(data, source_filename)
+        profile_delta["input_page_count"] = input_page_count
+        firm_id = resolve_firm_id_from_state(profile_delta)
+        if firm_id:
+            credit_decision = credit_gate_for_bytes(
+                firm_id=firm_id,
+                data=data,
+                filename=source_filename,
+            )
+            if not credit_decision.get("allowed", True):
+                user_msg = credit_block_message(credit_decision)
+                _stage_state.mark_failed("understand", "Out of credits")
+                _update_status(
+                    slack_client,
+                    channel_id,
+                    status_ts,
+                    "❌ Out of credits",
+                    blocks=_simple_status_blocks("❌ Out of credits"),
+                )
+                _post_message(slack_client, channel_id, user_msg, thread_ts=thread_ts)
+                _remove_reaction(slack_client, channel_id, upload_msg_ts, "eyes")
+                _add_reaction(slack_client, channel_id, upload_msg_ts, "x")
+                if batch_mode and status_callback is not None:
+                    status_callback(
+                        {
+                            "file_label": source_filename,
+                            "stage": "Out of credits",
+                            "detail": user_msg,
+                            "status": "failed",
+                        }
+                    )
+                return {
+                    "status": "blocked",
+                    "channel_id": channel_id,
+                    "file_id": file_id,
+                    "reason": credit_decision.get("reason"),
+                }
+        else:
+            # LIVE upload with no resolvable firm_id: this used to be a silent
+            # skip (unbilled documents passing through unnoticed). Flag it loudly
+            # and, when LEDGR_CREDIT_REQUIRE_FIRM is set, refuse the upload.
+            flag_unresolved_firm_billing_anomaly(
+                channel_id=channel_id,
+                file_id=file_id,
+                source_filename=source_filename,
+            )
+            if require_firm_for_billing():
+                user_msg = (
+                    "I couldn't determine which workspace to bill for this "
+                    "document, so I didn't process it. Please contact support."
+                )
+                _stage_state.mark_failed("understand", "No billing firm")
+                _update_status(
+                    slack_client,
+                    channel_id,
+                    status_ts,
+                    "❌ Billing not configured",
+                    blocks=_simple_status_blocks("❌ Billing not configured"),
+                )
+                _post_message(slack_client, channel_id, user_msg, thread_ts=thread_ts)
+                _remove_reaction(slack_client, channel_id, upload_msg_ts, "eyes")
+                _add_reaction(slack_client, channel_id, upload_msg_ts, "x")
+                if batch_mode and status_callback is not None:
+                    status_callback(
+                        {
+                            "file_label": source_filename,
+                            "stage": "Billing not configured",
+                            "detail": user_msg,
+                            "status": "failed",
+                        }
+                    )
+                return {
+                    "status": "blocked",
+                    "channel_id": channel_id,
+                    "file_id": file_id,
+                    "reason": "no_firm",
+                }
+
+        # Plan 6.3 / D.3: when the clean-agent flag is on, run
+        # ``process_document_batch`` directly and map ``BatchResult`` → the
+        # existing Slack delivery structs. Any failure falls through to the
+        # legacy ``document_app`` graph so production never breaks.
+        if _use_clean_agent():
+            try:
+                from accounting_agents.clean_agent_slack import process_file_via_clean_agent
+
+                return await process_file_via_clean_agent(
+                    runner=runner,
+                    ledger_store=ledger_store,
+                    db=db,
+                    slack_client=slack_client,
+                    channel_id=channel_id,
+                    file_id=file_id,
+                    session_id=session_id,
+                    app_name=app_name,
+                    data=data,
+                    source_filename=source_filename,
+                    profile_delta=profile_delta,
+                    client_store=client_store,
+                    thread_ts=thread_ts,
+                    status_ts=status_ts,
+                    upload_msg_ts=upload_msg_ts,
+                    replace=replace,
+                    defer_slack_delivery=defer_slack_delivery,
+                    batch_mode=batch_mode,
+                    defer_ledger_persist=defer_ledger_persist,
+                    status_callback=status_callback,
+                    stage_state=_stage_state,
+                )
+            except Exception:  # noqa: BLE001 — fail loud in log, fall through
+                logger.exception(
+                    "clean-agent dispatch failed: channel=%s file=%s — "
+                    "falling back to document_app",
+                    channel_id,
+                    file_id,
+                )
+
         artifact_name = nodes.artifact_name_for(file_id)
 
         from invoice_processing.extract.invoice_extractor import mime_for
@@ -1894,6 +2255,7 @@ async def process_file_event(
             "file_id": file_id,
             "source_filename": source_filename,
             nodes.ARTIFACT_NAME_KEY: artifact_name,
+            "input_page_count": input_page_count,
             **profile_delta,
         }
         # Re-extract (ADR-0010): ALWAYS write both keys unconditionally so a
@@ -2324,9 +2686,6 @@ def _build_processing_log_entry(file_id: str, state: dict) -> dict:
         ),
         "row_count": row_count,
         "fy": str(state.get("fy") or ""),
-        "soa_legacy_path": (
-            doc_type == "statement_of_account" or extraction_path == "legacy"
-        ),
         "backfilled": True,
     }
 
@@ -2448,7 +2807,7 @@ def _stage_output_for_completed_node(node_name: str, state: dict) -> Optional[st
         vendor = _vendor_from_inv_dict(first) or "Unknown vendor"
         inv_no = (first.get("invoice_number") or "").strip()
         total = first.get("doc_total")
-        cur = (first.get("currency") or "SGD").strip().upper()
+        cur = (first.get("currency") or "?").strip().upper()
         lines = first.get("lines") or []
         n_lines = len(lines)
         parts = [vendor]
@@ -2979,6 +3338,23 @@ async def handle_approval_action(
     if interrupt is None:
         logger.warning("no interrupt doc for op_id %s; cannot resume.", op_id)
         return {"status": "missing_interrupt", "op_id": op_id}
+
+    from ledgr_agent.slack.hitl_bridge import CLEAN_AGENT_HITL_KIND
+
+    if interrupt.get("kind") == CLEAN_AGENT_HITL_KIND:
+        from accounting_agents.clean_agent_slack import handle_clean_agent_approval_action
+
+        return await handle_clean_agent_approval_action(
+            runner=runner,
+            ledger_store=ledger_store,
+            db=db,
+            slack_client=slack_client,
+            op_id=op_id,
+            decision=decision,
+            app_name=app_name,
+            edits=edits,
+            client_store=_DEFAULT_CLIENT_STORE,
+        )
 
     channel_id = interrupt["channel_id"]
     session_id = interrupt["session_id"]
@@ -4888,7 +5264,10 @@ def build_runner(*, session_service=None, artifact_service=None, direct_document
     from google.adk.runners import Runner
 
     from accounting_agents.agent import document_app
+    from accounting_agents.credit_delivery import wire_shared_credit_service
     from accounting_agents.sessions import FirestoreSessionService
+
+    wire_shared_credit_service()
 
     logger.info("build_runner: using document_app (deterministic document entry, ADR-0021)")
     return Runner(
@@ -5162,14 +5541,20 @@ def build_async_app(
         if not op_id:
             return
         interrupt = read_interrupt(db, op_id)
+        from ledgr_agent.slack.hitl_bridge import CLEAN_AGENT_HITL_KIND, ledger_rows_to_edit_lines
+
         state = (
             await _read_session_state(runner, app_name, interrupt)
             if interrupt else {}
         )
-        # Single-invoice assumption (Task 6's apply_decision_node logs a WARNING
-        # when len(invs) > 1 — modal mirrors the same per-doc-session contract).
-        invs = state.get(nodes.NORMALIZED_KEY) or [{}]
-        lines = invs[0].get("lines") or []
+        if interrupt and interrupt.get("kind") == CLEAN_AGENT_HITL_KIND:
+            payload = interrupt.get("ledger_payload") or {}
+            lines = ledger_rows_to_edit_lines(payload)
+        else:
+            # Single-invoice assumption (Task 6's apply_decision_node logs a WARNING
+            # when len(invs) > 1 — modal mirrors the same per-doc-session contract).
+            invs = state.get(nodes.NORMALIZED_KEY) or [{}]
+            lines = invs[0].get("lines") or []
         coa_options = [
             (c.get("code"), f"{c.get('code')} — {c.get('description')}")
             for c in (state.get("coa") or [])
@@ -5784,7 +6169,7 @@ def build_async_app(
                         slack_client=sync_client,
                         channel_id=channel_id_dr,
                         batches=stash["batches"],
-                        software=stash.get("software") or "qbs",
+                        software=stash.get("software") or "",
                         kind=stash.get("kind") or "bank",
                         client_name=stash.get("client_name") or "",
                     )
@@ -6387,6 +6772,41 @@ def build_async_app(
                     sync_client.chat_update(**update_kwargs)
                 except Exception:  # noqa: BLE001 - cosmetic
                     logger.exception("failed to update Job summary in %s", channel_id)
+                    # Never leave the card stuck on "Processing batch …". Slack
+                    # rejects the rich update (e.g. invalid_blocks when a preview
+                    # data_table exceeds a block limit), so retry with a
+                    # plain-text-only summary — no blocks — so the user always
+                    # gets a clean delivery confirmation.
+                    try:
+                        fallback_text = (
+                            final_text
+                            if "final_text" in locals() and final_text
+                            else job_summary_text(
+                                total=total,
+                                posted=posted,
+                                needs_review=needs_review,
+                                rejected=rejected,
+                                failed=failed,
+                                duplicates=duplicates,
+                                software=software_hint,
+                                fy=fy_hint,
+                                kind=kind_hint,
+                            )
+                        )
+                        logger.warning(
+                            "falling back to plain-text Job summary in %s",
+                            channel_id,
+                        )
+                        sync_client.chat_update(
+                            channel=channel_id,
+                            ts=summary_ts,
+                            text=fallback_text,
+                        )
+                    except Exception:  # noqa: BLE001 - cosmetic
+                        logger.exception(
+                            "failed to update fallback Job summary in %s",
+                            channel_id,
+                        )
                 # Phase 2 backfill: patch delivery_message_ts onto per-doc log
                 # entries written during the batch loop (summary_ts is the thread parent).
                 if batch_file_ids and store is not None:
@@ -6476,7 +6896,10 @@ def build_fastapi_app():
     ``from __future__ import annotations`` (PEP 563 stringifies all annotations;
     FastAPI resolves them against the module globals at decoration time).
     """
+    from accounting_agents.observability.sentry_trends import init_sentry_if_configured
     from fastapi import FastAPI
+
+    init_sentry_if_configured()
     from slack_bolt.adapter.fastapi.async_handler import AsyncSlackRequestHandler
 
     # All heavyweight objects are deferred to first request. Imports happen

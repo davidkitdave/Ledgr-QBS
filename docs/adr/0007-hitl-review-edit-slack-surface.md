@@ -1,6 +1,12 @@
 # 0007 — HITL review & edit in Slack: one Job summary, threaded review cards, modal edits
 
-- **Status:** Accepted
+> **ℹ️ Amended by [ADR-0026](0026-ai-reads-rules-apply-on-a-lean-llmagent.md) (2026-06-24).**
+> This Slack review/edit surface is **retained unchanged**. Only the upstream *pause* changes:
+> reviews are now triggered by the batch tool's `pending_reviews` (resumed via the `hitl.py`
+> Firestore bridge), not by an ADK `RequestInput` graph node (graph retired). Edits still
+> become Corrections (ADR-0004).
+
+- **Status:** Accepted (surface retained; pause primitive amended by ADR-0026)
 - **Date:** 2026-06-14
 - **Deciders:** Ledgr team; grounded in Slack Block Kit docs + ADK HITL docs (via the adk-docs / google-dev-knowledge MCPs).
 

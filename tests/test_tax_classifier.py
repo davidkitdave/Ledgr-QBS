@@ -126,7 +126,7 @@ class TestChubbRegression:
         assert result.tax_confidence >= 0.8
 
     def test_gst_9pct_no_gst_amount_still_resolves_sr_no_flag(self):
-        """Explicit '9%' wording with no gst_amount captured → still SR, not flagged."""
+        """Explicit '9%' wording with no gst_amount captured → SR tie-break, flagged."""
         line, inv = _purchase(
             desc="Software licence GST 9%",
             net=200.0,
@@ -136,8 +136,8 @@ class TestChubbRegression:
         result = CLF.classify_line(line, inv)
 
         assert result.tax_treatment == "SR"
-        assert not result.tax_flagged, f"Reason: {result.tax_reason}"
-        assert result.tax_confidence >= 0.8
+        assert result.tax_flagged, f"Lexicon tie-break must flag. Reason: {result.tax_reason}"
+        assert result.tax_confidence < 0.8
 
     def test_explicit_sr_signal_sales_invoice_no_flag(self):
         """Sales invoice: explicit standard-rated signal in description → SR, not flagged."""
@@ -260,7 +260,7 @@ class TestAmbiguousCasesStillFlag:
             )
 
     def test_zero_rated_wording_does_not_become_sr(self):
-        """ZR signal in description must not be overridden by the new SR rule."""
+        """ZR lexicon tie-break must not lose to standard-rated lexicon tie-break."""
         line, inv = _purchase(
             desc="International freight export GST 9%",  # both signals present
             net=1000.0,
@@ -269,14 +269,14 @@ class TestAmbiguousCasesStillFlag:
         )
         result = CLF.classify_line(line, inv)
 
-        # ZR signal (international freight / export) must win over standard-rated wording
         assert result.tax_treatment == "ZR", (
-            f"ZR signal must take priority over standard-rated wording. "
+            f"ZR tie-break must take priority over standard-rated wording. "
             f"Got {result.tax_treatment}. Reason: {result.tax_reason}"
         )
+        assert result.tax_flagged
 
     def test_exempt_wording_does_not_become_sr(self):
-        """Exempt signal in description must not be overridden by the new SR rule."""
+        """Exempt lexicon tie-break must not be overridden by standard-rated tie-break."""
         line, inv = _purchase(
             desc="Residential rent (exempt) standard-rated",
             net=2000.0,
@@ -286,8 +286,9 @@ class TestAmbiguousCasesStillFlag:
         result = CLF.classify_line(line, inv)
 
         assert result.tax_treatment == "ES", (
-            f"ES signal must take priority. Got {result.tax_treatment}. Reason: {result.tax_reason}"
+            f"ES tie-break must take priority. Got {result.tax_treatment}. Reason: {result.tax_reason}"
         )
+        assert result.tax_flagged
 
 
 # ===========================================================================
@@ -307,13 +308,15 @@ class TestExistingRulesUnchanged:
         line, inv = _purchase(desc="IDD international call", gst=0.0, gst_regno="M12345678X")
         result = CLF.classify_line(line, inv)
         assert result.tax_treatment == "ZR"
-        assert not result.tax_flagged
+        assert result.tax_flagged
+        assert result.tax_confidence < 0.8
 
     def test_exempt_interest_income(self):
         line, inv = _purchase(desc="Bank interest income", gst=None, gst_regno="M12345678X")
         result = CLF.classify_line(line, inv)
         assert result.tax_treatment == "ES"
-        assert not result.tax_flagged
+        assert result.tax_flagged
+        assert result.tax_confidence < 0.8
 
     def test_nt_unregistered_no_gst(self):
         line, inv = _purchase(desc="Hawker food stall", gst=None, gst_regno=None, is_overseas=False)
@@ -346,6 +349,24 @@ class TestExistingRulesUnchanged:
         result = CLF.classify_line(line, inv)
         assert result.tax_treatment == "SR"
         assert not result.tax_flagged
+
+    def test_sales_gst_non_reconciling_amount_flags_for_review(self):
+        """Sales: positive GST that does not match any allowed rate band → SR flagged, low conf."""
+        line, inv = _sales(
+            desc="Local consulting",
+            net=1000.0,
+            gst=50.0,  # 5% — does not reconcile to 9% standard rate
+        )
+        result = CLF.classify_line(line, inv)
+
+        assert result.tax_treatment == "SR"
+        assert result.tax_flagged, (
+            f"Expected flag when printed GST does not reconcile. Reason: {result.tax_reason}"
+        )
+        assert result.tax_confidence <= 0.5, (
+            f"Expected low confidence for non-reconciling GST, got {result.tax_confidence}"
+        )
+        assert "does not reconcile" in (result.tax_reason or "").lower()
 
     def test_sales_not_gst_registered_nt(self):
         line, inv = _sales(desc="Service", our_gst_registered=False)
@@ -429,6 +450,246 @@ class TestExistingRulesUnchanged:
 
 
 # ===========================================================================
+# WS2 — Malaysia SST multi-rate bands (service 6%/8%, sales 5%/10%)
+# ===========================================================================
+
+class TestMySstMultiRate:
+  def test_service_invoice_2024_03_plus_8pct_not_flagged(self):
+    clf = get_tax_classifier("my_sst.yaml")
+    inv = NormalizedInvoice(
+      doc_type="purchase",
+      invoice_date=date(2024, 6, 1),
+      our_gst_registered=True,
+      tax_visible_on_document=True,
+      supplier=PartyInfo(gst_regno="200012346A", country="MY"),
+    )
+    inv.lines.append(
+      InvoiceLine(description="Workshop labour", net_amount=100.0, gst_amount=8.0)
+    )
+    clf.classify_line(inv.lines[0], inv)
+    line = inv.lines[0]
+    assert line.tax_treatment == "SR"
+    assert line.tax_flagged is False
+
+  def test_carve_out_telecom_6pct_not_flagged(self):
+    clf = get_tax_classifier("my_sst.yaml")
+    inv = NormalizedInvoice(
+      doc_type="purchase",
+      invoice_date=date(2024, 6, 1),
+      our_gst_registered=True,
+      tax_visible_on_document=True,
+      supplier=PartyInfo(gst_regno="200012346A", country="MY"),
+    )
+    inv.lines.append(
+      InvoiceLine(
+        description="Mobile telecom monthly plan",
+        net_amount=100.0,
+        gst_amount=6.0,
+      )
+    )
+    clf.classify_line(inv.lines[0], inv)
+    line = inv.lines[0]
+    assert line.tax_treatment == "SR"
+    assert line.tax_flagged is False
+
+  def test_sales_tax_goods_5_and_10_pct_not_flagged(self):
+    clf = get_tax_classifier("my_sst.yaml")
+    for gst, desc in ((5.0, "Essential groceries"), (10.0, "Standard goods supply")):
+      inv = NormalizedInvoice(
+        doc_type="purchase",
+        invoice_date=date(2024, 6, 1),
+        our_gst_registered=True,
+        tax_visible_on_document=True,
+        supplier=PartyInfo(gst_regno="200012346A", country="MY"),
+      )
+      inv.lines.append(
+        InvoiceLine(description=desc, net_amount=100.0, gst_amount=gst)
+      )
+      clf.classify_line(inv.lines[0], inv)
+      line = inv.lines[0]
+      assert line.tax_treatment == "SSR"
+      assert line.tax_flagged is False, f"{desc} gst={gst}"
+
+  def test_autocount_rate_keyed_sr_code(self):
+    clf = get_tax_classifier("my_sst.yaml")
+    assert clf.tax_code("SR", "purchase", "autocount", rate=0.08) == "SV-8"
+    assert clf.tax_code("SR", "purchase", "autocount", rate=0.06) == "SV-6"
+
+  def test_autocount_sales_es_rate_keyed(self):
+    clf = get_tax_classifier("my_sst.yaml")
+    assert clf.tax_code("ES", "sales", "autocount", rate=0.08) == "ESV-8"
+    assert clf.tax_code("ES", "sales", "autocount", rate=0.06) == "ESV-6"
+
+  def test_sql_account_flat_codes_no_svz(self):
+    clf = get_tax_classifier("my_sst.yaml")
+    assert clf.tax_code("SR", "purchase", "sql_account") == "SV"
+    assert clf.tax_code("IM", "purchase", "sql_account") == "IMSV"
+    assert clf.tax_code("SSR", "purchase", "sql_account") == "ST5"
+    table = clf.tax["code_map"]["sql_account"]["purchase"]
+    assert "SVZ" not in table
+
+
+# ===========================================================================
+# MY SST dual-band: both 6% and 8% are valid SR rates in dual-rate period
+# (post 2024-03). Rate guard must accept EITHER without keyword gating.
+# ===========================================================================
+
+class TestMyDualBandAccepted:
+    """Both 6% (carve-out) and 8% (standard) are legitimate concurrent service-tax
+    bands in MY post-2024-03. allowed_rates_for_treatment must return both
+    regardless of line description. Only genuinely anomalous rates (neither band)
+    should flag.
+    """
+
+    CLF_MY = get_tax_classifier("my_sst.yaml")
+
+    def _my_purchase(self, desc: str, net: float = 100.0, gst: float = 6.0) -> tuple:
+        inv = NormalizedInvoice(
+            doc_type="purchase",
+            invoice_date=date(2025, 12, 1),  # post 2025-07-01 dual-rate regime
+            our_gst_registered=True,
+            tax_visible_on_document=True,
+            supplier=PartyInfo(gst_regno="200012346A", country="MY"),
+        )
+        line = InvoiceLine(description=desc, net_amount=net, gst_amount=gst)
+        inv.lines.append(line)
+        return line, inv
+
+    @staticmethod
+    def _allowed(clf, line, inv) -> list[float]:
+        return clf.allowed_rates_for_treatment("SR", line, inv)
+
+    def test_generic_description_includes_both_bands(self):
+        """Generic description must return both 6% and 8% — no keyword dependency."""
+        line, inv = self._my_purchase("Total charges for taxable items", gst=6.0)
+        rates = self._allowed(self.CLF_MY, line, inv)
+        assert rates == sorted([0.06, 0.08]), (
+            f"Expected [0.06, 0.08] for generic description, got {rates}"
+        )
+
+    def test_consulting_description_also_includes_both_bands(self):
+        """Standard description must also return both bands (no keyword exclusion)."""
+        line, inv = self._my_purchase("Consulting services", gst=8.0)
+        rates = self._allowed(self.CLF_MY, line, inv)
+        assert rates == sorted([0.06, 0.08]), (
+            f"Expected [0.06, 0.08] for consulting description, got {rates}"
+        )
+
+    def test_6pct_generic_line_does_not_flag(self):
+        """End-to-end: 6% SST on a generic line must not trigger HITL."""
+        line, inv = self._my_purchase(
+            "Total charges for taxable items", net=71.28, gst=4.27
+        )
+        result = self.CLF_MY.classify_line(line, inv)
+        assert result.tax_treatment == "SR", f"Got {result.tax_treatment}"
+        assert result.tax_flagged is False, (
+            f"6% SST on generic line must not flag. Reason: {result.tax_reason}"
+        )
+
+    def test_8pct_line_does_not_flag(self):
+        """End-to-end: 8% SST on any SR line must not flag."""
+        line, inv = self._my_purchase(
+            "Professional services fee", net=100.0, gst=8.0
+        )
+        result = self.CLF_MY.classify_line(line, inv)
+        assert result.tax_treatment == "SR", f"Got {result.tax_treatment}"
+        assert result.tax_flagged is False, (
+            f"8% SST must not flag. Reason: {result.tax_reason}"
+        )
+
+    def test_anomalous_rate_flags(self):
+        """A rate far from both SST bands (6% / 8%) must flag as anomalous.
+
+        Rates within the classifier's 2% reconciliation tolerance of either band
+        (e.g. 7% — 1% from each) are legitimately absorbed and do NOT flag, so the
+        anomaly must be unambiguous: 15% on a 100 net line is ~7 points outside the
+        nearest band, so ``_best_rate_match`` cannot reconcile it and must flag.
+        """
+        line, inv = self._my_purchase("Professional services", net=100.0, gst=15.0)
+        result = self.CLF_MY.classify_line(line, inv)
+        assert result.tax_flagged is True, (
+            f"~15% rate must flag as anomalous. Got flagged={result.tax_flagged}, "
+            f"treatment={result.tax_treatment}, reason={result.tax_reason}"
+        )
+
+
+# ===========================================================================
+# B.1 — SG AutoCount / SQL Account ERP code resolution (was blank before fix)
+# ===========================================================================
+
+class TestSgErpCodeResolution:
+    """Regression lock for hole B.1: SG autocount/sql_account tax codes were blank.
+
+    Before the fix, sg_gst.yaml had no ``autocount`` or ``sql_account`` keys in
+    ``code_map``.  ``TaxClassifier.tax_code(treatment, doc_type, system)`` calls
+    ``code_map.get(system)``, so ``system="autocount"`` returned ``None`` → ``""``.
+    The fix added explicit blocks mirroring IRAS short-code convention (§7.2):
+    purchase SR → "TX", ZR → "ZR", NT → "NT"; sales SR → "SR".
+    """
+
+    CLF_SG = get_tax_classifier("sg_gst.yaml")
+
+    # --- purchase SR (the primary hole: "TX" was blank before B.1) -----------
+
+    def test_autocount_purchase_sr_is_tx(self):
+        """autocount purchase SR must resolve to 'TX', not ''."""
+        code = self.CLF_SG.tax_code("SR", "purchase", "autocount")
+        assert code == "TX", f"Expected 'TX', got {code!r}"
+
+    def test_sql_account_purchase_sr_is_tx(self):
+        """sql_account purchase SR must resolve to 'TX', not ''."""
+        code = self.CLF_SG.tax_code("SR", "purchase", "sql_account")
+        assert code == "TX", f"Expected 'TX', got {code!r}"
+
+    # --- purchase ZR ----------------------------------------------------------
+
+    def test_autocount_purchase_zr_is_zr(self):
+        code = self.CLF_SG.tax_code("ZR", "purchase", "autocount")
+        assert code == "ZR", f"Expected 'ZR', got {code!r}"
+
+    def test_sql_account_purchase_zr_is_zr(self):
+        code = self.CLF_SG.tax_code("ZR", "purchase", "sql_account")
+        assert code == "ZR", f"Expected 'ZR', got {code!r}"
+
+    # --- purchase NT ----------------------------------------------------------
+
+    def test_autocount_purchase_nt_is_nt(self):
+        code = self.CLF_SG.tax_code("NT", "purchase", "autocount")
+        assert code == "NT", f"Expected 'NT', got {code!r}"
+
+    # --- sales SR -------------------------------------------------------------
+
+    def test_autocount_sales_sr_is_sr(self):
+        code = self.CLF_SG.tax_code("SR", "sales", "autocount")
+        assert code == "SR", f"Expected 'SR', got {code!r}"
+
+    def test_sql_account_sales_sr_is_sr(self):
+        code = self.CLF_SG.tax_code("SR", "sales", "sql_account")
+        assert code == "SR", f"Expected 'SR', got {code!r}"
+
+    # --- belt-and-suspenders: none of the above return blank -----------------
+
+    def test_no_blank_codes_for_sg_erp_systems(self):
+        """Belt-and-suspenders: every common SG ERP code must be non-empty."""
+        cases = [
+            ("SR", "purchase", "autocount"),
+            ("SR", "purchase", "sql_account"),
+            ("ZR", "purchase", "autocount"),
+            ("ZR", "purchase", "sql_account"),
+            ("NT", "purchase", "autocount"),
+            ("NT", "purchase", "sql_account"),
+            ("SR", "sales", "autocount"),
+            ("SR", "sales", "sql_account"),
+        ]
+        blanks = [
+            f"{system}/{doc_type}/{treatment}"
+            for treatment, doc_type, system in cases
+            if self.CLF_SG.tax_code(treatment, doc_type, system) == ""
+        ]
+        assert not blanks, f"Blank tax codes returned for: {blanks}"
+
+
+# ===========================================================================
 # classify_invoice convenience wrapper
 # ===========================================================================
 
@@ -489,20 +750,17 @@ class TestGetTaxClassifierFactory:
         code = clf.tax_code("SR", "purchase", "qbs")
         assert code == "TX", f"Expected SG code 'TX' for SINGAPORE jurisdiction, got {code!r}"
 
-    def test_cross_border_defaults_to_sg(self):
-        clf = get_tax_classifier("CROSS_BORDER")
-        code = clf.tax_code("SR", "purchase", "qbs")
-        assert code == "TX", f"Expected SG code 'TX' for CROSS_BORDER, got {code!r}"
+    def test_cross_border_without_yaml_returns_none(self):
+        assert get_tax_classifier("CROSS_BORDER") is None
 
-    def test_none_defaults_to_sg(self):
-        clf = get_tax_classifier(None)
-        code = clf.tax_code("SR", "purchase", "qbs")
-        assert code == "TX", f"Expected SG default 'TX' for None, got {code!r}"
+    def test_none_returns_none_not_sg_default(self):
+        assert get_tax_classifier(None) is None
 
-    def test_empty_string_defaults_to_sg(self):
-        clf = get_tax_classifier("")
-        code = clf.tax_code("SR", "purchase", "qbs")
-        assert code == "TX", f"Expected SG default 'TX' for empty string, got {code!r}"
+    def test_empty_string_returns_none_not_sg_default(self):
+        assert get_tax_classifier("") is None
+
+    def test_unknown_jurisdiction_returns_none(self):
+        assert get_tax_classifier("ATLANTIS") is None
 
     def test_my_sst_nt_code_purchase_qbs(self):
         clf = get_tax_classifier("my_sst.yaml")
@@ -519,6 +777,20 @@ class TestGetTaxClassifierFactory:
         clf = TaxClassifier()
         code = clf.tax_code("SR", "purchase", "qbs")
         assert code == "TX", f"Default TaxClassifier() must give SG code 'TX', got {code!r}"
+
+    def test_my_classifier_sg_supplier_is_overseas(self):
+        """C4: MY taxonomy treats SG suppliers as overseas, not domestic."""
+        clf = get_tax_classifier("my_sst.yaml")
+        line, inv = _purchase(
+            desc="Consulting",
+            gst=None,
+            gst_regno=None,
+            is_overseas=False,
+        )
+        inv.supplier.country = "SG"
+        result = clf.classify_line(line, inv)
+        assert result.tax_treatment == "OS"
+        assert result.tax_flagged is True
 
 
 class TestGetTaxClassifierIntegration:
@@ -680,3 +952,68 @@ class TestIndeterminateNullBehavior:
         assert tax_amount == 0.0, (
             f"Indeterminate line must export Tax Amount=0, got {tax_amount!r}"
         )
+
+
+# ===========================================================================
+# YAML-driven keyword alias ladder (data-relocation refactor — behavior-preserving)
+# ===========================================================================
+
+class TestKeywordAliasLadderYaml:
+    """Representative tax_keyword → treatment mappings still resolve correctly
+    through the shared tax_aliases.yaml ladder (replaces the old hardcoded ladder).
+
+    Covers each match-type (exact / prefix / substring) and each treatment, in
+    precedence order. A no-GST purchase keeps the keyword unflagged.
+    """
+
+    CASES = [
+        # (tax_keyword, expected_treatment)
+        ("z", "ZR"),            # ZR exact
+        ("ZR", "ZR"),           # ZR prefix
+        ("zero-rated", "ZR"),   # ZR substring "zero"
+        ("GST 0%", "ZR"),       # ZR substring "0%"
+        ("e", "ES"),            # ES exact
+        ("ES", "ES"),           # ES prefix
+        ("exempt", "ES"),       # ES substring
+        ("OS", "OS"),           # OS prefix
+        ("out of scope", "OS"), # OS substring
+        ("n", "NT"),            # NT exact
+        ("NT", "NT"),           # NT prefix
+        ("no tax", "NT"),       # NT substring
+        ("no-tax", "NT"),       # NT substring (hyphen)
+        ("g", "SR"),            # SR exact "g"
+        ("gst", "SR"),          # SR exact "gst"
+        ("SR", "SR"),           # SR prefix
+        ("TX", "SR"),           # SR prefix "tx"
+        ("standard-rated", "SR"),  # SR substring "standard"
+    ]
+
+    def test_purchase_keyword_aliases(self):
+        for kw, expected in self.CASES:
+            line, inv = _purchase(
+                desc="Misc charge", gst=None, gst_regno="M12345678X", tax_kw=kw
+            )
+            result = CLF.classify_line(line, inv)
+            assert result.tax_treatment == expected, (
+                f"purchase tax_keyword {kw!r} → {result.tax_treatment!r}, expected {expected!r}"
+            )
+
+    def test_sales_keyword_aliases(self):
+        for kw, expected in self.CASES:
+            line, inv = _sales(desc="Misc charge", gst=None, tax_kw=kw)
+            result = CLF.classify_line(line, inv)
+            assert result.tax_treatment == expected, (
+                f"sales tax_keyword {kw!r} → {result.tax_treatment!r}, expected {expected!r}"
+            )
+
+    def test_sr_rate_keyword_still_matches(self):
+        # "9%" is not in the static alias table; it must still resolve to SR via
+        # the dynamic rate-keyword tail derived from the jurisdiction YAML.
+        assert CLF._sr_tax_keyword_match("9%") is True
+
+    def test_precedence_zr_before_sr(self):
+        # "zr" must hit ZR before any SR rule even though SR is also in the ladder.
+        line, inv = _purchase(
+            desc="x", gst=None, gst_regno="M12345678X", tax_kw="zr-export"
+        )
+        assert CLF.classify_line(line, inv).tax_treatment == "ZR"

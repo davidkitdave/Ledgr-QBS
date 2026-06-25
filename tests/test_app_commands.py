@@ -47,9 +47,19 @@ def _view_state_values(
     fye_month: str = "12",
     accounting_software: str = "QBS Ledger",
     gst_value: str = "yes",
+    region: str = "SINGAPORE",
 ) -> dict:
     return {
         "client_name": {"val": {"type": "plain_text_input", "value": client_name}},
+        "region": {
+            "val": {
+                "type": "static_select",
+                "selected_option": {
+                    "text": {"type": "plain_text", "text": region.title()},
+                    "value": region,
+                },
+            }
+        },
         "fye_month": {
             "val": {
                 "type": "static_select",
@@ -87,6 +97,7 @@ def _submit_body(
     fye_month: str = "12",
     accounting_software: str = "QBS Ledger",
     gst_value: str = "yes",
+    region: str = "SINGAPORE",
 ) -> dict:
     return {
         "team": {"id": team_id},
@@ -94,7 +105,9 @@ def _submit_body(
             "callback_id": "ledgr_onboarding",
             "private_metadata": channel_id,
             "state": {
-                "values": _view_state_values(client_name, fye_month, accounting_software, gst_value)
+                "values": _view_state_values(
+                    client_name, fye_month, accounting_software, gst_value, region
+                )
             },
         },
     }

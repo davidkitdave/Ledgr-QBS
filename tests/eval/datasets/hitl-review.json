@@ -1,0 +1,19 @@
+{
+  "eval_cases": [
+    {
+      "eval_case_id": "grouped_account_warning",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "Process tests/fixtures/stub-invoice.pdf with process_document_batch and return only the review_requests and soft_warnings fields."
+          }
+        ]
+      },
+      "metadata": {
+        "expect_grouped_soft_warning": true,
+        "max_ungrouped_soft_reviews": 1
+      }
+    }
+  ]
+}

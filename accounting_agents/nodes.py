@@ -50,27 +50,49 @@ from invoice_processing.export.categorizer import categorize_invoice
 from invoice_processing.export.client_context import (
     category_mapping_from_state,
     coa_from_state,
+    coa_keys_from_state,
     entity_memory_from_state,
+    tax_codes_from_state,
+)
+from invoice_processing.export.axis_resolvers import (
+    resolve_currency,
+    resolve_software,
+    resolve_tax_classifier_reference,
 )
 from invoice_processing.export.exporters import (
     bank_sheet_title,
+    collect_account_flagged_summary,
+    collect_export_unmapped_summary,
+    collect_import_readiness,
+    format_account_flagged_note,
+    format_import_readiness_note,
+    format_unmapped_export_note,
     get_bank_exporter,
     get_exporter,
-    normalize_software_key,
+    software_label,
 )
-from invoice_processing.export.tax_classifier import get_tax_classifier
 from invoice_processing.export.models import BankStatement, NormalizedInvoice
 from invoice_processing.export.routing import DocRoute, route_document
+from ledgr_agent.review.grouping import partition_and_group_reasons
 # Jurisdiction + LLM tax reasoning (multi-country support, replaces the
 # previous SG-only TaxClassifier call inside tax_node).
 from .jurisdiction import (
     CUSTOMER_COUNTRY_KEY,
+    FLAG_FOR_HUMAN_KEY,
+    JURISDICTION_AMBIGUOUS,
     JURISDICTION_RATES_KEY,
+    JURISDICTION_REVIEW_REASON_KEY,
     SUPPLIER_COUNTRY_KEY,
     TAX_JURISDICTION_KEY,
+    _norm_region,
+    _resolve_client_currency,
     resolution_from_state as _resolution_from_state,
     resolve_jurisdiction as _resolve_jurisdiction_fn,
     write_to_state as _write_jurisdiction_to_state,
+)
+from .observability.sentry_trends import (
+    emit_account_flagged_from_state,
+    emit_from_struggle_state,
 )
 from .tax_reasoning import reason_one_invoice as _reason_one_invoice
 
@@ -80,26 +102,29 @@ from .normalized_invoice_codec import (
     dict_to_invoice,
     invoice_to_dict,
 )
+from .ledger_doc_identity import ledger_doc_identity
 from invoice_processing.extract.bank_statement_extractor import (
     extract_bank_statement,
     to_bank_statements,
 )
-from invoice_processing.extract.document_extractor import extract_document_bundle
-from invoice_processing.extract.document_normalizer import normalize_document_bundle
-from invoice_processing.extract.document_record import DocumentRecord, DocumentRecordBundle
 from invoice_processing.extract.process_invoice_document import (
     InvoiceProcessResult,
     process_invoice_document,
 )
-from invoice_processing.extract.invoice_extractor import (
-    ExtractedInvoiceBundle,
-    _is_soa_summary_invoice,
-    extract_invoice_bundle,
-    reconcile,
-    to_normalized,
-)
 
 from .config import MODEL_LITE, MODEL_READ, MODEL_STD
+# Artifact-naming helpers — canonical definitions live in the neutral shared
+# module so that ledgr_agent can import them without depending on accounting_agents.
+# Re-exported here for backward compatibility.
+from invoice_processing.shared_libraries.document_artifacts import (
+    ARTIFACT_NAME_KEY,
+    ARTIFACT_NAME_FMT,  # noqa: F401 — re-exported; used by tests as nodes.ARTIFACT_NAME_FMT
+    artifact_name_for,
+    is_document_mime as _is_document_mime,  # backward-compat private alias
+)
+
+# Public alias (non-private name) — new callers should use is_document_mime.
+is_document_mime = _is_document_mime
 
 logger = logging.getLogger(__name__)
 
@@ -139,51 +164,6 @@ def _guard_state_payload(key: str, items: list) -> list:
         )
     return items
 
-
-# --------------------------------------------------------------------------- #
-# State-key + artifact-filename convention (shared with Slack + graph tasks)
-# --------------------------------------------------------------------------- #
-
-#: State key carrying the ADK artifact filename of the uploaded PDF for this run.
-ARTIFACT_NAME_KEY = "temp:artifact_name"
-
-#: Filename convention the Slack layer uses when it ``save_artifact``s the PDF.
-#:
-#: ADK's FastAPI dev server registers artifact routes with a single ``{artifact_name}``
-#: path parameter, which by default does NOT match the slash character. Names like
-#: ``inbox/upload.pdf`` therefore return 404 in the dev UI even when the file is
-#: on disk. To keep dev tooling working we collapse the path to a flat
-#: ``"{file_id}.pdf"`` in non-prod; prod keeps the namespace prefix for collision
-#: safety with other tools writing into the same artifact bucket.
-ARTIFACT_NAME_FMT = "inbox/{file_id}.pdf"
-
-
-def artifact_name_for(file_id: str) -> str:
-    """Return the artifact filename to use for ``file_id`` in the current env.
-
-    In **every** non-prod environment the flat form (``"{file_id}.pdf"``) is
-    returned so the dev FastAPI route matches. ADK's dev FastAPI registers
-    artifact routes with a single ``{artifact_name}`` path parameter that
-    does NOT match the slash character — names like ``inbox/upload.pdf``
-    therefore return 404 in the dev UI even when the file is on disk.
-
-    Prod keeps the namespaced ``"inbox/{file_id}.pdf"`` form for collision
-    safety alongside other artifacts.
-
-    Previous behaviour gated the flat form on ``is_playground_seed_enabled()``
-    which is enabled in dev/unset but ALSO active in any non-prod scenario
-    where a playground seed was used. Phase 1 / artifact-dev-naming
-    simplifies the gate to a direct ``LEDGR_ENV != "prod"`` check so the
-    flat form is used universally outside prod — eliminates the 404 in any
-    ADK web / agents-cli playground session regardless of seed state.
-    """
-    import os as _os
-    from .config import is_playground_seed_enabled
-
-    env = (_os.environ.get("LEDGR_ENV") or "dev").strip().lower()
-    if env != "prod" or is_playground_seed_enabled():
-        return f"{file_id}.pdf"
-    return ARTIFACT_NAME_FMT.format(file_id=file_id)
 
 #: State keys for routing / extraction outputs.
 DOC_TYPE_KEY = "doc_type"
@@ -235,6 +215,14 @@ REVIEW_VERDICT_CLARIFY = "user_clarify"
 #: reviewer calls and re-extracts before circuit-breaking to a human (§9.5).
 REVIEW_MAX_REVIEWS = 2
 REVIEW_MAX_REEXTRACTS = 1
+
+#: WS4 — one totals-focused reconcile re-read before HITL when unreconciled is the
+#: only tripped signal (``review_extraction_node`` + ``approval_gate``).
+RECONCILE_REEXTRACT_ATTEMPTED_KEY = "reconcile_reextract_attempted"
+RECONCILE_REREAD_HINT = (
+    "Re-read the document focusing on invoice totals, subtotals, tax amounts, "
+    "and line sums — ensure they reconcile."
+)
 
 #: Lever 2 (ADR-0017 §3) — soft-signal prefixes.
 #: A reason whose string starts with one of these is classified as SOFT and may
@@ -340,9 +328,6 @@ class ReviewClarifyDecision(BaseModel):
 
 CLASSIFY_FN: Callable[..., ClassificationResult] = classify_document
 DIRECTION_FN: Callable[..., str] = resolve_direction
-EXTRACT_BUNDLE_FN: Callable[..., ExtractedInvoiceBundle] = extract_invoice_bundle
-EXTRACT_DOCUMENT_FN: Callable[..., DocumentRecordBundle] = extract_document_bundle
-NORMALIZE_DOCUMENT_FN = normalize_document_bundle
 EXTRACT_INVOICE_DOCUMENT_FN: Callable[..., InvoiceProcessResult] = process_invoice_document
 EXTRACT_BANK_FN: Callable[..., Any] = extract_bank_statement
 CATEGORIZE_FN: Callable[..., NormalizedInvoice] = categorize_invoice
@@ -356,11 +341,6 @@ REVIEWER_FN: Callable[..., dict]
 # --------------------------------------------------------------------------- #
 # Artifact recovery
 # --------------------------------------------------------------------------- #
-
-
-def _is_document_mime(mime: str) -> bool:
-    """Return True for mime types accepted as document bytes."""
-    return mime.startswith("image/") or mime in ("application/pdf", "application/octet-stream", "")
 
 
 async def _load_pdf_bytes(ctx) -> tuple[bytes, str]:
@@ -524,7 +504,7 @@ async def classify_node(ctx) -> Event:
     # the coordinator (which had the before_agent_callback) was removed in ADR-0021,
     # so the seed must happen at the first node instead.  Function-local import
     # avoids the circular import (agent.py imports nodes at module level).
-    from accounting_agents.agent import seed_playground_profile_if_needed  # noqa: PLC0415
+    from invoice_processing.shared_libraries.playground_context import seed_playground_profile_if_needed  # noqa: PLC0415
     seed_playground_profile_if_needed(ctx.state)
 
     data, mime_type = await _load_pdf_bytes(ctx)
@@ -576,24 +556,25 @@ async def classify_node(ctx) -> Event:
 
 def _resolve_direction_from_extract(
     extract: Optional[dict],
-    fallback: str = "purchase",
+    fallback: str = "unknown",
 ) -> str:
     """Read ``direction_for_client`` from the Understand extract.
 
     Per the Batch Direction plan, the Understand call owns the direction
     decision. Returns the resolved direction string (``"purchase"`` /
-    ``"sales"`` / ``"self_referential"``) or the provided ``fallback`` if the
-    extract is missing or the model returned ``"unknown"``. The
-    ``"unknown"`` case is also returned as-is so the caller can escalate to
-    HITL rather than silently picking a direction.
+    ``"sales"`` / ``"self_referential"``) or ``"unknown"`` when the extract is
+    missing or the model returned ``"unknown"``. Never silently assumes
+    ``"purchase"`` — callers escalate unknown/self_referential to HITL.
     """
     if not extract:
         return fallback
-    direction = extract.get("direction_for_client")
+    documents = extract.get("documents")
+    if isinstance(documents, list) and documents:
+        direction = documents[0].get("direction_for_client")
+    else:
+        direction = extract.get("direction_for_client")
     if direction in ("purchase", "sales", "self_referential"):
         return direction
-    # Either the field is missing (older extract) or it is "unknown". Pass
-    # "unknown" through so the HITL gate can surface it; otherwise fall back.
     if direction == "unknown":
         return "unknown"
     return fallback
@@ -605,37 +586,74 @@ def _apply_invoice_process_result(ctx, result: InvoiceProcessResult) -> None:
     ctx.state[LEDGER_SUMMARY_TABLE_KEY] = result.summary_table
     if result.ledger_extract is not None:
         ctx.state["ledger_extract"] = result.ledger_extract
-    if result.document_records is not None:
-        ctx.state[DOCUMENT_RECORDS_KEY] = _guard_state_payload(
-            DOCUMENT_RECORDS_KEY, result.document_records
-        )
-    elif result.extraction_path == "understand":
+    if result.extraction_path == "understand":
         ctx.state[DOCUMENT_RECORDS_KEY] = _guard_state_payload(DOCUMENT_RECORDS_KEY, [])
     if result.skipped_pages is not None:
         ctx.state["skipped_pages"] = result.skipped_pages
+    if result.input_page_count is not None:
+        ctx.state["input_page_count"] = result.input_page_count
+    if result.partial_failure_warnings:
+        ctx.state["partial_failure_warnings"] = list(result.partial_failure_warnings)
+    ctx.state["normalized_invoice_count"] = len(result.normalized)
     if result.document_read_notes:
         ctx.state["document_read_notes"] = result.document_read_notes
     if result.booking_proposals is not None:
         ctx.state[BOOKING_PROPOSALS_KEY] = _guard_state_payload(
             BOOKING_PROPOSALS_KEY, result.booking_proposals
         )
+    file_id = (ctx.state.get("file_id") or "").strip()
+    normalized = list(result.normalized)
+    if file_id:
+        for inv in normalized:
+            if not inv.source_file_id:
+                inv.source_file_id = file_id
     ctx.state[NORMALIZED_KEY] = _guard_state_payload(
-        NORMALIZED_KEY, [_inv_to_dict(i) for i in result.normalized]
+        NORMALIZED_KEY, [_inv_to_dict(i) for i in normalized]
     )
+
+
+def _base_currency_from_state(state: dict) -> str:
+    """Registry-aware client currency for extract/normalize — no silent SGD default."""
+    region = _norm_region(state.get("client_region") or state.get("region") or "")
+    resolved = _resolve_client_currency(state, region)
+    return resolved or ""
+
+
+def _client_region_and_currency_from_state(state: dict) -> tuple[str, str]:
+    region = _norm_region(state.get("client_region") or state.get("region") or "")
+    currency = _resolve_client_currency(state, region) or ""
+    return region, currency
+
+
+def _resolve_software_from_state(state: dict) -> tuple[str, bool]:
+    """Return (canonical software key, flagged). Blank key when unresolved."""
+    res = resolve_software(state.get("software"))
+    if res.flagged:
+        state["software_unresolved"] = res.reason
+        return "", True
+    return res.value or "", False
+
+
+def _our_gst_registered_from_state(state: dict) -> bool:
+    """Map session tax_registered to extract bool — unknown (None) must not assume registered."""
+    val = state.get("tax_registered")
+    if val is None:
+        return False
+    return bool(val)
 
 
 @node
 async def extract_invoice_document_node(ctx) -> Event:
-    """Understand or legacy extraction — single orchestrated invoice lane step."""
+    """Understand extraction — single orchestrated invoice lane step."""
     data, mime_type = await _load_pdf_bytes(ctx)
     review_hint = (ctx.state.get("review_hint") or "").strip()
     result = EXTRACT_INVOICE_DOCUMENT_FN(
         data,
         mime_type,
         doc_type=ctx.state.get(DOC_TYPE_KEY) or "invoice",
-        direction=ctx.state.get(DIRECTION_KEY) or "purchase",
-        our_gst_registered=bool(ctx.state.get("tax_registered", True)),
-        base_currency=ctx.state.get("base_currency") or "SGD",
+        direction=ctx.state.get(DIRECTION_KEY) or "auto",
+        our_gst_registered=_our_gst_registered_from_state(ctx.state),
+        base_currency=_base_currency_from_state(ctx.state),
         client_name=ctx.state.get("client_name"),
         client_uen=ctx.state.get("client_uen"),
         hint=review_hint or None,
@@ -652,7 +670,7 @@ async def extract_invoice_document_node(ctx) -> Event:
     if result.extraction_path == "understand" and result.ledger_extract:
         resolved = _resolve_direction_from_extract(
             result.ledger_extract,
-            fallback=ctx.state.get(DIRECTION_KEY) or "purchase",
+            fallback=ctx.state.get(DIRECTION_KEY) or "unknown",
         )
         if resolved == "unknown":
             resolved = _retry_resolve_direction_llm(ctx, result.ledger_extract)
@@ -703,18 +721,31 @@ def _retry_resolve_direction_llm(ctx, extract: dict) -> str:
 
     from_party = extract.get("from_party") or {}
     to_party = extract.get("to_party") or {}
-    issuer_name = from_party.get("name") or extract.get("vendor_name")
-    issuer_uen = from_party.get("uen") or extract.get("issuer_gst_regno")
-    bill_to_name = to_party.get("name") or extract.get("customer_name")
-    bill_to_uen = to_party.get("uen")
-    doc_kind = extract.get("doc_kind") or "invoice"
-    summary_table = extract.get("summary_table") or []
-
-    summary_str = "\n".join(
-        f"- {s.get('category')}: {s.get('details')}"
-        for s in summary_table
-        if isinstance(s, dict)
-    )
+    documents = extract.get("documents") or []
+    if documents:
+        first_doc = documents[0]
+        issuer_name = first_doc.get("vendor")
+        issuer_uen = first_doc.get("vendor_tax_regno")
+        bill_to_name = first_doc.get("buyer")
+        bill_to_uen = None
+        doc_kind = first_doc.get("doc_type") or "invoice"
+        summary_str = (
+            f"- reference: {first_doc.get('reference')}\n"
+            f"- vendor: {issuer_name or 'Not visible'}\n"
+            f"- buyer: {bill_to_name or 'Not visible'}"
+        )
+    else:
+        issuer_name = from_party.get("name") or extract.get("vendor_name")
+        issuer_uen = from_party.get("uen") or extract.get("issuer_gst_regno")
+        bill_to_name = to_party.get("name") or extract.get("customer_name")
+        bill_to_uen = to_party.get("uen")
+        doc_kind = extract.get("doc_kind") or "invoice"
+        summary_table = extract.get("summary_table") or []
+        summary_str = "\n".join(
+            f"- {s.get('category')}: {s.get('details')}"
+            for s in summary_table
+            if isinstance(s, dict)
+        )
 
     # Two prompt variants: the standard one (name-match against the document) and
     # a playground variant (no real client to match against — pick the most
@@ -778,14 +809,13 @@ def _retry_resolve_direction_llm(ctx, extract: dict) -> str:
         reason: str
 
     try:
-        from google.genai import types as _genai_types
-
+        from invoice_processing.shared_libraries.gemini_call_config import default_llm_config
         from invoice_processing.shared_libraries.genai_client import make_client
         client = make_client()
         resp = client.models.generate_content(
             model=MODEL_LITE,
             contents=[instruction],
-            config=_genai_types.GenerateContentConfig(
+            config=default_llm_config(
                 response_mime_type="application/json",
                 response_schema=_DirectionDecision,
                 temperature=0,
@@ -804,83 +834,6 @@ def _retry_resolve_direction_llm(ctx, extract: dict) -> str:
         logger.warning("direction retry classification failed: %s", exc)
 
     return "unknown"
-
-
-def _normalize_bundle(ctx, bundle: ExtractedInvoiceBundle) -> list[NormalizedInvoice]:
-    """Reconcile + normalize every invoice in ``bundle`` into NormalizedInvoices.
-
-    Shared by ``extract_invoice_document_node`` (first pass) and the extract reviewer's
-    re-extract path (``_run_reviewer_loop``) so the normalization logic — totals
-    reconcile, FX flag preservation, and the self-referential / unknown-direction
-    review guards — lives in exactly one place. Reads direction / GST / base
-    currency from ``ctx.state``; does NOT write state (the caller does).
-    """
-    direction = ctx.state.get(DIRECTION_KEY)
-    # Structural direction for to_normalized must be "purchase" or "sales".
-    # "self_referential" and "unknown" both default to "purchase" for row
-    # structure, but are immediately flagged for review so the client is
-    # never silently booked as its own vendor (self-referential case) or
-    # routed without a confirmed side (unknown case).
-    effective_direction = direction if direction in ("purchase", "sales") else "purchase"
-    our_gst = bool(ctx.state.get("tax_registered", True))
-    base_currency: str = ctx.state.get("base_currency") or "SGD"
-
-    normalized: list[NormalizedInvoice] = []
-    for ex in bundle.invoices:
-        # Hard-gate: drop phantom SOA-summary invoices hallucinated from the
-        # SOA cover table (same predicate as to_normalized_bundle).
-        if _is_soa_summary_invoice(ex):
-            logger.warning(
-                "hard-gate: dropping SOA-summary phantom invoice",
-                extra={
-                    "invoice_number": ex.invoice_number,
-                    "line_count": len(ex.lines),
-                    "reason": "all_lines_summary_shaped",
-                },
-            )
-            continue
-        ok, _detail = reconcile(ex)
-        inv = to_normalized(
-            ex,
-            direction=effective_direction,
-            our_gst_registered=our_gst,
-            base_currency=base_currency,
-            fx_rate=ex.fx_rate,
-        )
-        # Carry the classify document kind (e.g. "credit_note", "invoice", "receipt")
-        # from state so exporters can apply the credit-note sign-flip at row-build time.
-        # This is distinct from inv.doc_type which is the DIRECTION ("purchase"/"sales").
-        inv.document_kind = ctx.state.get(DOC_TYPE_KEY)
-        # to_normalized already sets reconciled=False when needs_fx_review is True;
-        # only overwrite with the totals-reconcile result when FX has not already
-        # forced reconciled=False, so we don't accidentally clear the FX flag.
-        if not inv.needs_fx_review:
-            inv.reconciled = ok
-        # Self-referential / ambiguous direction guard (mirrors pipeline.py).
-        if direction == "self_referential":
-            inv.reconciled = False
-            review_note = (
-                "needs review: self-referential document — issuer and bill-to "
-                "both match client; not booked as a purchase"
-            )
-            inv.reconcile_note = (
-                f"{inv.reconcile_note}; {review_note}"
-                if inv.reconcile_note
-                else review_note
-            )
-        elif direction == "unknown":
-            inv.reconciled = False
-            review_note = (
-                "needs review: direction unknown — could not determine whether "
-                "client is issuer or bill-to; defaulted to purchase for routing"
-            )
-            inv.reconcile_note = (
-                f"{inv.reconcile_note}; {review_note}"
-                if inv.reconcile_note
-                else review_note
-            )
-        normalized.append(inv)
-    return normalized
 
 
 @node
@@ -924,6 +877,7 @@ async def categorize_node(ctx) -> Event:
     ctx.state[NORMALIZED_KEY] = _guard_state_payload(
         NORMALIZED_KEY, [_inv_to_dict(i) for i in invoices]
     )
+    emit_account_flagged_from_state(ctx.state)
     return Event(output={"count": len(invoices)})
 
 
@@ -1080,6 +1034,25 @@ def _is_soft_only(reasons: list[str]) -> bool:
     )
 
 
+def _is_unreconciled_only_detect_reasons(reasons: list[str]) -> bool:
+    """True when every ``detect_struggle`` reason is unreconciled (WS4)."""
+    return bool(reasons) and all(r.startswith("unreconciled:") for r in reasons)
+
+
+def _is_reconcile_only_needs_review_reasons(reasons: list[str]) -> bool:
+    """True when ``_needs_review`` reasons are only not-reconciled (WS4).
+
+    A reason that mentions ``direction`` (e.g. "direction unknown") is NOT
+    a reconcile-totals problem — it is a structural ambiguity that a totals-
+    focused re-extract cannot fix.  Exclude it so direction-uncertain docs
+    escalate to the reviewer rather than triggering a wasted re-read.
+    """
+    return bool(reasons) and all(
+        ": not reconciled (" in r and "direction" not in r.lower()
+        for r in reasons
+    )
+
+
 def detect_struggle(state: dict) -> tuple[bool, list[str]]:
     """Pure, deterministic struggle detector — NO LLM, NO network.
 
@@ -1095,39 +1068,16 @@ def detect_struggle(state: dict) -> tuple[bool, list[str]]:
 
     invoices = _normalized_from_state(state)
 
-    from invoice_processing.extract.document_normalizer import _is_telco_bill
-
     reasons: list[str] = []
 
-    # Phase 1 read fidelity (DocumentRecord capture) — legacy path only.
-    extraction_path = (state.get(EXTRACTION_PATH_KEY) or "").strip().lower()
-    records_raw = state.get(DOCUMENT_RECORDS_KEY)
-    doc_records: list = []
-    if extraction_path not in ("understand", "capture_book") and records_raw is not None:
-        if not records_raw:
-            reasons.append("read_empty")
-        for idx, raw in enumerate(records_raw):
-            doc = DocumentRecord.model_validate(raw) if isinstance(raw, dict) else raw
-            doc_records.append(doc)
-            if not doc.labeled_fields and not doc.line_items and not doc.tables:
-                reasons.append(f"read_no_capture: doc #{idx + 1}")
-            elif (
-                (doc.totals or doc.labeled_fields)
-                and not doc.line_items
-                and not doc.tables
-                and not _is_telco_bill(doc)
-            ):
-                reasons.append(f"read_no_lines: doc #{idx + 1}")
-        if len(doc_records) > 1:
-            reasons.append(f"read_false_split: {len(doc_records)} documents")
-
-    # Phase 1 rich but Phase 2 incomplete.
-    if doc_records and invoices:
-        primary = doc_records[0]
-        inv0 = invoices[0]
-        rich_read = bool(primary.labeled_fields or primary.line_items)
-        if rich_read and not inv0.invoice_number and not inv0.doc_total and inv0.lines:
-            reasons.append("normalize_incomplete: read captured lines but missing headers")
+    # NOTE: jurisdiction + COA + currency signals are NOT computed here.
+    # detect_struggle runs at lane position 2 (review_extraction), BEFORE
+    # categorize (writes account_code) and resolve_jurisdiction (writes
+    # tax_jurisdiction). Reading those state keys here always saw empty
+    # values and over-flagged every commercial doc. The genuine conditions
+    # (blank/not-in-COA account codes, unresolved jurisdiction, currency
+    # mismatch) are caught post-resolution at the terminal gate in
+    # _needs_review instead.
 
     # Signal #1: bundle_empty — normalization produced zero invoices.
     if not invoices:
@@ -1136,6 +1086,11 @@ def detect_struggle(state: dict) -> tuple[bool, list[str]]:
     # Read doc_type now; Signal #4 is evaluated AFTER the per-invoice loop so
     # weak_extract can be computed from signals gathered in that loop.
     doc_type = (state.get(DOC_TYPE_KEY) or "").strip().lower()
+
+    if "software" in state:
+        sw = resolve_software(state.get("software"))
+        if sw.flagged:
+            reasons.append(f"software_unresolved: {sw.reason}")
 
     # Signal #5: low_classify_confidence — classifier hedged.
     conf = state.get(CLASSIFY_CONFIDENCE_KEY)
@@ -1159,10 +1114,12 @@ def detect_struggle(state: dict) -> tuple[bool, list[str]]:
             )
             if not totals_ok:
                 reasons.append(f"unreconciled: {label} ({note})")
-            elif "direction unknown" in note or "self-referential" in note:
-                primary = doc_records[idx] if idx < len(doc_records) else None
-                if not (primary and _is_telco_bill(primary)):
-                    reasons.append(f"direction_uncertain: {label}")
+            elif (
+                "direction unknown" in note
+                or "self-referential" in note
+                or "direction not confirmed" in note
+            ):
+                reasons.append(f"direction_uncertain: {label}")
 
         # Signal #6: missing_required — a core identifier/total is absent.
         # §0.5-C: doc_total is a tax/GST-shaped total only insofar as a
@@ -1205,6 +1162,10 @@ def detect_struggle(state: dict) -> tuple[bool, list[str]]:
     # with state dicts written before Lever 3 was deployed).
     if state.get(CLASSIFY_PROCESSABLE_KEY) is False:
         reasons.append("processable_false")
+
+    # WS-6.4 — trend observability before familiarity may suppress return value.
+    if reasons or any(not inv.reconciled for inv in invoices):
+        emit_from_struggle_state(state, reasons)
 
     # Lever 4 (ADR-0017 §6) — familiarity gate: if ALL remaining signals are
     # SOFT and the client has seen this doc shape >= FAMILIARITY_THRESHOLD
@@ -1403,9 +1364,9 @@ def _reextract_with_hint(ctx, hint: str, pdf_bytes: bytes, mime_type: str = "app
         pdf_bytes,
         mime_type,
         doc_type=ctx.state.get(DOC_TYPE_KEY) or "invoice",
-        direction=ctx.state.get(DIRECTION_KEY) or "purchase",
-        our_gst_registered=bool(ctx.state.get("tax_registered", True)),
-        base_currency=ctx.state.get("base_currency") or "SGD",
+        direction=ctx.state.get(DIRECTION_KEY) or "auto",
+        our_gst_registered=_our_gst_registered_from_state(ctx.state),
+        base_currency=_base_currency_from_state(ctx.state),
         client_name=ctx.state.get("client_name"),
         client_uen=ctx.state.get("client_uen"),
         hint=hint,
@@ -1471,6 +1432,20 @@ async def review_extraction_node(ctx):
         ctx.state[REVIEW_VERDICT_KEY] = REVIEW_VERDICT_OK
         return
 
+    # WS4: unreconciled-only → one totals-focused re-extract before critic/HITL.
+    if (
+        _is_unreconciled_only_detect_reasons(reasons)
+        and not ctx.state.get(RECONCILE_REEXTRACT_ATTEMPTED_KEY)
+    ):
+        pdf_bytes, mime_type = await _load_pdf_bytes(ctx)
+        _reextract_with_hint(ctx, RECONCILE_REREAD_HINT, pdf_bytes, mime_type)
+        ctx.state[RECONCILE_REEXTRACT_ATTEMPTED_KEY] = True
+        tripped, reasons = detect_struggle(ctx.state)
+        ctx.state[REVIEW_REASON_KEY] = reasons
+        if not tripped:
+            ctx.state[REVIEW_VERDICT_KEY] = REVIEW_VERDICT_OK
+            return
+
     # Lever 2 (ADR-0017 §3): when EVERY tripped reason is soft, run the critic.
     # On REVIEW_VERDICT_OK the doc falls through with no human pause.
     # Any hard signal bypasses this branch entirely — the critic cannot clear
@@ -1483,9 +1458,11 @@ async def review_extraction_node(ctx):
             # Critic cleared the soft signals — fall through, no human pause.
             return
         # Critic returned CLARIFY or HINTS exhausted → escalate to human.
+        review_q = ctx.state.get("review_question") or _review_clarify_question(reasons)
+        ctx.state["review_question"] = review_q
         yield RequestInput(
             interrupt_id=review_interrupt_id,
-            message=ctx.state.get("review_question") or _review_clarify_question(reasons),
+            message=review_q,
             response_schema=ReviewClarifyDecision,
         )
         return
@@ -1512,9 +1489,11 @@ async def review_extraction_node(ctx):
         # critic explicitly asked for human clarification.
         ctx.state[REVIEW_VERDICT_KEY] = REVIEW_VERDICT_CLARIFY
         ctx.state[REVIEW_REASON_KEY] = recheck_reasons  # update to post-fix state
+        review_q = ctx.state.get("review_question") or _review_clarify_question(recheck_reasons)
+        ctx.state["review_question"] = review_q
         yield RequestInput(
             interrupt_id=review_interrupt_id,
-            message=ctx.state.get("review_question") or _review_clarify_question(recheck_reasons),
+            message=review_q,
             response_schema=ReviewClarifyDecision,
         )
         return
@@ -1643,6 +1622,10 @@ async def apply_decision_node(ctx, node_input=None) -> Event:
                     for field in EDITABLE_LINE_FIELDS:
                         if e.get(field) is not None:
                             lines[i][field] = e[field]
+                    if e.get("account_code") is not None:
+                        lines[i]["account_flagged"] = False
+                        lines[i]["account_flag_reason"] = None
+                        lines[i]["account_alternative_codes"] = []
             ctx.state[NORMALIZED_KEY] = _guard_state_payload(NORMALIZED_KEY, invoices)
     return Event(output={"decision": choice})
 
@@ -1701,12 +1684,39 @@ def _needs_review(state: dict) -> tuple[bool, list[str]]:
     used to build the approval prompt.
     """
     reasons: list[str] = []
+
+    jurisdiction_review = state.get(JURISDICTION_REVIEW_REASON_KEY)
+    if jurisdiction_review:
+        reasons.append(str(jurisdiction_review))
+    elif (
+        state.get(TAX_JURISDICTION_KEY) == JURISDICTION_AMBIGUOUS
+        and state.get(FLAG_FOR_HUMAN_KEY)
+    ):
+        reasons.append(
+            "Client tax region not set — please confirm region in client settings"
+        )
+
+    jurisdiction_ambiguous = state.get(TAX_JURISDICTION_KEY) == JURISDICTION_AMBIGUOUS
+
     for idx, inv in enumerate(_normalized_from_state(state)):
         label = inv.invoice_number or f"invoice #{idx + 1}"
         if not inv.reconciled:
             note = inv.reconcile_note or "totals do not reconcile"
             reasons.append(f"{label}: not reconciled ({note})")
+        # Currency vs jurisdiction mismatch — invoice-level, OUTSIDE the
+        # per-line jurisdiction_ambiguous guard so it is not suppressed under
+        # AMBIGUOUS. At the terminal gate tax_jurisdiction is reliably populated.
+        resolved = (state.get(TAX_JURISDICTION_KEY) or "").strip().upper()
+        if inv.currency == "SGD" and resolved == "MALAYSIA":
+            reasons.append(f"{label}: MY-jurisdiction but currency=SGD (currency_mismatch)")
         for line in inv.lines:
+            if jurisdiction_ambiguous:
+                continue
+            if line.account_flagged:
+                reasons.append(
+                    f"{label}: line '{line.description}' flagged for account review"
+                    + (f" ({line.account_flag_reason})" if line.account_flag_reason else "")
+                )
             if line.tax_flagged:
                 reasons.append(
                     f"{label}: line '{line.description}' flagged for tax review"
@@ -1723,6 +1733,47 @@ def _needs_review(state: dict) -> tuple[bool, list[str]]:
     return (bool(reasons), reasons)
 
 
+def _preview_export_unmapped(state: dict) -> dict:
+    """Build export rows early (pre-route) to flag blank tax/creditor codes."""
+    doc_type = (state.get(DOC_TYPE_KEY) or "").strip().lower()
+    if doc_type == "bank_statement":
+        return {"count": 0, "details": []}
+
+    software = ""
+    software_flagged = False
+    if "software" in state:
+        software, software_flagged = _resolve_software_from_state(state)
+    if not software or software_flagged:
+        return {"count": 0, "details": []}
+
+    _rates = state.get(JURISDICTION_RATES_KEY) or {}
+    _ref_yaml = _rates.get("reference_yaml") or state.get(TAX_JURISDICTION_KEY) or None
+    client_region, _ = _client_region_and_currency_from_state(state)
+    clf_res = resolve_tax_classifier_reference(
+        _ref_yaml,
+        client_region=client_region,
+    )
+    if clf_res.flagged or clf_res.value is None:
+        return {"count": 0, "details": []}
+
+    exporter = get_exporter(software, classifier=clf_res.value)
+    if hasattr(exporter, "configure_client_context"):
+        exporter.configure_client_context(
+            tax_codes=tax_codes_from_state(state),
+            entity_memory=entity_memory_from_state(state),
+            coa_keys=coa_keys_from_state(state),
+        )
+
+    direction = state.get(DIRECTION_KEY) or "purchase"
+    default_sheet = "Sales" if direction == "sales" else "Purchase"
+    batches: list[dict] = []
+    for inv in _normalized_from_state(state):
+        row_doc_type = "sales" if default_sheet == "Sales" else "purchase"
+        rows = exporter.rows([inv], row_doc_type)
+        batches.append({"sheet": default_sheet, "rows": rows})
+    return collect_export_unmapped_summary(batches, exporter)
+
+
 def _approval_interrupt_id(state: dict) -> str:
     """Stable interrupt id correlating the pause with the Slack drop.
 
@@ -1737,14 +1788,20 @@ def _approval_interrupt_id(state: dict) -> str:
     return f"{channel}:{file_id}"
 
 
-def _approval_summary(reasons: list[str]) -> str:
+def _approval_summary(reasons: list[str], *, export_unmapped: dict | None = None) -> str:
     """Human-readable summary of why the document needs approval."""
+    hard, soft = partition_and_group_reasons(reasons)
+    display_lines = [item.message for item in hard] + [item.message for item in soft]
     header = (
         "Please review the proposed accounting entries — the following need a "
         "human decision before they are added to the ledger:"
     )
-    bullets = "\n".join(f"  • {r}" for r in reasons)
-    return f"{header}\n{bullets}"
+    bullets = "\n".join(f"  • {line}" for line in display_lines)
+    summary = f"{header}\n{bullets}"
+    unmapped_note = format_unmapped_export_note(export_unmapped)
+    if unmapped_note:
+        summary = f"{summary}\n\n  • {unmapped_note}"
+    return summary
 
 
 def _read_preview_from_state(state: dict, *, max_fields: int = 8) -> str:
@@ -1796,19 +1853,29 @@ async def approval_gate(ctx):
     needs_review, reasons = _needs_review(ctx.state)
     is_multi = len(invoices) > 1
 
-    if not needs_review and not is_multi:
+    # WS4: reconcile-only at the terminal gate → one totals re-read before HITL.
+    if (
+        needs_review
+        and not is_multi
+        and _is_reconcile_only_needs_review_reasons(reasons)
+        and not ctx.state.get(RECONCILE_REEXTRACT_ATTEMPTED_KEY)
+    ):
+        pdf_bytes, mime_type = await _load_pdf_bytes(ctx)
+        _reextract_with_hint(ctx, RECONCILE_REREAD_HINT, pdf_bytes, mime_type)
+        ctx.state[RECONCILE_REEXTRACT_ATTEMPTED_KEY] = True
+        needs_review, reasons = _needs_review(ctx.state)
+
+    if not needs_review:
         ctx.state[APPROVAL_STATUS_KEY] = "auto_approved"
         return
 
-    # Multi-entity bundles get a bundle-level reason when no per-doc flags fired.
-    if is_multi and not reasons:
-        total_lines = sum(len(getattr(inv, "lines", [])) for inv in invoices)
-        reasons = [
-            f"{len(invoices)} sub-documents extracted, {total_lines} total lines"
-            " — review before posting."
-        ]
+    export_unmapped = _preview_export_unmapped(ctx.state)
+    ctx.state["export_unmapped_summary"] = export_unmapped
 
-    summary = _approval_summary(reasons)
+    summary = _approval_summary(
+        reasons,
+        export_unmapped=export_unmapped,
+    )
     read_preview = _read_preview_from_state(ctx.state)
     if read_preview:
         summary = f"{read_preview}\n\n{summary}"
@@ -1822,17 +1889,17 @@ async def approval_gate(ctx):
     )
 
 
-def _doc_key(state: dict, sheet: str, identity: str, index: int, *, period: str = "") -> str:
+def _doc_key(state: dict, sheet: str, identity: str, index: int, *, period: str = "", page_range: tuple[int, int] | None = None) -> str:
     """Content-based per-document dedupe key (re-uploading re-emits the same key).
 
     Does NOT include the Slack file id (which changes on every upload).
     Bank statements include the statement period so different months are
-    distinct; invoices use the invoice number.
+    distinct; invoices use reference + optional page_range (WS-5.4).
     """
-    ident = (identity or "").strip() or f"i{index}"
     if period:
+        ident = (identity or "").strip() or f"i{index}"
         return f"{sheet}:{ident}:{period}"
-    return f"{sheet}:{ident}"
+    return ledger_doc_identity(sheet, identity, page_range, index=index)
 
 
 @node
@@ -1850,28 +1917,39 @@ async def consolidate_node(ctx) -> Event:
     routes = state.get(ROUTES_KEY) or []
     doc_type = (state.get(DOC_TYPE_KEY) or "").strip().lower()
     client_id = state.get("client_id") or "unknown"
-    software = state.get("software")  # seeded by the runner; get_exporter raises if missing
+    software = ""
+    software_flagged = False
+    if "software" in state:
+        software, software_flagged = _resolve_software_from_state(state)
 
     # Representative FY for the run (the workbook is per-FY); take the first route.
     fy = str(routes[0]["fy"]) if routes else "unknown"
 
     batches: list[dict] = []
+    export_unmapped: dict = {}
+    import_readiness: dict = {}
+    account_flagged_summary: dict = {}
+    invoices: list = []
 
     if doc_type == "bank_statement":
         kind = "bank"
         exporter = get_bank_exporter()
         statements = _bank_statements_from_state(state)
+        client_region, client_currency = _client_region_and_currency_from_state(state)
         for idx, (stmt, route) in enumerate(zip(statements, routes)):
+            ccy_res = resolve_currency(
+                stmt.currency,
+                client_region=client_region,
+                client_currency=client_currency,
+            )
+            currency = ccy_res.value
             sheet = bank_sheet_title(
                 bank_name=stmt.bank_name,
                 account_number=stmt.account_number,
-                currency=stmt.currency or "SGD",
+                currency=currency,
             )
             rows = exporter.bank_rows(stmt)
-            # Currency is part of the dedupe identity so different currency
-            # sections of the same account don't share a doc_key (and so a
-            # re-drop of just one currency doesn't get silently deduped).
-            ident = f"{stmt.account_number or stmt.bank_name}:{stmt.currency or 'SGD'}"
+            ident = f"{stmt.account_number or stmt.bank_name}:{currency or '?'}"
             batches.append(
                 {
                     "sheet": sheet,
@@ -1882,39 +1960,56 @@ async def consolidate_node(ctx) -> Event:
             )
     else:
         kind = "invoice"
-        # Guard: get_exporter raises ValueError for None/unknown; default to "qbs"
-        # so the pipeline completes in the playground (no client profile seeded yet
-        # at consolidate time) and in any other no-software scenario.
-        # normalize_software_key accepts display values ("QBS Ledger", "Xero Ledger")
-        # and their lowercase aliases, returning the canonical key or None.
-        _software_key = normalize_software_key(software)
-        if _software_key is None:
-            if software is not None and software != "":
-                logger.warning(
-                    "consolidate_node: unknown software %r; falling back to 'qbs'",
-                    software,
-                )
-            _software_key = "qbs"
-        software = _software_key
-        # Derive jurisdiction-aware tax classifier from state so MY invoices get
-        # SST codes instead of SG GST codes. JURISDICTION_RATES_KEY["reference_yaml"]
-        # is the canonical source; fall back to TAX_JURISDICTION_KEY string, then
-        # to the default (sg_gst.yaml) when neither is present.
+        invoices = _normalized_from_state(state)
         _rates = state.get(JURISDICTION_RATES_KEY) or {}
         _ref_yaml = _rates.get("reference_yaml") or state.get(TAX_JURISDICTION_KEY) or None
-        classifier = get_tax_classifier(_ref_yaml)
-        exporter = get_exporter(software, classifier=classifier)
-        invoices = _normalized_from_state(state)
-        for idx, (inv, route) in enumerate(zip(invoices, routes)):
-            sheet = route.get("sheet") or "Purchase"
-            row_doc_type = "sales" if sheet == "Sales" else "purchase"
-            rows = exporter.rows([inv], row_doc_type)
-            batches.append(
-                {
-                    "sheet": sheet,
-                    "doc_key": _doc_key(state, sheet, inv.invoice_number, idx),
-                    "rows": rows,
-                }
+        client_region, _ = _client_region_and_currency_from_state(state)
+        clf_res = resolve_tax_classifier_reference(
+            _ref_yaml,
+            client_region=client_region,
+        )
+        if (
+            software
+            and not software_flagged
+            and not clf_res.flagged
+            and clf_res.value is not None
+        ):
+            exporter = get_exporter(software, classifier=clf_res.value)
+            if hasattr(exporter, "configure_client_context"):
+                exporter.configure_client_context(
+                    tax_codes=tax_codes_from_state(state),
+                    entity_memory=entity_memory_from_state(state),
+                    coa_keys=coa_keys_from_state(state),
+                )
+            for idx, (inv, route) in enumerate(zip(invoices, routes)):
+                sheet = route.get("sheet") or "Purchase"
+                row_doc_type = "sales" if sheet == "Sales" else "purchase"
+                rows = exporter.rows([inv], row_doc_type)
+                batches.append(
+                    {
+                        "sheet": sheet,
+                        "doc_key": _doc_key(
+                            state,
+                            sheet,
+                            inv.invoice_number,
+                            idx,
+                            page_range=inv.page_range,
+                        ),
+                        "rows": rows,
+                    }
+                )
+            export_unmapped = collect_export_unmapped_summary(batches, exporter)
+            state["export_unmapped_summary"] = export_unmapped
+            account_flagged_summary = collect_account_flagged_summary(batches)
+            state["account_flagged_summary"] = account_flagged_summary
+            import_readiness = collect_import_readiness(
+                batches, exporter, unmapped=export_unmapped
+            )
+            state["import_readiness"] = import_readiness
+        elif software_flagged:
+            logger.warning(
+                "consolidate_node: unresolved software %r — skipping export rows",
+                state.get("software"),
             )
 
     payload = {
@@ -1933,7 +2028,18 @@ async def consolidate_node(ctx) -> Event:
         # directly (deliver_node never ran).  Used to gate the confident-path note.
         "delivered": bool(state.get("delivered")),
         "batches": batches,
+        "export_unmapped_summary": export_unmapped if kind == "invoice" else {},
+        "import_readiness": import_readiness if kind == "invoice" else {},
+        "account_flagged_summary": account_flagged_summary if kind == "invoice" else {},
     }
+    if kind == "invoice":
+        payload["extracted_doc_count"] = len(invoices)
+        page_count = state.get("input_page_count")
+        if page_count is not None:
+            payload["input_page_count"] = int(page_count)
+        partial = state.get("partial_failure_warnings")
+        if partial:
+            payload["partial_failure_warnings"] = list(partial)
     state[LEDGER_ROWS_KEY] = payload
     state["consolidated_count"] = len(batches)
     return Event(output={"consolidated": len(batches), "fy": fy, "kind": kind})
@@ -1990,15 +2096,6 @@ def _closing_balance_from_rows(rows: list[dict]) -> Optional[float]:
     return last_stated
 
 
-def _software_label_for_summary(software: str) -> str:
-    key = (software or "").strip().lower()
-    if "xero" in key:
-        return "Xero"
-    if key:
-        return "QBS Ledger"
-    return ""
-
-
 def compose_delivery_summary(payload: dict) -> str:
     """Compose the user-facing delivery summary from a LEDGER_ROWS_KEY payload.
 
@@ -2014,7 +2111,7 @@ def compose_delivery_summary(payload: dict) -> str:
 
     doc_label = "Bank Statement" if kind == "bank" else "Ledger"
     prefix = f"{client_name} – " if client_name else ""
-    sw = _software_label_for_summary(str(payload.get("software") or ""))
+    sw = software_label(str(payload.get("software") or ""), empty_label="")
     sw_suffix = f" ({sw})" if sw and kind != "bank" else ""
     destination = f"**{prefix}{doc_label} FY{fy}{sw_suffix}**"
 
@@ -2106,22 +2203,61 @@ def compose_confident_note(
     # Derive reconcile total from rows (sum of net amounts).
     # Prefer the payload-level currency (set by consolidate_node from the statement)
     # before falling back to individual row values, then "SGD" as last resort.
+    #
+    # Profile-aware: use ``exporter.column_for_field(...)`` to look up the ACTUAL
+    # column that carries the line net ("sub_total") and the currency, instead of
+    # guessing literal header strings. Each exporter (QBS / Xero / AutoCount /
+    # SQL Account) declares its own column→logical mapping, so a single call
+    # works for every software. If a field has no column for this doc_type
+    # (e.g. AutoCount purchase has no currency column; Xero has no per-line
+    # sub_total), the helper returns None and we skip that piece of the note
+    # rather than rendering a blank or wrong value.
+    from collections import Counter
+
+    sw_res = resolve_software(str(payload.get("software") or ""))
+    _sub_total_col: Optional[str] = None
+    _currency_col: Optional[str] = None
+    _account_col: Optional[str] = None
+    _exp = None
+    if not sw_res.flagged and sw_res.value:
+        try:
+            _exp = get_exporter(sw_res.value)
+        except Exception:
+            _exp = None
+    if _exp is not None:
+        _sub_total_col = _exp.column_for_field("sub_total", doc_type)
+        _currency_col = _exp.column_for_field("currency", doc_type)
+        _account_col = _exp.column_for_field("account_code", doc_type)
+
+    client_region, client_currency = _client_region_and_currency_from_state(
+        {"region": payload.get("region"), "base_currency": payload.get("base_currency")}
+        if payload.get("region") or payload.get("base_currency")
+        else {}
+    )
     total: Optional[float] = None
-    currency = (payload.get("currency") or "").strip() or "SGD"
+    currency_res = resolve_currency(
+        payload.get("currency"),
+        client_region=client_region,
+        client_currency=client_currency,
+    )
+    currency = currency_res.value
     for row in all_rows:
-        amt = row.get("Net Amount")
-        if amt is not None:
-            try:
-                total = (total or 0.0) + float(amt)
-            except (TypeError, ValueError):
-                pass
-        row_currency = row.get("Currency")
-        if row_currency:
-            currency = row_currency
+        if _sub_total_col:
+            amt = row.get(_sub_total_col)
+            if amt is not None:
+                try:
+                    total = (total or 0.0) + float(amt)
+                except (TypeError, ValueError):
+                    pass
+        if _currency_col:
+            row_currency = row.get(_currency_col)
+            if row_currency:
+                currency = row_currency
 
     # Derive dominant account code (most frequent non-empty value).
-    from collections import Counter
-    codes = [row.get("Account Code") for row in all_rows if row.get("Account Code")]
+    codes: list[str] = []
+    if _account_col:
+        codes = [row.get(_account_col) for row in all_rows if row.get(_account_col)]
     dominant_code: Optional[str] = None
     if codes:
         dominant_code = Counter(codes).most_common(1)[0][0]
@@ -2136,7 +2272,20 @@ def compose_confident_note(
     parts = [p for p in [total_str, coded_str] if p]
     detail = " — " + ", ".join(parts) if parts else ""
 
-    return f"Posted this {doc_label} — {line_str}{detail}."
+    note = f"Posted this {doc_label} — {line_str}{detail}."
+    unmapped_note = format_unmapped_export_note(payload.get("export_unmapped_summary"))
+    if unmapped_note:
+        note = f"{note} {unmapped_note}."
+    readiness_note = format_import_readiness_note(payload.get("import_readiness"))
+    if readiness_note:
+        note = f"{note} {readiness_note}"
+    flagged_note = format_account_flagged_note(
+        payload.get("account_flagged_summary")
+        or collect_account_flagged_summary(batches)
+    )
+    if flagged_note and not readiness_note:
+        note = f"{note} {flagged_note}"
+    return note
 
 
 @node

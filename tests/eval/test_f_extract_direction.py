@@ -3,9 +3,9 @@
 For each F1..F12 case in ``tests/eval/datasets/ledgr.evalset.json``:
 
 1. Load the ``test_document`` fixture from ``session_input.state``.
-2. Build a ``DocumentLedgerExtract`` from it (the model output the Understand
+2. Build an ``ExtractedDocument`` from it (the model output the Understand
    call would have produced for that document).
-3. Run it through the mapper (``ledger_extract_to_normalized``) and the
+3. Run it through the mapper (``extracted_document_to_normalized``) and the
    per-line tax classifier (``classify_invoice``).
 4. Score against the per-case table using
    :func:`tests.eval.custom_metrics.score_f_case`.
@@ -26,10 +26,9 @@ import pytest
 from invoice_processing.export.exporters import XeroLedgerExporter
 from invoice_processing.export.tax_classifier import classify_invoice
 from invoice_processing.extract.ledger_extract import (
-    DocumentLedgerExtract,
-    LedgerLine,
-    PartyField,
-    ledger_extract_to_normalized,
+    ExtractedDocument,
+    ExtractedDocumentLine,
+    extracted_document_to_normalized,
 )
 
 from tests.eval.custom_metrics import f_case_ids, score_f_case
@@ -40,12 +39,12 @@ from tests.eval.custom_metrics import f_case_ids, score_f_case
 GATE_THRESHOLD = 0.9
 
 
-def _build_extract(case_id: str, fixture: dict) -> tuple[DocumentLedgerExtract, dict, dict]:
-    """Build a DocumentLedgerExtract from the case's test_document fixture.
+def _build_extract(case_id: str, fixture: dict) -> tuple[ExtractedDocument, dict, dict]:
+    """Build an ExtractedDocument from the case's test_document fixture.
 
     Returns the extract, the session_input.state dict, and the raw
     test_document so the harness can plumb through fixture-only fields
-    (e.g. ``is_overseas``) that don't belong on ``PartyField``.
+    (e.g. ``is_overseas``) that don't belong on ``ExtractedDocument``.
 
     Direction and tax_visible are derived from the per-case expected
     table (``_F_CASE_TABLE``) — the fixture in the evalset is a "what
@@ -58,51 +57,44 @@ def _build_extract(case_id: str, fixture: dict) -> tuple[DocumentLedgerExtract, 
     state = fixture
     expected = f_case_expected(case_id)
 
-    from_party = None
-    to_party = None
-    if doc.get("from_party") and doc["from_party"].get("name"):
-        from_party = PartyField(
-            name=doc["from_party"]["name"],
-            uen=doc["from_party"].get("uen"),
-            role="issuer",
-        )
-    if doc.get("to_party") and doc["to_party"].get("name"):
-        to_party = PartyField(
-            name=doc["to_party"]["name"],
-            uen=doc["to_party"].get("uen"),
-            role="recipient",
-        )
+    from_party = doc.get("from_party") or {}
+    to_party = doc.get("to_party") or {}
 
-    lines: list[LedgerLine] = []
+    lines: list[ExtractedDocumentLine] = []
     for ln in doc.get("lines") or []:
         lines.append(
-            LedgerLine(
+            ExtractedDocumentLine(
                 description=ln["description"],
                 net_amount=float(ln["net_amount"]),
                 gst_amount=float(ln.get("gst_amount") or 0.0),
-                tax_hint=ln.get("tax_keyword"),
+                tax_label=ln.get("tax_keyword"),
             )
         )
 
     direction = expected["direction"]
     tax_visible = expected["tax_visible"]
 
-    extract = DocumentLedgerExtract(
-        vendor_name=(from_party.name if from_party else "Unknown"),
-        customer_name=(to_party.name if to_party else None),
-        document_reference=doc.get("document_reference") or f"{case_id}-REF",
-        document_date=doc.get("document_date") or "2026-06-17",
+    vendor_country = None
+    if from_party.get("is_overseas"):
+        vendor_country = "Overseas"
+
+    extract = ExtractedDocument(
+        doc_type=doc.get("doc_kind", "invoice"),
+        page_range=[1, 1],
+        vendor=from_party.get("name") or "Unknown",
+        buyer=to_party.get("name"),
+        reference=doc.get("document_reference") or f"{case_id}-REF",
+        date=doc.get("document_date") or "2026-06-17",
         currency=doc.get("currency") or "SGD",
-        document_total=float(doc.get("document_total") or 0.0),
+        grand_total=float(doc.get("document_total") or 0.0),
         subtotal=doc.get("subtotal"),
-        gst_total=doc.get("gst_total"),
-        doc_kind=doc.get("doc_kind", "invoice"),
+        tax_total=doc.get("gst_total"),
         claimant_name=doc.get("claimant_name"),
         tax_visible_on_document=tax_visible,
-        from_party=from_party,
-        to_party=to_party,
+        vendor_tax_regno=from_party.get("uen"),
+        vendor_country=vendor_country,
         direction_for_client=direction,
-        ledger_lines=lines,
+        lines=lines,
     )
     return extract, state, doc
 
@@ -120,7 +112,7 @@ def _supplier_is_overseas(doc: dict) -> bool:
 
 def _actual_for_scoring(
     case_id: str,
-    extract: DocumentLedgerExtract,
+    extract: ExtractedDocument,
     state: dict,
     doc: dict,
 ) -> dict:
@@ -137,7 +129,7 @@ def _actual_for_scoring(
       4. Project to Xero rows on the *correct* sheet so header_mapping
          scores the headers the user would actually see.
     """
-    inv = ledger_extract_to_normalized(
+    inv = extracted_document_to_normalized(
         extract,
         direction=extract.direction_for_client or "auto",
         our_gst_registered=bool(state.get("tax_registered", True)),
@@ -146,7 +138,7 @@ def _actual_for_scoring(
         # Plumb overseas flag via country (PartyInfo.is_overseas is a
         # property derived from country != "SG"). The model would
         # derive this from the document itself; the test harness reads
-        # it from the fixture.
+        # it from the fixture when vendor_country was not set on extract.
         inv.supplier.country = "Overseas"
     classify_invoice(inv)
 
@@ -163,7 +155,7 @@ def _actual_for_scoring(
         # inv.doc_type which applies the mapper fallback for "unknown".
         "model_direction_for_client": extract.direction_for_client,
         "direction_for_client": inv.doc_type,
-        "doc_kind": extract.doc_kind,
+        "doc_kind": extract.doc_type,
         "tax_visible_on_document": inv.tax_visible_on_document,
         "currency": inv.currency,
         "line_tax_treatments": line_tax_treatments,

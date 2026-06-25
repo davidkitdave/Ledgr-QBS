@@ -259,6 +259,7 @@ class TestToNormalizedCarriesDocTotal:
             subtotal=2000.0,
             gst_total=90.0,
             total=2090.0,
+            issuer_tax_system="NONE",
         )
 
     def test_doc_totals_carried(self):
@@ -400,6 +401,7 @@ def _extract_missing_due_date(path, **_kw) -> ExtractedInvoice:
         subtotal=100.0,
         gst_total=9.0,
         total=109.0,
+        issuer_tax_system="NONE",
     )
 
 
@@ -501,6 +503,7 @@ class TestZeroLineInvoiceFlagged:
                 subtotal=0.0,
                 gst_total=0.0,
                 total=0.0,
+                issuer_tax_system="NONE",
             )
 
         p = tmp_path / "empty.pdf"
@@ -578,6 +581,7 @@ class TestBatchFlaggedAndCleanBothWritten:
                 lines=[ExtractedLine(description="Office supplies",
                                     net_amount=100.0, gst_amount=9.0, tax_label="SR")],
                 subtotal=100.0, gst_total=9.0, total=109.0,
+                issuer_tax_system="NONE",
             )
 
         def _extract_clean(path, **_kw) -> ExtractedInvoice:

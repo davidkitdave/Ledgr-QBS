@@ -1,49 +1,51 @@
-"""Hermetic tests for capture→book→verify orchestration."""
+"""Hermetic tests — Capture→Book→Verify retired from live routing."""
 
 from __future__ import annotations
 
-
 import pytest
 
-from invoice_processing.extract.book import BookingLedgerLine, BookingProposal
-from invoice_processing.extract.document_record import DocumentRecord, DocumentRecordBundle, LabeledField, LineCapture
+from invoice_processing.extract.ledger_extract import ExtractedDocument, ExtractedDocumentBundle
 from invoice_processing.extract.process_invoice_document import process_invoice_document
 
 pytestmark = pytest.mark.unit
 
 
-def test_process_invoice_document_capture_book_path(monkeypatch):
-    capture = DocumentRecord(
-        labeled_fields=[LabeledField(label="Invoice Number", value="EXP25-D03")],
-        line_items=[
-            LineCapture(description="Transport", net_amount=100.0),
+def _single_doc_bundle() -> ExtractedDocumentBundle:
+    return ExtractedDocumentBundle(
+        documents=[
+            ExtractedDocument(
+                doc_type="invoice",
+                page_range=[1, 1],
+                vendor="Vendor-A",
+                reference="INV-1",
+                date="2026-06-01",
+                currency="SGD",
+                lines=[],
+                subtotal=100.0,
+                tax_total=0.0,
+                grand_total=100.0,
+                direction_for_client="purchase",
+                tax_visible_on_document=False,
+            )
         ],
-        totals=[LabeledField(label="Total", value="100.00")],
     )
-    bundle = DocumentRecordBundle(documents=[capture])
 
-    def fake_extract(data, mime_type, **kwargs):
-        return bundle
 
-    def fake_book(record, **kwargs):
-        return BookingProposal(
-            doc_kind="expense_claim",
-            direction_for_client="purchase",
-            direction_reason="Employee reimbursement payable",
-            ledger_lines=[BookingLedgerLine(description="Transport", net_amount=100.0)],
-            invoice_number="EXP25-D03",
-            document_date="2025-03-16",
-            document_total=100.0,
-            tax_visible_on_document=False,
-        )
+def test_capture_book_env_ignored_uses_understand(monkeypatch):
+    """Retired: LEDGR_CAPTURE_BOOK no longer switches routing."""
+    ledger_called = {"count": 0}
+
+    def fake_extract(*args, **kwargs):
+        ledger_called["count"] += 1
+        return _single_doc_bundle()
 
     monkeypatch.setattr(
-        "invoice_processing.extract.process_invoice_document.EXTRACT_DOCUMENT_FN",
+        "invoice_processing.extract.process_invoice_document.EXTRACT_LEDGER_FN",
         fake_extract,
     )
     monkeypatch.setattr(
-        "invoice_processing.extract.process_invoice_document.BOOK_FROM_CAPTURE_FN",
-        fake_book,
+        "invoice_processing.extract.process_invoice_document.count_input_pages",
+        lambda data, mime: 1,
     )
     monkeypatch.setenv("LEDGR_CAPTURE_BOOK", "1")
 
@@ -54,10 +56,6 @@ def test_process_invoice_document_capture_book_path(monkeypatch):
         direction="auto",
         our_gst_registered=True,
     )
-    assert result.extraction_path == "capture_book"
+    assert result.extraction_path == "understand"
+    assert ledger_called["count"] == 1
     assert len(result.normalized) == 1
-    inv = result.normalized[0]
-    assert inv.doc_type == "purchase"
-    assert inv.tax_visible_on_document is False
-    assert inv.direction_reason == "Employee reimbursement payable"
-    assert inv.reconciled is True

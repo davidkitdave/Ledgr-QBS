@@ -1,6 +1,12 @@
 # 0003 — HITL via ADK `RequestInput` in the slim graph (not Tool Confirmation, not Block Kit)
 
-- **Status:** Accepted
+> **⚠️ Superseded by [ADR-0026](0026-ai-reads-rules-apply-on-a-lean-llmagent.md) (2026-06-24).**
+> HITL is no longer realized by an ADK `RequestInput` graph node (the graph is retired).
+> The Slack↔ADK **Firestore interrupt bridge `hitl.py`** built here is *retained* and is now
+> triggered by the batch tool's `pending_reviews` + the Slack review card. Tool Confirmation
+> is still rejected (unsupported with persistent Firestore sessions).
+
+- **Status:** Superseded by ADR-0026 (HITL primitive) — bridge mechanism retained
 - **Date:** 2026-06-13
 - **Deciders:** Ledgr team
 
