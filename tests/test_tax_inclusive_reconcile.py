@@ -116,6 +116,24 @@ class TestTaxInclusiveReconcile:
         assert ok is False
         assert "gst" in detail.lower()
 
+    def test_zero_subtotal_does_not_match_tax_inclusive_pattern(self):
+        """Missing subtotal maps to 0.0 — must not skip gst/subtotal checks via inclusive path."""
+        ex = ExtractedInvoice(
+            doc_type="invoice",
+            invoice_number="BAD-001",
+            currency="MYR",
+            issuer_tax_system="SST",
+            lines=[
+                ExtractedLine(description="Item", net_amount=65.0, gst_amount=0.0),
+            ],
+            subtotal=0.0,
+            gst_total=4.81,
+            total=65.0,
+        )
+        ok, detail = reconcile(ex, tax_visible_on_document=True, currency="MYR")
+        assert ok is False
+        assert "subtotal" in detail.lower() or "gst" in detail.lower()
+
     def test_validate_extracted_document_tax_inclusive_path(self):
         doc = ExtractedDocument(
             doc_type="invoice",
