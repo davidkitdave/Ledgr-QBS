@@ -861,10 +861,22 @@ async def persist_and_deliver(
 
             firm_id = resolve_firm_id_from_state(state)
             if firm_id is None and client_store is not None:
-                ctx = client_store.get_by_channel(channel_id)
                 from accounting_agents.credit_delivery import resolve_firm_id_from_client
 
-                firm_id = resolve_firm_id_from_client(ctx)
+                # Billing firm-id lookup must never break delivery: a store/
+                # Firestore failure (e.g. credentials unavailable) falls back to
+                # an unresolved firm (no charge) rather than crashing the append.
+                try:
+                    ctx = client_store.get_by_channel(channel_id)
+                    firm_id = resolve_firm_id_from_client(ctx)
+                except Exception:  # noqa: BLE001 — billing must not break delivery
+                    logger.warning(
+                        "credit firm-id lookup failed for channel=%s (non-fatal); "
+                        "delivering without a billing firm",
+                        channel_id,
+                        exc_info=True,
+                    )
+                    firm_id = None
             credit_info = charge_delivery_credits(
                 firm_id=firm_id,
                 channel_id=channel_id,
