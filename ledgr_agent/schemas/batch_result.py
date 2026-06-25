@@ -30,6 +30,7 @@ class BatchResult(BaseModel):
     review_requests: list[ReviewRequest] = Field(default_factory=list)
     soft_warnings: list[SoftWarning] = Field(default_factory=list)
     erp_exports: list[dict[str, object]] = Field(default_factory=list)
+    export_rows: list[dict[str, object]] = Field(default_factory=list)
     credits: CreditSummary = Field(default_factory=CreditSummary)
     models_used: list[str] = Field(default_factory=list)
     validation_summary: dict[str, object] = Field(default_factory=dict)

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from io import BytesIO
 from pathlib import Path
+
+from openpyxl import load_workbook
 
 from invoice_processing.pipeline import BatchResult as EngineBatchResult
 from invoice_processing.pipeline import ProcessedDoc
@@ -60,14 +63,70 @@ def posted_document_summary(doc: ProcessedDoc) -> dict[str, object]:
 
 
 def erp_export_summaries(workbooks: dict[str, bytes]) -> list[dict[str, object]]:
-    return [
-        {
+    summaries: list[dict[str, object]] = []
+    for file_name, data in sorted(workbooks.items()):
+        summary: dict[str, object] = {
             "file_name": file_name,
             "byte_size": len(data),
             "format": "xlsx",
         }
-        for file_name, data in sorted(workbooks.items())
-    ]
+        sheets = _workbook_sheet_summaries(data)
+        if sheets:
+            summary["sheets"] = sheets
+        summaries.append(summary)
+    return summaries
+
+
+def export_rows_from_workbooks(workbooks: dict[str, bytes]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for file_name, data in sorted(workbooks.items()):
+        try:
+            workbook = load_workbook(BytesIO(data), read_only=True, data_only=True)
+        except Exception:
+            continue
+        for sheet in workbook.worksheets:
+            values = list(sheet.iter_rows(values_only=True))
+            if not values:
+                continue
+            headers = [str(value) if value is not None else "" for value in values[0]]
+            for row_values in values[1:]:
+                row = {
+                    header: value
+                    for header, value in zip(headers, row_values, strict=False)
+                    if header
+                }
+                if any(value not in (None, "") for value in row.values()):
+                    rows.append(
+                        {
+                            "workbook": file_name,
+                            "sheet": sheet.title,
+                            **row,
+                        }
+                    )
+        workbook.close()
+    return rows
+
+
+def _workbook_sheet_summaries(data: bytes) -> list[dict[str, object]]:
+    try:
+        workbook = load_workbook(BytesIO(data), read_only=True, data_only=True)
+    except Exception:
+        return []
+
+    summaries: list[dict[str, object]] = []
+    for sheet in workbook.worksheets:
+        rows = list(sheet.iter_rows(values_only=True))
+        headers = [str(value) if value is not None else "" for value in rows[0]] if rows else []
+        data_row_count = max(len(rows) - 1, 0)
+        summaries.append(
+            {
+                "sheet_name": sheet.title,
+                "headers": headers,
+                "row_count": data_row_count,
+            }
+        )
+    workbook.close()
+    return summaries
 
 
 def determine_batch_status(
@@ -79,6 +138,8 @@ def determine_batch_status(
     if blocked_reason:
         return "blocked"
     if not processed_docs and missing_files:
+        return "error"
+    if not processed_docs and not missing_files:
         return "error"
     error_count = sum(1 for doc in processed_docs if doc.note.startswith("ERROR"))
     review_count = sum(
@@ -110,6 +171,8 @@ def map_engine_batch_to_contract(
     documents_skipped_before_llm: int = 0,
     elapsed_ms: int | None = None,
     tax_policy_version: str | None = None,
+    credits: CreditSummary | None = None,
+    policy_violations: list[dict] | None = None,
 ) -> BatchResult:
     """Convert the engine harness result into the shared ``BatchResult`` contract."""
 
@@ -122,9 +185,10 @@ def map_engine_batch_to_contract(
     for doc in engine_result.docs:
         per_file.append(per_file_summary(doc))
         file_name = Path(doc.path).name
-        hard_reqs, soft_warns = review_from_note(doc.note, file_name)
-        review_requests.extend(hard_reqs)
-        soft_warnings.extend(soft_warns)
+        if not doc.reconciled and not doc.note.startswith("ERROR"):
+            hard_reqs, soft_warns = review_from_note(doc.note, file_name)
+            review_requests.extend(hard_reqs)
+            soft_warnings.extend(soft_warns)
 
         if doc.note.startswith("ERROR"):
             skipped_documents.append(per_file_summary(doc))
@@ -141,6 +205,17 @@ def map_engine_batch_to_contract(
                 "note": "ERROR: file not found",
             }
         )
+
+    # Inject policy-rule violations collected by the runtime validator.
+    for violation in policy_violations or []:
+        rule_id = str(violation.get("id") or "")
+        severity = str(violation.get("severity") or "hard_review")
+        file_name = str(violation.get("file_name") or "")
+        message = str(violation.get("message") or rule_id)
+        if rule_id:
+            review_requests.append(
+                ReviewRequest(id=rule_id, severity=severity, message=message, file_name=file_name)
+            )
 
     status = determine_batch_status(
         blocked_reason=blocked_reason,
@@ -172,7 +247,8 @@ def map_engine_batch_to_contract(
         review_requests=review_requests,
         soft_warnings=soft_warnings,
         erp_exports=erp_export_summaries(engine_result.workbooks),
-        credits=CreditSummary(credit_status="not_checked"),
+        export_rows=export_rows_from_workbooks(engine_result.workbooks),
+        credits=credits or CreditSummary(credit_status="not_checked"),
         models_used=list(models_used or []),
         validation_summary=validation_summary,
         llm_call_count=llm_call_count,

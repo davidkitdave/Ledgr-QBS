@@ -423,6 +423,7 @@ def client_context_from_state(state: dict) -> ClientContext:
         client_id=state.get("client_id"),
         client_name=state.get("client_name"),
         client_uen=state.get("client_uen"),
+        firm_id=state.get("firm_id"),
         region=region,
         accounting_software=state.get("software") or "QBS Ledger",
         base_currency=base_currency,

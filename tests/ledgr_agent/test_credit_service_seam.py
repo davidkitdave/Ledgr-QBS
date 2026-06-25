@@ -17,13 +17,16 @@ from ledgr_agent.tools.document_tools import _credit_gate, _get_credit_service
 
 @pytest.fixture(autouse=True)
 def _reset_credit_factory() -> None:
-    """Make sure each test starts with a clean factory slot."""
-    original = document_tools._credit_service_factory
+    """Make sure each test starts with a clean factory slot and singleton."""
+    original_factory = document_tools._credit_service_factory
+    original_singleton = document_tools._credit_service_singleton
     document_tools._credit_service_factory = None
+    document_tools._credit_service_singleton = None
     try:
         yield
     finally:
-        document_tools._credit_service_factory = original
+        document_tools._credit_service_factory = original_factory
+        document_tools._credit_service_singleton = original_singleton
 
 
 def test_default_factory_returns_credit_service() -> None:
@@ -100,6 +103,29 @@ def test_monkeypatched_factory_with_positive_balance_allows(monkeypatch: pytest.
     assert decision["allowed"] is True
     assert decision["reason"] == "ok"
     assert decision["balance"] == 5
+
+
+def test_gate_blocks_when_required_units_exceed_balance(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _StubService:
+        def read_balance(self, firm_id: str) -> int:
+            return 2
+
+    monkeypatch.setattr(
+        document_tools,
+        "_credit_service_factory",
+        lambda: _StubService(),
+    )
+
+    decision = _credit_gate(
+        firm_id="firm-with-some-credits",
+        paths=["/tmp/five-page.pdf"],
+        required_units=5,
+    )
+
+    assert decision["allowed"] is False
+    assert decision["reason"] == "insufficient_credit"
+    assert decision["balance"] == 2
+    assert decision["required_units"] == 5
 
 
 def test_missing_app_package_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:

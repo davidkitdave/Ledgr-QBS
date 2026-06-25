@@ -49,7 +49,6 @@ class InvoiceProcessResult:
     extraction_path: str  # "understand"
     summary_table: list[dict[str, str]] = field(default_factory=list)
     ledger_extract: Optional[dict[str, Any]] = None
-    document_records: Optional[list[dict]] = None
     skipped_pages: Optional[list[int]] = None
     document_read_notes: Optional[str] = None
     booking_proposals: Optional[list[dict]] = None

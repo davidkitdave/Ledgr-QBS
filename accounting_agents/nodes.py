@@ -107,20 +107,9 @@ from invoice_processing.extract.bank_statement_extractor import (
     extract_bank_statement,
     to_bank_statements,
 )
-from invoice_processing.extract.document_extractor import extract_document_bundle
-from invoice_processing.extract.document_record import DocumentRecordBundle
 from invoice_processing.extract.process_invoice_document import (
     InvoiceProcessResult,
     process_invoice_document,
-)
-from invoice_processing.extract.invoice_extractor import (
-    ExtractedInvoiceBundle,
-    _is_soa_summary_invoice,
-    append_direction_review_note,
-    direction_needs_review,
-    extract_invoice_bundle,
-    reconcile,
-    to_normalized,
 )
 
 from .config import MODEL_LITE, MODEL_READ, MODEL_STD
@@ -372,8 +361,6 @@ class ReviewClarifyDecision(BaseModel):
 
 CLASSIFY_FN: Callable[..., ClassificationResult] = classify_document
 DIRECTION_FN: Callable[..., str] = resolve_direction
-EXTRACT_BUNDLE_FN: Callable[..., ExtractedInvoiceBundle] = extract_invoice_bundle
-EXTRACT_DOCUMENT_FN: Callable[..., DocumentRecordBundle] = extract_document_bundle
 EXTRACT_INVOICE_DOCUMENT_FN: Callable[..., InvoiceProcessResult] = process_invoice_document
 EXTRACT_BANK_FN: Callable[..., Any] = extract_bank_statement
 CATEGORIZE_FN: Callable[..., NormalizedInvoice] = categorize_invoice
@@ -637,11 +624,7 @@ def _apply_invoice_process_result(ctx, result: InvoiceProcessResult) -> None:
     ctx.state[LEDGER_SUMMARY_TABLE_KEY] = result.summary_table
     if result.ledger_extract is not None:
         ctx.state["ledger_extract"] = result.ledger_extract
-    if result.document_records is not None:
-        ctx.state[DOCUMENT_RECORDS_KEY] = _guard_state_payload(
-            DOCUMENT_RECORDS_KEY, result.document_records
-        )
-    elif result.extraction_path == "understand":
+    if result.extraction_path == "understand":
         ctx.state[DOCUMENT_RECORDS_KEY] = _guard_state_payload(DOCUMENT_RECORDS_KEY, [])
     if result.skipped_pages is not None:
         ctx.state["skipped_pages"] = result.skipped_pages
@@ -889,63 +872,6 @@ def _retry_resolve_direction_llm(ctx, extract: dict) -> str:
         logger.warning("direction retry classification failed: %s", exc)
 
     return "unknown"
-
-
-def _normalize_bundle(ctx, bundle: ExtractedInvoiceBundle) -> list[NormalizedInvoice]:
-    """Reconcile + normalize every invoice in ``bundle`` into NormalizedInvoices.
-
-    Shared by ``extract_invoice_document_node`` (first pass) and the extract reviewer's
-    re-extract path (``_run_reviewer_loop``) so the normalization logic — totals
-    reconcile, FX flag preservation, and the self-referential / unknown-direction
-    review guards — lives in exactly one place. Reads direction / GST / base
-    currency from ``ctx.state``; does NOT write state (the caller does).
-    """
-    direction = ctx.state.get(DIRECTION_KEY)
-    # Structural direction for to_normalized must be "purchase" or "sales".
-    # "self_referential" and "unknown" both default to "purchase" for row
-    # structure, but are immediately flagged for review so the client is
-    # never silently booked as its own vendor (self-referential case) or
-    # routed without a confirmed side (unknown case).
-    effective_direction = direction if direction in ("purchase", "sales") else "purchase"
-    our_gst = _our_gst_registered_from_state(ctx.state)
-    base_currency = _base_currency_from_state(ctx.state)
-
-    normalized: list[NormalizedInvoice] = []
-    for ex in bundle.invoices:
-        # Hard-gate: drop phantom SOA-summary invoices hallucinated from the
-        # SOA cover table (same predicate as to_normalized_bundle).
-        if _is_soa_summary_invoice(ex):
-            logger.warning(
-                "hard-gate: dropping SOA-summary phantom invoice",
-                extra={
-                    "invoice_number": ex.invoice_number,
-                    "line_count": len(ex.lines),
-                    "reason": "all_lines_summary_shaped",
-                },
-            )
-            continue
-        ok, _detail = reconcile(ex)
-        inv = to_normalized(
-            ex,
-            direction=effective_direction,
-            our_gst_registered=our_gst,
-            base_currency=base_currency,
-            fx_rate=ex.fx_rate,
-        )
-        # Carry the classify document kind (e.g. "credit_note", "invoice", "receipt")
-        # from state so exporters can apply the credit-note sign-flip at row-build time.
-        # This is distinct from inv.doc_type which is the DIRECTION ("purchase"/"sales").
-        inv.document_kind = ctx.state.get(DOC_TYPE_KEY)
-        # to_normalized already sets reconciled=False when needs_fx_review is True;
-        # only overwrite with the totals-reconcile result when FX has not already
-        # forced reconciled=False, so we don't accidentally clear the FX flag.
-        if not inv.needs_fx_review:
-            inv.reconciled = ok
-        # Self-referential / ambiguous direction guard (mirrors pipeline.py).
-        if direction_needs_review(direction):
-            append_direction_review_note(inv, direction)
-        normalized.append(inv)
-    return normalized
 
 
 @node

@@ -102,10 +102,11 @@ def test_credit_charge_fails_on_unexpected_credit_state() -> None:
     assert "unexpected" in result["explanation"].lower()
 
 
-def test_credit_charge_passes_when_no_batch_in_trace() -> None:
+def test_credit_charge_fails_when_no_batch_in_trace() -> None:
+    # A trace with no process_document_batch call must FAIL — the tool never ran.
     instance = {"agent_data": {"turns": []}}
 
     result = credit_charge_code(instance)
 
-    assert result["score"] == 1.0
-    assert "no batch" in result["explanation"].lower()
+    assert result["score"] == 0.0
+    assert "no process_document_batch" in result["explanation"].lower()
