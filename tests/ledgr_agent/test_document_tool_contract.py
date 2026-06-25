@@ -1,7 +1,28 @@
 
+import pytest
+
 from invoice_processing.classify.document_classifier import ClassificationResult
 from invoice_processing.extract.invoice_extractor import ExtractedInvoice
 from ledgr_agent.tools import process_document_batch
+from ledgr_agent.tools import document_tools
+
+
+@pytest.fixture(autouse=True)
+def _seed_playground_credits():
+    """Grant T_PLAYGROUND enough credits for each test and restore factory after."""
+    from app.credit_service import CreditService, InMemoryCreditStore
+
+    saved_factory = document_tools._credit_service_factory
+    saved_singleton = document_tools._credit_service_singleton
+    svc = CreditService(InMemoryCreditStore())
+    svc.ensure_firm("T_PLAYGROUND")
+    svc.grant("T_PLAYGROUND", 50)
+    document_tools._credit_service_factory = lambda: svc
+    try:
+        yield
+    finally:
+        document_tools._credit_service_factory = saved_factory
+        document_tools._credit_service_singleton = saved_singleton
 
 
 def _make_cls(doc_type: str) -> ClassificationResult:

@@ -201,18 +201,36 @@ def real_fixture_payload():
     """Run process_document_batch on invoice_8.pdf with injected stubs (no LLM)."""
     import os
 
+    from app.credit_service import CreditService, InMemoryCreditStore
+    from ledgr_agent.tools import document_tools
+
     fixture = _FIXTURE_PATH
     if not os.path.exists(fixture):
         pytest.skip(f"Committed fixture not found: {fixture}")
 
-    payload = process_document_batch(
-        None,  # tool_context=None → playground default
-        paths=[fixture],
-        classify_fn=_classify_stub,
-        direction_fn=_direction_stub,
-        extract_fn=_extract_stub,
-        categorize_fn=_categorize_stub,
-    )
+    # Seed a hermetic funded credit service so T_PLAYGROUND (the playground
+    # firm used when tool_context=None) passes the credit gate.  Restore the
+    # prior factory unconditionally in teardown so this module fixture cannot
+    # leak state to other test files.
+    _saved_factory = document_tools._credit_service_factory
+    _saved_singleton = document_tools._credit_service_singleton
+    _svc = CreditService(InMemoryCreditStore())
+    _svc.ensure_firm("T_PLAYGROUND")
+    _svc.grant("T_PLAYGROUND", 50)
+    document_tools._credit_service_factory = lambda: _svc
+    try:
+        payload = process_document_batch(
+            None,  # tool_context=None → playground default
+            paths=[fixture],
+            classify_fn=_classify_stub,
+            direction_fn=_direction_stub,
+            extract_fn=_extract_stub,
+            categorize_fn=_categorize_stub,
+        )
+    finally:
+        document_tools._credit_service_factory = _saved_factory
+        document_tools._credit_service_singleton = _saved_singleton
+
     return payload
 
 
