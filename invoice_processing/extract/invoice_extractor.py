@@ -423,7 +423,7 @@ def _is_tax_inclusive_footer_pattern(
     """Footer-only tax: line amounts are gross, per-line gst_amount is zero."""
     if tax_visible_on_document is False:
         return False
-    if ex.gst_total is None or ex.gst_total <= 0 or ex.subtotal is None:
+    if ex.gst_total is None or ex.gst_total <= 0 or ex.subtotal is None or ex.subtotal <= 0:
         return False
     if not _amounts_within_tolerance(
         gst_sum, 0.0, currency=currency, tol_abs=tol_abs, tol_rel=tol_rel
