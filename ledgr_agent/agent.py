@@ -11,7 +11,9 @@ from ledgr_agent.tools import (
     explain_tax_treatment_tool,
     inspect_market_policy,
     process_document_batch,
+    read_credit_balance,
 )
+from ledgr_agent.tools.search_tools import build_web_search_agent_tool
 
 _log = logging.getLogger(__name__)
 
@@ -51,6 +53,37 @@ def _seed_playground_profile(callback_context) -> None:
     return None
 
 
+def _wire_playground_credits() -> None:
+    """Share the dev credit store with ``read_credit_balance`` / ``_credit_gate``."""
+
+    try:
+        from accounting_agents.credit_delivery import wire_shared_credit_service
+
+        wire_shared_credit_service()
+    except Exception:  # noqa: BLE001 — playground must never abort
+        _log.debug("ledgr_agent: credit wire skipped", exc_info=True)
+
+
+def _before_agent_callback(callback_context) -> None:
+    _wire_playground_credits()
+    return _seed_playground_profile(callback_context)
+
+
+def _build_root_tools() -> list:
+    tools = [
+        inspect_market_policy,
+        process_document_batch,
+        read_credit_balance,
+        explain_tax_treatment_tool,
+        amend_ledger_row_action,
+    ]
+    search_tool = build_web_search_agent_tool()
+    if search_tool is not None:
+        tools.append(search_tool)
+        _log.info("ledgr_agent: web search sub-agent enabled (LEDGR_ENABLE_WEB_SEARCH)")
+    return tools
+
+
 root_agent = Agent(
     name="root_accountant_agent",
     model=lite_model(),
@@ -58,22 +91,19 @@ root_agent = Agent(
     instruction=(
         "You are the Ledgr accountant agent. "
         "Use tools to inspect market policy and explain what capabilities are available. "
+        "Use read_credit_balance when the user asks about credits, balance, or billing. "
         "Use process_document_batch to process batches of documents when requested by the user. "
         "If the user prompt mentions specific file path strings (such as paths containing env variables like LEDGR_TEST_DOC_DIR or absolute/relative path strings), you MUST pass these path strings exactly as elements in the 'paths' list parameter to process_document_batch. "
         "Otherwise, in the ADK web playground, if the user uploads files with the attach button, call "
         "process_document_batch with paths=[] and the tool will recover the uploaded files automatically. "
         "Do not invent placeholder paths such as invoice.png. "
+        "When LEDGR_ENABLE_WEB_SEARCH is on, delegate external tax-news questions to the search sub-agent tool. "
         "Use explain_tax_treatment_action to explain the tax treatment the reasoner would assign a line. "
         "amend_ledger_row_action requires human confirmation before mutating the ledger. "
         "Gemini reads document evidence, Python checks accounting rules, and YAML stores market policy. "
         "After using any tool, you MUST always reply to the user with a short plain-text summary of what the tool returned. Never end your turn with only a tool call and no text."
     ),
-    tools=[
-        inspect_market_policy,
-        process_document_batch,
-        explain_tax_treatment_tool,
-        amend_ledger_row_action,
-    ],
-    before_agent_callback=_seed_playground_profile,
+    tools=_build_root_tools(),
+    before_agent_callback=_before_agent_callback,
     after_tool_callback=validate_output_after_tool,
 )

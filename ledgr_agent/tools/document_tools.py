@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+import os
 import time
 from typing import Any
 
@@ -119,6 +120,11 @@ def _estimate_gate_units(paths: list[Any]) -> int:
         except Exception:
             total += 1
     return total
+
+
+def _charge_credits_in_tool() -> bool:
+    raw = os.environ.get("LEDGR_CHARGE_CREDITS_IN_TOOL", "")
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _merge_validation(payload: dict[str, Any], extra: dict[str, object]) -> None:
@@ -351,15 +357,16 @@ def process_document_batch(tool_context: Any, paths: list[str], **inject: Any) -
     source_files = [str(p) for p in existing_paths] if existing_paths else [str(p) for p in paths]
     gate_units = _estimate_gate_units(existing_paths) if existing_paths else len(source_files)
 
+    firm_id = getattr(client, "firm_id", None) or getattr(client, "slack_team_id", None)
     credit_decision = _credit_gate(
-        firm_id=getattr(client, "firm_id", None),
+        firm_id=firm_id,
         paths=source_files,
         required_units=gate_units,
     )
     credit_balance = credit_decision.get("balance")
     credit_remaining = (
         int(credit_balance)
-        if getattr(client, "firm_id", None) and isinstance(credit_balance, int)
+        if firm_id and isinstance(credit_balance, int)
         else None
     )
     if not credit_decision.get("allowed", True):
@@ -459,12 +466,12 @@ def process_document_batch(tool_context: Any, paths: list[str], **inject: Any) -
     # Fail-safe: a billing-service error must not lose the user's processed
     # work.  We swallow exceptions, log them, and set credit_status to
     # "not_checked" so the caller knows charging was skipped.
-    firm_id = getattr(client, "firm_id", None)
+    firm_id = getattr(client, "firm_id", None) or getattr(client, "slack_team_id", None)
     posted_count = sum(
         1 for doc in engine_result.docs if doc.reconciled and not doc.note.startswith("ERROR")
     )
 
-    if firm_id and posted_count > 0:
+    if firm_id and posted_count > 0 and _charge_credits_in_tool():
         try:
             service = _get_credit_service()
             if service is not None:
