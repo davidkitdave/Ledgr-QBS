@@ -1,0 +1,48 @@
+# CI test gate — ruff + full pytest on every push to main and every PR.
+#
+# This is the test signal that used to live in deploy.yml's `test` job.
+# Auto-deploy was gated to manual-only during the ledgr_agent cutover
+# (see deploy.yml), so this workflow keeps the green-check on push/PR
+# WITHOUT building or shipping anything to prod.
+#
+# All tests are hermetic (Gemini / Slack / Firestore are mocked), so no
+# cloud credentials or secrets are required.
+name: CI (ruff + pytest)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test gate (ruff + pytest)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Sync dependencies
+        run: uv sync --frozen
+
+      - name: Ruff lint check
+        run: uv run ruff check .
+
+      - name: Run tests
+        # All tests are hermetic (Gemini / Slack / Firestore are mocked).
+        run: uv run pytest
