@@ -353,10 +353,11 @@ class SlackLedgerStore:
         """Workbook column used to match invoice rows on replace (MAP5).
 
         AutoCount AP uses ``SupplierInvoiceNo`` because ``DocNo`` is always
-        the constant ``<<New>>``; QBS/Xero use ``Invoice Number``.
+        the constant ``<<New>>``; QBS uses ``Invoice Number``; Xero uses
+        ``*InvoiceNumber``.
         """
-        if isinstance(exporter, ProfileLedgerExporter):
-            doc_type = "sales" if sheet_name == "Sales" else "purchase"
+        doc_type = "sales" if sheet_name == "Sales" else "purchase"
+        if hasattr(exporter, "column_for_field"):
             for field in ("invoice_number", "supplier_invoice_no"):
                 col = exporter.column_for_field(field, doc_type)
                 if col:
@@ -946,7 +947,11 @@ class SlackLedgerStore:
                     ws = wb[sheet_name]
                     if ws.max_row >= 2:
                         col_map = self._header_col_map(ws)
-                        inv_col = col_map.get(identity_col) or col_map.get("Invoice Number")
+                        inv_col = (
+                            col_map.get(identity_col)
+                            or col_map.get("Invoice Number")
+                            or col_map.get("*InvoiceNumber")
+                        )
                         if inv_col is not None:
                             # Collect matching row indices (ascending) then delete bottom-up.
                             matching_rows: list[int] = []
@@ -1522,8 +1527,15 @@ class SlackLedgerStore:
                         continue
 
                     col_map = self._header_col_map(ws)
-                    date_col = col_map.get("Date")
-                    inv_col = col_map.get("Invoice Number")
+                    date_col = (
+                        col_map.get("Invoice Date")
+                        or col_map.get("*InvoiceDate")
+                        or col_map.get("Date")
+                    )
+                    inv_col = (
+                        col_map.get("Invoice Number")
+                        or col_map.get("*InvoiceNumber")
+                    )
 
                     # Collect matching row numbers in ascending order, then delete bottom-up.
                     matching_rows: list[int] = []
