@@ -392,6 +392,49 @@ def g4_tolerance_abs(currency: Optional[str]) -> float:
     return g4_tolerance_cents(currency) / 100.0
 
 
+def _amounts_within_tolerance(
+    computed: float,
+    reference: Optional[float],
+    *,
+    currency: Optional[str],
+    tol_abs: float,
+    tol_rel: float,
+) -> bool:
+    if reference is None:
+        return False
+    if currency is not None:
+        cents_tol = g4_tolerance_cents(currency)
+        diff_cents = abs(round(computed * 100) - round(reference * 100))
+        return diff_cents <= cents_tol
+    tol = max(tol_abs, tol_rel * abs(reference))
+    return abs(computed - reference) <= tol
+
+
+def _is_tax_inclusive_footer_pattern(
+    ex: ExtractedInvoice,
+    *,
+    net_sum: float,
+    gst_sum: float,
+    tax_visible_on_document: Optional[bool],
+    currency: Optional[str],
+    tol_abs: float,
+    tol_rel: float,
+) -> bool:
+    """Footer-only tax: line amounts are gross, per-line gst_amount is zero."""
+    if tax_visible_on_document is False:
+        return False
+    if ex.gst_total is None or ex.gst_total <= 0 or ex.subtotal is None:
+        return False
+    if not _amounts_within_tolerance(
+        gst_sum, 0.0, currency=currency, tol_abs=tol_abs, tol_rel=tol_rel
+    ):
+        return False
+    footer_gross = ex.subtotal + ex.gst_total
+    return _amounts_within_tolerance(
+        net_sum, footer_gross, currency=currency, tol_abs=tol_abs, tol_rel=tol_rel
+    )
+
+
 def reconcile(
     ex: ExtractedInvoice,
     *,
@@ -407,6 +450,9 @@ def reconcile(
     (``g4_tolerance_cents``) to avoid float drift. When ``subtotal_in_capture``
     is False, skip subtotal-only checks (fixes false alarms when the capture has
     no Sub Total row). When ``tax_visible_on_document`` is False, skip GST checks.
+    When lines carry tax-inclusive (gross) amounts with footer-only SST/GST and
+    per-line ``gst_amount`` is zero, skip subtotal/gst checks and validate on
+    ``grand_total`` only.
     """
     net_sum = sum(ln.net_amount or 0.0 for ln in ex.lines)
     gst_sum = sum(ln.gst_amount or 0.0 for ln in ex.lines)
@@ -433,11 +479,23 @@ def reconcile(
                 f"(diff={computed - reference:+.2f}, tol={tol:.2f})"
             )
 
-    if subtotal_in_capture is not False:
-        _check("subtotal", net_sum, ex.subtotal)
-    if tax_visible_on_document is not False:
-        _check("gst", gst_sum, ex.gst_total)
-    _check("total", line_total, ex.total)
+    tax_inclusive = _is_tax_inclusive_footer_pattern(
+        ex,
+        net_sum=net_sum,
+        gst_sum=gst_sum,
+        tax_visible_on_document=tax_visible_on_document,
+        currency=currency,
+        tol_abs=tol_abs,
+        tol_rel=tol_rel,
+    )
+    if tax_inclusive:
+        _check("total", net_sum, ex.total)
+    else:
+        if subtotal_in_capture is not False:
+            _check("subtotal", net_sum, ex.subtotal)
+        if tax_visible_on_document is not False:
+            _check("gst", gst_sum, ex.gst_total)
+        _check("total", line_total, ex.total)
 
     if mismatches:
         return False, "; ".join(mismatches)
