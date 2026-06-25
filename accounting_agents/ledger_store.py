@@ -46,7 +46,6 @@ from accounting_agents.lease_lock import FirestoreLeaseLock
 
 from invoice_processing.export.exporters import (
     BankStatementExporter,
-    ProfileLedgerExporter,
     get_exporter,
 )
 
