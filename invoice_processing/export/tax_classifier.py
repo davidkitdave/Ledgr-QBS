@@ -22,10 +22,33 @@ from .models import InvoiceLine, NormalizedInvoice
 
 _SHARED_LIBS = Path(__file__).resolve().parent.parent / "shared_libraries"
 _DEFAULT_YAML = "sg_gst.yaml"
+_ALIASES_YAML = "tax_aliases.yaml"
 
 # Per-name cache so repeated TaxClassifier construction in a single process
 # (e.g. batch fan-out of 20 docs) doesn't re-read the same YAML from disk.
 _TAXONOMY_CACHE: dict[str, dict] = {}
+
+# Cached, parsed keyword-alias ladder (jurisdiction-independent). Loaded once
+# from tax_aliases.yaml and reused across all classifier instances.
+_KEYWORD_ALIASES_CACHE: Optional[list[tuple[str, str, str]]] = None
+
+
+def _load_keyword_aliases() -> list[tuple[str, str, str]]:
+    """Load+cache the ordered keyword alias ladder as (treatment, match, pattern).
+
+    Mirrors the previously-hardcoded ladder in ``_classify_purchase`` /
+    ``_classify_sales``; first match wins, so YAML order is preserved.
+    """
+    global _KEYWORD_ALIASES_CACHE
+    if _KEYWORD_ALIASES_CACHE is None:
+        with open(_SHARED_LIBS / _ALIASES_YAML, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        rows = data.get("keyword_aliases") or []
+        _KEYWORD_ALIASES_CACHE = [
+            (str(r["treatment"]), str(r["match"]), str(r["pattern"]).lower())
+            for r in rows
+        ]
+    return _KEYWORD_ALIASES_CACHE
 
 logger = logging.getLogger(__name__)
 
@@ -242,7 +265,6 @@ class TaxClassifier:
         """If gst/net matches a known band, return (treatment, rate, reason)."""
         if not line.gst_amount or not line.net_amount:
             return None
-        desc = line.description or ""
         candidates: list[tuple[str, float, float]] = []
 
         for rate in self.sales_tax_rates():
@@ -277,12 +299,46 @@ class TaxClassifier:
             return (treatment, rate, f"SR: tax reconciles to carve-out rate {rate:.0%}")
         return (treatment, rate, f"SR: tax reconciles to standard rate {rate:.0%}")
 
+    @staticmethod
+    def _alias_matches(kw: str, match: str, pattern: str) -> bool:
+        if match == "exact":
+            return kw == pattern
+        if match == "prefix":
+            return kw.startswith(pattern)
+        return pattern in kw  # substring
+
     def _sr_tax_keyword_match(self, kw: str) -> bool:
-        if kw == "g" or kw == "gst" or kw.startswith("sr") or kw.startswith("tx"):
-            return True
-        if "standard" in kw:
-            return True
+        for treatment, match, pattern in _load_keyword_aliases():
+            if treatment == "SR" and self._alias_matches(kw, match, pattern):
+                return True
         return any(rk in kw for rk in self._rate_keyword_set)
+
+    # Confidence + canonical reason verb per treatment for the keyword ladder.
+    _KEYWORD_CONF = {"ZR": 0.97, "ES": 0.95, "OS": 0.95, "NT": 0.95, "SR": 0.95}
+
+    def _classify_tax_keyword(self, line: InvoiceLine, kw: str):
+        """Resolve an explicit tax_keyword via the shared alias ladder.
+
+        Returns the ``(treatment, conf, flag, reason)`` tuple matching the old
+        hardcoded ladder, or ``None`` when no alias (and no rate keyword) hits.
+        """
+        gst_positive = bool(line.gst_amount and line.gst_amount > 0)
+        for treatment, match, pattern in _load_keyword_aliases():
+            if treatment == "SR":
+                # SR also matches dynamic rate keywords; defer to the shared
+                # predicate so the rate-keyword tail keeps working.
+                continue
+            if self._alias_matches(kw, match, pattern):
+                flag = gst_positive
+                reason = f"{treatment}: explicit tax_keyword '{line.tax_keyword}'"
+                if flag:
+                    reason += f"; but gst_amount={line.gst_amount} > 0 — review"
+                return treatment, self._KEYWORD_CONF[treatment], flag, reason
+        if self._sr_tax_keyword_match(kw):
+            return "SR", self._KEYWORD_CONF["SR"], False, (
+                f"SR: explicit tax_keyword '{line.tax_keyword}'"
+            )
+        return None
 
     # -- signal matching --------------------------------------------------------
     def _matches(self, text: str, key: str) -> bool:
@@ -370,40 +426,12 @@ class TaxClassifier:
         gst = line.gst_amount
 
         # 0. Explicit tax_keyword from extraction — highest-priority signal.
+        # Ordered alias ladder lives in shared_libraries/tax_aliases.yaml.
         if line.tax_keyword and line.tax_keyword.strip():
             kw = line.tax_keyword.strip().lower()
-            gst_positive = bool(line.gst_amount and line.gst_amount > 0)
-            # ZR: bare "z", starts-with "zr", or contains zero/0% indicators.
-            if kw == "z" or kw.startswith("zr") or "zero" in kw or "0%" in kw:
-                flag = gst_positive
-                reason = f"ZR: explicit tax_keyword '{line.tax_keyword}'"
-                if flag:
-                    reason += f"; but gst_amount={line.gst_amount} > 0 — review"
-                return "ZR", 0.97, flag, reason
-            # ES: bare "e", starts-with "es", or contains "exempt".
-            if kw == "e" or kw.startswith("es") or "exempt" in kw:
-                flag = gst_positive
-                reason = f"ES: explicit tax_keyword '{line.tax_keyword}'"
-                if flag:
-                    reason += f"; but gst_amount={line.gst_amount} > 0 — review"
-                return "ES", 0.95, flag, reason
-            # OS: starts-with "os" or explicit "out of scope".
-            if kw.startswith("os") or "out of scope" in kw:
-                flag = gst_positive
-                reason = f"OS: explicit tax_keyword '{line.tax_keyword}'"
-                if flag:
-                    reason += f"; but gst_amount={line.gst_amount} > 0 — review"
-                return "OS", 0.95, flag, reason
-            # NT: bare "n", starts-with "nt", or contains no-tax indicators.
-            if kw == "n" or kw.startswith("nt") or "no tax" in kw or "no-tax" in kw:
-                flag = gst_positive
-                reason = f"NT: explicit tax_keyword '{line.tax_keyword}'"
-                if flag:
-                    reason += f"; but gst_amount={line.gst_amount} > 0 — review"
-                return "NT", 0.95, flag, reason
-            # SR: bare "g" (GST standard-rated), "gst", starts-with "sr"/"tx", or YAML rate%.
-            if self._sr_tax_keyword_match(kw):
-                return "SR", 0.95, False, f"SR: explicit tax_keyword '{line.tax_keyword}'"
+            resolved = self._classify_tax_keyword(line, kw)
+            if resolved is not None:
+                return resolved
 
         # 1. Positive GST amount — reconcile to a known SST/GST band when possible.
         if gst and gst > 0:
@@ -451,40 +479,12 @@ class TaxClassifier:
         customer = inv.customer
 
         # 0. Explicit tax_keyword from extraction — highest-priority signal.
+        # Ordered alias ladder lives in shared_libraries/tax_aliases.yaml.
         if line.tax_keyword and line.tax_keyword.strip():
             kw = line.tax_keyword.strip().lower()
-            gst_positive = bool(line.gst_amount and line.gst_amount > 0)
-            # ZR: bare "z", starts-with "zr", or contains zero/0% indicators.
-            if kw == "z" or kw.startswith("zr") or "zero" in kw or "0%" in kw:
-                flag = gst_positive
-                reason = f"ZR: explicit tax_keyword '{line.tax_keyword}'"
-                if flag:
-                    reason += f"; but gst_amount={line.gst_amount} > 0 — review"
-                return "ZR", 0.97, flag, reason
-            # ES: bare "e", starts-with "es", or contains "exempt".
-            if kw == "e" or kw.startswith("es") or "exempt" in kw:
-                flag = gst_positive
-                reason = f"ES: explicit tax_keyword '{line.tax_keyword}'"
-                if flag:
-                    reason += f"; but gst_amount={line.gst_amount} > 0 — review"
-                return "ES", 0.95, flag, reason
-            # OS: starts-with "os" or explicit "out of scope".
-            if kw.startswith("os") or "out of scope" in kw:
-                flag = gst_positive
-                reason = f"OS: explicit tax_keyword '{line.tax_keyword}'"
-                if flag:
-                    reason += f"; but gst_amount={line.gst_amount} > 0 — review"
-                return "OS", 0.95, flag, reason
-            # NT: bare "n", starts-with "nt", or contains no-tax indicators.
-            if kw == "n" or kw.startswith("nt") or "no tax" in kw or "no-tax" in kw:
-                flag = gst_positive
-                reason = f"NT: explicit tax_keyword '{line.tax_keyword}'"
-                if flag:
-                    reason += f"; but gst_amount={line.gst_amount} > 0 — review"
-                return "NT", 0.95, flag, reason
-            # SR: bare "g" (GST standard-rated), "gst", starts-with "sr"/"tx", or YAML rate%.
-            if self._sr_tax_keyword_match(kw):
-                return "SR", 0.95, False, f"SR: explicit tax_keyword '{line.tax_keyword}'"
+            resolved = self._classify_tax_keyword(line, kw)
+            if resolved is not None:
+                return resolved
 
         # 1. Overseas customer -> zero-rated (verify §21(3) fit).
         if self._party_is_overseas(customer):

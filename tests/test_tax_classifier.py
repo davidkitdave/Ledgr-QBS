@@ -952,3 +952,68 @@ class TestIndeterminateNullBehavior:
         assert tax_amount == 0.0, (
             f"Indeterminate line must export Tax Amount=0, got {tax_amount!r}"
         )
+
+
+# ===========================================================================
+# YAML-driven keyword alias ladder (data-relocation refactor — behavior-preserving)
+# ===========================================================================
+
+class TestKeywordAliasLadderYaml:
+    """Representative tax_keyword → treatment mappings still resolve correctly
+    through the shared tax_aliases.yaml ladder (replaces the old hardcoded ladder).
+
+    Covers each match-type (exact / prefix / substring) and each treatment, in
+    precedence order. A no-GST purchase keeps the keyword unflagged.
+    """
+
+    CASES = [
+        # (tax_keyword, expected_treatment)
+        ("z", "ZR"),            # ZR exact
+        ("ZR", "ZR"),           # ZR prefix
+        ("zero-rated", "ZR"),   # ZR substring "zero"
+        ("GST 0%", "ZR"),       # ZR substring "0%"
+        ("e", "ES"),            # ES exact
+        ("ES", "ES"),           # ES prefix
+        ("exempt", "ES"),       # ES substring
+        ("OS", "OS"),           # OS prefix
+        ("out of scope", "OS"), # OS substring
+        ("n", "NT"),            # NT exact
+        ("NT", "NT"),           # NT prefix
+        ("no tax", "NT"),       # NT substring
+        ("no-tax", "NT"),       # NT substring (hyphen)
+        ("g", "SR"),            # SR exact "g"
+        ("gst", "SR"),          # SR exact "gst"
+        ("SR", "SR"),           # SR prefix
+        ("TX", "SR"),           # SR prefix "tx"
+        ("standard-rated", "SR"),  # SR substring "standard"
+    ]
+
+    def test_purchase_keyword_aliases(self):
+        for kw, expected in self.CASES:
+            line, inv = _purchase(
+                desc="Misc charge", gst=None, gst_regno="M12345678X", tax_kw=kw
+            )
+            result = CLF.classify_line(line, inv)
+            assert result.tax_treatment == expected, (
+                f"purchase tax_keyword {kw!r} → {result.tax_treatment!r}, expected {expected!r}"
+            )
+
+    def test_sales_keyword_aliases(self):
+        for kw, expected in self.CASES:
+            line, inv = _sales(desc="Misc charge", gst=None, tax_kw=kw)
+            result = CLF.classify_line(line, inv)
+            assert result.tax_treatment == expected, (
+                f"sales tax_keyword {kw!r} → {result.tax_treatment!r}, expected {expected!r}"
+            )
+
+    def test_sr_rate_keyword_still_matches(self):
+        # "9%" is not in the static alias table; it must still resolve to SR via
+        # the dynamic rate-keyword tail derived from the jurisdiction YAML.
+        assert CLF._sr_tax_keyword_match("9%") is True
+
+    def test_precedence_zr_before_sr(self):
+        # "zr" must hit ZR before any SR rule even though SR is also in the ladder.
+        line, inv = _purchase(
+            desc="x", gst=None, gst_regno="M12345678X", tax_kw="zr-export"
+        )
+        assert CLF.classify_line(line, inv).tax_treatment == "ZR"
