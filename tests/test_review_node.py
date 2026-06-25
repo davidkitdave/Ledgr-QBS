@@ -97,6 +97,7 @@ def _still_unreconciled_extract_result():
                     subtotal=100.0,
                     gst_total=9.0,
                     total=120.0,
+                    issuer_tax_system="NONE",
                 )
             ]
         )
@@ -121,6 +122,7 @@ def _reconciled_extract_result():
                     subtotal=100.0,
                     gst_total=9.0,
                     total=109.0,
+                    issuer_tax_system="NONE",
                 )
             ]
         )
@@ -227,6 +229,7 @@ def test_hints_needed_reextracts_exactly_once_then_rereviews():
                     subtotal=100.0,
                     gst_total=9.0,
                     total=109.0,
+                    issuer_tax_system="NONE",
                 )
             ]
         ))
@@ -280,6 +283,9 @@ def test_ceiling_enforced_two_reviews_one_reextract():
                     currency="SGD",
                     lines=[],
                     total=109.0,
+                    gst_total=0.0,
+                    issuer_tax_system="NONE",
+                    subtotal=0.0,
                 )
             ]
         ))

@@ -45,6 +45,7 @@ def test_process_document_batch_converts_engine_output(tmp_path) -> None:
             subtotal=100.0,
             gst_total=9.0,
             total=109.0,
+            issuer_tax_system="NONE",
         )
 
     def stub_cat(inv, **kw):

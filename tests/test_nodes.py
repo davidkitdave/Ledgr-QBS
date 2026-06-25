@@ -32,57 +32,9 @@ from invoice_processing.extract.invoice_extractor import (
     ExtractedInvoiceBundle,
     ExtractedLine,
 )
-from invoice_processing.extract.document_record import (
-    DocumentRecord,
-    DocumentRecordBundle,
-    LabeledField,
-    LineCapture,
-)
-
-
-def _document_record_from_ex(ex: ExtractedInvoice) -> DocumentRecord:
-    fields: list[LabeledField] = []
-    if ex.invoice_number:
-        fields.append(LabeledField(label="Invoice Number", value=ex.invoice_number))
-    if ex.invoice_date:
-        fields.append(LabeledField(label="Invoice Date", value=ex.invoice_date))
-    if ex.currency:
-        fields.append(LabeledField(label="Currency", value=ex.currency))
-    if ex.fx_rate is not None:
-        fields.append(LabeledField(label="Exchange Rate", value=str(ex.fx_rate)))
-    totals: list[LabeledField] = []
-    if ex.subtotal is not None:
-        totals.append(LabeledField(label="Sub Total", value=str(ex.subtotal)))
-    if ex.gst_total is not None:
-        totals.append(LabeledField(label="GST", value=str(ex.gst_total)))
-    if ex.total is not None:
-        totals.append(LabeledField(label="Total", value=str(ex.total)))
-    return DocumentRecord(
-        labeled_fields=fields,
-        line_items=[
-            LineCapture(
-                description=ln.description,
-                net_amount=ln.net_amount,
-                tax_label=ln.tax_label,
-            )
-            for ln in ex.lines
-        ],
-        totals=totals,
-    )
-
-
-def _doc_bundle_from_ex_bundle(bundle: ExtractedInvoiceBundle) -> DocumentRecordBundle:
-    return DocumentRecordBundle(
-        documents=[_document_record_from_ex(ex) for ex in bundle.invoices],
-        skipped_pages=bundle.skipped_pages,
-        notes=bundle.notes,
-    )
-
-
 def _install_understand_extract_mock(bundle: ExtractedInvoiceBundle) -> None:
     """Hermetic tests: drive ``extract_invoice_document_node`` via understand path."""
     from invoice_processing.extract.invoice_extractor import (
-        _is_soa_summary_invoice,
         append_direction_review_note,
         direction_needs_review,
         reconcile,
@@ -97,8 +49,6 @@ def _install_understand_extract_mock(bundle: ExtractedInvoiceBundle) -> None:
         base_currency = kw.get("base_currency") or "SGD"
         normalized = []
         for ex in bundle.invoices:
-            if _is_soa_summary_invoice(ex):
-                continue
             ok, _detail = reconcile(ex)
             inv = to_normalized(
                 ex,
@@ -125,7 +75,6 @@ def _install_understand_extract_mock(bundle: ExtractedInvoiceBundle) -> None:
 def _understand_result_from_ex_bundle(bundle: ExtractedInvoiceBundle):
     """Build an ``InvoiceProcessResult`` for review/HITL hermetic tests."""
     from invoice_processing.extract.invoice_extractor import (
-        _is_soa_summary_invoice,
         append_direction_review_note,
         direction_needs_review,
         reconcile,
@@ -136,8 +85,6 @@ def _understand_result_from_ex_bundle(bundle: ExtractedInvoiceBundle):
     direction = "purchase"
     normalized = []
     for ex in bundle.invoices:
-        if _is_soa_summary_invoice(ex):
-            continue
         ok, _detail = reconcile(ex)
         inv = to_normalized(
             ex,
@@ -225,6 +172,7 @@ def _ex_invoice(number: str, net: float = 100.0, gst: float = 9.0) -> ExtractedI
         subtotal=net,
         gst_total=gst,
         total=net + gst,
+        issuer_tax_system="NONE",
     )
 
 
@@ -240,6 +188,7 @@ def _ex_receipt(number: str) -> ExtractedInvoice:
         subtotal=10.0,
         gst_total=0.9,
         total=10.9,
+        issuer_tax_system="NONE",
     )
 
 
@@ -251,8 +200,6 @@ def _restore_seams():
         for name in (
             "CLASSIFY_FN",
             "DIRECTION_FN",
-            "EXTRACT_BUNDLE_FN",
-            "EXTRACT_DOCUMENT_FN",
             "EXTRACT_INVOICE_DOCUMENT_FN",
             "EXTRACT_BANK_FN",
             "CATEGORIZE_FN",
@@ -939,6 +886,7 @@ def _self_ref_bundle() -> "ExtractedInvoiceBundle":
         subtotal=5000.0,
         gst_total=0.0,
         total=5000.0,
+    issuer_tax_system="NONE",
     )
     return ExtractedInvoiceBundle(invoices=[inv])
 
@@ -1062,6 +1010,7 @@ def _ex_usd_invoice(number: str, net: float = 100.0, gst: float = 0.0) -> Extrac
         subtotal=net,
         gst_total=gst,
         total=net + gst,
+        issuer_tax_system="NONE",
     )
 
 
@@ -1079,6 +1028,7 @@ def _ex_myr_invoice(number: str, net: float = 200.0) -> ExtractedInvoice:
         subtotal=net,
         gst_total=0.0,
         total=net,
+        issuer_tax_system="NONE",
     )
 
 
@@ -1117,6 +1067,7 @@ def test_extract_node_usd_doc_with_fx_rate_records_as_shown():
         gst_total=0.0,
         total=100.0,
         fx_rate=1.35,  # document states its own exchange rate — stored, not applied
+    issuer_tax_system="NONE",
     )
     bundle = ExtractedInvoiceBundle(invoices=[usd_inv])
     _install_understand_extract_mock(bundle)

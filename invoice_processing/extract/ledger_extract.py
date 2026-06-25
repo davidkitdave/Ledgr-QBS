@@ -588,12 +588,12 @@ def extracted_document_to_extracted_invoice(doc: ExtractedDocument) -> Extracted
         issuer_name=issuer_name,
         issuer_gst_regno=doc.vendor_tax_regno,
         issuer_country=doc.vendor_country,
-        issuer_tax_system=doc.tax_system_hint,
+        issuer_tax_system=doc.tax_system_hint or "NONE",
         bill_to_name=doc.buyer,
         bill_to_country=doc.buyer_country,
         lines=lines,
-        subtotal=doc.subtotal,
-        gst_total=doc.tax_total,
+        subtotal=doc.subtotal if doc.subtotal is not None else 0.0,
+        gst_total=doc.tax_total if doc.tax_total is not None else 0.0,
         total=doc.grand_total,
     )
 

@@ -106,6 +106,7 @@ def _restore_seams():
                         subtotal=100.0,
                         gst_total=9.0,
                         total=120.0,
+                        issuer_tax_system="NONE",
                     )
                 ]
             )
@@ -463,6 +464,7 @@ def test_hard_signal_autofix_via_hints_proceeds_when_detect_struggle_clears():
                         subtotal=100.0,
                         gst_total=9.0,
                         total=109.0,
+                        issuer_tax_system="NONE",
                     )
                 ]
             )

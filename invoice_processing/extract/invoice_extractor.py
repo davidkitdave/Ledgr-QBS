@@ -11,7 +11,7 @@ import logging
 import re
 from datetime import date, datetime
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from google.genai import types
 from pydantic import BaseModel, Field
@@ -88,16 +88,10 @@ class ExtractedInvoice(BaseModel):
             "country indicator is visible; null only when truly absent."
         ),
     )
-    issuer_tax_system: Optional[str] = Field(
-        None,
+    issuer_tax_system: Literal["GST", "SST", "VAT", "NONE"] = Field(
         description=(
-            "Tax system that applies to this issuer (informational only; the "
-            "jurisdiction router will override this with the resolved rule). One of: "
-            "'GST' (Singapore-style goods & services tax), 'SST' (Malaysia Sales Tax / "
-            "Service Tax), 'VAT' (European-style), 'NONE' (no tax system — e.g. US "
-            "domestic), or null when the document carries no tax column at all. "
-            "Infer from explicit tax wording on the document ('Service Tax', 'SST', "
-            "'GST 9%', 'VAT', etc.)."
+            "The tax system shown on the document — GST (SG), SST (MY), VAT, or "
+            "NONE if no tax is shown."
         ),
     )
     bill_to_name: Optional[str] = Field(None, description="Customer/buyer — who it is billed to")
@@ -110,9 +104,15 @@ class ExtractedInvoice(BaseModel):
         ),
     )
     lines: list[ExtractedLine] = Field(default_factory=list)
-    subtotal: Optional[float] = None
-    gst_total: Optional[float] = None
-    total: Optional[float] = None
+    subtotal: float = Field(
+        description="Net grand total excluding tax. If no separate subtotal is printed, set it equal to the sum of line net_amounts.",
+    )
+    gst_total: float = Field(
+        description="Total tax (GST/SST) for the whole document, summed across all lines, exactly as printed. Use 0.0 only when the document shows no tax at all. Never omit a printed SST/GST total.",
+    )
+    total: float = Field(
+        description="Grand total as printed (subtotal + tax).",
+    )
 
 
 class ExtractedInvoiceBundle(BaseModel):
@@ -577,95 +577,3 @@ def to_normalized(
         original_currency=original_currency,
         needs_fx_review=needs_fx_review,
     )
-
-
-def _is_soa_summary_invoice(ex: ExtractedInvoice) -> bool:
-    """Return True when an ExtractedInvoice looks like a phantom SOA-summary row.
-
-    The model is instructed to skip SOA cover pages and record them in
-    ``skipped_pages``, but it can hallucinate invoices from the SOA summary
-    table — particularly when the table lists many invoice numbers with amounts.
-    These phantom invoices share a distinctive shape: ALL their lines have a
-    bare description (empty, "INVOICE", or "INVOICES"), zero GST, and no
-    item_code on the extraction-layer model.
-
-    This is a deterministic gate — no LLM call.  Only drop when ALL lines
-    match the shape so that real invoices with tax_label==NT and gst_amount==0
-    are preserved (their descriptions are specific product/service names, not
-    the bare "INVOICE" sentinel).
-
-    Conservative: returns False when the invoice has no lines (let the
-    downstream reconciler flag it instead).
-    """
-    if not ex.lines:
-        return False
-    _sentinel_descs = {"", "INVOICE", "INVOICES"}
-    return all(
-        (line.description or "").strip().upper() in _sentinel_descs
-        and (line.gst_amount or 0.0) == 0.0
-        for line in ex.lines
-    )
-
-
-def to_normalized_bundle(
-    bundle: ExtractedInvoiceBundle,
-    *,
-    direction: str,
-    our_gst_registered: bool = True,
-    client_country: str = "SG",
-    base_currency: str = "SGD",
-    fx_rates: Optional[dict] = None,
-) -> list[NormalizedInvoice]:
-    """Convert an ExtractedInvoiceBundle into a list of NormalizedInvoices.
-
-    Each entry in bundle.invoices becomes one NormalizedInvoice.  SOA cover pages
-    are already excluded by the model (they appear in bundle.skipped_pages, not in
-    bundle.invoices), but the model can still hallucinate phantom invoices from
-    the SOA summary table.  This function applies two deterministic hard-gates
-    before conversion — no LLM call:
-
-      1. Drop any invoice whose invoice_number appears in ``bundle.skipped_pages``
-         (defensive; the model should not emit these but we enforce it in code).
-      2. Drop any invoice whose lines are ALL summary-shaped (bare "INVOICE"
-         description + zero GST): these are phantom rows hallucinated from the
-         SOA cover table.  See ``_is_soa_summary_invoice`` for the full predicate.
-
-    Both gates log a structured warning so operators can observe when the model
-    needed hardening.
-
-    fx_rates: optional dict mapping ISO currency code -> exchange rate to base_currency,
-    e.g. {'USD': 1.35, 'IDR': 0.000085}.  When provided, amounts are converted to
-    base_currency.  Single-currency foreign invoices without a rate are booked in
-    their document currency; needs_fx_review is set only for mixed-currency docs.
-    """
-    if fx_rates is None:
-        fx_rates = {}
-
-    results: list[NormalizedInvoice] = []
-
-    for ex in bundle.invoices:
-        # Gate 2: drop phantom summary-shaped invoices hallucinated from SOA cover.
-        if _is_soa_summary_invoice(ex):
-            logger.warning(
-                "hard-gate: dropping SOA-summary phantom invoice",
-                extra={
-                    "invoice_number": ex.invoice_number,
-                    "line_count": len(ex.lines),
-                    "reason": "all_lines_summary_shaped",
-                },
-            )
-            continue
-
-        doc_currency = (ex.currency or base_currency).upper()
-        rate = fx_rates.get(doc_currency)
-        normalized = to_normalized(
-            ex,
-            direction=direction,
-            our_gst_registered=our_gst_registered,
-            client_country=client_country,
-            base_currency=base_currency,
-            fx_rate=rate,
-        )
-        results.append(normalized)
-
-    return results

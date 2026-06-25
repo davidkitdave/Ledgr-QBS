@@ -105,6 +105,7 @@ def _fake_clean_bundle(*_a, **_k):
                     subtotal=100.0,
                     gst_total=9.0,
                     total=109.0,
+                    issuer_tax_system="NONE",
                 )
             ]
         )
@@ -139,6 +140,7 @@ def setup_function(_):
                     subtotal=100.0,
                     gst_total=9.0,
                     total=109.0,
+                    issuer_tax_system="NONE",
                 )
             ]
         )
@@ -332,6 +334,7 @@ def _unreconciled_bundle(*_a, **_k):
                     subtotal=100.0,
                     gst_total=9.0,
                     total=999.0,  # deliberately wrong → reconcile fails
+                    issuer_tax_system="NONE",
                 )
             ]
         )

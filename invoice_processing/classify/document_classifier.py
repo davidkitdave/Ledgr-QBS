@@ -14,7 +14,7 @@ from __future__ import annotations
 import difflib
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from google.genai import types
 from pydantic import BaseModel, Field
@@ -43,7 +43,15 @@ _MIME_BY_EXT = {
 
 
 class ClassificationResult(BaseModel):
-    doc_type: str = Field(description="One of: " + ", ".join(ALLOWED_DOC_TYPES))
+    doc_type: Literal[
+        "invoice",
+        "receipt",
+        "bank_statement",
+        "credit_note",
+        "statement_of_account",
+        "expense_claim",
+        "other",
+    ] = Field(description="One of: " + ", ".join(ALLOWED_DOC_TYPES))
     issuer_name: Optional[str] = Field(None, description="Party that issued/sent the document")
     bill_to_name: Optional[str] = Field(None, description="Party the document is addressed/billed to")
     currency: Optional[str] = Field(None, description="ISO currency code if visible, e.g. SGD/MYR/USD")

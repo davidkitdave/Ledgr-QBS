@@ -108,6 +108,7 @@ def _make_extracted_invoice() -> ExtractedInvoice:
         subtotal=100.0,
         gst_total=9.0,
         total=109.0,
+        issuer_tax_system="NONE",
     )
 
 
@@ -577,6 +578,7 @@ class TestSelfReferentialPipeline:
             subtotal=5000.0,
             gst_total=0.0,
             total=5000.0,
+            issuer_tax_system="NONE",
         )
 
     def test_self_referential_flagged_for_review(self, client_fye3, tmp_path):

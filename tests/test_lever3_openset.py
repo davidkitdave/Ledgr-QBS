@@ -215,7 +215,9 @@ class TestClampBehaviour:
         # Simulate what the clamp logic does (we can't call live Gemini).
         # The clamp in classify_document is: if result.doc_type not in ALLOWED_DOC_TYPES → "other"
         # We verify the logic branch directly.
-        raw_result = ClassificationResult(
+        # model_construct() bypasses Pydantic validation to simulate raw LLM output
+        # that carries an off-enum doc_type before the post-LLM clamp fires.
+        raw_result = ClassificationResult.model_construct(
             doc_type="delivery_order",
             confidence=0.85,
             reason="stub",
@@ -232,7 +234,7 @@ class TestClampBehaviour:
 
     def test_off_enum_bookable_doc_preserves_free_type(self):
         """free_type survives the clamp for a bookable off-enum type."""
-        raw_result = ClassificationResult(
+        raw_result = ClassificationResult.model_construct(
             doc_type="purchase_order",
             confidence=0.80,
             reason="stub",
@@ -265,7 +267,7 @@ class TestClampBehaviour:
 
     def test_genuinely_unbookable_off_enum_clamps_and_preserves_false(self):
         """Off-enum type + processable=False → doc_type='other', processable=False."""
-        raw_result = ClassificationResult(
+        raw_result = ClassificationResult.model_construct(
             doc_type="contract",
             confidence=0.75,
             reason="legal contract, no bookable amounts",
@@ -301,7 +303,7 @@ class TestClassifyNodePlumbing:
 
     def test_off_enum_doc_persists_free_type_and_processable_in_state(self):
         """When model returns delivery_order, state gets free_type + processable=True."""
-        nodes.CLASSIFY_FN = lambda data, mime, **kw: ClassificationResult(
+        nodes.CLASSIFY_FN = lambda data, mime, **kw: ClassificationResult.model_construct(
             doc_type="delivery_order",
             confidence=0.80,
             reason="stub",
@@ -361,7 +363,7 @@ class TestClassifyNodePlumbing:
 
     def test_route_still_correct_for_off_enum_doc(self):
         """Off-enum doc → route=invoice (non-bank → invoice lane). Routing is unchanged."""
-        nodes.CLASSIFY_FN = lambda data, mime, **kw: ClassificationResult(
+        nodes.CLASSIFY_FN = lambda data, mime, **kw: ClassificationResult.model_construct(
             doc_type="delivery_order",
             confidence=0.80,
             reason="stub",
