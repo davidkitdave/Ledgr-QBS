@@ -20,13 +20,19 @@ _MISSING_FIELDS_RE = re.compile(
 
 
 def _missing_fields_label(reasons: list[str]) -> str:
-    labels: list[str] = []
+    fields: list[str] = []
+    seen: set[str] = set()
     for reason in reasons:
         match = _MISSING_FIELDS_RE.search(reason.strip())
         if match:
-            labels.append((match.group(1) or match.group(2) or "").strip())
-    if labels:
-        return labels[0]
+            field_text = (match.group(1) or match.group(2) or "").strip()
+            for field in field_text.split(","):
+                name = field.strip()
+                if name and name not in seen:
+                    seen.add(name)
+                    fields.append(name)
+    if fields:
+        return ", ".join(fields)
     return "required fields"
 
 
