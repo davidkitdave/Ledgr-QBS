@@ -39,7 +39,7 @@ def _seed_playground_profile(callback_context) -> None:
         state = getattr(callback_context, "state", None)
         if state is None:
             return None
-        from accounting_agents.agent import seed_playground_profile_if_needed
+        from invoice_processing.shared_libraries.playground_context import seed_playground_profile_if_needed
         seeded = seed_playground_profile_if_needed(state)
         if seeded:
             _log.info(

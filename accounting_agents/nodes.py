@@ -113,6 +113,18 @@ from invoice_processing.extract.process_invoice_document import (
 )
 
 from .config import MODEL_LITE, MODEL_READ, MODEL_STD
+# Artifact-naming helpers — canonical definitions live in the neutral shared
+# module so that ledgr_agent can import them without depending on accounting_agents.
+# Re-exported here for backward compatibility.
+from invoice_processing.shared_libraries.document_artifacts import (
+    ARTIFACT_NAME_KEY,
+    ARTIFACT_NAME_FMT,  # noqa: F401 — re-exported; used by tests as nodes.ARTIFACT_NAME_FMT
+    artifact_name_for,
+    is_document_mime as _is_document_mime,  # backward-compat private alias
+)
+
+# Public alias (non-private name) — new callers should use is_document_mime.
+is_document_mime = _is_document_mime
 
 logger = logging.getLogger(__name__)
 
@@ -152,51 +164,6 @@ def _guard_state_payload(key: str, items: list) -> list:
         )
     return items
 
-
-# --------------------------------------------------------------------------- #
-# State-key + artifact-filename convention (shared with Slack + graph tasks)
-# --------------------------------------------------------------------------- #
-
-#: State key carrying the ADK artifact filename of the uploaded PDF for this run.
-ARTIFACT_NAME_KEY = "temp:artifact_name"
-
-#: Filename convention the Slack layer uses when it ``save_artifact``s the PDF.
-#:
-#: ADK's FastAPI dev server registers artifact routes with a single ``{artifact_name}``
-#: path parameter, which by default does NOT match the slash character. Names like
-#: ``inbox/upload.pdf`` therefore return 404 in the dev UI even when the file is
-#: on disk. To keep dev tooling working we collapse the path to a flat
-#: ``"{file_id}.pdf"`` in non-prod; prod keeps the namespace prefix for collision
-#: safety with other tools writing into the same artifact bucket.
-ARTIFACT_NAME_FMT = "inbox/{file_id}.pdf"
-
-
-def artifact_name_for(file_id: str) -> str:
-    """Return the artifact filename to use for ``file_id`` in the current env.
-
-    In **every** non-prod environment the flat form (``"{file_id}.pdf"``) is
-    returned so the dev FastAPI route matches. ADK's dev FastAPI registers
-    artifact routes with a single ``{artifact_name}`` path parameter that
-    does NOT match the slash character — names like ``inbox/upload.pdf``
-    therefore return 404 in the dev UI even when the file is on disk.
-
-    Prod keeps the namespaced ``"inbox/{file_id}.pdf"`` form for collision
-    safety alongside other artifacts.
-
-    Previous behaviour gated the flat form on ``is_playground_seed_enabled()``
-    which is enabled in dev/unset but ALSO active in any non-prod scenario
-    where a playground seed was used. Phase 1 / artifact-dev-naming
-    simplifies the gate to a direct ``LEDGR_ENV != "prod"`` check so the
-    flat form is used universally outside prod — eliminates the 404 in any
-    ADK web / agents-cli playground session regardless of seed state.
-    """
-    import os as _os
-    from .config import is_playground_seed_enabled
-
-    env = (_os.environ.get("LEDGR_ENV") or "dev").strip().lower()
-    if env != "prod" or is_playground_seed_enabled():
-        return f"{file_id}.pdf"
-    return ARTIFACT_NAME_FMT.format(file_id=file_id)
 
 #: State keys for routing / extraction outputs.
 DOC_TYPE_KEY = "doc_type"
@@ -376,11 +343,6 @@ REVIEWER_FN: Callable[..., dict]
 # --------------------------------------------------------------------------- #
 
 
-def _is_document_mime(mime: str) -> bool:
-    """Return True for mime types accepted as document bytes."""
-    return mime.startswith("image/") or mime in ("application/pdf", "application/octet-stream", "")
-
-
 async def _load_pdf_bytes(ctx) -> tuple[bytes, str]:
     """Recover the uploaded PDF bytes + mime type from the ADK artifact service.
 
@@ -542,7 +504,7 @@ async def classify_node(ctx) -> Event:
     # the coordinator (which had the before_agent_callback) was removed in ADR-0021,
     # so the seed must happen at the first node instead.  Function-local import
     # avoids the circular import (agent.py imports nodes at module level).
-    from accounting_agents.agent import seed_playground_profile_if_needed  # noqa: PLC0415
+    from invoice_processing.shared_libraries.playground_context import seed_playground_profile_if_needed  # noqa: PLC0415
     seed_playground_profile_if_needed(ctx.state)
 
     data, mime_type = await _load_pdf_bytes(ctx)

@@ -337,8 +337,8 @@ def process_document_batch(tool_context: Any, paths: list[str], **inject: Any) -
         state = tool_context.state
     else:
         # Fallback to playground context for local testing/eval
-        from accounting_agents.agent import _playground_default_context
-        state = _playground_default_context().to_state()
+        from invoice_processing.shared_libraries.playground_context import playground_default_context
+        state = playground_default_context().to_state()
 
     client = client_context_from_state(state)
     tax_policy_version = _resolve_tax_policy_version(client)

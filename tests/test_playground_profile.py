@@ -83,17 +83,35 @@ class TestPlaygroundProfileSeed:
         assert ctx.state.get("tax_registered") is True
         assert ctx.state.get("fye_month") == 12
 
-    def test_seed_reads_jbi_plus_profile_from_json(self, monkeypatch):
+    def test_seed_reads_profile_from_json(self, monkeypatch, tmp_path):
         """Phase 8 / playground-profile-my: JSON profile wins over hardcoded defaults.
 
-        Verifies the JBI PLUS / MALAYSIA / MYR seed profile (the default
-        ADK web playground profile) loads into state when present in the
-        workspace. COA must also be seeded so the categorize LLM runs.
+        Hermetic: writes a synthetic MALAYSIA / MYR profile to a tmp_path
+        JSON and points LEDGR_PLAYGROUND_PROFILE_PATH at it. Verifies the
+        JSON profile loads into state, COA is seeded so the categorize LLM
+        runs, and entity_memory carries the vendor -> account mapping.
         """
+        import json as _json
+
         monkeypatch.delenv("LEDGR_ENV", raising=False)
         monkeypatch.delenv("LEDGR_PLAYGROUND_SEED", raising=False)
-        # Don't override LEDGR_PLAYGROUND_PROFILE_PATH — use the real
-        # workspace file so this test catches any drift in the default seed.
+        # Write a synthetic profile and point the loader at it (hermetic —
+        # no dependency on any real workspace playground_profile.json).
+        profile_path = tmp_path / "playground_profile.json"
+        profile_path.write_text(_json.dumps({
+            "client_id": "acme-auto",
+            "client_name": "Acme Auto Sdn Bhd",
+            "region": "MALAYSIA",
+            "base_currency": "MYR",
+            "coa": [
+                {"code": "500-020", "name": "Motor Vehicle Expenses"},
+                {"code": "400-A0001", "name": "Trade Creditors"},
+            ],
+            "entity_memory": [
+                {"name": "Apex Motor Sdn Bhd", "account_code": "500-020"},
+            ],
+        }))
+        monkeypatch.setenv("LEDGR_PLAYGROUND_PROFILE_PATH", str(profile_path))
 
         ctx = FakeCallbackContext(state={})
 
@@ -101,19 +119,19 @@ class TestPlaygroundProfileSeed:
             from accounting_agents.agent import load_client_profile
             load_client_profile(ctx)
 
-        # JBI PLUS / MALAYSIA profile wins.
-        assert ctx.state.get("client_id") == "jbi-plus-auto"
-        assert ctx.state.get("client_name") == "JBI PLUS AUTO SDN BHD"
+        # JSON profile wins over hardcoded defaults.
+        assert ctx.state.get("client_id") == "acme-auto"
+        assert ctx.state.get("client_name") == "Acme Auto Sdn Bhd"
         assert ctx.state.get("region") == "MALAYSIA"
         assert ctx.state.get("base_currency") == "MYR"
         # COA must be populated (else categorize LLM is skipped and
-        # account_code ends up blank — the YAU LEE issue).
+        # account_code ends up blank).
         coa = ctx.state.get("coa") or []
         assert len(coa) > 0, "playground_profile.json must seed a COA so categorize LLM runs"
-        # entity_memory carries the YAU LEE vendor -> 500-020 mapping.
+        # entity_memory carries the vendor -> 500-020 mapping.
         em = ctx.state.get("entity_memory") or []
-        assert any(e.get("name") == "YAU LEE MOTOR" for e in em), (
-            "entity_memory must include the YAU LEE MOTOR mapping for tax"
+        assert any(e.get("name") == "Apex Motor Sdn Bhd" for e in em), (
+            "entity_memory must include the Apex Motor Sdn Bhd mapping for tax"
         )
 
     def test_seed_does_not_activate_in_prod(self, monkeypatch):
