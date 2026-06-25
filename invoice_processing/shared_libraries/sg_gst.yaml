@@ -29,7 +29,19 @@ code_map:
   xero:
     purchase: { SR: "SR", ZR: "ZR", ES: "No Tax", OS: "No Tax", IM: "No Tax", NT: "No Tax" }
     sales:    { SR: "SR", ZR: "ZR", ES: "No Tax", OS: "No Tax", NT: "No Tax" }
-  qbs:        # AI-Account / AutoCount / SQL Acc short codes
+  qbs:        # QBS Ledger app — short GST codes
+    purchase: { SR: "TX", ZR: "ZR", ES: "ES", OS: "NT", IM: "IM", NT: "NT" }
+    sales:    { SR: "SR", ZR: "ZR", ES: "ES", OS: "OS", NT: "NT" }
+  # AutoCount (SG) and SQL Account (SG) share the IRAS short-code GST convention
+  # (docs/research/sg-gst-tax-codes.md §7.2). Codes are rate-invariant — the 7/8/9%
+  # variant lives on the GST amount, not the code string (§1). These are the
+  # documented defaults; reconcile against the company's GST code master on first
+  # run (§9.5). Without these blocks an SG client on AutoCount/SQL rendered BLANK
+  # tax codes (hole B.1).
+  autocount:
+    purchase: { SR: "TX", ZR: "ZR", ES: "ES", OS: "NT", IM: "IM", NT: "NT" }
+    sales:    { SR: "SR", ZR: "ZR", ES: "ES", OS: "OS", NT: "NT" }
+  sql_account:
     purchase: { SR: "TX", ZR: "ZR", ES: "ES", OS: "NT", IM: "IM", NT: "NT" }
     sales:    { SR: "SR", ZR: "ZR", ES: "ES", OS: "OS", NT: "NT" }
 
