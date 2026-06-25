@@ -286,7 +286,7 @@ def _line_net_amount(line: InvoiceLine, inv: NormalizedInvoice) -> float:
     net = float(line.net_amount or 0.0)
     gst = float(line.gst_amount or 0.0)
     treatment = (line.tax_treatment or "").strip().upper()
-    absorb_gst = not inv.our_gst_registered or treatment != "SR"
+    absorb_gst = not inv.our_gst_registered or treatment not in ("SR", "SSR")
     if absorb_gst:
         raw = round(net + gst, 2)
     else:
