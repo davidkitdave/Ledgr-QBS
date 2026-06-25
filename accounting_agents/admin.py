@@ -13,9 +13,9 @@ import argparse
 import sys
 from typing import List
 
-from app.credit_service import CreditService, InMemoryCreditStore
+from app.credit_service import InMemoryCreditStore, get_shared_credit_service
 
-_service = CreditService(store=InMemoryCreditStore())
+_service = get_shared_credit_service()
 
 
 def grant(firm_id: str, amount: int, note: str = "") -> None:
