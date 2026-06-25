@@ -595,6 +595,8 @@ def extract_document_ledger(
     try:
         return _extract_document_ledger_once(data, mime_type, **kwargs)
     except ValidationError:
+        if mime_type != "application/pdf":
+            raise
         return extract_document_ledger_chunked(
             data,
             mime_type,
