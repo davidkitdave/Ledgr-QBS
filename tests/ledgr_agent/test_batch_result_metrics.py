@@ -114,17 +114,25 @@ def test_accounting_task_success_fails_when_status_blocked() -> None:
 
 
 def test_doc_type_passes_for_recognised_label() -> None:
-    result = doc_type_code(_batch_instance({"doc_type": "invoice"}))
+    # doc_type is read from per_file entries, not a top-level key
+    result = doc_type_code(
+        _batch_instance({"per_file": [{"doc_type": "invoice"}]})
+    )
     assert result["score"] == 1.0
 
 
 def test_doc_type_passes_for_mixed_label() -> None:
-    result = doc_type_code(_batch_instance({"doc_type": "mixed"}))
+    # multiple distinct recognised types collapse to "mixed"
+    result = doc_type_code(
+        _batch_instance(
+            {"per_file": [{"doc_type": "invoice"}, {"doc_type": "receipt"}]}
+        )
+    )
     assert result["score"] == 1.0
 
 
 def test_doc_type_fails_for_unknown_label() -> None:
-    result = doc_type_code(_batch_instance({"doc_type": "parcel"}))
+    result = doc_type_code(_batch_instance({"per_file": [{"doc_type": "parcel"}]}))
     assert result["score"] == 0.0
 
 

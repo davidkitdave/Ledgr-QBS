@@ -17,7 +17,7 @@ custom_metrics:
                           if isinstance(payload, dict):
                               batch = payload
           if batch is None:
-              return {"score": 1.0, "explanation": "no batch"}
+              return {"score": 0.0, "explanation": "no process_document_batch result in trace — expected document processing"}
           credits = batch.get("credits") or {}
           status = credits.get("credit_status")
           block = (batch.get("validation_summary") or {}).get("block_reason")

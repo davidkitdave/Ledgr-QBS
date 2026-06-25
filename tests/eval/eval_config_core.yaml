@@ -32,7 +32,7 @@ custom_metrics:
                           if isinstance(payload, dict):
                               batch = payload
           if batch is None:
-              return {"score": 1.0, "explanation": "no batch"}
+              return {"score": 0.0, "explanation": "no process_document_batch result in trace — expected document processing"}
           status = batch.get("status")
           if status == "success":
               return {"score": 1.0, "explanation": "batch status=success"}
@@ -53,12 +53,18 @@ custom_metrics:
                           if isinstance(payload, dict):
                               batch = payload
           if batch is None:
-              return {"score": 1.0, "explanation": "no batch"}
+              return {"score": 0.0, "explanation": "no process_document_batch result in trace — expected document processing"}
           valid = {"invoice", "receipt", "credit_note", "bank_statement", "mixed"}
-          doc_type = batch.get("doc_type")
-          if isinstance(doc_type, str) and doc_type in valid:
-              return {"score": 1.0, "explanation": f"doc_type={doc_type}"}
-          return {"score": 0.0, "explanation": f"unrecognised doc_type={doc_type!r}"}
+          per_file = batch.get("per_file") or []
+          posted = batch.get("posted_documents") or []
+          skipped = batch.get("skipped_documents") or []
+          all_docs = per_file or posted + skipped
+          doc_types = {d.get("doc_type") for d in all_docs if isinstance(d.get("doc_type"), str)}
+          valid_found = doc_types & valid
+          if valid_found:
+              label = next(iter(valid_found)) if len(valid_found) == 1 else "mixed"
+              return {"score": 1.0, "explanation": f"doc_type={label}"}
+          return {"score": 0.0, "explanation": f"unrecognised doc_types={doc_types!r}"}
 
   - name: tax_validity_code
     custom_function: |
@@ -75,7 +81,7 @@ custom_metrics:
                           if isinstance(payload, dict):
                               batch = payload
           if batch is None:
-              return {"score": 1.0, "explanation": "no batch to grade"}
+              return {"score": 0.0, "explanation": "no process_document_batch result in trace — expected document processing"}
           version = (batch.get("validation_summary") or {}).get("tax_policy_version")
           hard_ids = {item.get("id") for item in batch.get("review_requests") or []}
           if version and "gst_claimed_by_non_registered_client" in hard_ids:
@@ -99,7 +105,7 @@ custom_metrics:
                           if isinstance(payload, dict):
                               batch = payload
           if batch is None:
-              return {"score": 1.0, "explanation": "no batch"}
+              return {"score": 0.0, "explanation": "no process_document_batch result in trace — expected document processing"}
           export_rows = batch.get("export_rows")
           if isinstance(export_rows, list):
               return {"score": 1.0, "explanation": f"export_rows list len={len(export_rows)}"}
@@ -120,7 +126,7 @@ custom_metrics:
                           if isinstance(payload, dict):
                               batch = payload
           if batch is None:
-              return {"score": 1.0, "explanation": "no batch"}
+              return {"score": 0.0, "explanation": "no process_document_batch result in trace — expected document processing"}
           credits = batch.get("credits") or {}
           status = credits.get("credit_status")
           block = (batch.get("validation_summary") or {}).get("block_reason")
@@ -145,7 +151,7 @@ custom_metrics:
                           if isinstance(payload, dict):
                               batch = payload
           if batch is None:
-              return {"score": 1.0, "explanation": "no document batch result in trace"}
+              return {"score": 0.0, "explanation": "no process_document_batch result in trace — expected document processing"}
           review_requests = batch.get("review_requests") or []
           soft_warnings = batch.get("soft_warnings") or []
           soft_review_count = sum(
@@ -176,7 +182,7 @@ custom_metrics:
                           if isinstance(payload, dict):
                               batch = payload
           if batch is None:
-              return {"score": 1.0, "explanation": "no document batch result in trace"}
+              return {"score": 0.0, "explanation": "no process_document_batch result in trace — expected document processing"}
           llm_call_count = int(batch.get("llm_call_count") or 0)
           strong_model_used = bool(batch.get("strong_model_used"))
           if llm_call_count <= 2 and not strong_model_used:
@@ -201,7 +207,7 @@ custom_metrics:
                           if isinstance(payload, dict):
                               batch = payload
           if batch is None:
-              return {"score": 1.0, "explanation": "no document batch result in trace"}
+              return {"score": 0.0, "explanation": "no process_document_batch result in trace — expected document processing"}
           validation = batch.get("validation_summary") or {}
           block_reason = validation.get("block_reason")
           llm_call_count = int(batch.get("llm_call_count") or 0)

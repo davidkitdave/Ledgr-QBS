@@ -14,7 +14,7 @@ import json
 import pathlib
 
 CHAT_CASE_PREFIX = "B"
-DOC_AGENT_MODULE = "accounting_agents.agent"
+DOC_AGENT_MODULE = "ledgr_agent.agent"
 CHAT_AGENT_MODULE = "accounting_agents.chat_eval.agent"
 
 _EVALSET_PATH = pathlib.Path(__file__).parent / "datasets" / "ledgr.evalset.json"

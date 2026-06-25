@@ -6,7 +6,7 @@
         "role": "user",
         "parts": [
           {
-            "text": "For client_id playground, process tests/fixtures/stub-invoice.pdf with process_document_batch. Confirm status=success and doc_type=invoice."
+            "text": "For client_id playground, process the file at tests/eval_invoices/invoice_8.pdf with process_document_batch. Confirm status=success."
           }
         ]
       },
@@ -18,18 +18,18 @@
       }
     },
     {
-      "eval_case_id": "receipt_processing_success",
+      "eval_case_id": "invoice_processing_success_2",
       "prompt": {
         "role": "user",
         "parts": [
           {
-            "text": "For client_id playground, process a synthetic single-page receipt fixture. Confirm status=success and doc_type=receipt."
+            "text": "For client_id playground, process the file at tests/eval_invoices/invoice_9.pdf with process_document_batch. Confirm status=success."
           }
         ]
       },
       "metadata": {
         "expect_status": "success",
-        "expect_doc_type": "receipt",
+        "expect_doc_type": "invoice",
         "expect_tax_policy_version": "sg-2026-01",
         "max_llm_call_count": 2
       }

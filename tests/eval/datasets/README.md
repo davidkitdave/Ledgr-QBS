@@ -147,6 +147,17 @@ Minimal single-turn case shape:
 }
 ```
 
+## Stateless smoke gate vs state-dependent datasets
+
+`core-documents.json` is the **stateless smoke gate** — both cases reference concrete committed
+fixture paths (`tests/eval_invoices/invoice_8.pdf`, `invoice_9.pdf`) so a plain
+`agents-cli eval generate` causes the agent to call `process_document_batch` and produce a
+gradeable trace. Use this to verify the tool is actually invoked in CI.
+
+`multi-erp.json` (per-ERP profile) and `credits.json` (firm_id / dedup state) cases are **NOT
+satisfiable by stateless `agents-cli eval generate`** — they need session-state injection via the
+doc-lane bridge or pytest; do not trust a stateless run of them.
+
 ## Beyond Generate and Grade
 
 - `agents-cli eval compare BASE CAND` — diff two grade-result files (regression check).

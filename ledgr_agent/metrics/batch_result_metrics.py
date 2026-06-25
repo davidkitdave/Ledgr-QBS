@@ -28,7 +28,10 @@ def cost_efficiency_code(instance: dict[str, Any]) -> dict[str, Any]:
 
     batch = _latest_batch_result(instance)
     if batch is None:
-        return {"score": 1.0, "explanation": "no document batch result in trace"}
+        return {
+            "score": 0.0,
+            "explanation": "no process_document_batch result in trace — expected document processing",
+        }
 
     llm_call_count = int(batch.get("llm_call_count") or 0)
     strong_model_used = bool(batch.get("strong_model_used"))
@@ -45,7 +48,10 @@ def no_unneeded_llm_code(instance: dict[str, Any]) -> dict[str, Any]:
 
     batch = _latest_batch_result(instance)
     if batch is None:
-        return {"score": 1.0, "explanation": "no document batch result in trace"}
+        return {
+            "score": 0.0,
+            "explanation": "no process_document_batch result in trace — expected document processing",
+        }
 
     validation = batch.get("validation_summary") or {}
     block_reason = validation.get("block_reason")
@@ -62,7 +68,10 @@ def no_unneeded_llm_code(instance: dict[str, Any]) -> dict[str, Any]:
 def tax_validity_code(instance: dict[str, Any]) -> dict[str, Any]:
     batch = _latest_batch_result(instance)
     if batch is None:
-        return {"score": 1.0, "explanation": "no batch to grade"}
+        return {
+            "score": 0.0,
+            "explanation": "no process_document_batch result in trace — expected document processing",
+        }
     version = (batch.get("validation_summary") or {}).get("tax_policy_version")
     hard_ids = {item.get("id") for item in batch.get("review_requests") or []}
     if version and "gst_claimed_by_non_registered_client" in hard_ids:
@@ -75,7 +84,10 @@ def tax_validity_code(instance: dict[str, Any]) -> dict[str, Any]:
 def credit_charge_code(instance: dict[str, Any]) -> dict[str, Any]:
     batch = _latest_batch_result(instance)
     if batch is None:
-        return {"score": 1.0, "explanation": "no batch"}
+        return {
+            "score": 0.0,
+            "explanation": "no process_document_batch result in trace — expected document processing",
+        }
     credits = batch.get("credits") or {}
     status = credits.get("credit_status")
     block = (batch.get("validation_summary") or {}).get("block_reason")
@@ -97,7 +109,10 @@ def accounting_task_success_code(instance: dict[str, Any]) -> dict[str, Any]:
 
     batch = _latest_batch_result(instance)
     if batch is None:
-        return {"score": 1.0, "explanation": "no document batch result in trace"}
+        return {
+            "score": 0.0,
+            "explanation": "no process_document_batch result in trace — expected document processing",
+        }
 
     status = batch.get("status")
     if status == "success":
@@ -113,12 +128,27 @@ def doc_type_code(instance: dict[str, Any]) -> dict[str, Any]:
 
     batch = _latest_batch_result(instance)
     if batch is None:
-        return {"score": 1.0, "explanation": "no document batch result in trace"}
+        return {
+            "score": 0.0,
+            "explanation": "no process_document_batch result in trace — expected document processing",
+        }
 
-    doc_type = batch.get("doc_type")
-    if isinstance(doc_type, str) and doc_type in _VALID_DOC_TYPES:
-        return {"score": 1.0, "explanation": f"doc_type={doc_type}"}
-    return {"score": 0.0, "explanation": f"unrecognised doc_type={doc_type!r}"}
+    # BatchResult has no top-level doc_type; read from per_file entries
+    # (posted_documents and skipped_documents both derive from per_file).
+    per_file: list[dict[str, Any]] = batch.get("per_file") or []
+    posted: list[dict[str, Any]] = batch.get("posted_documents") or []
+    skipped: list[dict[str, Any]] = batch.get("skipped_documents") or []
+    all_docs = per_file or posted + skipped
+    doc_types = {
+        d.get("doc_type")
+        for d in all_docs
+        if isinstance(d.get("doc_type"), str)
+    }
+    valid_found = doc_types & _VALID_DOC_TYPES
+    if valid_found:
+        label = next(iter(valid_found)) if len(valid_found) == 1 else "mixed"
+        return {"score": 1.0, "explanation": f"doc_type={label}"}
+    return {"score": 0.0, "explanation": f"unrecognised doc_types={doc_types!r}"}
 
 
 def erp_export_shape_code(instance: dict[str, Any]) -> dict[str, Any]:
@@ -126,7 +156,10 @@ def erp_export_shape_code(instance: dict[str, Any]) -> dict[str, Any]:
 
     batch = _latest_batch_result(instance)
     if batch is None:
-        return {"score": 1.0, "explanation": "no document batch result in trace"}
+        return {
+            "score": 0.0,
+            "explanation": "no process_document_batch result in trace — expected document processing",
+        }
 
     export_rows = batch.get("export_rows")
     if isinstance(export_rows, list):
@@ -137,7 +170,10 @@ def erp_export_shape_code(instance: dict[str, Any]) -> dict[str, Any]:
 def hitl_noise_score(instance: dict[str, Any]) -> dict[str, Any]:
     batch = _latest_batch_result(instance)
     if batch is None:
-        return {"score": 1.0, "explanation": "no document batch result in trace"}
+        return {
+            "score": 0.0,
+            "explanation": "no process_document_batch result in trace — expected document processing",
+        }
 
     review_requests = batch.get("review_requests") or []
     soft_warnings = batch.get("soft_warnings") or []
