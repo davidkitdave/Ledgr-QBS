@@ -24,9 +24,14 @@
 
 name: Deploy to Cloud Run
 
+# AUTO-DEPLOY DISABLED during the ledgr_agent cutover (2026-06-25).
+# Push-to-main no longer auto-builds/auto-ships to prod. Deploys are
+# manual-only: Actions → Deploy to Cloud Run → Run workflow. The full
+# test signal on push/PR now lives in ci.yml.
+# To re-enable auto-deploy, uncomment the `push:` trigger below.
 on:
-  push:
-    branches: [main]
+  # push:
+  #   branches: [main]
   workflow_dispatch:
     inputs:
       rollback_revision:
