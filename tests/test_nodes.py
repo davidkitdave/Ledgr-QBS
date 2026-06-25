@@ -1503,6 +1503,7 @@ def test_normalized_invoice_codec_round_trip_handles_all_fields():
         reconcile_note="OK",
         tax_visible_on_document=True,
         direction_reason="Letterhead shows Client Co as buyer",
+        document_kind="credit_note",
     )
 
     rebuilt, d = _round_trip_invoice(inv)
@@ -1545,6 +1546,21 @@ def test_normalized_invoice_codec_round_trip_handles_all_fields():
     assert rebuilt.reconcile_note == "OK"
     assert rebuilt.tax_visible_on_document is True
     assert rebuilt.direction_reason == "Letterhead shows Client Co as buyer"
+    assert rebuilt.document_kind == "credit_note"
+
+
+def test_normalized_invoice_codec_round_trip_preserves_document_kind():
+    """Regression: credit_note sign-flip depends on document_kind surviving state I/O."""
+    from invoice_processing.export.models import NormalizedInvoice
+
+    inv = NormalizedInvoice(
+        doc_type="purchase",
+        document_kind="credit_note",
+        invoice_number="CN-001",
+    )
+    rebuilt, wire = _round_trip_invoice(inv)
+    assert wire.get("document_kind") == "credit_note"
+    assert rebuilt.document_kind == "credit_note"
 
 
 def test_normalized_invoice_codec_date_serialized_as_iso_string():
