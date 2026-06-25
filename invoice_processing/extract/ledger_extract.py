@@ -515,7 +515,7 @@ def _drop_soa_cover_documents(bundle: ExtractedDocumentBundle) -> ExtractedDocum
     return bundle
 
 
-def extract_document_ledger(
+def _extract_document_ledger_once(
     data: bytes,
     mime_type: str,
     *,
@@ -526,12 +526,7 @@ def extract_document_ledger(
     client_name: Optional[str] = None,
     client_uen: Optional[str] = None,
 ) -> ExtractedDocumentBundle:
-    """Single multimodal call — faithful ``documents[]`` array (WS-2.1).
-
-    When ``client_name`` and/or ``client_uen`` are supplied, the prompt asks
-    the model to set ``direction_for_client`` per document from visible
-    From/To/claimant blocks.
-    """
+    """One multimodal call — faithful ``documents[]`` array (WS-2.1)."""
     client = make_client(project, location)
     model = model or lite_model()
     part = types.Part.from_bytes(data=data, mime_type=mime_type)
@@ -553,6 +548,61 @@ def extract_document_ledger(
     log_context_cache_usage(resp, lane="extract")
     bundle = ExtractedDocumentBundle.model_validate_json(resp.text)
     return _drop_soa_cover_documents(bundle)
+
+
+def extract_document_ledger(
+    data: bytes,
+    mime_type: str,
+    *,
+    project: Optional[str] = None,
+    location: Optional[str] = None,
+    model: Optional[str] = None,
+    hint: Optional[str] = None,
+    client_name: Optional[str] = None,
+    client_uen: Optional[str] = None,
+) -> ExtractedDocumentBundle:
+    """Extract bookable documents from one upload.
+
+    Large multi-receipt PDFs are split into page windows so Gemini JSON does not
+    truncate mid-response (issue #16). Smaller files use a single call, with a
+    chunked retry when the model returns invalid JSON.
+    """
+    from pydantic import ValidationError
+
+    from .pdf_chunks import (
+        extract_document_ledger_chunked,
+        should_chunk_pdf,
+    )
+    from .segmentation_gates import count_input_pages
+
+    kwargs = {
+        "project": project,
+        "location": location,
+        "model": model,
+        "hint": hint,
+        "client_name": client_name,
+        "client_uen": client_uen,
+    }
+    page_count = count_input_pages(data, mime_type) if mime_type == "application/pdf" else 1
+    if should_chunk_pdf(data, mime_type, page_count=page_count):
+        return extract_document_ledger_chunked(
+            data,
+            mime_type,
+            extract_fn=_extract_document_ledger_once,
+            **kwargs,
+        )
+
+    try:
+        return _extract_document_ledger_once(data, mime_type, **kwargs)
+    except ValidationError:
+        if mime_type != "application/pdf":
+            raise
+        return extract_document_ledger_chunked(
+            data,
+            mime_type,
+            extract_fn=_extract_document_ledger_once,
+            **kwargs,
+        )
 
 
 def extract_ledger_file(path: str, **kwargs) -> ExtractedDocumentBundle:

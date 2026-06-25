@@ -135,6 +135,29 @@ def _merge_validation(payload: dict[str, Any], extra: dict[str, object]) -> None
         }
 
 
+def _derive_fallback_reason(payload: dict[str, Any]) -> str | None:
+    """Surface the first actionable failure reason on the batch contract."""
+    summary = payload.get("validation_summary") or {}
+    block_reason = summary.get("block_reason")
+    if block_reason:
+        return str(block_reason)
+    engine_errors = summary.get("engine_errors") or []
+    if engine_errors:
+        return str(engine_errors[0])
+    for skipped in payload.get("skipped_documents") or []:
+        note = str(skipped.get("note") or "")
+        if note.startswith("ERROR"):
+            return note
+    return None
+
+
+def _finalize_batch_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    reason = _derive_fallback_reason(payload)
+    if reason:
+        payload["fallback_reason"] = reason
+    return payload
+
+
 def _build_pipeline_inject(overrides: dict[str, Any]) -> tuple[PipelineInject, dict[str, Any]]:
     """Build engine inject kwargs and LLM telemetry for the current call."""
 
@@ -396,7 +419,7 @@ def process_document_batch(tool_context: Any, paths: list[str], **inject: Any) -
                 },
             },
         )
-        return payload
+        return _finalize_batch_payload(payload)
 
     if not existing_paths:
         blocked_reason = "no_source_files" if not paths else "no_readable_files"
@@ -420,7 +443,7 @@ def process_document_batch(tool_context: Any, paths: list[str], **inject: Any) -
                 },
             },
         )
-        return payload
+        return _finalize_batch_payload(payload)
 
     # 2. Call the underlying procedural engine with dynamic telemetry.
     # Real ADK/tool runs use the multi-document spine so SOA packages fan out
@@ -542,6 +565,11 @@ def process_document_batch(tool_context: Any, paths: list[str], **inject: Any) -
         credits=credits_summary,
     )
 
+    if engine_result.errors:
+        extra_validation = {"engine_errors": list(engine_result.errors)}
+    else:
+        extra_validation = {}
+
     payload = batch_result.model_dump()
     truth_report = document_truth_report(existing_paths, payload.get("export_rows") or [])
     expected_invoice_count = truth_report.get("expected_invoice_count")
@@ -554,6 +582,7 @@ def process_document_batch(tool_context: Any, paths: list[str], **inject: Any) -
         payload,
         {
             **path_resolution,
+            **extra_validation,
             "document_truth": truth_report,
             "credit_estimate": {
                 "gate_units": gate_units,
@@ -563,4 +592,4 @@ def process_document_batch(tool_context: Any, paths: list[str], **inject: Any) -
             },
         },
     )
-    return payload
+    return _finalize_batch_payload(payload)
