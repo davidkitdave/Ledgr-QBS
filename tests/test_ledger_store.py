@@ -2013,6 +2013,49 @@ def test_remove_rows_for_month_qbs_exporter_headers():
     assert len(oct_rows) == 2
 
 
+def _make_autocount_workbook_with_months() -> bytes:
+    """Purchase + Sales workbook with AutoCount DocDate / SupplierInvoiceNo headers."""
+    from openpyxl import Workbook as _WB
+
+    wb = _WB()
+    ws_p = wb.active
+    ws_p.title = "Purchase"
+    ws_p.append(["DocNo", "DocDate", "SupplierInvoiceNo", "Description", "TaxableAmt"])
+    ws_p.append(["<<New>>", "05/09/2025", "INV-P1", "AWS Sep", 100.0])
+    ws_p.append(["<<New>>", "20/09/2025", "INV-P2", "Zoom Sep", 50.0])
+    ws_p.append(["<<New>>", "03/10/2025", "INV-P3", "AWS Oct", 120.0])
+    ws_s = wb.create_sheet("Sales")
+    ws_s.append(["DocNo", "DocDate", "Description", "TaxableAmt"])
+    ws_s.append(["<<New>>", "10/09/2025", "Consulting Sep", 500.0])
+    ws_s.append(["<<New>>", "15/10/2025", "Consulting Oct", 600.0])
+    import io
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_remove_rows_for_month_autocount_docdate_headers():
+    """Regression: AutoCount workbooks use DocDate, not Invoice Date."""
+    xlsx = _make_autocount_workbook_with_months()
+    slack, store = _store_with_workbook(xlsx)
+    ptr_ref = store._pointer_ref("c1", "2026")
+    ptr_ref.set({**(ptr_ref.get().to_dict() or {}), "software": "autocount"})
+
+    result = store.remove_rows_for_month(
+        "c1", "2026", slack, "C1", year=2025, month=9,
+    )
+    assert result["sheets"]["Purchase"] == 2
+    assert result["sheets"]["Sales"] == 1
+    rows = store.read_rows("c1", "2026", slack, "C1")
+    sep_rows = [
+        r for r in rows
+        if r.get("_sheet") in ("Purchase", "Sales")
+        and "09/2025" in str(r.get("DocDate") or r.get("Invoice Date") or "")
+    ]
+    assert sep_rows == []
+
+
 def test_remove_rows_for_month_leaves_other_months_intact():
     xlsx = _make_invoice_workbook_with_months()
     slack, store = _store_with_workbook(xlsx)
