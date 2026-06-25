@@ -1,6 +1,6 @@
 """Tests for the multi-country jurisdiction router + tax reasoning.
 
-Covers the YAU LEE Malaysia session gap (plan Phase 5 §P0):
+Covers the Apex Motor Malaysia session gap (plan Phase 5 §P0):
 
 * ``resolve_jurisdiction`` returns SINGAPORE for SG/SGD profile.
 * ``resolve_jurisdiction`` returns MALAYSIA for MY/MYR profile (with the
@@ -57,8 +57,8 @@ class TestResolveJurisdiction:
         assert res.jurisdiction.standard_rate == pytest.approx(0.09)
         assert res.jurisdiction.flag_for_human is False
 
-    def test_malaysia_jbi_plus_profile(self):
-        """YAU LEE scenario: client=MALAYSIA, base_currency=MYR."""
+    def test_malaysia_acme_profile(self):
+        """Apex Motor scenario: client=MALAYSIA, base_currency=MYR."""
         res = resolve_jurisdiction(
             {"region": "MALAYSIA", "base_currency": "MYR"}
         )
@@ -327,8 +327,8 @@ def _inv_with_one_line(
         invoice_date=inv_date or date(2024, 6, 1),
         our_gst_registered=our_gst,
         supplier=PartyInfo(
-            name="YAU LEE MOTOR",
-            gst_regno="202301011111",
+            name="Apex Motor",
+            gst_regno="200012346A",
             country=supplier_country,
         ),
     )
@@ -337,8 +337,8 @@ def _inv_with_one_line(
 
 
 class TestTaxReasoningLLMPath:
-    def test_yau_lee_malaysia_8pct_sst_passes(self, monkeypatch):
-        """YAU LEE: net=60.19, gst=4.81 (8% SST). Must NOT flag SR 9% mismatch."""
+    def test_apex_motor_malaysia_8pct_sst_passes(self, monkeypatch):
+        """Apex Motor: net=60.19, gst=4.81 (8% SST). Must NOT flag SR 9% mismatch."""
         _install_stub_llm(
             monkeypatch,
             {
@@ -548,7 +548,7 @@ def _build_normalized_for_state(supplier_country: str = "MY"):
         invoice_date=date(2024, 6, 1),
         our_gst_registered=True,
         supplier=PartyInfo(
-            name="YAU LEE MOTOR", gst_regno="202301011111", country=supplier_country,
+            name="Apex Motor", gst_regno="200012346A", country=supplier_country,
         ),
     )
     inv.lines.append(InvoiceLine(description="Workshop labour", net_amount=60.19, gst_amount=4.81))
@@ -582,8 +582,8 @@ class TestTaxNodeWritesJurisdiction:
             "region": "MALAYSIA",
             "base_currency": "MYR",
             "tax_registered": True,
-            "client_id": "jbi-plus-auto",
-            "client_name": "JBI PLUS AUTO SDN BHD",
+            "client_id": "acme-auto",
+            "client_name": "Acme Auto Sdn Bhd",
             "normalized_invoices": [invoice_to_dict(_build_normalized_for_state("MY"))],
         }
         ctx = FakeContext(state)

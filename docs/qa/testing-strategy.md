@@ -160,7 +160,7 @@ kill + relaunch the Socket-Mode bot from HEAD before a live QA pass.
 | 6 | SOA cover + invoices | either | cover page skipped, no phantom rows |
 
 Sample docs live at `~/Desktop/LocalTest/TestDoc/` (copy into `scratch/qa_docs/`
-for browser upload). See the `cast-unity-test-data` memory.
+for browser upload). See the local test-data memory.
 
 ---
 

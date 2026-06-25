@@ -90,9 +90,9 @@ Add `tests/test_erp_golden_format.py`:
    `Import Purchase Invoice.xlsx` row 6, in order, and that `_QTY/_UOM/_UNITPRICE/_ACCOUNT` are
    populated. Same for sales.
 4. Keep the existing synthetic WS5 tests green (tax code values SV-8/SV-6/SV unchanged).
-5. Use the JBI master data as a realistic fixture: `COA & List.xlsx` → Party List "Mapping Code"
+5. Use the Acme master data as a realistic fixture: `COA & List.xlsx` → Party List "Mapping Code"
    column = creditor/debtor code (e.g. `400-A0001`), COA sheet = account codes. Build an
-   EntityMemoryEntry set from it and assert a known JBI vendor (ATOM AUTO SUPPLY SDN BHD →
+   EntityMemoryEntry set from it and assert a known Acme vendor (Bolt Auto Supply Sdn Bhd →
    400-A0001) resolves its code into `CreditorCode`/`CODE`.
 
 Templates are blank format templates, not a client-imported known-good file — so this closes the

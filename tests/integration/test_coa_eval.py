@@ -23,8 +23,9 @@ The ground truth is small but covers the spec's required scenarios:
   - MY vs SG → correct COA, no cross-contamination
   - credit-note → sign-flip preserves code
 
-Data source: a real client COA + Party List workbook the user keeps at
-``~/Desktop/LocalTest/TestDoc/MYDoc/JBI PLUS AUTO ENTERPRISE/COA & List.xlsx``.
+Data source: a real client COA + Party List workbook the user keeps locally
+at ``<local>/TestDoc/MYDoc/<client folder>/COA & List.xlsx`` (real local data,
+not committed).
 The path is read at test time via :data:`_CLIENT_COA_XLSX` and the test
 skips gracefully (the same pattern ``test_erp_golden_format.py`` uses) when
 the data is not on disk. The path is NEVER baked into the test as a
@@ -67,8 +68,15 @@ from invoice_processing.export.client_context import (
 # Privacy: the path is the user's local-test data location. We do NOT
 # name the client anywhere in the test code — the path is structural
 # only. ``_DATA_PRESENT`` gates the tests with pytest.mark.skipif.
-_CLIENT_DATA_ROOT = Path.home() / "Desktop/LocalTest/TestDoc/MYDoc"
-_CLIENT_COA_XLSX = _CLIENT_DATA_ROOT / "JBI PLUS AUTO ENTERPRISE/COA & List.xlsx"
+import os as _os
+
+_CLIENT_DATA_ROOT = Path(
+    _os.getenv("LEDGR_LOCAL_DATA_ROOT", str(Path.home() / "Desktop/LocalTest"))
+) / "TestDoc/MYDoc"
+# Client folder supplied at runtime (real local data, not committed);
+# defaults to a generic placeholder so no client name is baked into the path.
+_CLIENT_FOLDER = _os.getenv("LEDGR_CLIENT_FOLDER", "Acme Auto Enterprise")
+_CLIENT_COA_XLSX = _CLIENT_DATA_ROOT / _CLIENT_FOLDER / "COA & List.xlsx"
 
 _DATA_PRESENT = _CLIENT_COA_XLSX.exists()
 
@@ -134,7 +142,7 @@ _SYNTHETIC_ENTITY_MEMORY: list[EntityMemoryEntry] = [
 ]
 
 _SYNTHETIC_CATEGORY_MAPPING: dict[str, Optional[str]] = {
-    # Universal category → client code. Uses real codes from the JBI COA
+    # Universal category → client code. Uses real codes from the Acme COA
     # (909-R01 RENTAL EXPENSES, 903-B01 BANK CHARGES, etc.). Generic
     # category names; the values are account numbers, not private data.
     "office_rent": "909-R01",
@@ -164,7 +172,7 @@ class CoaScenario:
 
 
 # Ground-truth scenarios. Generic descriptions only — no real vendor names.
-# The expected_code values reference COA codes that exist in the JBI COA
+# The expected_code values reference COA codes that exist in the Acme COA
 # workbook (LAND = 200-010, BUILDING = 200-020, etc.); the test will skip
 # if the workbook is missing. Codes are account numbers, not private data.
 GROUND_TRUTH: list[CoaScenario] = [
@@ -219,7 +227,7 @@ GROUND_TRUTH: list[CoaScenario] = [
         notes="Salary must NOT silently book a code — the only path is blank+flag.",
     ),
     # 6) brand-new vendor with a clear description.
-    # Note: the JBI local COA has empty 'AI Search Keywords' columns, so the
+    # Note: the Acme local COA has empty 'AI Search Keywords' columns, so the
     # keyword-match path doesn't fire. We model the "new vendor with clear
     # description" case via entity-memory for a known cleaning vendor
     # (which is what the production code path would look like in practice —

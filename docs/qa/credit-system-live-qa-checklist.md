@@ -3,7 +3,7 @@
 **Spec:** [docs/superpowers/specs/2026-06-17-slack-credit-system-design.md](../superpowers/specs/2026-06-17-slack-credit-system-design.md)  
 **Requirement matrix:** Spec §7 (R1–R15) + R16 (alerts, this doc)
 
-Run after each implementation slice and before Cast Unity (or any contract customer) go-live.
+Run after each implementation slice and before Northwind Advisory (or any contract customer) go-live.
 
 > **Reconciled 2026-06-20 (ADR-0016 governs; plan: `../superpowers/plans/2026-06-20-slack-credit-system.md`).**
 > The credit model is now: Firm = workspace `team_id`; flat balance (no FIFO buckets);

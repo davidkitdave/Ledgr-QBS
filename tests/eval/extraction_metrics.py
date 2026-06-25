@@ -36,14 +36,14 @@ _EVALSET_PATH = _REPO_ROOT / "tests" / "eval" / "datasets" / "ledgr.evalset.json
 
 # Local test PDF root — structural path only; no client data in repo.
 _CLIENT_DATA_ROOT = pathlib.Path.home() / "Desktop/LocalTest/TestDoc/MYDoc"
-_CLIENT_PDF_ROOT = _CLIENT_DATA_ROOT / "JBI PLUS AUTO ENTERPRISE"
+_CLIENT_PDF_ROOT = _CLIENT_DATA_ROOT / "Acme Auto Enterprise"
 
 # Scenario key → relative PDF under _CLIENT_PDF_ROOT (local machine only).
 SCENARIO_PDF_RELATIVE: dict[str, str] = {
-    "multi_invoice_regression": "Purchase/M PREMIUM EURO PARTS - DEC 2025.pdf",
-    "soa_embedded_eleven": "Purchase/ATOM - DEC 2025_.pdf",
-    "soa_skip_cover_six": "Purchase/AUTO LAB - DEC 2025_.pdf",
-    "single_summary_invoice": "Purchase/GDEX - DEC 2025 - GDBA3838384.pdf",
+    "multi_invoice_regression": "Purchase/Prime Euro Parts - DEC 2025.pdf",
+    "soa_embedded_eleven": "Purchase/Bolt Auto Supply - DEC 2025_.pdf",
+    "soa_skip_cover_six": "Purchase/Gearbox Lab - DEC 2025_.pdf",
+    "single_summary_invoice": "Purchase/Swift Courier - DEC 2025 - SWFT0000000.pdf",
     "non_english_doc": "中国订货 - DEC 2025_.pdf",
 }
 

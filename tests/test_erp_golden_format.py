@@ -10,7 +10,7 @@ reverse-engineered from:
 Also validates:
   - Mandatory AutoCount columns populated for a fully-mapped line
   - SQL REQUIRED columns (_QTY/_UOM/_UNITPRICE/_ACCOUNT) populated
-  - JBI COA Party List: ATOM AUTO SUPPLY SDN BHD → creditor code 400-A0001
+  - Acme COA Party List: Bolt Auto Supply Sdn Bhd → creditor code 400-A0001
 """
 
 from __future__ import annotations
@@ -35,9 +35,15 @@ from invoice_processing.export.tax_classifier import get_tax_classifier
 MY_CLF = get_tax_classifier("my_sst.yaml")
 
 # Real template paths — tests skip gracefully when running in CI without the local files.
-_AUTOCOUNT_DIR = Path.home() / "Desktop/LocalTest/header template/Autocount Template"
-_SQL_DIR = Path.home() / "Desktop/LocalTest/header template/SQL Header"
-_JBI_COA = Path.home() / "Desktop/LocalTest/TestDoc/MYDoc/JBI PLUS AUTO ENTERPRISE/COA & List.xlsx"
+# The client folder segment is supplied at runtime (real local data, not committed);
+# defaults to a generic placeholder so no client name lives in the path literal.
+import os as _os
+
+_LOCAL_DATA_ROOT = Path(_os.getenv("LEDGR_LOCAL_DATA_ROOT", str(Path.home() / "Desktop/LocalTest")))
+_CLIENT_FOLDER = _os.getenv("LEDGR_CLIENT_FOLDER", "Acme Auto Enterprise")
+_AUTOCOUNT_DIR = _LOCAL_DATA_ROOT / "header template/Autocount Template"
+_SQL_DIR = _LOCAL_DATA_ROOT / "header template/SQL Header"
+_CLIENT_COA = _LOCAL_DATA_ROOT / "TestDoc/MYDoc" / _CLIENT_FOLDER / "COA & List.xlsx"
 
 _TEMPLATES_PRESENT = (
     (_AUTOCOUNT_DIR / "Import-AP-Invoice.xls").exists()
@@ -71,7 +77,7 @@ _SQL_REQUIRED = [
 def _make_purchase_inv(
     *,
     inv_date: date = date(2024, 6, 1),
-    vendor: str = "ATOM AUTO SUPPLY SDN BHD",
+    vendor: str = "Bolt Auto Supply Sdn Bhd",
     reg_no: str | None = None,
     net: float = 1000.0,
     gst: float = 80.0,
@@ -81,7 +87,7 @@ def _make_purchase_inv(
 ) -> NormalizedInvoice:
     inv = NormalizedInvoice(
         doc_type="purchase",
-        invoice_number="INV-JBI-001",
+        invoice_number="INV-CLIENT-001",
         invoice_date=inv_date,
         our_gst_registered=True,
         currency="MYR",
@@ -265,7 +271,7 @@ class TestAutoCountMandatoryColumns:
         inv = _make_purchase_inv()
         exporter = AutoCountExporter(classifier=MY_CLF)
         rows = exporter.rows([inv], "purchase")
-        assert rows[0]["SupplierInvoiceNo"] == "INV-JBI-001"
+        assert rows[0]["SupplierInvoiceNo"] == "INV-CLIENT-001"
 
     def test_ap_taxable_amt_equals_net_amount(self):
         """TaxableAmt = line net (AutoCount derives tax from TaxType × TaxableAmt)."""
@@ -375,18 +381,18 @@ class TestSqlAccountHeader:
 
 
 # ---------------------------------------------------------------------------
-# JBI fixture: Party List creditor code resolution
+# Acme fixture: Party List creditor code resolution
 # ---------------------------------------------------------------------------
 
-class TestJBICreditorResolution:
-    """Build EntityMemoryEntry set from JBI COA & List.xlsx and assert code resolution."""
+class TestClientCreditorResolution:
+    """Build EntityMemoryEntry set from Acme COA & List.xlsx and assert code resolution."""
 
-    @pytest.mark.skipif(not _JBI_COA.exists(), reason="JBI COA not on this machine")
-    def test_atom_auto_supply_resolves_to_400_A0001(self):
-        """ATOM AUTO SUPPLY SDN BHD (Creditor) must resolve to 400-A0001."""
+    @pytest.mark.skipif(not _CLIENT_COA.exists(), reason="Acme COA not on this machine")
+    def test_bolt_auto_supply_resolves_to_400_A0001(self):
+        """Bolt Auto Supply Sdn Bhd (Creditor) must resolve to 400-A0001."""
         from invoice_processing.export.code_resolver import resolve_creditor_code
 
-        wb = load_workbook(str(_JBI_COA))
+        wb = load_workbook(str(_CLIENT_COA))
         ws = wb["Party List"]
         headers = [ws.cell(row=1, column=c).value for c in range(1, ws.max_column + 1)]
         name_col = headers.index("Name") + 1
@@ -404,17 +410,17 @@ class TestJBICreditorResolution:
                     )
                 )
 
-        code = resolve_creditor_code("ATOM AUTO SUPPLY SDN BHD", None, memory)
+        code = resolve_creditor_code("Bolt Auto Supply Sdn Bhd", None, memory)
         assert code == "400-A0001", (
-            f"Expected creditor code '400-A0001' for ATOM AUTO SUPPLY SDN BHD, got {code!r}"
+            f"Expected creditor code '400-A0001' for Bolt Auto Supply Sdn Bhd, got {code!r}"
         )
 
-    @pytest.mark.skipif(not _JBI_COA.exists(), reason="JBI COA not on this machine")
-    def test_jbi_creditor_code_in_autocount_row(self):
-        """With JBI entity memory loaded, AutoCount AP row has CreditorCode=400-A0001."""
+    @pytest.mark.skipif(not _CLIENT_COA.exists(), reason="Acme COA not on this machine")
+    def test_client_creditor_code_in_autocount_row(self):
+        """With Acme entity memory loaded, AutoCount AP row has CreditorCode=400-A0001."""
         from invoice_processing.export.code_resolver import resolve_creditor_code
 
-        wb = load_workbook(str(_JBI_COA))
+        wb = load_workbook(str(_CLIENT_COA))
         ws = wb["Party List"]
         headers = [ws.cell(row=1, column=c).value for c in range(1, ws.max_column + 1)]
         name_col = headers.index("Name") + 1
@@ -435,11 +441,11 @@ class TestJBICreditorResolution:
         # Build inv WITHOUT pre-setting vendor_code so resolution goes through entity memory
         inv = NormalizedInvoice(
             doc_type="purchase",
-            invoice_number="INV-ATOM-001",
+            invoice_number="INV-BOLT-001",
             invoice_date=date(2024, 6, 1),
             our_gst_registered=True,
             currency="MYR",
-            supplier=PartyInfo(name="ATOM AUTO SUPPLY SDN BHD", country="MY"),
+            supplier=PartyInfo(name="Bolt Auto Supply Sdn Bhd", country="MY"),
         )
         inv.lines.append(
             InvoiceLine(
@@ -506,7 +512,7 @@ class TestMAP1AmountIsLineNetNotUnitPrice:
     With `InclusiveTax=F` (always emitted), the AutoCount `Amount` column and the
     SQL Account `_AMOUNT` column are the **tax-exclusive line net** — the value
     posted to the GL `AccNo` / `_ACCOUNT(10)`. Mapping them to `unit_price` (= net
-    ÷ qty) understated the ledger by the qty factor for any qty>1 line. JBI lines
+    ÷ qty) understated the ledger by the qty factor for any qty>1 line. Acme lines
     are mostly qty=1 so the bug was masked; this test guards the fix.
     """
 

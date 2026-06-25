@@ -2196,11 +2196,11 @@ def test_single_file_coordinator_flushes_workbook_to_slack(monkeypatch):
     deferred = {
         "summary": "Added",
         "payload": {
-            "client_id": "c-akar",
+            "client_id": "c-cobalt",
             "fy": "2024",
             "kind": "bank",
             "software": "qbs",
-            "client_name": "Akar Enterprises Pte. Ltd.",
+            "client_name": "Cobalt Enterprises Pte. Ltd.",
         },
         "batches": [
             {
@@ -2265,7 +2265,7 @@ def test_single_file_re_drop_all_deduped_shows_delivery_preview_and_callout(monk
     store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
     doc_key = "DBS Bank Ltd - 5545 - SGD:5545:SGD:01 Apr 2024 - 30 Apr 2024"
     store.append_rows(
-        client_id="c-akar", fy="2024", slack_client=slack, channel_id="C-redrop",
+        client_id="c-cobalt", fy="2024", slack_client=slack, channel_id="C-redrop",
         kind="bank",
         batches=[{
             "sheet": "DBS Bank Ltd - 5545 - SGD",
@@ -2286,8 +2286,8 @@ def test_single_file_re_drop_all_deduped_shows_delivery_preview_and_callout(monk
     deferred = {
         "summary": "Added",
         "payload": {
-            "client_id": "c-akar", "fy": "2024", "kind": "bank",
-            "software": "qbs", "client_name": "Akar",
+            "client_id": "c-cobalt", "fy": "2024", "kind": "bank",
+            "software": "qbs", "client_name": "Cobalt",
         },
         "batches": [{
             "sheet": "DBS Bank Ltd - 5545 - SGD",

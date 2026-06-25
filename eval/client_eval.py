@@ -528,8 +528,10 @@ def _print_overall(reports: list[ClientReport]) -> None:
 # --------------------------------------------------------------------------- #
 # __main__
 # --------------------------------------------------------------------------- #
+# Placeholder default roster. Real client names are supplied at runtime via
+# the --clients flag (real local data, not committed to the repo).
 _DEFAULT_CLIENTS = (
-    "DMTV Global Pte Ltd,"
+    "Sample Client Pte Ltd,"
     "Orange Perspective Consulting Pte. Ltd.,"
     "Sanesea Shipping  Pte. Ltd."
 )

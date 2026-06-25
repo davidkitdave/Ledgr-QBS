@@ -11,7 +11,7 @@ cross-border document** — a foreign-supplier invoice for a local client — un
 stopped for HITL. `resolve_jurisdiction` hardcoded `flag_for_human=True` on both
 cross-border branches, and `tax_reasoning._reason_one_invoice` then forced every line to
 `tax_flagged=True` with the reason *"(no jurisdiction rule); HITL review required"*. A
-Malaysian client receiving a Singapore StarHub bill (which shows explicit 9% SG GST) was
+Malaysian client receiving a Singapore TelcoTwo bill (which shows explicit 9% SG GST) was
 flagged on both lines and blocked.
 
 We grounded the correct behaviour in primary tax guidance (IRAS e-Tax Guides for SG GST;
@@ -58,7 +58,7 @@ Make cross-border handling **intelligent, not rigid**:
 ## Consequences
 
 - Routine cross-border purchases (overseas SaaS, telco, vendors) auto-book and deliver — the
-  manual bottleneck the QA flagged is gone. Live-verified: the MY-client StarHub bill went from
+  manual bottleneck the QA flagged is gone. Live-verified: the MY-client TelcoTwo bill went from
   a HITL stop (2 flagged lines) to `CROSS_BORDER/OS`, `flagged_lines=0`, `auto_approved`,
   delivered.
 - A partially-exempt SG client still gets the reverse-charge review (set `partial_exempt=True`

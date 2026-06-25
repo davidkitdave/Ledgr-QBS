@@ -415,7 +415,7 @@ def test_bank_node_multi_account_list():
 def test_consolidate_node_bank_sheet_titles_multi_currency():
     """consolidate_node emits distinct 'Bank - XXXX - CCY' sheet names per currency.
 
-    Regression for the Akar DBS FY2024 case: a multi-currency statement of
+    Regression for the Cobalt DBS FY2024 case: a multi-currency statement of
     one account used to collapse into a single Excel tab because the sheet
     name was the LLM-supplied ``bank_name`` (no currency suffix). The merge
     in ``SlackLedgerStore._merge_bank_statement`` then silently rolled the

@@ -18,8 +18,8 @@ The output is a checklist suitable for pasting into an ADK web QA log.
 Run::
 
     .venv/bin/python -m accounting_agents.adk_web_qa \\
-        --pdf scratch/yau_lee_motor_receipt.pdf \\
-        --output docs/qa/qa_session_yau_lee.md
+        --pdf scratch/apex_motor_receipt.pdf \\
+        --output docs/qa/qa_session_my_receipt.md
 """
 
 from __future__ import annotations
@@ -356,7 +356,7 @@ def _default_client_state() -> dict:
         "entity_memory": [
             {
                 "name": "Generic MY Vendor",
-                "reg_no": "202301011111",
+                "reg_no": "201234567A",
                 "mapping_code": "500-020",
                 "role": "Creditor",
                 "tax_code": "SR",
@@ -371,19 +371,19 @@ def main():
     )
     parser.add_argument(
         "--pdf",
-        default="scratch/yau_lee_motor_receipt.pdf",
-        help="Path to the PDF to process (default: scratch/yau_lee_motor_receipt.pdf)",
+        default="scratch/apex_motor_receipt.pdf",
+        help="Path to the PDF to process (default: scratch/apex_motor_receipt.pdf)",
     )
     parser.add_argument(
         "--output",
-        default="docs/qa/qa_session_yau_lee.md",
-        help="Markdown file to write the per-view checklist (default: docs/qa/qa_session_yau_lee.md)",
+        default="docs/qa/qa_session_my_receipt.md",
+        help="Markdown file to write the per-view checklist (default: docs/qa/qa_session_my_receipt.md)",
     )
     parser.add_argument(
         "--client-state",
         default=None,
         help="JSON file with the client profile (region/base_currency/COA/etc). "
-        "Defaults to JBI PLUS / MALAYSIA / MYR.",
+        "Defaults to Acme Auto / MALAYSIA / MYR.",
     )
     args = parser.parse_args()
 

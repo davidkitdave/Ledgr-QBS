@@ -461,7 +461,7 @@ class TestMySstMultiRate:
       invoice_date=date(2024, 6, 1),
       our_gst_registered=True,
       tax_visible_on_document=True,
-      supplier=PartyInfo(gst_regno="202301011111", country="MY"),
+      supplier=PartyInfo(gst_regno="200012346A", country="MY"),
     )
     inv.lines.append(
       InvoiceLine(description="Workshop labour", net_amount=100.0, gst_amount=8.0)
@@ -478,7 +478,7 @@ class TestMySstMultiRate:
       invoice_date=date(2024, 6, 1),
       our_gst_registered=True,
       tax_visible_on_document=True,
-      supplier=PartyInfo(gst_regno="202301011111", country="MY"),
+      supplier=PartyInfo(gst_regno="200012346A", country="MY"),
     )
     inv.lines.append(
       InvoiceLine(
@@ -500,7 +500,7 @@ class TestMySstMultiRate:
         invoice_date=date(2024, 6, 1),
         our_gst_registered=True,
         tax_visible_on_document=True,
-        supplier=PartyInfo(gst_regno="202301011111", country="MY"),
+        supplier=PartyInfo(gst_regno="200012346A", country="MY"),
       )
       inv.lines.append(
         InvoiceLine(description=desc, net_amount=100.0, gst_amount=gst)
@@ -549,7 +549,7 @@ class TestMyDualBandAccepted:
             invoice_date=date(2025, 12, 1),  # post 2025-07-01 dual-rate regime
             our_gst_registered=True,
             tax_visible_on_document=True,
-            supplier=PartyInfo(gst_regno="202301011111", country="MY"),
+            supplier=PartyInfo(gst_regno="200012346A", country="MY"),
         )
         line = InvoiceLine(description=desc, net_amount=net, gst_amount=gst)
         inv.lines.append(line)

@@ -33,11 +33,13 @@ from invoice_processing.extract.bank_statement_extractor import (
 _bank_eval_dir = os.getenv("LEDGR_BANK_EVAL_DIR", "")
 BASE_DIR = Path(_bank_eval_dir) if _bank_eval_dir else Path(".")
 
+# Placeholder client roster. Real client names are supplied at runtime via
+# the --clients flag (real local data, not committed to the repo).
 CLIENTS = [
     "AAAC GALLERY PRIVATELIMITED",
     "Sample Bank Client Pte Ltd",
     "Bfit Life Pte Ltd",
-    "DMTV Global Pte Ltd",
+    "Sample Client Pte Ltd",
     "Envistore Pte. Ltd.",
     "Orange Perspective Consulting Pte. Ltd.",
     "Sample Co Pte Ltd",

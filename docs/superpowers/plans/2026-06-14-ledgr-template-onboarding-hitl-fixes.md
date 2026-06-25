@@ -66,7 +66,7 @@ def test_profile_state_delta_includes_software_and_coa():
             assert channel_id == "C1"
             return ClientContext(
                 client_id="CL-1",
-                client_name="Acme Client Pte. Ltd.",
+                client_name="Acme Customer Pte Ltd",
                 accounting_software="Xero",
                 fye_month=10,
                 coa=[CoaAccount(key="k", code="6010", description="Travel",
@@ -301,13 +301,13 @@ def _flat_text(blocks):
 
 def test_profile_summary_shows_all_registered_fields():
     blocks = profile_summary_blocks({
-        "client_name": "Acme Client Pte. Ltd.",
+        "client_name": "Acme Customer Pte Ltd",
         "accounting_software": "Xero",
         "fye_month": 10,
         "gst_registered": False,
     })
     text = _flat_text(blocks)
-    assert "Acme Client Pte. Ltd." in text
+    assert "Acme Customer Pte Ltd" in text
     assert "Xero" in text
     assert "October" in text          # fye_month 10 -> month name
     assert "Not GST-registered" in text
@@ -370,7 +370,7 @@ def test_onboarding_posts_profile_summary_then_coa_prompt():
         def set_channel(self, cid, clid): pass
 
     body = _make_submit_body(  # existing helper building a view_submission body
-        client_name="Acme Client Pte. Ltd.",
+        client_name="Acme Customer Pte Ltd",
         fye_month="10", accounting_software="Xero", gst_value="no",
         channel_id="C1",
     )
@@ -477,7 +477,7 @@ def test_ledgr_profile_posts_summary():
 
     class _Store:
         def get_by_channel(self, cid):
-            return ClientContext(client_id="CL-1", client_name="Acme Client Pte. Ltd.",
+            return ClientContext(client_id="CL-1", client_name="Acme Customer Pte Ltd",
                                  accounting_software="Xero", fye_month=10, tax_registered=False)
 
     handle_ledgr_command(ack=lambda: None,
@@ -488,7 +488,7 @@ def test_ledgr_profile_posts_summary():
         for call in posted for blk in call.get("blocks", [])
         if isinstance(blk.get("text"), dict)
     )
-    assert "Acme Client Pte. Ltd." in joined and "Xero" in joined
+    assert "Acme Customer Pte Ltd" in joined and "Xero" in joined
 ```
 
 - [ ] **Step 6: Run it to verify it fails**

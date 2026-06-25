@@ -32,7 +32,7 @@ This spec defines hierarchy, Firestore schema, install→grant→use flows, prob
 ## Goals
 
 1. **Install → account:** OAuth install creates a Firm (installer Slack user) and links workspace → firm.
-2. **Grant:** Operator can pre-provision credits (Cast Unity) or grant after payment (pay-first).
+2. **Grant:** Operator can pre-provision credits (Northwind Advisory) or grant after payment (pay-first).
 3. **Gate:** Lightweight credit probe before expensive pipeline; block when balance insufficient.
 4. **Charge:** Deduct credits only when documents are **written to the ledger** (delivery), not on chat or failed/rejected/deduped paths.
 5. **Visibility:** Passive job footers, `/ledgr credits`, and **App Home** dashboard (per-firm personalized).
@@ -58,7 +58,7 @@ This spec defines hierarchy, Firestore schema, install→grant→use flows, prob
 | 4 | **Two-phase billing:** probe quote (gate) → delivery charge (authoritative) |
 | 5 | **Billable unit** matches CONTEXT: invoice/receipt = 1 per unique doc written; bank = 1 per page written; dedup/reject = 0 |
 | 6 | **Install link for paying customers:** `{SLACK_BASE_URL}/slack/install?ref={INVITE}` (not Slack Manage Distribution URL alone) |
-| 7 | **Pre-provisioned invite** auto-grants on install (Cast Unity); pay-first stays `pending_credits` until operator grant |
+| 7 | **Pre-provisioned invite** auto-grants on install (Northwind Advisory); pay-first stays `pending_credits` until operator grant |
 | 8 | **App Home** is MVP for credit dashboard (not Phase 2) |
 | 9 | **Users may install before credit code ships** — backfill firm + grant later; no reinstall required |
 
@@ -141,18 +141,18 @@ clients/{channelId}
 
 | Link | Source | Credits on install |
 |------|--------|-------------------|
-| **Recommended** | `https://ledgr-640071771526.asia-southeast1.run.app/slack/install?ref=CAST-UNITY-2026` | Auto-grant if invite exists |
+| **Recommended** | `https://ledgr-640071771526.asia-southeast1.run.app/slack/install?ref=NORTHWIND-2026` | Auto-grant if invite exists |
 | Slack Shareable URL | api.slack.com → Manage Distribution | Manual grant only |
 | No ref | `…/slack/install` | `pending_credits` |
 
 Production base URL: Cloud Run `SLACK_BASE_URL`. Redirect: `…/slack/oauth_redirect`.
 
-### 3.2 Mode A — Pre-provisioned (Cast Unity)
+### 3.2 Mode A — Pre-provisioned (Northwind Advisory)
 
-1. Operator: `create_install_invite.py --ref CAST-UNITY-2026 --credits 60000 --label "Cast Unity"`
-2. Send link with `?ref=CAST-UNITY-2026`
+1. Operator: `create_install_invite.py --ref NORTHWIND-2026 --credits 60000 --label "Northwind Advisory"`
+2. Send link with `?ref=NORTHWIND-2026`
 3. Customer OAuth Allow → `ensure_firm_on_install` → auto-grant → welcome DM → operator notify
-4. Verify: `list_firms.py --ref CAST-UNITY-2026` or Firestore `firms/{U}/credits/balance`
+4. Verify: `list_firms.py --ref NORTHWIND-2026` or Firestore `firms/{U}/credits/balance`
 
 ### 3.3 Mode B — Pay-first
 
@@ -284,7 +284,7 @@ Use this table in review sessions. Mark Pass/Fail in [credit-system-live-qa-chec
 | R11 | App Home shows balance | — | QA-F1 |
 | R12 | `/ledgr credits` ephemeral master/channel | `test_app_commands` | QA-F3–F4 |
 | R13 | Ledger has channel + balance_after | `test_credits_report` | QA-D2 |
-| R14 | Cast Unity 60k end-to-end | — | QA-G |
+| R14 | Northwind Advisory 60k end-to-end | — | QA-G |
 | R15 | Backfill works for pre-install users | manual script | §3.4 manual |
 
 **Automated gate (before live QA):**
@@ -323,6 +323,6 @@ pytest tests/test_credit_service.py tests/test_billing.py tests/test_credit_prob
 | Operator (grant flow) | | | 2 |
 | Engineering (automated) | | | 1–5 |
 | Live QA (Slack + Firestore) | | | A–G |
-| Cast Unity dry run | | | G |
+| Northwind Advisory dry run | | | G |
 
 **Ready for production customer when:** QA-G pass + R1–R14 verified + ADR-0013 merged.

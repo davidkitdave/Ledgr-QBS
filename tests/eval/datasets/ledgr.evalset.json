@@ -1611,14 +1611,14 @@
     },
 
     {
-      "eval_id": "F12_MY_receipt_yau_lee_sst",
-      "description": "YAU LEE MOTOR Malaysia SST 8% receipt — Phase 8 / multi-country eval. The YAU LEE ADK session (c92951d1) wrongly flagged a valid Malaysia 8% SST line as a Singapore 9% GST mismatch. After the LLM tax reasoner + jurisdiction router, the line must resolve to SR with confidence >= 0.8 and tax_flagged=false.",
+      "eval_id": "F12_MY_receipt_apex_motor_sst",
+      "description": "Apex Motor Malaysia SST 8% receipt — Phase 8 / multi-country eval. The Apex Motor ADK session (c92951d1) wrongly flagged a valid Malaysia 8% SST line as a Singapore 9% GST mismatch. After the LLM tax reasoner + jurisdiction router, the line must resolve to SR with confidence >= 0.8 and tax_flagged=false.",
       "session_input": {
         "app_name": "accounting_agents",
         "user_id": "eval_user",
         "state": {
-          "client_id": "jbi-plus-auto",
-          "client_name": "JBI PLUS AUTO SDN BHD",
+          "client_id": "acme-auto",
+          "client_name": "Acme Auto Sdn Bhd",
           "client_uen": "202401012345",
           "region": "MALAYSIA",
           "base_currency": "MYR",
@@ -1632,8 +1632,8 @@
           ],
           "entity_memory": [
             {
-              "name": "YAU LEE MOTOR",
-              "reg_no": "202301011111",
+              "name": "Apex Motor",
+              "reg_no": "200012346A",
               "mapping_code": "500-020",
               "role": "Creditor",
               "tax_code": "SR"
@@ -1649,7 +1649,7 @@
             "role": "user",
             "parts": [
               {
-                "text": "YAU LEE MOTOR issued a Malaysia workshop receipt to JBI PLUS AUTO. Net 60.19 MYR, Service Tax 4.81 (8% SST), Total 65.00. Source: ${LEDGR_TEST_DOC_DIR}/receipts/yau_lee_motor_receipt.pdf. Confirm direction, tax jurisdiction, and per-line treatment."
+                "text": "Apex Motor issued a Malaysia workshop receipt to Acme Auto. Net 60.19 MYR, Service Tax 4.81 (8% SST), Total 65.00. Source: ${LEDGR_TEST_DOC_DIR}/receipts/apex_motor_receipt.pdf. Confirm direction, tax jurisdiction, and per-line treatment."
               }
             ]
           },
@@ -1669,8 +1669,8 @@
       ],
       "test_document": {
         "doc_kind": "receipt",
-        "from_party": {"name": "YAU LEE MOTOR", "country": "MY", "role": "issuer"},
-        "to_party": {"name": "JBI PLUS AUTO SDN BHD", "country": "MY", "role": "recipient"},
+        "from_party": {"name": "Apex Motor", "country": "MY", "role": "issuer"},
+        "to_party": {"name": "Acme Auto Sdn Bhd", "country": "MY", "role": "recipient"},
         "lines": [
           {"description": "Workshop labour", "net_amount": 60.19, "gst_amount": 4.81, "tax_keyword": null}
         ],
@@ -1684,7 +1684,7 @@
         "_eval_assertions": {
           "tax_jurisdiction": "MALAYSIA",
           "tax_system": "SST",
-          "expected_outcome": "per-line tax_treatment=SR with tax_flagged=false; 4.81 / 60.19 = 7.99% within 1% of MY 8% SST band; no SG 9% mismatch flag; account_code=500-020 (YAU LEE entity memory match)"
+          "expected_outcome": "per-line tax_treatment=SR with tax_flagged=false; 4.81 / 60.19 = 7.99% within 1% of MY 8% SST band; no SG 9% mismatch flag; account_code=500-020 (Apex Motor entity memory match)"
         }
       }
     },

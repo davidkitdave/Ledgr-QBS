@@ -20,7 +20,7 @@ thing we'll keep hitting" to design out.
 
 | ID | Sev | Finding | Where |
 |----|-----|---------|-------|
-| A1 | **HIGH** | Default "Understand" path makes ONE Gemini call → flat `DocumentLedgerExtract` (no `documents[]` list) → wrapped in **list-of-1**. A multi-invoice PDF loses N-1 invoices. **Confirmed live: M PREMIUM 2→1 (RM60 dropped).** | `process_invoice_document.py:171`; `ledger_extract.py:358` |
+| A1 | **HIGH** | Default "Understand" path makes ONE Gemini call → flat `DocumentLedgerExtract` (no `documents[]` list) → wrapped in **list-of-1**. A multi-invoice PDF loses N-1 invoices. **Confirmed live: Prime Euro Parts 2→1 (RM60 dropped).** | `process_invoice_document.py:171`; `ledger_extract.py:358` |
 | A2 | **HIGH** | Prompt forces **bookkeeper-summary granularity** ("ledger_lines… not every itemized row"; "Produce the SMALL set of summary lines"). The JSON is lossy before any mapping — contradicts "exactly as printed". | `ledger_extract.py:67`; `invoice_extractor.py:140` |
 | A3 | MED | Multi-document schemas ALREADY EXIST but are **dead code** on the live path: `ExtractedInvoiceBundle.invoices: list`, `DocumentRecordBundle.documents: list`, `DocumentRecord.line_items` ("do NOT collapse"). `EXTRACT_BUNDLE_FN` is wired but never called. | `nodes.py:364`; `document_record.py:63` |
 
@@ -66,7 +66,7 @@ flag for review**, or use an explicit client-profile value — never a literal.
 | ID | Sev | Finding | Where |
 |----|-----|---------|-------|
 | D1 | **CRIT** | `tax_classifier` defaults to **SG GST** (`sg_gst.yaml`) on ANY unresolved jurisdiction (`get_tax_classifier(None)`, unknown region → SG). An MY doc whose `reference_yaml` is lost gets SG codes + 9% guards. | `tax_classifier.py:24,66,69,80,114`; `nodes.py:2025` |
-| D2 | **HIGH** | `AccNo` (GL account) defaults to the **creditor code** when no COA resolves → posts expense to the AP control account. **Confirmed live: M PREMIUM AccNo=400-M0001.** | account-mapping path (categorize → exporter) |
+| D2 | **HIGH** | `AccNo` (GL account) defaults to the **creditor code** when no COA resolves → posts expense to the AP control account. **Confirmed live: Prime Euro Parts AccNo=400-M0001.** | account-mapping path (categorize → exporter) |
 | D3 | **HIGH** | Unknown `software` → **`qbs`** in 6+ scattered sites (some warn, most silent). A Xero/AutoCount client whose display-string didn't normalize exports as QBS columns. | `nodes.py:1801,2018`; `app/blocks.py:39`; `slack_runner.py:817,1040,1262,1318` |
 | D4 | **HIGH** | `_classify_sales` defaults every unmatched line to **SR @ 0.9 conf, not flagged** — books output tax not on the document. | `tax_classifier.py:503` |
 | D5 | MED | `is_overseas` property **hardcodes SG** home country; any caller using it treats MY suppliers as overseas. (Deprecated in its own docstring, still callable.) | `models.py:37` |
@@ -99,7 +99,7 @@ The deterministic mapping is the right architecture, but several call sites **by
 
 | ID | Sev | Finding | Where |
 |----|-----|---------|-------|
-| MAP1 | **CRIT** | AutoCount `Amount` & SQL `_AMOUNT` map to **`unit_price` (= net ÷ qty)**, not the line net. Any **qty > 1** line imports a value divided by qty → ledger understated. (Masked today: JBI lines are mostly qty 1.) **Verified:** `exporters.py:392` + `autocount.yaml:96`. | `autocount.yaml`/`sql_account.yaml` `*_fields`; `exporters.py:392` |
+| MAP1 | **CRIT** | AutoCount `Amount` & SQL `_AMOUNT` map to **`unit_price` (= net ÷ qty)**, not the line net. Any **qty > 1** line imports a value divided by qty → ledger understated. (Masked today: Acme lines are mostly qty 1.) **Verified:** `exporters.py:392` + `autocount.yaml:96`. | `autocount.yaml`/`sql_account.yaml` `*_fields`; `exporters.py:392` |
 | MAP2 | **HIGH** | `compose_confident_note` reads `row.get("Net Amount")` / `row.get("Currency")` — **no exporter emits those keys** → the "reconciles to $X" total is always blank. Half-patched: account-code lookup was made profile-aware, amount/currency was not. | `nodes.py:2250,2256` |
 | MAP3 | **HIGH** | `_build_preview_rows` + `collect_export_unmapped_summary` use long `or row.get(...)` header guess-chains that **omit AutoCount/SQL headers** (returns blank date/account/net for profile ERPs; needs an append per new ERP). | `slack_runner.py:1397`; `exporters.py:616` |
 | MAP4 | MED | Xero `Total` written onto **every** line of a multi-line invoice (grand-total repeated N times). | `exporters.py:282` |
@@ -128,7 +128,7 @@ Violates the project's "no real client/vendor data in repo" rule AND overfits be
 | ID | Sev | Finding | Where |
 |----|-----|---------|-------|
 | P1 | MED | Hardcoded client/vendor reference-format regexes: `AAI-\d{2}-\d{3}`, `^(IA|CNA)-\d+$`, `^\d{2}-D\d{2}$` drive merge/SOA-drop decisions. A different firm's refs don't match. | `record_merge.py:25,58`; `document_normalizer.py:45` |
-| P2 | MED | The "**YAU LEE** Malaysia receipt was wrongly processed under SG GST" anecdote is quoted in 3 extraction prompts (real vendor name + overfit rule). | `ledger_extract.py:79`; `invoice_extractor.py:84,172` |
+| P2 | MED | The "**Apex Motor** Malaysia receipt was wrongly processed under SG GST" anecdote is quoted in 3 extraction prompts (real vendor name + overfit rule). | `ledger_extract.py:79`; `invoice_extractor.py:84,172` |
 | P3 | LOW | SOA "phantom" drop uses an English sentinel set (`{"","INVOICE","INVOICES"}`) + invoice-ref regex `^[A-Z]{2,5}-\d{3,6}$` — can drop a REAL one-line invoice or miss a differently-phrased SOA. | `invoice_extractor.py:554`; `document_normalizer.py:604` |
 
 **Fix:** segmentation/grouping signals come from the model (`document_group_id`, `page_role`,
@@ -152,8 +152,8 @@ Violates the project's "no real client/vendor data in repo" rule AND overfits be
 8. **Cost pass** — Batch API (50% off: Flash-Lite $0.05/$0.20), `mediaResolution=LOW`,
    `thinkingBudget` cap, ADK `ContextCacheConfig` for large shared prefixes; measure tokens.
 
-**Eval golden set (JBI real docs):** M PREMIUM=2 docs · ATOM=11 (SOA) · AUTO LAB=6 (SOA) ·
-GDEX=1 line faithful to its own summary · a multi-line parts invoice itemized · a qty>1 line for MAP1.
+**Eval golden set (Acme real docs):** Prime Euro Parts=2 docs · Bolt Auto Supply=11 (SOA) · Gearbox Lab=6 (SOA) ·
+Swift Courier=1 line faithful to its own summary · a multi-line parts invoice itemized · a qty>1 line for MAP1.
 Chat lane = agents-cli eval; doc lane = pytest integration on `process_file_event`.
 
 ---
@@ -263,7 +263,7 @@ does not support Flex or Batch** — verify tier per deployed model.
 full COA inlined as JSON** ("choose key from these only"); hallucinated keys nulled; conf<0.6 ⇒ flagged;
 no-match ⇒ **blank + HITL, never a default code**. **This corrects Part I/D2:** the GL account does NOT
 silently default to the creditor code — `resolve_account` returns blank+flag, and the **creditor code
-is a separate export field** (`code_resolver.resolve_creditor_code`). The live "M PREMIUM AccNo=400-M0001"
+is a separate export field** (`code_resolver.resolve_creditor_code`). The live "Prime Euro Parts AccNo=400-M0001"
 is therefore a **column-mapping** question (a creditor-code field landing in an account-labelled column),
 **not** a resolution default. → **Reclassify D2 from HIGH-resolution-bug to a MAP item; verify which
 column the creditor code is populating in AutoCount and whether that's the ERP's intended AccNo semantics.**
@@ -282,7 +282,7 @@ given free-text"), in increasing power:**
 3. **Confidence + HITL gate (§5).** Read the chosen code's token logprob; below threshold or on a
    near-tie between two plausible accounts ⇒ route to HITL instead of auto-booking. Wrong postings are
    the hardest thing for the user to catch later, so this axis gets the *strictest* gate.
-4. **Vector/embedding retrieval — a FUTURE lever, only when COA outgrows in-context.** For JBI's ~158
+4. **Vector/embedding retrieval — a FUTURE lever, only when COA outgrows in-context.** For Acme's ~158
    codes, the full COA fits trivially in the 1M-token window, so **in-context + enum-constrain is the
    right call now** (cheaper, simpler, no vector store — consistent with the prior
    [[multi-erp-autocount-sql-decisions]] "deterministic, not RAG" decision: the *final pick stays
@@ -430,8 +430,8 @@ These are runtime assertions feeding `detect_struggle`/HITL, distinct from tests
 
 There is **zero end-to-end COA test today** — unit tests cover `resolve_account` mechanics, but nothing
 runs the full PDF → extract → categorize → ERP row path and asserts `account_code == expected`. Build
-`tests/integration/test_coa_eval_jbi.py`, gated on the JBI data existing locally (same pattern as
-`test_erp_golden_format.py`). Ground truth: JBI `COA & List.xlsx` (Party List + COA) +
+`tests/integration/test_coa_eval_acme.py`, gated on the Acme data existing locally (same pattern as
+`test_erp_golden_format.py`). Ground truth: Acme `COA & List.xlsx` (Party List + COA) +
 `LocalRecon_VertexPrompt_LedgerRows.json` + ~30 min of manual line→code annotation (the single
 highest-ROI eval investment in the repo).
 
@@ -448,9 +448,9 @@ not unit_price (MAP1); MY vs SG → correct COA, no cross-contamination; credit-
 - **ZERO-TOLERANCE GATE:** no exported row may carry an `account_code` not in the client's COA (or blank).
   Asserted end-to-end through the exporter, not just at the categorizer.
 
-**Extraction eval (array schema):** `jbi_golden.json` with `expected_doc_count` + per-doc
-`grand_total`/`must_reconcile` + the page-coverage assertion. Confirmed counts: **M PREMIUM=2** (the 2→1
-regression guard), **ATOM=11**, **AUTO LAB=6** (SOA, skip cover page), GDEX=1 faithful. **ADD a
+**Extraction eval (array schema):** `acme_golden.json` with `expected_doc_count` + per-doc
+`grand_total`/`must_reconcile` + the page-coverage assertion. Confirmed counts: **Prime Euro Parts=2** (the 2→1
+regression guard), **Bolt Auto Supply=11**, **Gearbox Lab=6** (SOA, skip cover page), Swift Courier=1 faithful. **ADD a
 segmentation-stress doc (≥3 invoices on one page) and a non-English (Malay/Chinese) doc** — both absent
 and both are exactly where the array schema + the (deleted) keyword lexicons fail.
 
@@ -459,7 +459,7 @@ and both are exactly where the array schema + the (deleted) keyword lexicons fai
 Slack delivery card is the primary error channel (§4). **Additionally**, after the in-pipeline flags
 exist, log structured events to the connected Sentry for **cross-document trend detection** only —
 `{client_id, vendor, reconciled:false, reason, confidence}` on `reconciled=False` / `blank_account_code`.
-Value: "30% of client JBI's docs failed reconcile this week" (prompt drift / format change) is invisible
+Value: "30% of client Acme's docs failed reconcile this week" (prompt drift / format change) is invisible
 from individual Slack messages. **Do this AFTER §5 — there's no value logging silently-wrong output the
 pipeline itself can't detect.**
 
@@ -500,7 +500,7 @@ pipeline itself can't detect.**
 Two risky assumptions from Part III were tested live before planning. Both resolved.
 
 ### Spike A — enum-in-nested-array: **STRUCTURAL (confirmed), with one critical caveat**
-- **Setup:** `gemini-2.5-flash` (AI Studio), 158 REAL JBI COA keys as a per-line `account_code` enum
+- **Setup:** `gemini-2.5-flash` (AI Studio), 158 REAL Acme COA keys as a per-line `account_code` enum
   inside `Doc{lines: list[Line{description, account_code: ENUM[158]}]}`; 18 runs × 6 deliberately
   out-of-scope line descriptions (max pressure to hallucinate); temperature 0.
 - **Result: 0 / 108 out-of-set emissions.** The enum is enforced at the constrained-decoding layer —
