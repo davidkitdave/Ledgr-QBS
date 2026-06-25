@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 from accounting_agents.jurisdiction import REGION_MALAYSIA, REGION_SINGAPORE
 from invoice_processing.export.axis_resolvers import (

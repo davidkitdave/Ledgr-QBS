@@ -1701,7 +1701,7 @@ class TestPreviewColumnSpecAutoCountSQL:
     def test_profile_numeric_cols_use_raw_number(self):
         from invoice_processing.export.exporters import load_erp_profile_for_system
 
-        profile = load_erp_profile_for_system("sql_account")
+        load_erp_profile_for_system("sql_account")  # smoke: profile loads from skill
         spec = preview_column_spec(software="SQL Account", sheet="Purchase")
         by_key = {c.row_key: c.cell_type for c in spec}
         assert by_key["_TAXAMT"] == "raw_number"
@@ -1786,7 +1786,6 @@ class TestDeliveryCardReadinessBlock:
 
     def test_autocount_purchase_with_readiness_appends_context_block(self, monkeypatch):
         from accounting_agents import nodes
-        from invoice_processing.export.exporters import format_import_readiness_note
 
         # Patch format_import_readiness_note so it returns a known string.
         monkeypatch.setattr(nodes, "format_import_readiness_note", lambda r: "Ready to import")

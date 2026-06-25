@@ -128,7 +128,9 @@ def process_pdf(path: Path, client: ClientContext) -> dict:
 
     return {
         "file": path.name,
-        "phase1_documents": len(bundle.documents),
+        # ``InvoiceProcessResult`` no longer exposes a pre-normalization document
+        # list; report the normalized invoice count (was a stale ``bundle.documents``).
+        "phase1_documents": len(invoices),
         "invoice_count": len(invoices),
         "qbs_row_count": len(all_rows),
         "qbs_columns": exporter.purchase_cols,

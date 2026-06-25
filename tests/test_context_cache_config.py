@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-import pytest
 
 from invoice_processing.shared_libraries.context_cache_config import (
     LEDGR_CONTEXT_CACHE_INTERVALS,

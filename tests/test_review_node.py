@@ -509,7 +509,6 @@ def test_is_reconcile_only_excludes_direction_reasons():
 
 def test_approval_gate_direction_uncertain_does_not_auto_retry():
     """approval_gate: direction-uncertain reason escalates — no reconcile re-extract."""
-    from google.adk.events import RequestInput
 
     extract_calls = {"n": 0}
 
@@ -531,7 +530,7 @@ def test_approval_gate_direction_uncertain_does_not_auto_retry():
             events.append(event)
         return events
 
-    events = asyncio.run(_run_gate())
+    asyncio.run(_run_gate())
 
     assert extract_calls["n"] == 0, "direction-uncertain doc must NOT trigger reconcile re-extract"
     assert nodes.RECONCILE_REEXTRACT_ATTEMPTED_KEY not in ctx.state

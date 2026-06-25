@@ -6,7 +6,7 @@ import hashlib
 import json
 import logging
 import os
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 
 from google.adk.tools import ToolContext
 
@@ -19,13 +19,11 @@ from accounting_agents.jurisdiction import (
     resolve_jurisdiction,
     write_to_state,
 )
-from invoice_processing.export.categorizer import resolve_account
 from invoice_processing.export.models import InvoiceLine, NormalizedInvoice
 
 from accounting_agents.tax_reasoning import reason_one_invoice as _reason_one_invoice
 
 from ..constants import (
-    DOCUMENT_SESSIONS_KEY,
     LEDGER_DATA_KEY,
     PENDING_REVIEWS_KEY,
     PROCESSING_LOG_KEY,

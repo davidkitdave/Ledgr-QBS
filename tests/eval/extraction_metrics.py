@@ -29,7 +29,6 @@ from google.adk.evaluation.eval_case import ConversationScenario, Invocation
 from google.adk.evaluation.eval_metrics import EvalStatus
 from google.adk.evaluation.evaluator import EvaluationResult, PerInvocationResult
 
-from invoice_processing.extract.segmentation_gates import validate_page_ranges
 
 _REPO_ROOT = pathlib.Path(__file__).parent.parent.parent
 _EVALSET_PATH = _REPO_ROOT / "tests" / "eval" / "datasets" / "ledgr.evalset.json"

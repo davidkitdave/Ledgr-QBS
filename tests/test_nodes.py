@@ -2016,7 +2016,6 @@ def test_consolidate_node_unknown_software_skips_export(caplog):
     """A genuinely unknown software value must flag and skip QBS export rows."""
     import logging
 
-    from invoice_processing.export.exporters import QbsLedgerExporter
     from unittest.mock import patch
 
     captured_exporter: list = []

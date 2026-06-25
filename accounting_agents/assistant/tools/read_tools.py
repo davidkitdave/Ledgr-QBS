@@ -10,7 +10,6 @@ from google.adk.tools import ToolContext
 from accounting_agents import config
 
 from ..constants import (
-    LEDGER_DATA_KEY,
     PROCESSING_LOG_KEY,
     THREAD_FOCUS_KEY,
 )

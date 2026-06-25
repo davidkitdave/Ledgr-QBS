@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 
 from accounting_agents.agent import assistant_app
-from accounting_agents.assistant import assistant_agent
 from accounting_agents.chat_skills import load_chat_skills
 from accounting_agents.plugins.ledgr_reflect_retry import LedgrReflectRetryPlugin
 
