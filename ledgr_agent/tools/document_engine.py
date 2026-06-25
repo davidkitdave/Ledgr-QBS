@@ -53,25 +53,74 @@ def process_batch_with_document_spine(
     docs: list[ProcessedDoc] = []
     errors: list[str] = []
     for path in paths:
+        path_obj = Path(path)
         try:
-            docs.extend(
-                _process_one_path(
-                    Path(path),
-                    client,
-                    classify_fn=classify_fn,
-                    direction_fn=direction_fn,
-                    bank_fn=bank_fn,
-                    categorize_fn=categorize_fn,
-                    invoice_process_fn=invoice_process_fn,
+            path_docs = _process_one_path(
+                path_obj,
+                client,
+                classify_fn=classify_fn,
+                direction_fn=direction_fn,
+                bank_fn=bank_fn,
+                categorize_fn=categorize_fn,
+                invoice_process_fn=invoice_process_fn,
+            )
+            if not path_docs:
+                note = "ERROR: no documents extracted — file may be unreadable or too large"
+                path_docs = [
+                    _error_processed_doc(
+                        path_obj,
+                        client=client,
+                        doc_type="other",
+                        note=note,
+                    )
+                ]
+                errors.append(f"{path}: {note}")
+            docs.extend(path_docs)
+        except Exception as exc:  # noqa: BLE001
+            note = f"ERROR: {exc}"
+            errors.append(f"{path}: {note}")
+            docs.append(
+                _error_processed_doc(
+                    path_obj,
+                    client=client,
+                    doc_type="other",
+                    note=note,
                 )
             )
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"{path}: ERROR: {exc}")
 
     return EngineBatchResult(
         workbooks=_build_workbooks(docs, client),
         docs=docs,
         errors=errors,
+    )
+
+
+def _error_processed_doc(
+    path: Path,
+    *,
+    client: Any,
+    doc_type: str,
+    note: str,
+) -> ProcessedDoc:
+    fye_month, _ = _effective_fye_month(client)
+    client_id = client.client_id or "unknown"
+    route = route_document(
+        doc_type=doc_type,
+        direction=None,
+        doc_date=date.today(),
+        fye_month=fye_month,
+        client_id=client_id,
+        filename=path.name,
+    )
+    return ProcessedDoc(
+        path=str(path),
+        doc_type=doc_type,
+        direction=None,
+        normalized=None,
+        bank=None,
+        route=route,
+        reconciled=False,
+        note=note,
     )
 
 
@@ -171,6 +220,25 @@ def _process_one_path(
                 note=note,
             )
         )
+    if not docs:
+        warnings = list(result.partial_failure_warnings or [])
+        if warnings:
+            note = f"ERROR: {warnings[0]}"
+        elif result.input_page_count:
+            note = (
+                f"ERROR: no documents extracted from "
+                f"{result.input_page_count} page(s) — entire file needs review"
+            )
+        else:
+            note = "ERROR: no documents extracted"
+        return [
+            _error_processed_doc(
+                path,
+                client=client,
+                doc_type=doc_type,
+                note=note,
+            )
+        ]
     return docs
 
 

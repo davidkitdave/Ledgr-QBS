@@ -144,27 +144,32 @@ def process_invoice_document(
 
     if not page_ok and not _is_segmentation_retry_hint(hint):
         retry_hint = _build_segmentation_retry_hint(hint)
-        retry_bundle = EXTRACT_LEDGER_FN(
-            data,
-            mime_type,
-            hint=retry_hint,
-            **extract_kwargs,
-        )
-        retry_bundle = _drop_soa_cover_documents(retry_bundle)
-        retry_page_ok, retry_page_detail = validate_bundle_page_coverage(
-            retry_bundle,
-            total_pages=total_pages,
-        )
-        if retry_page_ok:
-            bundle = retry_bundle
-            normalized = _normalize_ledger_bundle(
-                bundle,
-                direction=direction,
-                our_gst_registered=our_gst_registered,
-                base_currency=base_currency,
+        try:
+            retry_bundle = EXTRACT_LEDGER_FN(
+                data,
+                mime_type,
+                hint=retry_hint,
+                **extract_kwargs,
             )
-            page_ok = retry_page_ok
-            page_detail = retry_page_detail
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("segmentation retry failed: %s", exc)
+            retry_bundle = None
+        if retry_bundle is not None:
+            retry_bundle = _drop_soa_cover_documents(retry_bundle)
+            retry_page_ok, retry_page_detail = validate_bundle_page_coverage(
+                retry_bundle,
+                total_pages=total_pages,
+            )
+            if retry_page_ok:
+                bundle = retry_bundle
+                normalized = _normalize_ledger_bundle(
+                    bundle,
+                    direction=direction,
+                    our_gst_registered=our_gst_registered,
+                    base_currency=base_currency,
+                )
+                page_ok = retry_page_ok
+                page_detail = retry_page_detail
 
     if not page_ok:
         apply_segmentation_uncertain_flag(normalized, page_detail)
