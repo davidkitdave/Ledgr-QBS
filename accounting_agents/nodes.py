@@ -102,7 +102,7 @@ from .normalized_invoice_codec import (
     dict_to_invoice,
     invoice_to_dict,
 )
-from .ledger_doc_identity import ledger_doc_identity
+from .ledger_doc_identity import ledger_doc_identity, ledger_doc_key_for_invoice
 from invoice_processing.extract.bank_statement_extractor import (
     extract_bank_statement,
     to_bank_statements,
@@ -2008,15 +2008,16 @@ async def consolidate_node(ctx) -> Event:
                 sheet = route.get("sheet") or "Purchase"
                 row_doc_type = "sales" if sheet == "Sales" else "purchase"
                 rows = exporter.rows([inv], row_doc_type)
+                # Issue #34: AutoCount sales (AR) has no readable invoice-identity
+                # column, so its dedupe key is a row signature derived from the
+                # exporter row — computed by the same helper the clear-side purge
+                # uses (ledger_store.remove_rows_for_month). Every other ERP keeps
+                # its invoice_number / SupplierInvoiceNo identity.
                 batches.append(
                     {
                         "sheet": sheet,
-                        "doc_key": _doc_key(
-                            state,
-                            sheet,
-                            inv.invoice_number,
-                            idx,
-                            page_range=inv.page_range,
+                        "doc_key": ledger_doc_key_for_invoice(
+                            exporter, sheet, inv, idx
                         ),
                         "rows": rows,
                     }

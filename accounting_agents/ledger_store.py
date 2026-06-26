@@ -42,6 +42,10 @@ from typing import Any, Optional
 from openpyxl import Workbook, load_workbook
 
 from accounting_agents.config import _ns
+from accounting_agents.ledger_doc_identity import (
+    ledger_row_signature,
+    sheet_lacks_invoice_identity_column,
+)
 from accounting_agents.lease_lock import FirestoreLeaseLock
 
 from invoice_processing.export.exporters import (
@@ -524,6 +528,7 @@ class SlackLedgerStore:
         kind: str,
         client_name: str,
         prev_file_id: Optional[str],
+        software: str = "",
     ) -> tuple[Optional[str], Any]:
         """Upload workbook bytes to Slack and update the Firestore pointer."""
         new_bytes = self._to_bytes(wb)
@@ -535,6 +540,13 @@ class SlackLedgerStore:
         )
         new_file_id = self._extract_uploaded_file_id(upload_result)
         if new_file_id:
+            # Persist ``software`` on the pointer so remove_rows_for_month can
+            # resolve the right exporter at clear time (issue #34): the AutoCount
+            # sales row-signature purge needs to know the workbook is AutoCount.
+            # Only write a non-empty value so we never blank an onboarding seed.
+            extra: dict[str, Any] = {}
+            if software:
+                extra["software"] = software
             self._set_pointer(
                 client_id,
                 fy,
@@ -543,6 +555,7 @@ class SlackLedgerStore:
                 channel_id=channel_id,
                 kind=kind,
                 client_name=client_name,
+                **extra,
             )
         if prev_file_id and new_file_id and prev_file_id != new_file_id:
             try:
@@ -1033,6 +1046,7 @@ class SlackLedgerStore:
                     kind=kind,
                     client_name=client_name,
                     prev_file_id=prev_file_id,
+                    software=software,
                 )
                 if new_file_id:
                     result["slack_file_id"] = new_file_id
@@ -1050,6 +1064,7 @@ class SlackLedgerStore:
             kind=kind,
             client_name=client_name,
             prev_file_id=prev_file_id,
+            software=software,
         )
 
         result = {
@@ -1553,6 +1568,33 @@ class SlackLedgerStore:
                         or col_map.get("DOCNO(20)")
                     )
 
+                    # Issue #34: AutoCount sales (AR) has no readable invoice-
+                    # identity column, so its appended doc_key is a row signature
+                    # (sheet:DocDate:code:Amount), NOT sheet:invoice_number. Detect
+                    # that case and resolve the signature columns from the SAME
+                    # exporter mapping the append side used, so the reconstructed
+                    # key matches and the purge fires. Every other ERP keeps the
+                    # invoice_number path below.
+                    use_row_signature = (
+                        inv_col is None
+                        and exporter is not None
+                        and sheet_lacks_invoice_identity_column(exporter, doc_type)
+                    )
+                    sig_code_col = None
+                    sig_amount_col = None
+                    if use_row_signature:
+                        code_field = (
+                            "debtor_code" if doc_type == "sales" else "creditor_code"
+                        )
+                        code_header = exporter.column_for_field(code_field, doc_type)
+                        amount_header = exporter.column_for_field("sub_total", doc_type)
+                        sig_code_col = (
+                            col_map.get(code_header) if code_header else None
+                        )
+                        sig_amount_col = (
+                            col_map.get(amount_header) if amount_header else None
+                        )
+
                     # Collect matching row numbers in ascending order, then delete bottom-up.
                     matching_rows: list[int] = []
                     for row_num in range(2, ws.max_row + 1):
@@ -1569,16 +1611,33 @@ class SlackLedgerStore:
 
                     # Reconstruct doc_keys for the matching rows BEFORE deletion.
                     for row_num in matching_rows:
-                        inv_num = (
-                            ws.cell(row=row_num, column=inv_col).value
-                            if inv_col else None
-                        )
-                        # Mirror the nodes._doc_key format: f"{sheet}:{invoice_number}"
-                        # (no index suffix for a single-row-per-doc batch).
-                        if inv_num is not None:
-                            key = f"{sheet_name}:{str(inv_num).strip()}"
-                            if key in existing_keys:
-                                purged_keys.append(key)
+                        key = None
+                        if use_row_signature:
+                            # AutoCount sales: rebuild the row signature from the
+                            # Excel cells via the shared helper (#34). Page-range
+                            # keys never apply here (AutoCount sales has no
+                            # invoice_number identity), so a bare signature match
+                            # against existing_keys is sufficient.
+                            key = ledger_row_signature(
+                                sheet_name,
+                                ws.cell(row=row_num, column=date_col).value
+                                if date_col else None,
+                                ws.cell(row=row_num, column=sig_code_col).value
+                                if sig_code_col else None,
+                                ws.cell(row=row_num, column=sig_amount_col).value
+                                if sig_amount_col else None,
+                            )
+                        else:
+                            inv_num = (
+                                ws.cell(row=row_num, column=inv_col).value
+                                if inv_col else None
+                            )
+                            # Mirror nodes._doc_key: f"{sheet}:{invoice_number}"
+                            # (no index suffix for a single-row-per-doc batch).
+                            if inv_num is not None:
+                                key = f"{sheet_name}:{str(inv_num).strip()}"
+                        if key is not None and key in existing_keys:
+                            purged_keys.append(key)
                         removed_descs.append(
                             f"{sheet_name} row {row_num}"
                         )

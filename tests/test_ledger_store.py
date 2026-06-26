@@ -2056,6 +2056,88 @@ def test_remove_rows_for_month_autocount_docdate_headers():
     assert sep_rows == []
 
 
+def _autocount_sales_batch(sheet: str, inv_number: str, *, idx: int = 0) -> dict:
+    """Build one AutoCount AR (sales) append batch the production way (issue #34).
+
+    Uses the SAME centralized helper the live append path uses so the test's
+    doc_key is not hand-rolled (a circular test would prove nothing). The
+    invoice has a real ``invoice_number`` but AutoCount AR has no readable
+    identity column for it — that is exactly the case the row-signature
+    fallback must cover.
+    """
+    from datetime import date
+
+    from accounting_agents.ledger_doc_identity import ledger_doc_key_for_invoice
+    from invoice_processing.export.exporters import get_exporter
+    from invoice_processing.export.models import InvoiceLine, NormalizedInvoice
+
+    inv = NormalizedInvoice(
+        doc_type="sales",
+        invoice_number=inv_number,
+        invoice_date=date(2025, 9, 10),
+        currency="MYR",
+        doc_subtotal=500.0,
+    )
+    inv.customer.name = "Acme Sdn Bhd"
+    inv.lines = [
+        InvoiceLine(
+            description="Consulting Sep",
+            net_amount=500.0,
+            tax_treatment="SR",
+            account_code="4000",
+        )
+    ]
+    exporter = get_exporter("autocount")
+    rows = exporter.rows([inv], "sales")
+    doc_key = ledger_doc_key_for_invoice(exporter, sheet, inv, idx)
+    return {"sheet": sheet, "doc_key": doc_key, "rows": rows}
+
+
+def test_autocount_sales_clear_month_then_reimport_not_deduped():
+    """Issue #34: AutoCount sales clear → re-import end-to-end (append→clear→re-append).
+
+    AutoCount AR has no readable invoice-identity column, so the clear-side
+    purge used to silently skip and re-uploading the same sales invoice was
+    mis-flagged as a duplicate. The row-signature fallback must purge the key
+    so the re-import appends. Fails (re-import deduped) if the fallback is
+    reverted on EITHER side, because append and clear would compute different
+    keys.
+    """
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+    batch = _autocount_sales_batch("Sales", "INV-S1")
+
+    first = store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        software="autocount", kind="invoice", batches=[batch],
+    )
+    assert first["appended"] == 1
+    assert first["deduped"] == 0
+    # The appended doc_key is now recorded in Firestore seen_doc_keys.
+    assert batch["doc_key"] in set(store.get_pointer("c1", "2026").get("seen_doc_keys") or [])
+
+    # Clear September: the row deletes AND the doc_key must be purged.
+    result = store.remove_rows_for_month(
+        "c1", "2026", slack, "C1", year=2025, month=9,
+    )
+    assert result["sheets"]["Sales"] == 1
+    assert batch["doc_key"] in set(result["purged_keys"]), (
+        "AutoCount sales clear did not purge the appended doc_key — "
+        "the row-signature fallback is not wired on the clear side"
+    )
+    assert batch["doc_key"] not in set(
+        store.get_pointer("c1", "2026").get("seen_doc_keys") or []
+    )
+
+    # Re-import the SAME sales invoice — must NOT be deduped.
+    second = store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        software="autocount", kind="invoice", batches=[_autocount_sales_batch("Sales", "INV-S1")],
+    )
+    assert second["appended"] == 1, "re-import was mis-detected as a duplicate (stale seen_doc_keys)"
+    assert second["deduped"] == 0
+
+
 def test_remove_rows_for_month_leaves_other_months_intact():
     xlsx = _make_invoice_workbook_with_months()
     slack, store = _store_with_workbook(xlsx)
