@@ -119,7 +119,7 @@ def process_invoice_document(
     doc_type: str,
     direction: str,
     our_gst_registered: bool = True,
-    base_currency: str = "SGD",
+    base_currency: str = "",
     client_name: Optional[str] = None,
     client_uen: Optional[str] = None,
     entity_memory: list[EntityMemoryEntry] | None = None,

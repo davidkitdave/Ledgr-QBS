@@ -113,7 +113,7 @@ def dict_to_invoice(d: dict[str, Any]) -> NormalizedInvoice:
         invoice_number=d.get("invoice_number"),
         invoice_date=_parse_iso(d.get("invoice_date")),
         due_date=_parse_iso(d.get("due_date")),
-        currency=d.get("currency", "SGD"),
+        currency=d.get("currency") or "",
         po_number=d.get("po_number"),
         supplier=_party_from_dict(d.get("supplier")),
         customer=_party_from_dict(d.get("customer")),
