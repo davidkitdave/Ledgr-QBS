@@ -17,8 +17,11 @@ opt into the join by carrying a ``source_doc_id``; without it the scorer falls
 back to per-file index pairing (legacy behaviour).
 
 N/A still legitimately occurs when: golden authored no lines for an ERP, OR a
-projected doc genuinely has no rows (e.g. a bank statement), OR a golden doc's
-``source_doc_id`` matches no live row.
+projected doc genuinely has no rows and the golden did not author line
+expectations for that doc (e.g. a bank statement). When the golden *did* author
+lines (or direction) but the join produced no actual line data, the sub-scorers
+return **0.0** — not N/A — so a broken tagging run cannot false-green by
+dropping line dimensions from the overall mean.
 
 Entry point for agents-cli: ``golden_field_match_code(instance)``
 """
@@ -323,6 +326,11 @@ def score_fields(
     }
 
 
+def _golden_expects_line_join(golden_doc: dict[str, Any]) -> bool:
+    """True when the golden opted into id-based line scoring (issue #28)."""
+    return bool(golden_doc.get("source_doc_id"))
+
+
 def score_tax_coa(
     golden_doc: dict[str, Any],
     actual_doc: dict[str, Any],
@@ -333,9 +341,9 @@ def score_tax_coa(
     Scores matching of tax_code + coa_code + erp_codes[erp] per line.
     "BLANK(hole B.1)" in golden means the expected actual value is empty/None.
 
-    Returns N/A when:
-    - golden has no authored lines for this erp, OR
-    - actual has no lines (live-projection gap — see TODO 0.4).
+    Returns N/A when golden has no authored lines for this erp. Returns 0.0 when
+    golden authored scoreable lines but the export-row join produced no actual
+    line data (broken tagging / id mismatch) — never N/A in that case.
     """
     erp_label = f"tax_coa[{erp}]"
     golden_lines: list[dict[str, Any]] = golden_doc.get("lines") or []
@@ -357,11 +365,19 @@ def score_tax_coa(
 
     actual_lines: list[dict[str, Any]] = actual_doc.get("lines") or []
     if not actual_lines:
+        if _golden_expects_line_join(golden_doc):
+            return {
+                "score": 0.0,
+                "explanation": (
+                    f"{erp_label}: 0/{scoreable_count} lines matched "
+                    "(join miss — golden authored lines but actual has none)"
+                ),
+            }
         return {
             "score": None,
             "explanation": (
                 f"{erp_label}: no actual line data — "
-                "pending export-row doc tagging (TODO 0.4)"
+                "legacy manifest without source_doc_id (N/A)"
             ),
         }
 
@@ -434,18 +450,27 @@ def score_line_direction(
 
     Compares each actual line's ``direction`` (purchase/sales the row was
     exported under) against the golden document's expected ``direction``.
-    Returns N/A when golden authored no ``direction`` OR the actual doc has no
-    lines (live gap / bank statement). This catches a line booked on the wrong
-    sheet — a classification error the reconcile math is blind to.
+    Returns N/A when golden authored no ``direction``. Returns 0.0 when golden
+    expects a direction but the join produced no actual line data. This catches
+    a line booked on the wrong sheet — a classification error the reconcile
+    math is blind to.
     """
     golden_direction = str(golden_doc.get("direction") or "").strip().lower()
     if not golden_direction:
         return {"score": None, "explanation": "no direction in golden (N/A)"}
     actual_lines: list[dict[str, Any]] = actual_doc.get("lines") or []
     if not actual_lines:
+        if _golden_expects_line_join(golden_doc):
+            return {
+                "score": 0.0,
+                "explanation": (
+                    f"direction: 0/0 lines match {golden_direction!r} "
+                    "(join miss — golden authored direction but actual has no lines)"
+                ),
+            }
         return {
             "score": None,
-            "explanation": "no actual line data — pending export-row doc tagging (N/A)",
+            "explanation": "no actual line data — legacy manifest without source_doc_id (N/A)",
         }
     matched = sum(
         1
@@ -589,9 +614,13 @@ def golden_field_match_code(instance: dict[str, Any]) -> dict[str, Any]:
 
         for i, g_doc in enumerate(golden_docs_for_file):
             golden_doc_id = g_doc.get("source_doc_id")
-            if golden_doc_id and str(golden_doc_id) in actual_by_doc_id:
-                a_doc = actual_by_doc_id[str(golden_doc_id)]
+            if golden_doc_id:
+                # Id-authored golden: join strictly on source_doc_id. When the id
+                # matches no live row, score against an empty actual — never
+                # positionally pair (reordered fan-out / stale ids).
+                a_doc = actual_by_doc_id.get(str(golden_doc_id), {})
             else:
+                # Legacy manifests without source_doc_id keep index pairing.
                 a_doc = actual_docs_for_file[i] if i < len(actual_docs_for_file) else {}
             doc_prefix = f"[{basename}#{i}]"
 

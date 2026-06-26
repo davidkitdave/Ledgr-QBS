@@ -650,7 +650,7 @@ class TestScoreTaxCoa:
         assert result["score"] == pytest.approx(0.5)
         assert "1/2" in result["explanation"]
 
-    def test_actual_lines_absent_returns_na(self):
+    def test_actual_lines_absent_returns_na_for_legacy_manifest(self):
         from ledgr_agent.metrics.golden_field_match import score_tax_coa
 
         g = self._make_golden_doc([
@@ -659,7 +659,22 @@ class TestScoreTaxCoa:
         a = {"doc_type": "invoice", "total": 100.0, "lines": []}
         result = score_tax_coa(g, a, "autocount")
         assert result["score"] is None
-        assert "no actual line data" in result["explanation"]
+        assert "legacy manifest" in result["explanation"]
+
+    def test_actual_lines_absent_returns_zero_when_source_doc_id_authored(self):
+        """Issue #28: id-authored golden with no joined lines → 0.0, not N/A."""
+        from ledgr_agent.metrics.golden_field_match import score_tax_coa
+
+        g = {
+            **self._make_golden_doc([
+                {"tax_code": "SR", "coa_code": "610-000", "erp_codes": {"autocount": "SV-8"}},
+            ]),
+            "source_doc_id": "alpha.pdf:INV-001:1-1",
+        }
+        a = {"doc_type": "invoice", "total": 100.0, "lines": []}
+        result = score_tax_coa(g, a, "autocount")
+        assert result["score"] == 0.0
+        assert "join miss" in result["explanation"]
 
     def test_no_golden_lines_for_erp_returns_na(self):
         from ledgr_agent.metrics.golden_field_match import score_tax_coa

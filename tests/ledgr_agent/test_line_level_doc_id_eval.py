@@ -494,6 +494,339 @@ class TestRealGoldenEnvIsOptional:
 
 
 # ---------------------------------------------------------------------------
+# Fix 1 — empty join must FAIL, not score N/A→pass
+# ---------------------------------------------------------------------------
+
+
+class TestEmptyJoinFailsNotNA:
+    """When a golden doc authors lines but the export_rows join produces nothing
+    (broken tagging), line sub-scores must return 0.0, NOT N/A which would be
+    silently dropped from the mean and let the overall float up to ~0.83.
+
+    This is the false-green pattern the project has been bitten by.
+    """
+
+    def _manifest_with_authored_lines(self):
+        return {
+            "file_expectations": {
+                "alpha.pdf": {"expected_doc_count": 1, "expected_billable_credits": 1}
+            },
+            "documents": [
+                {
+                    "file": "alpha.pdf",
+                    "source_doc_id": "alpha.pdf:INV-001:1-1",
+                    "doc_type": "invoice",
+                    "direction": "purchase",
+                    "lines": [
+                        {
+                            "tax_code": "SR",
+                            "coa_code": "610-000",
+                            "erp_codes": {"qbs": "SR"},
+                        }
+                    ],
+                }
+            ],
+        }
+
+    def _batch_no_export_rows(self) -> dict:
+        """Live batch with a posted_document but ZERO export_rows (broken tagging)."""
+        return {
+            "status": "success",
+            "client_id": "test-client",
+            "firm_id": None,
+            "documents_processed": 1,
+            "credits": {"credits_used": 1, "credit_status": "charged"},
+            "per_file": [],
+            "posted_documents": [
+                {
+                    "path": "/uploads/alpha.pdf",
+                    "file_name": "alpha.pdf",
+                    "doc_type": "invoice",
+                    "invoice_number": "INV-001",
+                    "total": 1060.0,
+                    "source_doc_id": "alpha.pdf:INV-001:1-1",
+                }
+            ],
+            "skipped_documents": [],
+            "export_rows": [],  # <- broken tagging: no rows at all
+        }
+
+    def test_score_tax_coa_returns_zero_not_na_when_actual_lines_empty_but_golden_authored(self):
+        """Fix 1 core: actual_lines=[] + golden authored lines → score 0.0, not N/A."""
+        from ledgr_agent.metrics.golden_field_match import score_tax_coa
+
+        golden_doc = self._manifest_with_authored_lines()["documents"][0]
+        actual_doc_no_lines = {"doc_type": "invoice", "lines": []}
+        result = score_tax_coa(golden_doc, actual_doc_no_lines, "qbs")
+        assert result["score"] == 0.0, (
+            f"Expected 0.0 when golden authored lines but actual has none; "
+            f"got {result['score']!r}. explanation={result['explanation']!r}"
+        )
+        assert "0" in result["explanation"] or "join" in result["explanation"].lower(), (
+            f"Explanation should mention the join miss: {result['explanation']!r}"
+        )
+
+    def test_score_line_direction_returns_zero_not_na_when_actual_lines_empty_but_golden_authored(self):
+        """Fix 1 direction: golden has direction authored, actual_lines=[] → 0.0."""
+        from ledgr_agent.metrics.golden_field_match import score_line_direction
+
+        golden_doc = {"direction": "purchase", "source_doc_id": "alpha.pdf:INV-001:1-1", "lines": [{"tax_code": "SR"}]}
+        actual_doc_no_lines = {"doc_type": "invoice", "lines": []}
+        result = score_line_direction(golden_doc, actual_doc_no_lines)
+        assert result["score"] == 0.0, (
+            f"Expected 0.0 when golden has direction but actual has no lines; "
+            f"got {result['score']!r}. explanation={result['explanation']!r}"
+        )
+
+    def test_overall_is_failure_not_pass_when_join_produces_nothing(self):
+        """Fix 1 end-to-end: broken tagging (export_rows=[]) must produce a
+        clearly failing score, NOT ~0.83 pass from N/A sub-scores being dropped.
+        """
+        from ledgr_agent.metrics.golden_field_match import golden_field_match_code
+
+        manifest = self._manifest_with_authored_lines()
+        batch = self._batch_no_export_rows()
+
+        # Run scorer with broken tagging
+        result = _run_scorer(
+            golden_field_match_code,
+            [],  # no rows — but we need full batch control; use helper directly
+            manifest,
+        )
+        # Actually call with the raw batch (no rows) via the full entry-point path
+        fd, path = __import__("tempfile").mkstemp(suffix=".json")
+        import os as _os
+        with _os.fdopen(fd, "w") as fh:
+            __import__("json").dump(manifest, fh)
+        old = _os.environ.get("LEDGR_GOLDEN_MANIFEST")
+        _os.environ["LEDGR_GOLDEN_MANIFEST"] = path
+        try:
+            result = golden_field_match_code(_make_instance(batch))
+        finally:
+            if old is None:
+                _os.environ.pop("LEDGR_GOLDEN_MANIFEST", None)
+            else:
+                _os.environ["LEDGR_GOLDEN_MANIFEST"] = old
+            _os.unlink(path)
+
+        # A correct tagging run gets ~1.0; a broken-join run must be clearly below
+        # the false-green ~0.83 pattern (line dims were N/A and dropped from mean).
+        assert result["score"] <= 0.6, (
+            f"Broken-join overall={result['score']:.4f} should be <= 0.6 (false-green). "
+            f"explanation={result['explanation']!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Fix 2 — no positional fallback when source_doc_id is set but mismatches
+# ---------------------------------------------------------------------------
+
+
+class TestNoPositionalFallbackOnDocIdMismatch:
+    """When a golden doc carries source_doc_id but that id matches no live row,
+    the scorer must NOT positionally pair it with actual_docs_for_file[i].
+    Positional pairing can score golden doc A against live doc B in a reordered
+    multi-doc file — reintroducing the fragility #28 set out to remove.
+
+    Legacy manifests (no source_doc_id at all on any doc) keep positional pairing
+    for backward compat (the 54 existing golden_v2 tests must stay green).
+    """
+
+    def _two_doc_manifest(self):
+        """Two docs from one file, both authored with source_doc_ids."""
+        return {
+            "file_expectations": {
+                "bundle.pdf": {"expected_doc_count": 2, "expected_billable_credits": 2}
+            },
+            "documents": [
+                {
+                    "file": "bundle.pdf",
+                    "source_doc_id": "bundle.pdf:INV-A:1-1",
+                    "doc_type": "invoice",
+                    "direction": "purchase",
+                    "lines": [
+                        {
+                            "tax_code": "SR",
+                            "coa_code": "610-000",
+                            "erp_codes": {"qbs": "SR"},
+                        }
+                    ],
+                },
+                {
+                    "file": "bundle.pdf",
+                    "source_doc_id": "bundle.pdf:INV-B:2-2",
+                    "doc_type": "invoice",
+                    "direction": "purchase",
+                    "lines": [
+                        {
+                            "tax_code": "ZR",
+                            "coa_code": "640-000",
+                            "erp_codes": {"qbs": "ZR"},
+                        }
+                    ],
+                },
+            ],
+        }
+
+    def _batch_with_swapped_order(self) -> dict:
+        """Live batch where doc B is listed first (fan-out reorder).
+        The golden expects INV-A at position 0 and INV-B at position 1, but the
+        live rows have them swapped — only id-based join handles this correctly.
+        """
+        rows = [
+            # B first (wrong position)
+            _tagged_row(
+                file="bundle.pdf",
+                sdid="bundle.pdf:INV-B:2-2",
+                tax_treatment="ZR",
+                account_code="640-000",
+                direction="purchase",
+            ),
+            # A second (wrong position)
+            _tagged_row(
+                file="bundle.pdf",
+                sdid="bundle.pdf:INV-A:1-1",
+                tax_treatment="SR",
+                account_code="610-000",
+                direction="purchase",
+            ),
+        ]
+        return {
+            "status": "success",
+            "client_id": "test-client",
+            "firm_id": None,
+            "documents_processed": 2,
+            "credits": {"credits_used": 2, "credit_status": "charged"},
+            "per_file": [],
+            "posted_documents": [
+                {
+                    "path": "/uploads/bundle.pdf",
+                    "file_name": "bundle.pdf",
+                    "doc_type": "invoice",
+                    "invoice_number": "INV-B",
+                    "total": 500.0,
+                    "source_doc_id": "bundle.pdf:INV-B:2-2",
+                },
+                {
+                    "path": "/uploads/bundle.pdf",
+                    "file_name": "bundle.pdf",
+                    "doc_type": "invoice",
+                    "invoice_number": "INV-A",
+                    "total": 1060.0,
+                    "source_doc_id": "bundle.pdf:INV-A:1-1",
+                },
+            ],
+            "skipped_documents": [],
+            "export_rows": rows,
+        }
+
+    def _batch_with_id_stale_mismatch(self) -> dict:
+        """Live batch where a golden source_doc_id is present but no live row
+        matches it (e.g. page range changed, ref changed) — must NOT positionally
+        pair; must score the line dims 0.0/fail.
+        """
+        rows = [
+            _tagged_row(
+                file="bundle.pdf",
+                sdid="bundle.pdf:INV-A:1-1",  # only A is present
+                tax_treatment="SR",
+                account_code="610-000",
+                direction="purchase",
+            ),
+            # INV-B row is ABSENT (stale id — would have matched position 1)
+        ]
+        return {
+            "status": "success",
+            "client_id": "test-client",
+            "firm_id": None,
+            "documents_processed": 2,
+            "credits": {"credits_used": 1, "credit_status": "charged"},
+            "per_file": [],
+            "posted_documents": [
+                {
+                    "path": "/uploads/bundle.pdf",
+                    "file_name": "bundle.pdf",
+                    "doc_type": "invoice",
+                    "invoice_number": "INV-A",
+                    "total": 1060.0,
+                    "source_doc_id": "bundle.pdf:INV-A:1-1",
+                },
+            ],
+            "skipped_documents": [],
+            "export_rows": rows,
+        }
+
+    def test_swapped_order_still_scores_correctly_via_id_join(self):
+        """Fix 2 key case: reordered fan-out must score 1.0 on both docs when
+        joined by source_doc_id, not 0.0 from positional mis-alignment.
+        """
+        from ledgr_agent.metrics.golden_field_match import golden_field_match_code
+
+        manifest = self._two_doc_manifest()
+        batch = self._batch_with_swapped_order()
+
+        fd, path = __import__("tempfile").mkstemp(suffix=".json")
+        import os as _os
+        with _os.fdopen(fd, "w") as fh:
+            __import__("json").dump(manifest, fh)
+        old = _os.environ.get("LEDGR_GOLDEN_MANIFEST")
+        _os.environ["LEDGR_GOLDEN_MANIFEST"] = path
+        try:
+            result = golden_field_match_code(_make_instance(batch))
+        finally:
+            if old is None:
+                _os.environ.pop("LEDGR_GOLDEN_MANIFEST", None)
+            else:
+                _os.environ["LEDGR_GOLDEN_MANIFEST"] = old
+            _os.unlink(path)
+
+        # Both docs must score 1.0 on their tax_coa — id-join resolves reorder
+        exp = result["explanation"]
+        assert "tax_coa[qbs]=1.0" in exp, (
+            f"Reordered fan-out must still score 1.0 via id-join. "
+            f"explanation={exp!r}"
+        )
+        assert "tax_coa[qbs]=0.0" not in exp, (
+            f"No doc should mis-score due to positional pairing. "
+            f"explanation={exp!r}"
+        )
+
+    def test_stale_doc_id_scores_zero_not_positional_guess(self):
+        """Fix 2 id-mismatch: when golden doc B's source_doc_id matches no live
+        row, it must score 0.0 (not a positional guess against live doc A's lines).
+        """
+        from ledgr_agent.metrics.golden_field_match import golden_field_match_code
+
+        manifest = self._two_doc_manifest()
+        batch = self._batch_with_id_stale_mismatch()
+
+        fd, path = __import__("tempfile").mkstemp(suffix=".json")
+        import os as _os
+        with _os.fdopen(fd, "w") as fh:
+            __import__("json").dump(manifest, fh)
+        old = _os.environ.get("LEDGR_GOLDEN_MANIFEST")
+        _os.environ["LEDGR_GOLDEN_MANIFEST"] = path
+        try:
+            result = golden_field_match_code(_make_instance(batch))
+        finally:
+            if old is None:
+                _os.environ.pop("LEDGR_GOLDEN_MANIFEST", None)
+            else:
+                _os.environ["LEDGR_GOLDEN_MANIFEST"] = old
+            _os.unlink(path)
+
+        # INV-A should score 1.0; INV-B (unmatched) must score 0.0 on line dims
+        # not silently positional-pair with INV-A's lines.
+        # The overall must therefore be below what it would be if both scored 1.0.
+        exp = result["explanation"]
+        # We expect at least one 0.0 tax_coa for the unmatched doc B
+        assert "tax_coa[qbs]=0.0" in exp, (
+            f"Unmatched golden doc must score 0.0 on line dims, not positional guess. "
+            f"explanation={exp!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
 
