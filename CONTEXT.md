@@ -161,6 +161,51 @@ judged by **one LLM call against the client's own COA**; low-confidence lines ar
 flagged → [[Review (HITL)]] → fix becomes a [[Correction]]. No account numbers are
 hardcoded.
 
+## Direction
+Which side of a [[Client]]'s books a document belongs to: **purchase** (the Client
+pays the vendor) or **sales** (the Client issues / collects). Direction is a
+*reading* decision and is **universal** — every accounting target separates purchase
+from sales.
+
+**Resolution (deterministic-first, mirroring [[Categorisation]]):** the
+[[Understand layer]] reads Direction from the document; for a vendor the Client has
+already taught us, the Client's recorded buy/sell **role** ([[Correction]] /
+Entity_Memory — Creditor = buy-from, Debtor = sell-to) acts as a deterministic prior.
+It **fills in** when the read is *unknown*, **agrees** silently when they match, and
+**flags a [[Review (HITL)]]** when it *conflicts* with a confident read — it never
+silently overrides the document. A brand-new vendor with no recorded role takes
+**one** Review pause, after which the role is remembered and the floor handles it. The
+role rides on buy/sell only, so it is **ERP-independent** (it never uses an ERP's
+account codes); when no role is on file the floor has no data and degrades to the pure
+LLM read.
+
+Direction is a *necessary input to* the [[Accounting Module]] but **not the whole
+answer** — where a document lands also depends on [[Payment status]]. (A document where
+the Client is both issuer and payer is *self-referential*.)
+
+## Payment status
+Whether a document was **paid at the point of issue** (cash / card / bank now) or
+stands as an **amount owed on credit** (carries terms / a due date). Values: paid /
+credit / unknown. Payment status is a property of the **document itself** — the same
+fact regardless of which accounting software the Client uses — so it is **read once**
+at the document boundary and carried in the [[Canonical Schema]]. Whether a given
+target *acts on* it is decided per target (see [[Accounting Module]]).
+
+## Accounting Module
+**Where a document finally lands in a specific software's books** — a **per-target
+projection**, not a universal fact. Some targets (e.g. AutoCount, SQL Account)
+separate a **CashBook** module — a **Payment Voucher (PV)** for paid purchases, an
+**Official Receipt (OR)** for paid sales — from a credit **AP/AR Invoice** module; for
+them the module is a function of **[[Direction]] × [[Payment status]]**. Other targets
+(e.g. QBS Ledger, Xero) have **no such split** — a document posts to the direction's
+sheet and payment is reconciled separately — so for them the Module **collapses to
+[[Direction]]**. Because each target's modules, sheets, preview columns and
+[[Workbook]] tabs are described by **that target's own profile** (rule-data),
+introducing a module is a profile change that the export, the Excel [[Workbook]], the
+Slack preview table and the [[Batch (Job)]] summary all **follow** — the
+[[Completeness Contract]] gains that module's required headers for the targets that
+declare it.
+
 ## Credit
 The prepaid unit a [[Firm]] spends to use Ledgr. A firm buys credits up front (a
 [[Top-up]]); processing a document consumes them. The balance is held **per Firm** —
