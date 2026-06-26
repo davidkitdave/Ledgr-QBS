@@ -41,11 +41,24 @@ def _fy_from_export_rows(export_rows: list[dict[str, Any]]) -> str | None:
     return None
 
 
+#: Row keys that are eval/routing metadata, not ledger columns. Stripped before
+#: appending to the human-facing Slack ledger so the live sheet is byte-identical
+#: whether or not the row carries issue-#28 provenance tags.
+_EXPORT_METADATA_KEYS = {
+    "workbook",
+    "sheet",
+    "source_doc_id",
+    "tax_treatment",
+    "account_code",
+    "direction",
+}
+
+
 def _strip_export_metadata(row: dict[str, Any]) -> dict[str, Any]:
     return {
         key: value
         for key, value in row.items()
-        if key not in {"workbook", "sheet"}
+        if key not in _EXPORT_METADATA_KEYS
     }
 
 

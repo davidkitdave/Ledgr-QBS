@@ -20,7 +20,7 @@ Gemini call is ever made inside this module itself.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from io import BytesIO
 from pathlib import Path
@@ -42,6 +42,7 @@ from .export.client_context import (
     entity_memory_from_state,
 )
 from .export.exporters import (
+    ROW_PROVENANCE_KEYS,
     BankStatementExporter,
     bank_sheet_title,
     get_bank_exporter,
@@ -84,6 +85,11 @@ class BatchResult:
     workbooks: dict[str, bytes]     # filename -> xlsx bytes
     docs: list[ProcessedDoc]
     errors: list[str]
+    # Exporter rows tagged with a stable source_doc_id + canonical per-line
+    # tax/COA/direction (issue #28). Surfaced straight from the exporter (NOT
+    # reconstructed from workbook cells) so the provenance keys survive for the
+    # golden line-level scorer. Empty for legacy/harness paths that don't tag.
+    export_rows: list[dict] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #
@@ -146,6 +152,42 @@ def _build_ledger_workbook(
     buf = BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+def tagged_export_rows(
+    exporter,
+    workbook_name: str,
+    purchases: list[NormalizedInvoice],
+    sales: list[NormalizedInvoice],
+) -> list[dict]:
+    """Exporter rows for one ledger workbook, tagged for the line-level scorer.
+
+    Each row mirrors the workbook cells (so downstream consumers that read column
+    headers keep working) and additionally carries the issue-#28 provenance keys
+    (``source_doc_id`` + canonical per-line ``tax_treatment`` / ``account_code`` /
+    ``direction``). Built straight from ``exporter.rows`` — NOT reconstructed from
+    workbook bytes — so the provenance keys survive instead of being dropped when
+    the row is projected onto the human column set.
+    """
+    out: list[dict] = []
+    for title, cols, invs, doc_type_str in (
+        ("Purchase", exporter.purchase_cols, purchases, "purchase"),
+        ("Sales", exporter.sales_cols, sales, "sales"),
+    ):
+        for row in exporter.rows(invs, doc_type_str):
+            cells = {col: row.get(col, "") for col in cols}
+            provenance = {
+                key: row[key] for key in ROW_PROVENANCE_KEYS if key in row
+            }
+            out.append(
+                {
+                    "workbook": workbook_name,
+                    "sheet": title,
+                    **cells,
+                    **provenance,
+                }
+            )
+    return out
 
 
 def _build_bank_workbook(

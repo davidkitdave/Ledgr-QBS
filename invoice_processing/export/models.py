@@ -141,6 +141,14 @@ class NormalizedInvoice:
     page_range: Optional[tuple[int, int]] = None
     source_file_id: Optional[str] = None
 
+    # Stable per-logical-document id used to tag exported rows so a golden
+    # scorer can join live output rows back to expected per-line values
+    # (issue #28). Derived from source basename + reference + page_range via
+    # invoice_processing.export.source_doc_id; survives multi-doc fan-out and is
+    # reproducible run-to-run (unlike source_file_id, which rotates). Stamped
+    # onto each exporter row dict but never written to the human-facing Excel.
+    source_doc_id: Optional[str] = None
+
     @property
     def counterparty(self) -> PartyInfo:
         """The other party: supplier for purchases, customer for sales."""

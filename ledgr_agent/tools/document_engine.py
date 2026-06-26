@@ -19,6 +19,7 @@ from invoice_processing.export.exporters import (
 )
 from invoice_processing.export.models import NormalizedInvoice
 from invoice_processing.export.routing import route_document
+from invoice_processing.export.source_doc_id import source_doc_id_for_invoice
 from invoice_processing.extract.bank_statement_extractor import (
     extract_bank_file,
     to_bank_statements,
@@ -34,6 +35,7 @@ from invoice_processing.pipeline import (
     _build_bank_workbook,
     _build_ledger_workbook,
     _effective_fye_month,
+    tagged_export_rows,
 )
 
 
@@ -88,10 +90,12 @@ def process_batch_with_document_spine(
                 )
             )
 
+    workbooks, export_rows = _build_workbooks(docs, client)
     return EngineBatchResult(
-        workbooks=_build_workbooks(docs, client),
+        workbooks=workbooks,
         docs=docs,
         errors=errors,
+        export_rows=export_rows,
     )
 
 
@@ -184,6 +188,14 @@ def _process_one_path(
     state = client.to_state()
     docs: list[ProcessedDoc] = []
     for index, normalized in enumerate(result.normalized, start=1):
+        # Stable per-logical-document id for line-level eval (issue #28).
+        # Derived from source basename + reference + page_range so it survives
+        # the multi-doc fan-out and is reproducible run-to-run.
+        normalized.source_doc_id = source_doc_id_for_invoice(
+            normalized,
+            source_basename=path.name,
+            index=index - 1,
+        )
         # Derive resolved direction per-doc from the engine output.
         # extracted_document_to_normalized sets normalized.doc_type to
         # "sales" or "purchase" via _effective_direction(direction="auto").
@@ -294,7 +306,15 @@ def _route_normalized(
     )
 
 
-def _build_workbooks(docs: list[ProcessedDoc], client: Any) -> dict[str, bytes]:
+def _build_workbooks(
+    docs: list[ProcessedDoc], client: Any
+) -> tuple[dict[str, bytes], list[dict]]:
+    """Build the FY workbooks and the source-doc-id-tagged export rows (issue #28).
+
+    Returns ``(workbooks, export_rows)``: the workbook bytes (human-facing, no
+    provenance columns) and the parallel tagged rows the line-level scorer joins
+    on ``source_doc_id``.
+    """
     ledger_groups: dict[str, dict[str, list[NormalizedInvoice]]] = {}
     bank_groups: dict[str, list[Any]] = {}
 
@@ -310,6 +330,7 @@ def _build_workbooks(docs: list[ProcessedDoc], client: Any) -> dict[str, bytes]:
             ledger_groups[workbook].setdefault(sheet, []).append(doc.normalized)
 
     workbooks: dict[str, bytes] = {}
+    export_rows: list[dict] = []
     exporter = get_exporter(client.accounting_software)
     exporter.configure_client_context(coa_keys=coa_keys_from_state(client.to_state()))
     for workbook, sheets in ledger_groups.items():
@@ -317,6 +338,14 @@ def _build_workbooks(docs: list[ProcessedDoc], client: Any) -> dict[str, bytes]:
             exporter,
             sheets.get("Purchase", []),
             sheets.get("Sales", []),
+        )
+        export_rows.extend(
+            tagged_export_rows(
+                exporter,
+                workbook,
+                sheets.get("Purchase", []),
+                sheets.get("Sales", []),
+            )
         )
 
     bank_exporter = get_bank_exporter()
@@ -327,4 +356,4 @@ def _build_workbooks(docs: list[ProcessedDoc], client: Any) -> dict[str, bytes]:
         if statements:
             workbooks[workbook] = _build_bank_workbook(bank_exporter, statements)
 
-    return workbooks
+    return workbooks, export_rows
