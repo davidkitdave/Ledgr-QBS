@@ -1046,6 +1046,7 @@ class SlackLedgerStore:
                     kind=kind,
                     client_name=client_name,
                     prev_file_id=prev_file_id,
+                    software=software,
                 )
                 if new_file_id:
                     result["slack_file_id"] = new_file_id
