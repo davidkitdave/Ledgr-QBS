@@ -1390,6 +1390,7 @@ def _reextract_with_hint(ctx, hint: str, pdf_bytes: bytes, mime_type: str = "app
         base_currency=_base_currency_from_state(ctx.state),
         client_name=ctx.state.get("client_name"),
         client_uen=ctx.state.get("client_uen"),
+        entity_memory=entity_memory_from_state(ctx.state),
         hint=hint,
         model=MODEL_READ,
     )
