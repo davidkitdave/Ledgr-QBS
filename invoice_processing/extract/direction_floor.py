@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Literal, Optional
 
 from ..export.client_context import EntityMemoryEntry
+
+MatchKind = Literal["reg_no", "name_only"]
 
 
 def _norm(s: Optional[str]) -> str:
@@ -27,10 +29,16 @@ def _lookup_vendor_role(
     vendor_name: Optional[str],
     vendor_reg_no: Optional[str],
     entity_memory: list[EntityMemoryEntry],
-) -> Optional[str]:
-    """Return the remembered buy/sell role for a vendor, if any."""
+) -> Optional[tuple[str, MatchKind]]:
+    """Return remembered buy/sell role and how it was matched, if any.
+
+    ``reg_no`` matches (both sides non-empty and normalized equal) are trusted.
+    ``name_only`` matches are weaker: invoice vendor names are untrusted text.
+    """
     n_vendor = _norm(vendor_name)
     n_reg = _norm(vendor_reg_no)
+
+    name_only_match: Optional[tuple[str, MatchKind]] = None
 
     for entry in entity_memory:
         role_direction = _role_to_direction(entry.role)
@@ -41,10 +49,12 @@ def _lookup_vendor_role(
         reg_hit = bool(n_reg) and bool(_norm(entry.reg_no)) and _norm(entry.reg_no) == n_reg
         name_hit = bool(n_vendor) and bool(n_entry_name) and n_entry_name == n_vendor
 
-        if reg_hit or name_hit:
-            return entry.role
+        if reg_hit:
+            return entry.role, "reg_no"
+        if name_hit and name_only_match is None:
+            name_only_match = (entry.role, "name_only")
 
-    return None
+    return name_only_match
 
 
 @dataclass(frozen=True)
@@ -64,8 +74,10 @@ def apply_direction_floor(
 ) -> DirectionFloorResult:
     """Apply the client's remembered vendor role as a deterministic direction floor.
 
-    - LLM ``unknown`` + role present → take role direction (no review).
-    - LLM agrees with role → proceed.
+    - LLM ``unknown`` + role matched by ``reg_no`` → take role direction (no review).
+    - LLM ``unknown`` + role matched by name only → pure LLM (needs review); names on
+      invoices are untrusted and must not auto-clear HITL.
+    - LLM agrees with role → proceed (name-only match is acceptable here).
     - LLM confidently disagrees with role → conflict review.
     - No role on file → pure LLM read (unknown still needs review).
     """
@@ -76,7 +88,9 @@ def apply_direction_floor(
             needs_review=True,
         )
 
-    role = _lookup_vendor_role(vendor_name, vendor_reg_no, entity_memory)
+    lookup = _lookup_vendor_role(vendor_name, vendor_reg_no, entity_memory)
+    role = lookup[0] if lookup else None
+    match_kind = lookup[1] if lookup else None
     role_direction = _role_to_direction(role)
 
     if not role_direction:
@@ -87,6 +101,12 @@ def apply_direction_floor(
         )
 
     if llm in ("unknown", "auto", ""):
+        # Name-only matches must not silently bypass HITL when the LLM is unsure.
+        if match_kind == "name_only":
+            return DirectionFloorResult(
+                effective_direction="unknown",
+                needs_review=True,
+            )
         return DirectionFloorResult(
             effective_direction=role_direction,
             needs_review=False,

@@ -17,12 +17,12 @@ def _creditor_vendor() -> list[EntityMemoryEntry]:
     ]
 
 
-def test_unknown_llm_direction_uses_creditor_role_without_review():
-    """Taught vendor + LLM unknown → purchase from Creditor role, no review."""
+def test_unknown_llm_direction_uses_creditor_role_without_review_when_reg_no_matches():
+    """Taught vendor + LLM unknown + trusted reg_no match → purchase, no review."""
     result = apply_direction_floor(
         "unknown",
         vendor_name="NTUC FairPrice",
-        vendor_reg_no=None,
+        vendor_reg_no="201234567A",
         entity_memory=_creditor_vendor(),
     )
     assert result.effective_direction == "purchase"
@@ -30,14 +30,32 @@ def test_unknown_llm_direction_uses_creditor_role_without_review():
     assert result.conflict is False
 
 
-def test_unknown_llm_direction_uses_debtor_role_as_sales():
+def test_unknown_llm_direction_name_only_match_still_needs_review():
+    """Spoofed vendor names must not auto-clear HITL when LLM is unknown."""
+    result = apply_direction_floor(
+        "unknown",
+        vendor_name="NTUC FairPrice",
+        vendor_reg_no=None,
+        entity_memory=_creditor_vendor(),
+    )
+    assert result.effective_direction == "unknown"
+    assert result.needs_review is True
+    assert result.conflict is False
+
+
+def test_unknown_llm_direction_uses_debtor_role_as_sales_when_reg_no_matches():
     memory = [
-        EntityMemoryEntry(name="Big Customer Ltd", role="Debtor", mapping_code="4000"),
+        EntityMemoryEntry(
+            name="Big Customer Ltd",
+            reg_no="53123456A",
+            role="Debtor",
+            mapping_code="4000",
+        ),
     ]
     result = apply_direction_floor(
         "unknown",
         vendor_name="Big Customer Ltd",
-        vendor_reg_no=None,
+        vendor_reg_no="53123456A",
         entity_memory=memory,
     )
     assert result.effective_direction == "sales"
