@@ -321,3 +321,98 @@ def test_process_file_event_clean_agent_charges_on_delivery(
 
 def test_delivery_idempotency_key_format() -> None:
     assert delivery_idempotency_key(channel_id="C1", file_id="F1") == "C1:F1:deliver"
+
+
+def test_flush_deferred_ledger_writes_charges_credits_per_doc(credit_svc: CreditService) -> None:
+    """Batch-deferred Slack drops must charge after the batch-end flush (ADR-0016)."""
+    from accounting_agents.slack_runner import _flush_deferred_ledger_writes
+    from invoice_processing.export.client_context import FirestoreClientStore
+
+    db = FakeFirestore()
+    profile = {
+        "client_id": "c1",
+        "client_name": "Test Client",
+        "fye_month": 12,
+        "accounting_software": "QBS Ledger",
+        "gst_registered": True,
+        "region": "SINGAPORE",
+        "base_currency": "SGD",
+        "status": "active",
+        "firm_id": "TQA",
+        "slack_team_id": "TQA",
+    }
+    db.collection("clients").document("c1").set(profile)
+    db.collection("channels").document("C-batch-charge").set({"client_id": "c1"})
+    client_store = FirestoreClientStore(client=db)
+
+    slack = FakeSlackClient()
+    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+    credit_svc.ensure_firm("TQA")
+    credit_svc.grant("TQA", 10, note="trial")
+
+    batch_deferred = [
+        {
+            "file_id": "F-batch-1",
+            "effective_replace": False,
+            "payload": {
+                "client_id": "c1",
+                "fy": "2026",
+                "kind": "invoice",
+                "software": "qbs",
+                "client_name": "Test Client",
+                "input_page_count": 1,
+            },
+            "batches": [
+                {
+                    "sheet": "Purchase",
+                    "doc_key": "F-batch-1:Purchase:INV-1",
+                    "rows": [{"Invoice Number": "INV-1", "Description": "a", "Source Amount": 10.0}],
+                }
+            ],
+            "workbook_name": "",
+        },
+        {
+            "file_id": "F-batch-2",
+            "effective_replace": False,
+            "payload": {
+                "client_id": "c1",
+                "fy": "2026",
+                "kind": "invoice",
+                "software": "qbs",
+                "client_name": "Test Client",
+                "input_page_count": 1,
+            },
+            "batches": [
+                {
+                    "sheet": "Purchase",
+                    "doc_key": "F-batch-2:Purchase:INV-2",
+                    "rows": [{"Invoice Number": "INV-2", "Description": "b", "Source Amount": 20.0}],
+                }
+            ],
+            "workbook_name": "",
+        },
+    ]
+
+    asyncio.run(
+        _flush_deferred_ledger_writes(
+            ledger_store=store,
+            slack_client=slack,
+            channel_id="C-batch-charge",
+            batch_deferred=batch_deferred,
+            client_store=client_store,
+        )
+    )
+
+    assert credit_svc.read_balance("TQA") == 8, "two delivered docs should charge 2 credits total"
+
+    # Re-flush the same deferred payloads: idempotency keys must prevent double-charge.
+    asyncio.run(
+        _flush_deferred_ledger_writes(
+            ledger_store=store,
+            slack_client=slack,
+            channel_id="C-batch-charge",
+            batch_deferred=batch_deferred,
+            client_store=client_store,
+        )
+    )
+    assert credit_svc.read_balance("TQA") == 8, "re-flush must not double-charge"
