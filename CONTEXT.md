@@ -180,29 +180,46 @@ account codes); when no role is on file the floor has no data and degrades to th
 LLM read.
 
 Direction is a *necessary input to* the [[Accounting Module]] but **not the whole
-answer** — where a document lands also depends on [[Payment status]]. (A document where
-the Client is both issuer and payer is *self-referential*.)
+answer** — where a document lands also depends on whether the counterparty is a tracked
+[[Creditor / Debtor code]]. (A document where the Client is both issuer and payer is
+*self-referential*.)
 
-## Payment status
-Whether a document was **paid at the point of issue** (cash / card / bank now) or
-stands as an **amount owed on credit** (carries terms / a due date). Values: paid /
-credit / unknown. Payment status is a property of the **document itself** — the same
-fact regardless of which accounting software the Client uses — so it is **read once**
-at the document boundary and carried in the [[Canonical Schema]]. Whether a given
-target *acts on* it is decided per target (see [[Accounting Module]]).
+## Creditor / Debtor code
+A specific software's **identifier for one tracked supplier (Creditor) or customer
+(Debtor)** — the code under its AP / AR control account. It is **per-client master data
+the Client owns**, never something Ledgr invents. Ledgr **learns** a code (from a
+[[Correction]] / Entity_Memory, or by ingesting the Client's own **Creditor / Debtor
+balance report**) and **resolves** a document's counterparty to it — but never
+fabricates or hardcodes one. Same authority rule as the [[Chart of Accounts (COA)]]:
+the **Client's own scheme wins**; there is no generic default and no example client's
+codes are baked in. A target that requires the code (e.g. AutoCount / SQL AP/AR
+Invoice) cannot post a credit document without it, so a brand-new counterparty takes
+**one** [[Review (HITL)]] pause to capture its code, then is remembered. A counterparty
+with no code on a **paid** document falls to the [[Accounting Module]] CashBook path
+(no code needed).
+
+## Payment (settlement)
+Whether a document has been **paid** is a **settlement** fact — **not** a property that
+reroutes the document. A bill is booked as a payable / receivable when it is understood;
+the matching payment is a **separate event** that arrives through the **bank lane** (a
+bank-statement line — realised in some targets as a Payment Voucher / Official Receipt
+that knocks off the invoice). Ledgr therefore does **not** stamp a paid/credit status on
+an invoice to decide where it lands — see [[Accounting Module]]. *Exception:* a one-off
+paid expense with **no** [[Creditor / Debtor code]] (petty cash, a directly-paid utility)
+is booked straight to an expense account via a CashBook-style module.
 
 ## Accounting Module
 **Where a document finally lands in a specific software's books** — a **per-target
-projection**, not a universal fact. Some targets (e.g. AutoCount, SQL Account)
-separate a **CashBook** module — a **Payment Voucher (PV)** for paid purchases, an
-**Official Receipt (OR)** for paid sales — from a credit **AP/AR Invoice** module; for
-them the module is a function of **[[Direction]] × [[Payment status]]**. Other targets
-(e.g. QBS Ledger, Xero) have **no such split** — a document posts to the direction's
-sheet and payment is reconciled separately — so for them the Module **collapses to
-[[Direction]]**. Because each target's modules, sheets, preview columns and
-[[Workbook]] tabs are described by **that target's own profile** (rule-data),
-introducing a module is a profile change that the export, the Excel [[Workbook]], the
-Slack preview table and the [[Batch (Job)]] summary all **follow** — the
+projection** described entirely by **that target's own profile** (rule-data), never
+hardcoded to any one client or ERP. The driver is the **counterparty, not payment**: a
+bill from a tracked supplier / customer posts to the target's **AP / AR Invoice** module
+against that party's [[Creditor / Debtor code]]; a one-off cash expense with **no** such
+account posts to a **CashBook** module (Payment Voucher / Official Receipt) straight to
+an expense / income account. Targets that split a CashBook (e.g. AutoCount, SQL Account)
+carry both; targets with no split (e.g. QBS Ledger, Xero) **collapse the Module to
+[[Direction]]** — one sheet per side, payment reconciled separately. Introducing or
+changing a module is a **profile edit** the export, the Excel [[Workbook]], the Slack
+preview table and the [[Batch (Job)]] summary all **follow** — the
 [[Completeness Contract]] gains that module's required headers for the targets that
 declare it.
 

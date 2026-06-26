@@ -9,44 +9,66 @@ These are vertical tracer-bullet slices — each a thin end-to-end path, demoabl
 
 ---
 
-## Phase B — CashBook PV/OR (per-ERP; ADR-0028)
+## Phase B — counterparty-code routing + CashBook PV/OR (per-target; ADR-0028, amended 2026-06-26)
 
-### B1 — Paid AutoCount purchase → CashBook PV, end-to-end *(AFK)*
-**Blocked by:** #30 (confirmed PV/OR template columns), #28 (line-level eval)
+**Re-scope (2026-06-26):** the Accounting Module driver is the **counterparty's Creditor/Debtor
+code**, not `payment_status` (withdrawn — see amended ADR-0028). A bill that resolves to its code →
+**AP/AR Invoice**; a one-off cash expense with **no** code → **CashBook PV/OR**. Payment itself is
+bank-lane settlement, out of scope for the invoice path. These slices reflect that frame.
 
-**What to build:** The first full vertical path for the Accounting Module fork. A paid purchase
-for an AutoCount client books to the **CashBook Payment Voucher (PV)** module instead of AP
-Invoice, cutting through every layer: read `payment_status` (paid|credit|unknown) on the
-document; AutoCount profile declares a **CashBook block**; deterministic profile-driven routing
-sends `paid → PV`, `credit → AP`; the PV exporter writes the correct sheet; the Excel workbook,
-Slack preview and Job summary follow the profile; one golden test locks the path. Generic routing
-— **no ERP names in code**.
+### B1 — Resolve counterparty → Creditor/Debtor code; seed from the client's balance report *(AFK)*
+**Blocked by:** #26 (Phase A engine intelligence on the shared engine)
+
+**What to build:** The universal core every AP/AR Invoice needs. Resolve a document's counterparty
+to the client's own **Creditor/Debtor code** (Entity_Memory / Correction first), and let a client
+**ingest their own Creditor Balance / Debtor Balance report** to bulk-seed those codes (same
+soft-gate path as the COA, ADR-0006) — Ledgr never invents a code. A counterparty with no
+resolvable code on a **credit** document takes **one** Review (HITL) pause to capture it, then is
+remembered. No example client's codes are baked in.
 
 **Acceptance criteria:**
-- [ ] A paid AutoCount purchase document books to CashBook PV (not AP Invoice), end-to-end.
-- [ ] A credit AutoCount purchase still books to AP Invoice (unchanged).
-- [ ] Excel sheet, Slack preview columns, and Job summary all reflect the PV module via the profile (no hardcoding).
-- [ ] QBS/Xero clients are unaffected (regression check — they have no CashBook block).
+- [ ] A document from a known counterparty resolves to the client's own code (no pause).
+- [ ] Ingesting a Creditor/Debtor balance report bulk-seeds codes into Entity_Memory.
+- [ ] A brand-new counterparty on a credit bill pauses once; the captured code is remembered.
+- [ ] No generic/default or example-client codes anywhere in code or rule-data.
+
+### B2 — No-counterparty paid expense → CashBook PV (AutoCount), end-to-end *(AFK)*
+**Blocked by:** B1, #30 (confirmed PV/OR template columns), #28 (line-level eval)
+
+**What to build:** The first CashBook vertical. A one-off **paid** purchase with **no resolvable
+creditor code** (petty cash, a directly-paid utility) books to the **CashBook Payment Voucher
+(PV)** module — straight to an expense GL account with a free-text payee — instead of an AP Invoice
+that would leave a phantom creditor. Driven by the profile's **CashBook block**, not an ERP name:
+routing = "counterparty resolves to a code → AP Invoice; else (paid, no code) → PV". The PV
+exporter writes the correct sheet; Excel workbook, Slack preview and Job summary follow the
+profile; one golden test locks the path.
+
+**Acceptance criteria:**
+- [ ] A paid AutoCount purchase with no resolvable creditor code books to CashBook PV (not AP Invoice).
+- [ ] A bill that resolves to a creditor code still books to AP Invoice (unchanged).
+- [ ] Excel sheet, Slack preview and Job summary reflect the PV module via the profile (no hardcoding).
+- [ ] QBS/Xero clients unaffected (no CashBook block → everything posts to the direction sheet).
 - [ ] Golden test covers the PV path; line-level eval green.
 
-### B2 — Paid AutoCount sale → Official Receipt (OR) *(AFK)*
-**Blocked by:** B1
+### B3 — No-counterparty paid receipt → CashBook OR (AutoCount) *(AFK)*
+**Blocked by:** B2
 
-**What to build:** Extend the same machinery to the sales side — a paid sale books to the
-**CashBook Official Receipt (OR)** module; a credit sale still books to AR Invoice.
+**What to build:** The sales mirror — a one-off **paid** receipt with **no resolvable debtor code**
+books to the **CashBook Official Receipt (OR)** module (income GL + free-text payer); a receipt
+that resolves to a debtor code still books to AR Invoice.
 
 **Acceptance criteria:**
-- [ ] Paid AutoCount sale → CashBook OR; credit sale → AR Invoice.
+- [ ] Paid AutoCount receipt with no debtor code → CashBook OR; resolved debtor → AR Invoice.
 - [ ] Presentation surfaces follow the profile; golden test covers OR.
 
-### B3 — SQL Account PV + OR *(AFK)*
-**Blocked by:** B1
+### B4 — SQL Account CashBook PV + OR *(AFK)*
+**Blocked by:** B2
 
 **What to build:** Declare the CashBook block in the SQL Account profile and confirm the PV/OR
-routing works for the second ERP, reusing the generic routing built in B1/B2.
+routing works for the second ERP, reusing the generic routing from B2/B3.
 
 **Acceptance criteria:**
-- [ ] Paid SQL Account purchase → PV; paid sale → OR; credit → AP/AR.
+- [ ] SQL Account: paid no-code purchase → PV; paid no-code receipt → OR; resolved counterparty → AP/AR.
 - [ ] Golden tests cover SQL Account PV/OR; no ERP-name branching in code.
 
 ---

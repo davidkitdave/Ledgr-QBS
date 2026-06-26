@@ -2,7 +2,7 @@ from datetime import date
 from typing import Any
 
 from invoice_processing.classify.document_classifier import ClassificationResult
-from invoice_processing.export.client_context import ClientContext, CoaAccount
+from invoice_processing.export.client_context import ClientContext, CoaAccount, EntityMemoryEntry
 from invoice_processing.export.models import InvoiceLine, NormalizedInvoice, PartyInfo
 from invoice_processing.extract.process_invoice_document import InvoiceProcessResult
 from ledgr_agent.tools.batch_mapper import map_engine_batch_to_contract
@@ -415,7 +415,11 @@ def test_invoice_process_fn_receives_direction_auto(tmp_path: Any) -> None:
 # bypassed and both tests will FAIL — confirming they guard the regression.
 
 
-def _make_bundle(direction_for_client: str) -> Any:
+def _make_bundle(
+    direction_for_client: str,
+    *,
+    vendor_tax_regno: str | None = None,
+) -> Any:
     """Build a minimal ExtractedDocumentBundle with one document."""
     from invoice_processing.extract.ledger_extract import (
         ExtractedDocument,
@@ -427,6 +431,7 @@ def _make_bundle(direction_for_client: str) -> Any:
         doc_type="invoice",
         page_range=[1, 1],
         vendor="MYSTERY VENDOR",
+        vendor_tax_regno=vendor_tax_regno,
         buyer="TEST CORP PTE LTD",
         reference="IV-CAUSAL-001",
         date="2025-06-01",
@@ -573,3 +578,130 @@ def test_self_referential_direction_real_chain_flags_review(
     assert "self-referential" in note, (
         f"note must mention 'self-referential', got: {note!r}"
     )
+
+
+def test_known_vendor_role_floor_skips_review_on_unknown_llm_direction(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """ADR-0027 causal test: taught Creditor vendor + LLM unknown → purchase, no review.
+
+    Reg-no match is required for auto-apply (security: name-only is untrusted).
+    Causal guarantee: removing entity_memory from the client reverts to
+    reconciled=False and a direction review note — this test fails if the
+    floor is removed.
+    """
+    import invoice_processing.extract.process_invoice_document as pid_mod
+
+    pdf = tmp_path / "retail-receipt.pdf"
+    pdf.write_bytes(b"%PDF fake")
+
+    client = ClientContext(
+        client_id="test-corp",
+        client_name="TEST CORP PTE LTD",
+        region="SINGAPORE",
+        accounting_software="qbs",
+        base_currency="SGD",
+        tax_registered=True,
+        fye_month=12,
+        coa=[CoaAccount(code="6100", description="Office Supplies")],
+        entity_memory=[
+            EntityMemoryEntry(
+                name="MYSTERY VENDOR",
+                reg_no="201234567A",
+                role="Creditor",
+                mapping_code="6100",
+            )
+        ],
+    )
+
+    def classify_fn(path: str) -> ClassificationResult:
+        return ClassificationResult(
+            doc_type="receipt",
+            confidence=0.9,
+            issuer_name="MYSTERY VENDOR",
+            bill_to_name=None,
+            reason="test",
+        )
+
+    unknown_bundle = _make_bundle("unknown", vendor_tax_regno="201234567A")
+    monkeypatch.setattr(pid_mod, "EXTRACT_LEDGER_FN", lambda *_a, **_kw: unknown_bundle)
+
+    def _categorize_with_memory(inv: NormalizedInvoice, **kwargs: Any) -> None:
+        for line in inv.lines:
+            line.account_code = "6100"
+
+    engine = process_batch_with_document_spine(
+        [pdf],
+        client,
+        classify_fn=classify_fn,
+        direction_fn=lambda cls, **kw: "purchase",
+        invoice_process_fn=pid_mod.process_invoice_document,
+        categorize_fn=_categorize_with_memory,
+    )
+
+    assert len(engine.docs) == 1
+    doc = engine.docs[0]
+    assert doc.direction == "purchase"
+    assert doc.reconciled is True, (
+        "taught Creditor vendor + LLM unknown must book purchase without review pause"
+    )
+    note = doc.note or ""
+    assert "direction unknown" not in note
+    assert "needs review: direction" not in note
+
+
+def test_known_vendor_role_conflict_flags_review(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """LLM sales vs remembered Creditor (purchase) must surface a conflict review."""
+    import invoice_processing.extract.process_invoice_document as pid_mod
+
+    pdf = tmp_path / "role-flip.pdf"
+    pdf.write_bytes(b"%PDF fake")
+
+    client = ClientContext(
+        client_id="test-corp",
+        client_name="TEST CORP PTE LTD",
+        region="SINGAPORE",
+        accounting_software="qbs",
+        base_currency="SGD",
+        tax_registered=True,
+        fye_month=12,
+        coa=[CoaAccount(code="400-000", description="Sales Revenue")],
+        entity_memory=[
+            EntityMemoryEntry(
+                name="MYSTERY VENDOR",
+                role="Creditor",
+                mapping_code="6100",
+            )
+        ],
+    )
+
+    def classify_fn(path: str) -> ClassificationResult:
+        return ClassificationResult(
+            doc_type="invoice",
+            confidence=0.9,
+            issuer_name="MYSTERY VENDOR",
+            bill_to_name="TEST CORP PTE LTD",
+            reason="test",
+        )
+
+    sales_bundle = _make_bundle("sales")
+    monkeypatch.setattr(pid_mod, "EXTRACT_LEDGER_FN", lambda *_a, **_kw: sales_bundle)
+
+    engine = process_batch_with_document_spine(
+        [pdf],
+        client,
+        classify_fn=classify_fn,
+        direction_fn=lambda cls, **kw: "purchase",
+        invoice_process_fn=pid_mod.process_invoice_document,
+        categorize_fn=lambda *_a, **_kw: None,
+    )
+
+    assert len(engine.docs) == 1
+    doc = engine.docs[0]
+    assert doc.reconciled is False
+    note = doc.note or ""
+    assert "direction conflicts" in note
+    assert "needs review" in note
+
