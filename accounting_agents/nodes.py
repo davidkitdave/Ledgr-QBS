@@ -111,6 +111,7 @@ from invoice_processing.extract.process_invoice_document import (
     InvoiceProcessResult,
     process_invoice_document,
 )
+from invoice_processing.extract.direction_floor import apply_direction_floor
 
 from .config import MODEL_LITE, MODEL_READ, MODEL_STD
 # Artifact-naming helpers — canonical definitions live in the neutral shared
@@ -661,6 +662,7 @@ async def extract_invoice_document_node(ctx) -> Event:
         base_currency=_base_currency_from_state(ctx.state),
         client_name=ctx.state.get("client_name"),
         client_uen=ctx.state.get("client_uen"),
+        entity_memory=entity_memory_from_state(ctx.state),
         hint=review_hint or None,
         model=MODEL_READ,
     )
@@ -673,13 +675,26 @@ async def extract_invoice_document_node(ctx) -> Event:
     # the HITL gate (review_extraction_node / approval_gate) can surface the
     # ambiguity — never silently rewrite via fuzzy Python matching.
     if result.extraction_path == "understand" and result.ledger_extract:
-        resolved = _resolve_direction_from_extract(
+        llm_resolved = _resolve_direction_from_extract(
             result.ledger_extract,
             fallback=ctx.state.get(DIRECTION_KEY) or "unknown",
         )
-        if resolved == "unknown":
-            resolved = _retry_resolve_direction_llm(ctx, result.ledger_extract)
-        ctx.state[DIRECTION_KEY] = resolved
+        documents = result.ledger_extract.get("documents") or []
+        first_doc = documents[0] if documents else result.ledger_extract
+        floor = apply_direction_floor(
+            llm_resolved,
+            vendor_name=first_doc.get("vendor"),
+            vendor_reg_no=first_doc.get("vendor_tax_regno"),
+            entity_memory=entity_memory_from_state(ctx.state),
+        )
+        if floor.effective_direction in ("purchase", "sales") and not floor.conflict:
+            ctx.state[DIRECTION_KEY] = floor.effective_direction
+        elif llm_resolved == "unknown":
+            ctx.state[DIRECTION_KEY] = _retry_resolve_direction_llm(
+                ctx, result.ledger_extract
+            )
+        else:
+            ctx.state[DIRECTION_KEY] = llm_resolved
     return Event(output={"count": len(result.normalized)})
 
 
@@ -1123,6 +1138,7 @@ def detect_struggle(state: dict) -> tuple[bool, list[str]]:
                 "direction unknown" in note
                 or "self-referential" in note
                 or "direction not confirmed" in note
+                or "direction conflicts" in note
             ):
                 reasons.append(f"direction_uncertain: {label}")
 

@@ -23,7 +23,9 @@ from typing import Literal, Optional
 from google.genai import types
 from pydantic import BaseModel, Field
 
+from ..export.client_context import EntityMemoryEntry
 from ..export.models import NormalizedInvoice
+from .direction_floor import apply_direction_floor
 from ..shared_libraries.context_cache_config import log_context_cache_usage
 from ..shared_libraries.gemini_call_config import default_llm_config
 from ..shared_libraries.genai_client import lite_model, make_client
@@ -664,9 +666,17 @@ def extracted_document_to_normalized(
     our_gst_registered: bool = True,
     client_country: str = "SG",
     base_currency: str = "SGD",
+    entity_memory: list[EntityMemoryEntry] | None = None,
 ) -> NormalizedInvoice:
     """Map one ExtractedDocument → NormalizedInvoice."""
-    effective_direction = _effective_direction(doc, direction)
+    llm_direction = _effective_direction(doc, direction)
+    floor = apply_direction_floor(
+        llm_direction,
+        vendor_name=doc.vendor,
+        vendor_reg_no=doc.vendor_tax_regno,
+        entity_memory=entity_memory or [],
+    )
+    effective_direction = floor.effective_direction
     structural_direction = (
         effective_direction
         if effective_direction in ("purchase", "sales")
@@ -679,7 +689,14 @@ def extracted_document_to_normalized(
         client_country=client_country,
         base_currency=base_currency,
     )
-    if direction_needs_review(effective_direction):
+    if floor.conflict and floor.review_note:
+        inv.reconciled = False
+        inv.reconcile_note = (
+            f"{inv.reconcile_note}; {floor.review_note}"
+            if inv.reconcile_note
+            else floor.review_note
+        )
+    elif floor.needs_review and direction_needs_review(effective_direction):
         append_direction_review_note(inv, effective_direction)
     inv.tax_visible_on_document = doc.tax_visible_on_document
     inv.direction_reason = doc.direction_reason

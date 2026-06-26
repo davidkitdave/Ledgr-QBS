@@ -178,6 +178,7 @@ def _process_one_path(
         base_currency=client.base_currency,
         client_name=client.client_name,
         client_uen=client.client_uen,
+        entity_memory=client.entity_memory,
     )
 
     state = client.to_state()

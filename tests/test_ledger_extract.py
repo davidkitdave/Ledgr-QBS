@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from invoice_processing.export.client_context import EntityMemoryEntry
 from invoice_processing.extract.ledger_extract import (
     FAITHFUL_EXTRACT_STATIC_INSTRUCTION,
     ExtractedDocument,
@@ -325,3 +326,32 @@ def test_extracted_document_bundle_schema_descriptions():
     assert "collapse" in doc_props["presentation"]["description"].lower()
     assert "unknown" in doc_props["direction_for_client"]["description"]
     assert "collapse" in doc_props["lines"]["description"].lower()
+
+
+def test_extracted_document_to_normalized_applies_vendor_role_floor():
+    doc = ExtractedDocument(
+        doc_type="receipt",
+        page_range=[1, 1],
+        vendor="NTUC FairPrice",
+        reference="RCP-1",
+        date="2026-06-01",
+        currency="SGD",
+        grand_total=10.0,
+        subtotal=10.0,
+        tax_total=0.0,
+        tax_visible_on_document=False,
+        direction_for_client="unknown",
+        lines=[
+            ExtractedDocumentLine(description="Groceries", net_amount=10.0, gst_amount=0.0),
+        ],
+    )
+    memory = [EntityMemoryEntry(name="NTUC FairPrice", role="Creditor", mapping_code="6100")]
+    inv = extracted_document_to_normalized(
+        doc,
+        direction="auto",
+        entity_memory=memory,
+    )
+    assert inv.doc_type == "purchase"
+    assert inv.reconciled is True
+    assert "direction unknown" not in (inv.reconcile_note or "").lower()
+

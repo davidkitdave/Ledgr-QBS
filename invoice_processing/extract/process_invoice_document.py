@@ -12,6 +12,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
+from ..export.client_context import EntityMemoryEntry
 from ..export.models import NormalizedInvoice
 from .ledger_extract import (
     ExtractedDocumentBundle,
@@ -90,6 +91,7 @@ def _normalize_ledger_bundle(
     direction: str,
     our_gst_registered: bool,
     base_currency: str,
+    entity_memory: list[EntityMemoryEntry] | None = None,
 ) -> list[NormalizedInvoice]:
     normalized: list[NormalizedInvoice] = []
     for doc in bundle.documents:
@@ -98,6 +100,7 @@ def _normalize_ledger_bundle(
             direction=direction,
             our_gst_registered=our_gst_registered,
             base_currency=base_currency,
+            entity_memory=entity_memory,
         )
         ok, note = validate_extracted_document(doc)
         if not ok:
@@ -119,6 +122,7 @@ def process_invoice_document(
     base_currency: str = "SGD",
     client_name: Optional[str] = None,
     client_uen: Optional[str] = None,
+    entity_memory: list[EntityMemoryEntry] | None = None,
     hint: Optional[str] = None,
     model: Optional[str] = None,
 ) -> InvoiceProcessResult:
@@ -137,6 +141,7 @@ def process_invoice_document(
         direction=direction,
         our_gst_registered=our_gst_registered,
         base_currency=base_currency,
+        entity_memory=entity_memory,
     )
 
     total_pages = input_page_count
@@ -167,6 +172,7 @@ def process_invoice_document(
                     direction=direction,
                     our_gst_registered=our_gst_registered,
                     base_currency=base_currency,
+                    entity_memory=entity_memory,
                 )
                 page_ok = retry_page_ok
                 page_detail = retry_page_detail
