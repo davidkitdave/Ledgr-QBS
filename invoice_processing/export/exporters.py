@@ -274,6 +274,34 @@ def _doc_sign(inv: NormalizedInvoice) -> int:
     return -1 if (inv.document_kind or "").strip().lower() == "credit_note" else 1
 
 
+#: Provenance keys stamped onto every exporter row dict for line-level eval
+#: (issue #28). These are deliberately NOT ERP column names — they never appear
+#: in ``purchase_cols`` / ``sales_cols`` so they are dropped when a row is
+#: projected to workbook cells (which use ``[row.get(c) for c in cols]``), and
+#: they are stripped before the live ledger append. They exist only so the
+#: golden scorer can join live export rows to expected per-line values.
+ROW_PROVENANCE_KEYS = ("source_doc_id", "tax_treatment", "account_code", "direction")
+
+
+def _tag_row_provenance(
+    row: dict,
+    inv: NormalizedInvoice,
+    line: InvoiceLine,
+    doc_type: str,
+) -> None:
+    """Stamp the source-doc id + canonical per-line tax/COA/direction onto *row*.
+
+    Mutates ``row`` in place. Keyed off the canonical ``line.tax_treatment`` and
+    ``line.account_code`` (not the ERP-specific code in the visible column) so
+    the scorer can field-match deterministically across exporters. ``direction``
+    is the booking direction the row was exported under.
+    """
+    row["source_doc_id"] = getattr(inv, "source_doc_id", None) or ""
+    row["tax_treatment"] = (line.tax_treatment or "") if line.tax_treatment else ""
+    row["account_code"] = line.account_code or ""
+    row["direction"] = doc_type
+
+
 def _line_net_amount(line: InvoiceLine, inv: NormalizedInvoice) -> float:
     """Exportable line subtotal (sign-adjusted for credit notes).
 
@@ -425,11 +453,11 @@ class LedgerExporter:
         out = []
         for inv in invoices:
             for line in inv.lines:
-                out.append(
-                    self._sanitize_row_account_code(
-                        builder(inv, line), doc_type, line=line
-                    )
+                row = self._sanitize_row_account_code(
+                    builder(inv, line), doc_type, line=line
                 )
+                _tag_row_provenance(row, inv, line, doc_type)
+                out.append(row)
         return out
 
     def write_workbook(

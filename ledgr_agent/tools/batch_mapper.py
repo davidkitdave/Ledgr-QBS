@@ -59,6 +59,10 @@ def posted_document_summary(doc: ProcessedDoc) -> dict[str, object]:
             else None
         )
         summary["total"] = doc.normalized.doc_total
+        # Stable source-doc id (issue #28) so the line-level scorer can join
+        # this posted doc to its tagged export rows.
+        if doc.normalized.source_doc_id:
+            summary["source_doc_id"] = doc.normalized.source_doc_id
     return summary
 
 
@@ -249,7 +253,13 @@ def map_engine_batch_to_contract(
         review_requests=review_requests,
         soft_warnings=soft_warnings,
         erp_exports=erp_export_summaries(engine_result.workbooks),
-        export_rows=export_rows_from_workbooks(engine_result.workbooks),
+        # Prefer the engine's source-doc-id-tagged rows (issue #28) so the
+        # line-level scorer can join on source_doc_id; fall back to workbook
+        # reconstruction for legacy/harness paths that don't tag.
+        export_rows=(
+            list(getattr(engine_result, "export_rows", None) or [])
+            or export_rows_from_workbooks(engine_result.workbooks)
+        ),
         credits=credits or CreditSummary(credit_status="not_checked"),
         models_used=list(models_used or []),
         validation_summary=validation_summary,

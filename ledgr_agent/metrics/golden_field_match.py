@@ -3,15 +3,25 @@
 Compares extracted BatchResult values against a hand-authored golden v2 manifest.
 No LLM calls, no network I/O — fully hermetic and deterministic.
 
-**Documented limitation (TODO 0.4):** ``export_rows`` in a live BatchResult are
-workbook/sheet-keyed and carry no document/file pointer.  Per-line tax_code,
-coa_code, erp_codes, and creditor_code cannot yet be joined back to a source
-document from a real BatchResult.  Therefore ``project_batch`` emits
-``lines: []`` for every projected document.  The line-level sub-scorers
-(``score_tax_coa``, ``score_creditor``) return N/A (score=None) when the actual
-projection has no lines, but they work fully on synthetic/complete projections —
-which is what the unit tests prove.  Unblock by tagging each export row with a
-``doc_id`` in the engine (ADR-0026 / Stream-0.4).
+Line-level join (issue #28)
+---------------------------
+Every export row in a live BatchResult now carries a stable ``source_doc_id``
+(source basename + reference + page_range) plus the canonical per-line
+``tax_treatment`` / ``account_code`` / ``direction`` — tagged in the engine and
+surfaced straight from the exporter (not reconstructed from workbook cells).
+``project_batch`` groups those rows by ``source_doc_id`` so each projected
+document carries its real ``lines`` (``{tax_code, coa_code, direction, erp_codes}``)
+and the line-level sub-scorers (``score_tax_coa``, ``score_creditor``) score
+non-N/A on a live ``process_document_batch`` run. Expected manifest documents
+opt into the join by carrying a ``source_doc_id``; without it the scorer falls
+back to per-file index pairing (legacy behaviour).
+
+N/A still legitimately occurs when: golden authored no lines for an ERP, OR a
+projected doc genuinely has no rows and the golden did not author line
+expectations for that doc (e.g. a bank statement). When the golden *did* author
+lines (or direction) but the join produced no actual line data, the sub-scorers
+return **0.0** — not N/A — so a broken tagging run cannot false-green by
+dropping line dimensions from the overall mean.
 
 Entry point for agents-cli: ``golden_field_match_code(instance)``
 """
@@ -86,6 +96,42 @@ def _basename(path_or_name: str | None) -> str:
     return os.path.basename(path_or_name)
 
 
+def _lines_by_source_doc_id(
+    export_rows: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Group tagged export rows by ``source_doc_id`` into scorer-shaped lines.
+
+    Each row carries the canonical per-line ``tax_treatment`` / ``account_code`` /
+    ``direction`` (issue #28). We project them to the line shape the per-ERP
+    scorer reads: ``tax_code`` (= tax_treatment), ``coa_code`` (= account_code),
+    ``direction``, and an ``erp_codes`` map populated for *every* ERP from the
+    canonical tax_treatment so ``score_tax_coa`` can match whichever ERP the
+    golden authored. Rows without a ``source_doc_id`` are skipped (untagged).
+    """
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in export_rows:
+        sdid = row.get("source_doc_id")
+        if not sdid:
+            continue
+        tax_treatment = row.get("tax_treatment")
+        line = {
+            "tax_code": tax_treatment,
+            "coa_code": row.get("account_code"),
+            "direction": row.get("direction"),
+            # Canonical tax_treatment is ERP-agnostic; expose it under each ERP
+            # key so the golden's per-ERP line scorer joins regardless of which
+            # ERP it authored. The deterministic engine maps treatment→ERP code
+            # at workbook-write time; the field-match here scores the canonical
+            # decision (tax code + COA), which is the classification under test.
+            "erp_codes": {
+                erp: tax_treatment
+                for erp in ("autocount", "sql_account", "xero", "qbs")
+            },
+        }
+        grouped.setdefault(str(sdid), []).append(line)
+    return grouped
+
+
 def project_batch(batch: dict[str, Any]) -> dict[str, Any]:
     """Normalise a raw BatchResult dict into a scorer-friendly projection.
 
@@ -94,10 +140,13 @@ def project_batch(batch: dict[str, Any]) -> dict[str, Any]:
     - credits_used: int
     - credit_status: str
     - per_file_doc_counts: {basename: int}  (from posted_documents)
-    - docs_by_file: {basename: [{"doc_type", "invoice_number", "total", "lines"}]}
+    - docs_by_file: {basename: [{"doc_type", "invoice_number", "source_doc_id",
+      "total", "lines"}]}
 
-    NOTE: ``lines`` is always ``[]`` for live BatchResult projections — see the
-    module-level docstring for the TODO(0.4) rationale.
+    ``lines`` is populated by joining the tagged ``export_rows`` to each posted
+    document on ``source_doc_id`` (issue #28). It stays ``[]`` only when no
+    tagged row matches the document (e.g. a bank statement, or an untagged
+    legacy run) — in which case the line scorers correctly record N/A.
     """
     credits_block: dict[str, Any] = batch.get("credits") or {}
     # CreditSummary may be a Pydantic model serialised as dict or a raw dict.
@@ -108,6 +157,8 @@ def project_batch(batch: dict[str, Any]) -> dict[str, Any]:
     credit_status: str = str(credits_block.get("credit_status") or "not_checked")
 
     posted: list[dict[str, Any]] = batch.get("posted_documents") or []
+    export_rows: list[dict[str, Any]] = batch.get("export_rows") or []
+    lines_by_doc_id = _lines_by_source_doc_id(export_rows)
 
     per_file_doc_counts: dict[str, int] = {}
     docs_by_file: dict[str, list[dict[str, Any]]] = {}
@@ -118,12 +169,13 @@ def project_batch(batch: dict[str, Any]) -> dict[str, Any]:
         if not base:
             continue
         per_file_doc_counts[base] = per_file_doc_counts.get(base, 0) + 1
+        source_doc_id = doc.get("source_doc_id")
         entry: dict[str, Any] = {
             "doc_type": doc.get("doc_type"),
             "invoice_number": doc.get("invoice_number"),
+            "source_doc_id": source_doc_id,
             "total": doc.get("total"),
-            # TODO(0.4): lines empty until export_rows carry a doc_id tag.
-            "lines": [],
+            "lines": list(lines_by_doc_id.get(str(source_doc_id), [])) if source_doc_id else [],
         }
         docs_by_file.setdefault(base, []).append(entry)
 
@@ -133,6 +185,7 @@ def project_batch(batch: dict[str, Any]) -> dict[str, Any]:
         "credit_status": credit_status,
         "per_file_doc_counts": per_file_doc_counts,
         "docs_by_file": docs_by_file,
+        "lines_by_source_doc_id": lines_by_doc_id,
     }
 
 
@@ -273,6 +326,11 @@ def score_fields(
     }
 
 
+def _golden_expects_line_join(golden_doc: dict[str, Any]) -> bool:
+    """True when the golden opted into id-based line scoring (issue #28)."""
+    return bool(golden_doc.get("source_doc_id"))
+
+
 def score_tax_coa(
     golden_doc: dict[str, Any],
     actual_doc: dict[str, Any],
@@ -283,9 +341,9 @@ def score_tax_coa(
     Scores matching of tax_code + coa_code + erp_codes[erp] per line.
     "BLANK(hole B.1)" in golden means the expected actual value is empty/None.
 
-    Returns N/A when:
-    - golden has no authored lines for this erp, OR
-    - actual has no lines (live-projection gap — see TODO 0.4).
+    Returns N/A when golden has no authored lines for this erp. Returns 0.0 when
+    golden authored scoreable lines but the export-row join produced no actual
+    line data (broken tagging / id mismatch) — never N/A in that case.
     """
     erp_label = f"tax_coa[{erp}]"
     golden_lines: list[dict[str, Any]] = golden_doc.get("lines") or []
@@ -307,11 +365,19 @@ def score_tax_coa(
 
     actual_lines: list[dict[str, Any]] = actual_doc.get("lines") or []
     if not actual_lines:
+        if _golden_expects_line_join(golden_doc):
+            return {
+                "score": 0.0,
+                "explanation": (
+                    f"{erp_label}: 0/{scoreable_count} lines matched "
+                    "(join miss — golden authored lines but actual has none)"
+                ),
+            }
         return {
             "score": None,
             "explanation": (
                 f"{erp_label}: no actual line data — "
-                "pending export-row doc tagging (TODO 0.4)"
+                "legacy manifest without source_doc_id (N/A)"
             ),
         }
 
@@ -342,13 +408,20 @@ def score_tax_coa(
         # COA code match
         coa_match = actual_coa == golden_coa
 
-        # ERP code match — "BLANK(hole B.1)" means expected empty/None
-        if golden_erp_val == _BLANK_HOLE:
-            erp_match = not actual_erp_val  # empty string or None are both ok
+        if _golden_expects_line_join(golden_doc):
+            # Joined export rows carry canonical tax_treatment in every erp_codes
+            # slot (see _lines_by_source_doc_id); score classification only.
+            line_match = tax_match and coa_match
         else:
-            erp_match = actual_erp_val == golden_erp_val
+            # Legacy manifests: also require per-ERP workbook code match.
+            # "BLANK(hole B.1)" means expected empty/None.
+            if golden_erp_val == _BLANK_HOLE:
+                erp_match = not actual_erp_val  # empty string or None are both ok
+            else:
+                erp_match = actual_erp_val == golden_erp_val
+            line_match = tax_match and coa_match and erp_match
 
-        if tax_match and coa_match and erp_match:
+        if line_match:
             matched += 1
 
     frac = matched / scoreable_count
@@ -357,6 +430,64 @@ def score_tax_coa(
         "explanation": (
             f"{erp_label}: {matched}/{scoreable_count} lines matched"
         ),
+    }
+
+
+# Default ERPs always reported by the entry point (back-compat with the existing
+# golden_v2 manifest + tests). A golden doc may author additional ERP keys (e.g.
+# qbs / xero) on its lines; those are scored on top of these via the union.
+_DEFAULT_SCORED_ERPS = ("autocount", "sql_account")
+
+
+def _scored_erps_for_doc(golden_doc: dict[str, Any]) -> list[str]:
+    """ERP keys to score for a golden doc: the defaults plus any line-authored ERPs."""
+    erps: list[str] = list(_DEFAULT_SCORED_ERPS)
+    for line in golden_doc.get("lines") or []:
+        for erp in (line.get("erp_codes") or {}):
+            if erp not in erps:
+                erps.append(erp)
+    return erps
+
+
+def score_line_direction(
+    golden_doc: dict[str, Any],
+    actual_doc: dict[str, Any],
+) -> dict[str, Any]:
+    """Per-line booking-direction match (issue #28).
+
+    Compares each actual line's ``direction`` (purchase/sales the row was
+    exported under) against the golden document's expected ``direction``.
+    Returns N/A when golden authored no ``direction``. Returns 0.0 when golden
+    expects a direction but the join produced no actual line data. This catches
+    a line booked on the wrong sheet — a classification error the reconcile
+    math is blind to.
+    """
+    golden_direction = str(golden_doc.get("direction") or "").strip().lower()
+    if not golden_direction:
+        return {"score": None, "explanation": "no direction in golden (N/A)"}
+    actual_lines: list[dict[str, Any]] = actual_doc.get("lines") or []
+    if not actual_lines:
+        if _golden_expects_line_join(golden_doc):
+            return {
+                "score": 0.0,
+                "explanation": (
+                    f"direction: 0/0 lines match {golden_direction!r} "
+                    "(join miss — golden authored direction but actual has no lines)"
+                ),
+            }
+        return {
+            "score": None,
+            "explanation": "no actual line data — legacy manifest without source_doc_id (N/A)",
+        }
+    matched = sum(
+        1
+        for ln in actual_lines
+        if str(ln.get("direction") or "").strip().lower() == golden_direction
+    )
+    frac = matched / len(actual_lines)
+    return {
+        "score": frac,
+        "explanation": f"direction: {matched}/{len(actual_lines)} lines match {golden_direction!r}",
     }
 
 
@@ -474,29 +605,49 @@ def golden_field_match_code(instance: dict[str, Any]) -> dict[str, Any]:
                 all_sub_scores.append(cr_s)
             breakdown_parts.append(f"credits={_fmt_score(cr_s)}")
 
-        # Per-document metrics: pair golden docs for this file with projected docs by index
+        # Per-document metrics: pair golden docs for this file with projected
+        # docs. Prefer a join on source_doc_id (issue #28) so the right line
+        # data is scored even when fan-out order differs; fall back to index
+        # pairing for golden manifests that predate source_doc_id.
         golden_docs_for_file = [
             d for d in golden_documents if d.get("file") == basename
         ]
         actual_docs_for_file = projection["docs_by_file"].get(basename) or []
+        actual_by_doc_id = {
+            str(d.get("source_doc_id")): d
+            for d in actual_docs_for_file
+            if d.get("source_doc_id")
+        }
 
         for i, g_doc in enumerate(golden_docs_for_file):
-            a_doc = actual_docs_for_file[i] if i < len(actual_docs_for_file) else {}
+            golden_doc_id = g_doc.get("source_doc_id")
+            if golden_doc_id:
+                # Id-authored golden: join strictly on source_doc_id. When the id
+                # matches no live row, score against an empty actual — never
+                # positionally pair (reordered fan-out / stale ids).
+                a_doc = actual_by_doc_id.get(str(golden_doc_id), {})
+            else:
+                # Legacy manifests without source_doc_id keep index pairing.
+                a_doc = actual_docs_for_file[i] if i < len(actual_docs_for_file) else {}
             doc_prefix = f"[{basename}#{i}]"
 
             cls_result = score_classification(g_doc, a_doc)
             fld_result = score_fields(g_doc, a_doc)
-            ac_result = score_tax_coa(g_doc, a_doc, "autocount")
-            sql_result = score_tax_coa(g_doc, a_doc, "sql_account")
             crd_result = score_creditor(g_doc, a_doc)
+            dir_result = score_line_direction(g_doc, a_doc)
 
-            for label, res in (
+            labelled: list[tuple[str, dict[str, Any]]] = [
                 ("classification", cls_result),
                 ("fields", fld_result),
-                ("tax_coa[autocount]", ac_result),
-                ("tax_coa[sql_account]", sql_result),
-                ("creditor", crd_result),
-            ):
+            ]
+            # Score tax+COA per ERP: the defaults (autocount/sql_account) plus
+            # any ERP the golden doc's lines author (e.g. qbs) — issue #28.
+            for erp in _scored_erps_for_doc(g_doc):
+                labelled.append((f"tax_coa[{erp}]", score_tax_coa(g_doc, a_doc, erp)))
+            labelled.append(("direction", dir_result))
+            labelled.append(("creditor", crd_result))
+
+            for label, res in labelled:
                 s = res["score"]
                 if s is not None:
                     all_sub_scores.append(s)
