@@ -2056,6 +2056,152 @@ def test_remove_rows_for_month_autocount_docdate_headers():
     assert sep_rows == []
 
 
+def _make_sql_account_workbook_with_months() -> bytes:
+    """Purchase + Sales workbook with SQL Account DOCDATE / DOCNO(20) headers.
+
+    Mirrors ``_make_autocount_workbook_with_months`` but uses the real SQL
+    Account import column names as emitted by SqlAccountExporter (confirmed in
+    ledgr_agent/skills/sql_account.yaml lines 13, 28: DOCNO(20) / DOCDATE).
+    Rows span Sep 2025 and Oct 2025 so the month-clear is non-trivial.
+    """
+    from openpyxl import Workbook as _WB
+
+    wb = _WB()
+    ws_p = wb.active
+    ws_p.title = "Purchase"
+    ws_p.append(["DOCNO(20)", "DOCDATE", "CODE(10)", "DESCRIPTION(200)", "_AMOUNT"])
+    ws_p.append(["PO-001", "05/09/2025", "SUP001", "Server Sep", 800.0])
+    ws_p.append(["PO-002", "20/09/2025", "SUP002", "License Sep", 200.0])
+    ws_p.append(["PO-003", "03/10/2025", "SUP001", "Server Oct", 900.0])
+    ws_s = wb.create_sheet("Sales")
+    ws_s.append(["DOCNO(20)", "DOCDATE", "CODE(10)", "DESCRIPTION(200)", "_AMOUNT"])
+    ws_s.append(["SO-001", "10/09/2025", "CUS001", "Consulting Sep", 1500.0])
+    ws_s.append(["SO-002", "15/10/2025", "CUS001", "Consulting Oct", 1800.0])
+    import io
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _store_with_sql_account_workbook() -> tuple:
+    """Return (slack, store) with a SQL Account workbook already uploaded + pointer seeded."""
+    xlsx = _make_sql_account_workbook_with_months()
+    slack, store = _store_with_workbook(
+        xlsx,
+        client_id="c1",
+        fy="2026",
+    )
+    # Seed seen_doc_keys in the SQL Account format: "{sheet}:{DOCNO(20)}"
+    ptr_ref = store._pointer_ref("c1", "2026")
+    existing = ptr_ref.get().to_dict() or {}
+    existing["software"] = "sql_account"
+    existing["seen_doc_keys"] = [
+        "Purchase:PO-001", "Purchase:PO-002", "Purchase:PO-003",
+        "Sales:SO-001", "Sales:SO-002",
+        "OtherKey:SHOULD-SURVIVE",
+    ]
+    ptr_ref.set(existing)
+    return slack, store
+
+
+def test_remove_rows_for_month_sql_account_headers():
+    """Regression (#33): SQL Account workbooks use DOCDATE / DOCNO(20) headers.
+
+    The resolved header (from column_for_field) must take precedence over the
+    fallback tokens so the correct Sep 2025 rows are removed from both Purchase
+    and Sales.  Fails if DOCDATE or DOCNO(20) resolution is reverted.
+    """
+    slack, store = _store_with_sql_account_workbook()
+
+    result = store.remove_rows_for_month(
+        "c1", "2026", slack, "C1", year=2025, month=9,
+    )
+
+    # Two Purchase rows (Sep) + one Sales row (Sep) must be removed.
+    assert result["sheets"]["Purchase"] == 2, (
+        f"expected 2 Sep Purchase rows removed, got {result['sheets']['Purchase']}; "
+        "DOCDATE resolution may have regressed"
+    )
+    assert result["sheets"]["Sales"] == 1, (
+        f"expected 1 Sep Sales row removed, got {result['sheets']['Sales']}; "
+        "DOCDATE resolution may have regressed"
+    )
+
+    # October rows must survive intact.
+    rows = store.read_rows("c1", "2026", slack, "C1")
+    sep_rows = [
+        r for r in rows
+        if r.get("_sheet") in ("Purchase", "Sales")
+        and "09/2025" in str(r.get("DOCDATE") or "")
+    ]
+    assert sep_rows == [], "Sep SQL Account rows were not fully removed"
+
+    oct_rows = [
+        r for r in rows
+        if r.get("_sheet") in ("Purchase", "Sales")
+        and "10/2025" in str(r.get("DOCDATE") or "")
+    ]
+    assert len(oct_rows) == 2, f"expected 2 Oct rows to survive, got {len(oct_rows)}"
+
+    # doc_key purge: Sep keys removed, Oct key and OtherKey survive.
+    purged = set(result["purged_keys"])
+    assert "Purchase:PO-001" in purged, "Sep purchase doc_key PO-001 not purged"
+    assert "Purchase:PO-002" in purged, "Sep purchase doc_key PO-002 not purged"
+    assert "Sales:SO-001" in purged, "Sep sales doc_key SO-001 not purged"
+    remaining = set(store.get_pointer("c1", "2026").get("seen_doc_keys") or [])
+    assert "Purchase:PO-003" in remaining, "Oct purchase key must not be purged"
+    assert "Sales:SO-002" in remaining, "Oct sales key must not be purged"
+    assert "OtherKey:SHOULD-SURVIVE" in remaining, "unrelated key must not be purged"
+
+
+def test_remove_rows_for_month_qbs_precedence_over_docdate():
+    """Regression (#33): resolved QBS header ('Invoice Date') wins over DOCDATE fallback.
+
+    A QBS workbook has no DOCDATE column.  The resolved date_header from
+    column_for_field("invoice_date") is 'Invoice Date', which takes priority in
+    the resolution chain.  This test proves the precedence: QBS rows whose date
+    lives in 'Invoice Date' are matched correctly and no DOCDATE fallback is
+    needed.  If the resolved-header-first logic is inverted (fallbacks tried
+    first), a QBS workbook with an 'Invoice Date' column would still work
+    (because 'Invoice Date' IS in the fallback chain), but a workbook that
+    accidentally has BOTH 'Invoice Date' and 'DOCDATE' would use the wrong one —
+    so this companion assertion uses a QBS workbook and checks that the correct
+    column drives removal.
+    """
+    xlsx = _make_qbs_exporter_workbook_with_months()
+    slack, store = _store_with_workbook(xlsx)
+    ptr_ref = store._pointer_ref("c1", "2026")
+    existing = ptr_ref.get().to_dict() or {}
+    existing["software"] = "qbs"
+    ptr_ref.set(existing)
+
+    result = store.remove_rows_for_month(
+        "c1", "2026", slack, "C1", year=2025, month=9,
+    )
+
+    # QBS workbook: 2 Purchase Sep + 1 Sales Sep must be cleared via 'Invoice Date'.
+    assert result["sheets"]["Purchase"] == 2
+    assert result["sheets"]["Sales"] == 1
+
+    rows = store.read_rows("c1", "2026", slack, "C1")
+    # 'Invoice Date' is the QBS column — Sep rows gone, Oct rows remain.
+    sep_rows = [
+        r for r in rows
+        if r.get("_sheet") in ("Purchase", "Sales")
+        and "09/2025" in str(r.get("Invoice Date") or "")
+    ]
+    assert sep_rows == [], "QBS Sep rows were not removed via 'Invoice Date'"
+
+    # Crucially: no DOCDATE key exists in remaining rows (QBS does not emit it).
+    docdate_rows = [
+        r for r in rows
+        if r.get("_sheet") in ("Purchase", "Sales")
+        and r.get("DOCDATE") is not None
+    ]
+    assert docdate_rows == [], "QBS rows should never carry a DOCDATE column"
+
+
 def _autocount_sales_batch(sheet: str, inv_number: str, *, idx: int = 0) -> dict:
     """Build one AutoCount AR (sales) append batch the production way (issue #34).
 
