@@ -408,13 +408,20 @@ def score_tax_coa(
         # COA code match
         coa_match = actual_coa == golden_coa
 
-        # ERP code match — "BLANK(hole B.1)" means expected empty/None
-        if golden_erp_val == _BLANK_HOLE:
-            erp_match = not actual_erp_val  # empty string or None are both ok
+        if _golden_expects_line_join(golden_doc):
+            # Joined export rows carry canonical tax_treatment in every erp_codes
+            # slot (see _lines_by_source_doc_id); score classification only.
+            line_match = tax_match and coa_match
         else:
-            erp_match = actual_erp_val == golden_erp_val
+            # Legacy manifests: also require per-ERP workbook code match.
+            # "BLANK(hole B.1)" means expected empty/None.
+            if golden_erp_val == _BLANK_HOLE:
+                erp_match = not actual_erp_val  # empty string or None are both ok
+            else:
+                erp_match = actual_erp_val == golden_erp_val
+            line_match = tax_match and coa_match and erp_match
 
-        if tax_match and coa_match and erp_match:
+        if line_match:
             matched += 1
 
     frac = matched / scoreable_count
