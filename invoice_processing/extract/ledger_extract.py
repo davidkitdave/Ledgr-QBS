@@ -585,24 +585,28 @@ def extract_document_ledger(
     }
     page_count = count_input_pages(data, mime_type) if mime_type == "application/pdf" else 1
     if should_chunk_pdf(data, mime_type, page_count=page_count):
-        return extract_document_ledger_chunked(
+        bundle = extract_document_ledger_chunked(
             data,
             mime_type,
             extract_fn=_extract_document_ledger_once,
             **kwargs,
         )
+        # Per-chunk SOA drop only sees one window at a time; a cover alone in
+        # chunk 1 survives until we merge the full faithful array.
+        return _drop_soa_cover_documents(bundle)
 
     try:
         return _extract_document_ledger_once(data, mime_type, **kwargs)
     except ValidationError:
         if mime_type != "application/pdf":
             raise
-        return extract_document_ledger_chunked(
+        bundle = extract_document_ledger_chunked(
             data,
             mime_type,
             extract_fn=_extract_document_ledger_once,
             **kwargs,
         )
+        return _drop_soa_cover_documents(bundle)
 
 
 def extract_ledger_file(path: str, **kwargs) -> ExtractedDocumentBundle:
@@ -685,6 +689,9 @@ def extracted_document_to_normalized(
     inv.direction_reason = doc.direction_reason
     if len(doc.page_range) >= 2:
         inv.page_range = (int(doc.page_range[0]), int(doc.page_range[1]))
+    doc_kind = (doc.doc_type or "").strip().lower()
+    if doc_kind:
+        inv.document_kind = doc_kind
     return inv
 
 

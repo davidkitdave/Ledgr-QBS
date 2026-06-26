@@ -99,3 +99,67 @@ def test_merge_chunk_bundles_offsets_page_ranges() -> None:
 def test_chunk_page_size_is_reasonable_for_multi_receipt() -> None:
     assert CHUNK_PAGE_SIZE >= 3
     assert CHUNK_PAGE_SIZE <= 10
+
+
+def test_chunked_extract_drops_soa_cover_after_merge(monkeypatch) -> None:
+    """SOA cover in chunk 1 alone is not dropped per-chunk; merge must drop it."""
+    from invoice_processing.extract.ledger_extract import (
+        _drop_soa_cover_documents,
+        extract_document_ledger,
+    )
+
+    cover = ExtractedDocument(
+        doc_type="statement",
+        page_range=[1, 1],
+        vendor="Vendor",
+        reference="SOA-1",
+        date="2026-01-01",
+        currency="SGD",
+        grand_total=100.0,
+    )
+    invoice = ExtractedDocument(
+        doc_type="invoice",
+        page_range=[1, 1],
+        vendor="Vendor",
+        reference="INV-1",
+        date="2026-01-01",
+        currency="SGD",
+        presentation="summary",
+        lines=[ExtractedDocumentLine(description="Item", net_amount=100.0, gst_amount=0.0)],
+        subtotal=100.0,
+        tax_total=0.0,
+        grand_total=100.0,
+        tax_lines=[],
+        direction_for_client="purchase",
+        tax_visible_on_document=False,
+    )
+
+    def _fake_chunked(_data, _mime, **kwargs):
+        from invoice_processing.extract.ledger_extract import ExtractedDocumentBundle
+
+        return ExtractedDocumentBundle(
+            documents=[cover, invoice],
+            skipped_pages=None,
+        )
+
+    monkeypatch.setattr(
+        "invoice_processing.extract.pdf_chunks.extract_document_ledger_chunked",
+        _fake_chunked,
+    )
+    monkeypatch.setattr(
+        "invoice_processing.extract.pdf_chunks.should_chunk_pdf",
+        lambda *_a, **_k: True,
+    )
+    monkeypatch.setattr(
+        "invoice_processing.extract.segmentation_gates.count_input_pages",
+        lambda *_a, **_k: 20,
+    )
+
+    bundle = extract_document_ledger(b"x", "application/pdf")
+    assert len(bundle.documents) == 1
+    assert bundle.documents[0].doc_type == "invoice"
+    assert bundle.skipped_pages == [1]
+
+    # Sanity: per-chunk-only drop would leave the cover when chunk has one doc.
+    lone_cover = ExtractedDocumentBundle(documents=[cover])
+    assert len(_drop_soa_cover_documents(lone_cover).documents) == 1

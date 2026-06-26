@@ -1509,6 +1509,11 @@ class SlackLedgerStore:
             try:
                 pointer, data = self._download_current_workbook(slack_client, client_id, fy)
                 wb = self._load_workbook(data)
+                software = str(pointer.get("software") or "qbs")
+                try:
+                    exporter = self._exporter_for(software)
+                except ValueError:
+                    exporter = None
 
                 existing_keys: set = self._get_seen_doc_keys(pointer)
                 purged_keys: list[str] = []
@@ -1526,14 +1531,26 @@ class SlackLedgerStore:
                         continue
 
                     col_map = self._header_col_map(ws)
+                    doc_type = "sales" if sheet_name == "Sales" else "purchase"
+                    date_header = None
+                    inv_header = None
+                    if exporter is not None and hasattr(exporter, "column_for_field"):
+                        date_header = exporter.column_for_field("invoice_date", doc_type)
+                        inv_header = self._invoice_identity_column(exporter, sheet_name)
                     date_col = (
-                        col_map.get("Invoice Date")
+                        (col_map.get(date_header) if date_header else None)
+                        or col_map.get("Invoice Date")
                         or col_map.get("*InvoiceDate")
+                        or col_map.get("DocDate")
+                        or col_map.get("DOCDATE")
                         or col_map.get("Date")
                     )
                     inv_col = (
-                        col_map.get("Invoice Number")
+                        (col_map.get(inv_header) if inv_header else None)
+                        or col_map.get("Invoice Number")
                         or col_map.get("*InvoiceNumber")
+                        or col_map.get("SupplierInvoiceNo")
+                        or col_map.get("DOCNO(20)")
                     )
 
                     # Collect matching row numbers in ascending order, then delete bottom-up.
