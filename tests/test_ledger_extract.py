@@ -333,6 +333,7 @@ def test_extracted_document_to_normalized_applies_vendor_role_floor():
         doc_type="receipt",
         page_range=[1, 1],
         vendor="NTUC FairPrice",
+        vendor_tax_regno="201234567A",
         reference="RCP-1",
         date="2026-06-01",
         currency="SGD",
@@ -345,7 +346,14 @@ def test_extracted_document_to_normalized_applies_vendor_role_floor():
             ExtractedDocumentLine(description="Groceries", net_amount=10.0, gst_amount=0.0),
         ],
     )
-    memory = [EntityMemoryEntry(name="NTUC FairPrice", role="Creditor", mapping_code="6100")]
+    memory = [
+        EntityMemoryEntry(
+            name="NTUC FairPrice",
+            reg_no="201234567A",
+            role="Creditor",
+            mapping_code="6100",
+        )
+    ]
     inv = extracted_document_to_normalized(
         doc,
         direction="auto",

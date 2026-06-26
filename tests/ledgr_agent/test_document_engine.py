@@ -415,7 +415,11 @@ def test_invoice_process_fn_receives_direction_auto(tmp_path: Any) -> None:
 # bypassed and both tests will FAIL — confirming they guard the regression.
 
 
-def _make_bundle(direction_for_client: str) -> Any:
+def _make_bundle(
+    direction_for_client: str,
+    *,
+    vendor_tax_regno: str | None = None,
+) -> Any:
     """Build a minimal ExtractedDocumentBundle with one document."""
     from invoice_processing.extract.ledger_extract import (
         ExtractedDocument,
@@ -427,6 +431,7 @@ def _make_bundle(direction_for_client: str) -> Any:
         doc_type="invoice",
         page_range=[1, 1],
         vendor="MYSTERY VENDOR",
+        vendor_tax_regno=vendor_tax_regno,
         buyer="TEST CORP PTE LTD",
         reference="IV-CAUSAL-001",
         date="2025-06-01",
@@ -580,6 +585,7 @@ def test_known_vendor_role_floor_skips_review_on_unknown_llm_direction(
 ) -> None:
     """ADR-0027 causal test: taught Creditor vendor + LLM unknown → purchase, no review.
 
+    Reg-no match is required for auto-apply (security: name-only is untrusted).
     Causal guarantee: removing entity_memory from the client reverts to
     reconciled=False and a direction review note — this test fails if the
     floor is removed.
@@ -601,6 +607,7 @@ def test_known_vendor_role_floor_skips_review_on_unknown_llm_direction(
         entity_memory=[
             EntityMemoryEntry(
                 name="MYSTERY VENDOR",
+                reg_no="201234567A",
                 role="Creditor",
                 mapping_code="6100",
             )
@@ -616,7 +623,7 @@ def test_known_vendor_role_floor_skips_review_on_unknown_llm_direction(
             reason="test",
         )
 
-    unknown_bundle = _make_bundle("unknown")
+    unknown_bundle = _make_bundle("unknown", vendor_tax_regno="201234567A")
     monkeypatch.setattr(pid_mod, "EXTRACT_LEDGER_FN", lambda *_a, **_kw: unknown_bundle)
 
     def _categorize_with_memory(inv: NormalizedInvoice, **kwargs: Any) -> None:
