@@ -960,11 +960,14 @@ async def persist_and_deliver(
 
     if defer_slack_delivery:
         if append_result.get("appended", 0) > 0 or append_result.get("deferred_ledger"):
+            file_id = state.get("file_id") or payload.get("file_id")
             append_result["deferred_delivery"] = {
                 "summary": summary,
                 "batches": batches,
                 "payload": payload,
                 "workbook_name": append_result.get("filename") or "",
+                "file_id": file_id,
+                "effective_replace": effective_replace,
             }
         # Phase 1 (thread-context fix): persist processing_log BEFORE the early
         # return so multi-file batch drops stay visible to the chat lane. The
@@ -1507,12 +1510,102 @@ def _post_batch_aggregate_delivery(
         logger.warning("batch aggregate delivery post failed (non-fatal)", exc_info=True)
 
 
+async def _charge_deferred_batch_credits(
+    *,
+    channel_id: str,
+    batch_deferred: list[dict],
+    grp: dict,
+    append_result: dict,
+    client_store=None,
+) -> dict:
+    """Deduct credits for each deferred doc after a batch-end ledger flush (ADR-0016).
+
+    Per-doc deferred payloads carry ``appended=0`` at stash time; the flush
+    result's ``batch_charge_counts`` is the source of truth for what was written.
+    """
+    from accounting_agents.credit_delivery import (
+        charge_delivery_credits,
+        resolve_firm_id_from_client,
+    )
+
+    charge_map = {
+        str(entry.get("doc_key")): entry
+        for entry in (append_result.get("batch_charge_counts") or [])
+        if entry.get("doc_key") is not None
+    }
+    if not charge_map:
+        return {}
+
+    firm_id = None
+    if client_store is not None:
+        try:
+            ctx = client_store.get_by_channel(channel_id)
+            firm_id = resolve_firm_id_from_client(ctx)
+        except Exception:  # noqa: BLE001 — billing must not break delivery
+            logger.warning(
+                "credit firm-id lookup failed for channel=%s (non-fatal); "
+                "delivering without a billing firm",
+                channel_id,
+                exc_info=True,
+            )
+
+    total_used = 0
+    last_remaining: int | None = None
+    for item in batch_deferred:
+        payload = item.get("payload") or {}
+        if (
+            (payload.get("client_id") or "unknown") != grp["client_id"]
+            or str(payload.get("fy") or "unknown") != grp["fy"]
+            or (payload.get("kind") or "invoice") != grp["kind"]
+        ):
+            continue
+
+        file_id = item.get("file_id") or payload.get("file_id")
+        if not file_id:
+            continue
+
+        doc_appended = 0
+        doc_deduped = True
+        for batch in item.get("batches") or []:
+            charge_entry = charge_map.get(str(batch.get("doc_key")))
+            if not charge_entry:
+                continue
+            doc_appended += int(charge_entry.get("appended") or 0)
+            if not charge_entry.get("deduped"):
+                doc_deduped = False
+
+        per_doc_append = {
+            "appended": doc_appended,
+            "all_deduped": doc_deduped and doc_appended == 0,
+        }
+        credit_info = charge_delivery_credits(
+            firm_id=firm_id,
+            channel_id=channel_id,
+            file_id=str(file_id),
+            kind=str(payload.get("kind") or grp["kind"] or "invoice"),
+            payload=payload,
+            append_result=per_doc_append,
+            input_page_count=payload.get("input_page_count"),
+        )
+        if credit_info:
+            total_used += int(credit_info.get("credits_used") or 0)
+            last_remaining = credit_info.get("credits_remaining")
+
+    if total_used <= 0 and last_remaining is None:
+        return {}
+    return {
+        "credits_used": total_used,
+        "credits_remaining": last_remaining,
+    }
+
+
 async def _flush_deferred_ledger_writes(
     *,
     ledger_store: SlackLedgerStore,
     slack_client: Any,
     channel_id: str,
     batch_deferred: list[dict],
+    client_store=None,
 ) -> list[dict]:
     """Merge stashed ledger payloads across the batch and write the workbook ONCE.
 
@@ -1586,6 +1679,15 @@ async def _flush_deferred_ledger_writes(
                 grp["client_id"], grp["fy"], grp["kind"],
             )
             continue
+        credit_info = await _charge_deferred_batch_credits(
+            channel_id=channel_id,
+            batch_deferred=batch_deferred,
+            grp=grp,
+            append_result=append_result or {},
+            client_store=client_store,
+        )
+        if credit_info:
+            append_result = {**(append_result or {}), **credit_info}
         flush_results.append(append_result or {})
         workbook_name = (append_result or {}).get("filename") or ""
         if not workbook_name:
@@ -6714,6 +6816,7 @@ def build_async_app(
                     slack_client=sync_client,
                     channel_id=channel_id,
                     batch_deferred=batch_deferred,
+                    client_store=store,
                 )
 
             ledger_appended = sum(int(r.get("appended") or 0) for r in flush_results)

@@ -932,6 +932,7 @@ class SlackLedgerStore:
         appended = 0
         deduped = 0
         batch_replace_counts: list[dict] = []
+        batch_charge_counts: list[dict] = []
 
         for batch in batches:
             sheet_name = batch["sheet"]
@@ -988,6 +989,9 @@ class SlackLedgerStore:
             logger.debug("append_rows: doc_key=%r match=%s", doc_key, doc_key in seen_doc_keys)
             if doc_key in seen_doc_keys:
                 deduped += 1
+                batch_charge_counts.append(
+                    {"doc_key": doc_key, "appended": 0, "deduped": True}
+                )
                 if replace:
                     batch_replace_counts.append(
                         {"sheet": sheet_name, "doc_key": doc_key,
@@ -1007,6 +1011,9 @@ class SlackLedgerStore:
 
             if n == 0:
                 deduped += 1
+                batch_charge_counts.append(
+                    {"doc_key": doc_key, "appended": 0, "deduped": True}
+                )
                 if replace:
                     batch_replace_counts.append(
                         {"sheet": sheet_name, "doc_key": doc_key,
@@ -1015,6 +1022,9 @@ class SlackLedgerStore:
             else:
                 appended += n
                 seen_doc_keys.add(doc_key)
+                batch_charge_counts.append(
+                    {"doc_key": doc_key, "appended": n, "deduped": False}
+                )
                 if replace:
                     batch_replace_counts.append(
                         {"sheet": sheet_name, "doc_key": doc_key,
@@ -1031,6 +1041,7 @@ class SlackLedgerStore:
                 "appended": 0,
                 "deduped": deduped,
                 "filename": filename,
+                "batch_charge_counts": batch_charge_counts,
             }
             if replace:
                 result["batch_replace_counts"] = batch_replace_counts
@@ -1072,6 +1083,7 @@ class SlackLedgerStore:
             "appended": appended,
             "deduped": deduped,
             "filename": filename,
+            "batch_charge_counts": batch_charge_counts,
         }
         if replace:
             result["batch_replace_counts"] = batch_replace_counts
