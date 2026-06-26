@@ -668,8 +668,8 @@ def extracted_document_to_normalized(
     *,
     direction: str,
     our_gst_registered: bool = True,
-    client_country: str = "SG",
-    base_currency: str = "SGD",
+    client_country: Optional[str] = None,
+    base_currency: str = "",
     entity_memory: list[EntityMemoryEntry] | None = None,
 ) -> NormalizedInvoice:
     """Map one ExtractedDocument → NormalizedInvoice."""

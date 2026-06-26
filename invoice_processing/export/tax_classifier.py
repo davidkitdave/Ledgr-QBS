@@ -136,7 +136,10 @@ class TaxClassifier:
     def __init__(self, taxonomy: Optional[dict] = None):
         self.tax = taxonomy if taxonomy is not None else _load_taxonomy()
         self._signals = {k: [s.lower() for s in v] for k, v in self.tax["signals"].items()}
-        self._home_country = str(self.tax.get("home_country") or "SG").strip().upper()
+        # No silent SG fallback: a taxonomy that does not declare home_country
+        # stays explicit-unknown ("") so is_overseas_for(...) returns None
+        # (overseas/domestic undecided) rather than assuming Singapore.
+        self._home_country = str(self.tax.get("home_country") or "").strip().upper()
         self._threshold = self.tax["review"]["confidence_threshold"]
         self._rate_tol = self.tax["review"]["rate_tolerance"]
         self._rate_keyword_set = self.rate_keyword_strings()

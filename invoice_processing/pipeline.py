@@ -278,7 +278,6 @@ def process_document(
                 base_currency=client.base_currency,
                 client_name=client.client_name,
                 client_uen=client.client_uen,
-                client_country="SG",
             )
             reconciled = normalized.reconciled
             rec_note = normalized.reconcile_note or "ok"
