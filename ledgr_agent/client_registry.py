@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from invoice_processing.export.client_context import ClientContext, InMemoryClientStore
+from ledgr_agent.models.client_context import ClientContext, InMemoryClientStore
 
 _store = InMemoryClientStore()
 

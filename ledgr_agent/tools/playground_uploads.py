@@ -8,7 +8,7 @@ from pathlib import Path
 import tempfile
 from typing import Any
 
-from invoice_processing.shared_libraries.document_artifacts import (
+from ledgr_agent.shared.document_artifacts import (
     ARTIFACT_NAME_KEY,
     artifact_name_for,
     is_document_mime as _is_document_mime,

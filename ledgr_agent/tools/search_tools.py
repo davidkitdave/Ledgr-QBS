@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-from invoice_processing.shared_libraries.model_config import lite_model
+from ledgr_agent.shared.model_config import lite_model
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 

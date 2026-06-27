@@ -54,6 +54,82 @@ workbook. It is **intelligent at the document boundary, deterministic after**.
   per-step LLM agents (an earlier rewrite burned tokens and was retired; see
   docs/adr/0001). See [[Understand layer]] and ADR-0011.
 
+**Verified empirically (2026-06-26, issue #28, branch
+`feat/minimal-extract-control-experiment`):** one direct `generate_content`
+call on the real Starhub bill (18 pages, 4.4 MB) returns 1 doc / 3 lines /
+clean SR+ZR GST breakdown in 8.9 s; the chunked factory returns 12 fake docs
+/ 216 noisy lines in 209.8 s. The chunked path *causes* the truncation it
+was added to prevent. The minimal direct-call path is now wired into
+`ledgr_agent` as a `FunctionTool` alongside the full pipeline
+(ADR-0030). "Smart factory" was the wrong instinct for a per-bill read;
+Drive-style direct extraction is the correct shape.
+
+**Light path (ADR-0031):** after the read, add **policy rounds only when
+proven necessary** — R1 one LLM read alone → R2 deterministic tax → R3 COA
+from the client's list (LLM batched match) → R4 route + export. The spike
+`scripts/spike_light_vs_factory.py` climbs that ladder per fixture before
+any production cutover.
+
+## Light path
+The **experimental minimum spine** for replacing the heavy extraction factory
+(ADR-0031). Two related shapes live in `ledgr_agent` today — do not conflate them.
+
+### Commercial bill → ERP (shipped eval gate, 2026-06-27)
+
+For **one** invoice / tax invoice / receipt / credit note when the user wants
+**ERP import rows** (QBS, Xero, AutoCount, SQL Account):
+
+1. **Read** — `read_document` `FunctionTool`: one Gemini call with the real PDF
+   bytes and structured `ReadDocument` schema (`ledgr_agent/agents/document_reader.py`).
+2. **Project** — `project_to_erp`: deterministic YAML-driven row mapping
+   (`ledgr_agent/export/erp_projection.py`); **no second LLM call**.
+
+**Not** this path: bank statements, SOA / multi-invoice PDFs, multi-file batches,
+COA/tax engine — see bank path below or `process_document_batch`.
+
+Eval: `tests/eval/datasets/light-read-erp-smoke.json` +
+`tests/eval/eval_config_light_read.yaml` (Auditair ISO golden: purchase, QBS
+Sub Total 2800, Tax 252, Total 3052).
+
+### Bank statement → workbook (shipped eval gate, 2026-06-27)
+
+For **one** bank / account statement PDF when the user wants **workbook tabs**:
+
+1. **Read** — `read_bank_statement`: hybrid pdfplumber digital + vision fallback;
+   structured `ReadBankStatement` (`ledgr_agent/models/bank_statement.py`).
+2. **Normalize** — running-balance reconcile + deterministic tab titles
+   (`ledgr_agent/normalize/bank_statement.py`).
+3. **Project** — `project_bank_workbook`: QBS bank column rows per account+currency;
+   **no second LLM call** (`ledgr_agent/export/bank_workbook.py`).
+
+Eval: `tests/eval/datasets/light-read-bank-smoke.json` +
+`tests/eval/eval_config_light_read_bank.yaml`.
+
+**Not** this path: commercial bills → `read_document`; SOA / FY merge → factory.
+
+### Policy ladder (R1–R4, still experimental)
+
+One direct Gemini read (`LedgerRowBundle`) then a **policy ladder**
+added only when A/B evidence requires it:
+
+1. **Read** — LLM fills vendor, reference, `tax_lines[]`, summary charge rows;
+   **no account codes** in this step.
+2. **Tax** — deterministic `classify_invoice` after bridging printed tax onto
+   lines; LLM does not decide tax codes (ADR-0026).
+3. **COA** — `categorize_invoice`: entity memory / corrections first, then **one
+   LLM call against the client's own COA list** for unresolved lines.
+4. **Deliver** — deterministic FY route + exporter projection.
+
+Implemented in `ledgr_agent/tools/light_ledger.py`; measured by
+`scripts/spike_light_vs_factory.py`. Production still uses
+`process_document_batch` until eval gates the winning round per doc type.
+
+## Document truth (QA)
+Independent checks that exported rows cover what the **source PDF text** shows
+(e.g. every invoice number and total in a multi-invoice SOA), without trusting
+the LLM extraction. Implemented in `ledgr_agent/tools/document_truth.py`; used
+in spikes and eval to catch "only one of five invoices exported" failures.
+
 ## Understand layer
 The **intelligence** step at the document boundary: one Gemini multimodal call
 with a structured JSON schema that returns both human-readable facts and
@@ -160,6 +236,10 @@ Assigning each extracted line to one of the client's own COA codes.
 judged by **one LLM call against the client's own COA**; low-confidence lines are
 flagged → [[Review (HITL)]] → fix becomes a [[Correction]]. No account numbers are
 hardcoded.
+
+On the [[Light path]], round 1 **does not** assign account codes. Round 3 is this
+same categorizer — the LLM sees the client's COA JSON and picks the best key per
+line; do not patch keyword matching in the spike to fake a match.
 
 ## Direction
 Which side of a [[Client]]'s books a document belongs to: **purchase** (the Client

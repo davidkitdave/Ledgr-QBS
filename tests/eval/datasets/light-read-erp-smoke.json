@@ -1,0 +1,26 @@
+{
+  "eval_cases": [
+    {
+      "eval_case_id": "light_project_to_erp_tool",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "Call project_to_erp with this document JSON and systems [\"qbs\", \"xero\"] only, then summarize the row counts per ERP:\n{\"doc_type\":\"purchase\",\"document_kind\":\"invoice\",\"vendor_name\":\"Acme Supplies Pte Ltd\",\"customer_name\":\"\",\"entity_tax_id\":\"201234567M\",\"invoice_number\":\"INV-1001\",\"invoice_date\":\"2026-01-15\",\"due_date\":\"2026-02-14\",\"currency\":\"SGD\",\"fx_rate\":null,\"subtotal\":100.0,\"tax_total\":9.0,\"grand_total\":109.0,\"lines\":[{\"description\":\"Office paper\",\"quantity\":2,\"unit_amount\":50.0,\"net_amount\":100.0,\"tax_amount\":9.0,\"total_amount\":109.0}],\"notes\":\"\"}"
+          }
+        ]
+      }
+    },
+    {
+      "eval_case_id": "light_read_auditair_iso",
+      "prompt": {
+        "role": "user",
+        "parts": [
+          {
+            "text": "Use the light document path on ${LEDGR_TEST_DOC_DIR}/Cast Unity/Auditair International Pte. Ltd./Purchase/FY2026/Tax Invoice #11861 Audit for ISO.pdf: call read_document with paths=[\"${LEDGR_TEST_DOC_DIR}/Cast Unity/Auditair International Pte. Ltd./Purchase/FY2026/Tax Invoice #11861 Audit for ISO.pdf\"], then project_to_erp for all four ERPs (qbs, xero, autocount, sql_account). Summarize vendor name, invoice number, grand total, and the QBS row Sub Total and Total."
+          }
+        ]
+      }
+    }
+  ]
+}

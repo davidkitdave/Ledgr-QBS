@@ -1,0 +1,32 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>
+endobj
+4 0 obj
+<< /Length 465 >>
+stream
+BT /F1 10 Tf 50 750 Td (OCBC Bank Statement Apr 2025) Tj 0 -16 Td (Account Number: 072-955554-5) Tj 0 -16 Td (Currency: SGD) Tj 0 -16 Td (Balance B/F 1000.00) Tj 0 -16 Td (01 Apr 2025 Transfer In 500.00 1500.00) Tj 0 -16 Td (02 Apr 2025 GIRO Payment 200.00 1300.00) Tj 0 -24 Td (Currency: USD) Tj 0 -16 Td (Account Number: 072-955554-5) Tj 0 -16 Td (Balance B/F 50.00) Tj 0 -16 Td (01 Apr 2025 FX In 25.00 75.00) Tj 0 -16 Td (02 Apr 2025 Wire Out 20.00 55.00) Tj ET
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000266 00000 n 
+0000000999 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+1099
+%%EOF

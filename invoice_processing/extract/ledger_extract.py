@@ -90,9 +90,9 @@ Produce:
 
 Line granularity (faithful transcription — M1):
 - Itemized invoice/receipt: one ledger line per visible printed row.
-- Telco/utility bill whose ONLY charge breakdown is a summary section: transcribe those
-  summary rows as printed (often SR + ZR buckets) — do NOT emit per-phone/per-call detail
-  from appendix pages unless those rows are visibly printed.
+- When the document's ONLY charge breakdown is a summary/totals section (common for
+  telco/utility, subscription, and other bills that print only SR + ZR summary buckets),
+  transcribe those summary rows as printed and set ``presentation`` = "summary".
 - Simple single-total receipt: one line when only one charge row exists.
 
 Arithmetic:
@@ -360,10 +360,11 @@ SOA packages (Statement of Account):
 
 Line granularity (faithful transcription):
 - Itemized invoice/receipt: one ``lines[]`` row per visible printed charge row.
-- Telco/utility bill whose ONLY charge breakdown is a summary section: transcribe
-  those summary rows as printed (often SR + ZR buckets) with ``presentation`` =
-  "summary" — do NOT emit per-phone/per-call detail from appendix pages unless
-  those rows are visibly printed on the bill face.
+|- When the document's ONLY charge breakdown is a summary/totals section (common for
+  telco/utility bills, subscriptions, and any bill that exposes a small set of SR + ZR
+  buckets instead of per-line detail), transcribe those summary rows as printed with
+  ``presentation`` = "summary" — do NOT enumerate detail from appendix pages unless those
+  rows are visibly printed on the bill face.
 - Simple single-total receipt: one line when only one charge row exists.
 - Do NOT collapse itemized rows into bookkeeper buckets during extraction.
 
@@ -709,6 +710,9 @@ def extracted_document_to_normalized(
     doc_kind = (doc.doc_type or "").strip().lower()
     if doc_kind:
         inv.document_kind = doc_kind
+    # fix1d: surface the extracted tax_lines[] so the clean SR/ZR/ES split the
+    # model captured survives into NormalizedInvoice (was previously discarded).
+    inv.tax_breakdown = [tl.model_dump(exclude_none=True) for tl in doc.tax_lines]
     return inv
 
 

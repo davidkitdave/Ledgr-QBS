@@ -4,14 +4,20 @@ import logging
 
 from google.adk.agents import Agent
 
-from invoice_processing.shared_libraries.model_config import lite_model
+from ledgr_agent.shared.model_config import lite_model
+from ledgr_agent.shared.playground_seed import seed_playground_profile_if_needed
 from ledgr_agent.callbacks.validate_output import validate_output_after_tool
 from ledgr_agent.tools import (
     amend_ledger_row_action,
     explain_tax_treatment_tool,
+    extract_one_bill_minimal,
     inspect_market_policy,
     process_document_batch,
+    project_to_erp,
     read_credit_balance,
+    read_document,
+    read_bank_statement,
+    project_bank_workbook,
 )
 from ledgr_agent.tools.search_tools import build_web_search_agent_tool
 
@@ -41,7 +47,6 @@ def _seed_playground_profile(callback_context) -> None:
         state = getattr(callback_context, "state", None)
         if state is None:
             return None
-        from invoice_processing.shared_libraries.playground_context import seed_playground_profile_if_needed
         seeded = seed_playground_profile_if_needed(state)
         if seeded:
             _log.info(
@@ -69,10 +74,28 @@ def _before_agent_callback(callback_context) -> None:
     return _seed_playground_profile(callback_context)
 
 
+def _build_pipeline_agent_tools() -> list:
+    from google.adk.tools.agent_tool import AgentTool
+
+    from ledgr_agent.agents.bank_pipeline import build_bank_pipeline_agent
+    from ledgr_agent.agents.bill_pipeline import build_bill_pipeline_agent
+
+    return [
+        AgentTool(agent=build_bill_pipeline_agent()),
+        AgentTool(agent=build_bank_pipeline_agent()),
+    ]
+
+
 def _build_root_tools() -> list:
     tools = [
         inspect_market_policy,
         process_document_batch,
+        extract_one_bill_minimal,
+        *_build_pipeline_agent_tools(),
+        read_document,
+        project_to_erp,
+        read_bank_statement,
+        project_bank_workbook,
         read_credit_balance,
         explain_tax_treatment_tool,
         amend_ledger_row_action,
@@ -92,10 +115,17 @@ root_agent = Agent(
         "You are the Ledgr accountant agent. "
         "Use tools to inspect market policy and explain what capabilities are available. "
         "Use read_credit_balance when the user asks about credits, balance, or billing. "
-        "Use process_document_batch to process batches of documents when requested by the user. "
-        "If the user prompt mentions specific file path strings (such as paths containing env variables like LEDGR_TEST_DOC_DIR or absolute/relative path strings), you MUST pass these path strings exactly as elements in the 'paths' list parameter to process_document_batch. "
-        "Otherwise, in the ADK web playground, if the user uploads files with the attach button, call "
-        "process_document_batch with paths=[] and the tool will recover the uploaded files automatically. "
+        "Document routing (pick one path per upload): "
+        "(1) Single commercial bill (invoice, receipt, credit note) and user wants ERP import rows → "
+        "bill_pipeline (preferred) or read_document then project_to_erp. "
+        "Default ERPs: qbs, xero, autocount, sql_account. "
+        "(2) Bank statement PDF → bank_pipeline (preferred) or read_bank_statement then project_bank_workbook. "
+        "Do not call read_document on bank PDFs. "
+        "(3) SOA, multi-invoice PDF, multi-file batch, COA/tax categorization, or credit-gated factory run → process_document_batch. "
+        "(4) Fast single-bill extract with printed SR/ZR tax breakdown only → extract_one_bill_minimal. "
+        "Never invent document fields — only use what read_document returns. Show ERP row summaries in your reply. "
+        "If the user prompt mentions specific file path strings (LEDGR_TEST_DOC_DIR or absolute paths), pass them exactly in the tool paths list. "
+        "For light-path uploads in playground or agents-cli --file, pass paths=[] so the tool recovers the attachment. "
         "Do not invent placeholder paths such as invoice.png. "
         "When LEDGR_ENABLE_WEB_SEARCH is on, delegate external tax-news questions to the search sub-agent tool. "
         "Use explain_tax_treatment_action to explain the tax treatment the reasoner would assign a line. "

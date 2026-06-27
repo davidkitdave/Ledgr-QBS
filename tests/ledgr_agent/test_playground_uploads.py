@@ -3,8 +3,6 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
-from invoice_processing.classify.document_classifier import ClassificationResult
-from invoice_processing.extract.invoice_extractor import ExtractedInvoice, ExtractedLine
 from ledgr_agent.tools.document_tools import process_document_batch
 from ledgr_agent.tools.playground_uploads import materialize_playground_uploads, resolve_document_paths
 
@@ -106,52 +104,34 @@ def test_process_document_batch_recovers_empty_paths_playground_upload() -> None
         ],
     )
 
-    def _classify(path, **_kw):
-        return ClassificationResult(
-            doc_type="invoice",
-            confidence=0.99,
-            issuer_name="Supplier Inc",
-            bill_to_name="Playground Client",
-            reason="test",
-        )
-
-    def _direction(cls, **_kw):
-        return "purchase"
-
-    def _extract_stub(path, **_kw):
-        return ExtractedInvoice(
-            doc_type="invoice",
-            invoice_number="INV-PLAY-2",
-            invoice_date="2026-06-24",
-            currency="SGD",
-            issuer_name="Supplier Inc",
-            issuer_gst_regno="200012345A",
-            bill_to_name="Playground Client",
-            lines=[
-                ExtractedLine(
-                    description="Office supplies",
-                    net_amount=100.0,
-                    gst_amount=9.0,
-                    tax_label="SR",
-                )
+    def _bundle_stub(_path, **_kw):
+        return {
+            "documents": [
+                {
+                    "doc_type": "purchase",
+                    "document_kind": "invoice",
+                    "vendor_name": "Supplier Inc",
+                    "invoice_number": "INV-PLAY-2",
+                    "invoice_date": "2026-06-24",
+                    "currency": "SGD",
+                    "lines": [
+                        {
+                            "description": "Office supplies",
+                            "net_amount": 100.0,
+                            "tax_amount": 9.0,
+                            "total_amount": 109.0,
+                        }
+                    ],
+                }
             ],
-            subtotal=100.0,
-            gst_total=9.0,
-            total=109.0,
-            issuer_tax_system="NONE",
-        )
-
-    def stub_cat(inv, **kw):
-        if inv.lines:
-            inv.lines[0].account_code = "6100"
+            "document_count": 1,
+            "extraction_meta": {"gemini_call_count": 1, "model": "gemini-2.5-flash-lite"},
+        }
 
     result = process_document_batch(
         ctx,
         paths=[],
-        classify_fn=_classify,
-        direction_fn=_direction,
-        extract_fn=_extract_stub,
-        categorize_fn=stub_cat,
+        read_bundle_fn=_bundle_stub,
     )
 
     assert result["status"] == "success"
@@ -165,52 +145,34 @@ def test_process_document_batch_recovers_playground_upload(tmp_path) -> None:
         ],
     )
 
-    def _classify(path, **_kw):
-        return ClassificationResult(
-            doc_type="invoice",
-            confidence=0.99,
-            issuer_name="Supplier Inc",
-            bill_to_name="Playground Client",
-            reason="test",
-        )
-
-    def _direction(cls, **_kw):
-        return "purchase"
-
-    def _extract_stub(path, **_kw):
-        return ExtractedInvoice(
-            doc_type="invoice",
-            invoice_number="INV-PLAY-1",
-            invoice_date="2026-06-24",
-            currency="SGD",
-            issuer_name="Supplier Inc",
-            issuer_gst_regno="200012345A",
-            bill_to_name="Playground Client",
-            lines=[
-                ExtractedLine(
-                    description="Office supplies",
-                    net_amount=100.0,
-                    gst_amount=9.0,
-                    tax_label="SR",
-                )
+    def _bundle_stub(_path, **_kw):
+        return {
+            "documents": [
+                {
+                    "doc_type": "purchase",
+                    "document_kind": "invoice",
+                    "vendor_name": "Supplier Inc",
+                    "invoice_number": "INV-PLAY-1",
+                    "invoice_date": "2026-06-24",
+                    "currency": "SGD",
+                    "lines": [
+                        {
+                            "description": "Office supplies",
+                            "net_amount": 100.0,
+                            "tax_amount": 9.0,
+                            "total_amount": 109.0,
+                        }
+                    ],
+                }
             ],
-            subtotal=100.0,
-            gst_total=9.0,
-            total=109.0,
-            issuer_tax_system="NONE",
-        )
-
-    def stub_cat(inv, **kw):
-        if inv.lines:
-            inv.lines[0].account_code = "6100"
+            "document_count": 1,
+            "extraction_meta": {"gemini_call_count": 1, "model": "gemini-2.5-flash-lite"},
+        }
 
     result = process_document_batch(
         ctx,
         paths=["invoice.png"],
-        classify_fn=_classify,
-        direction_fn=_direction,
-        extract_fn=_extract_stub,
-        categorize_fn=stub_cat,
+        read_bundle_fn=_bundle_stub,
     )
 
     assert result["status"] == "success"

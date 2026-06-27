@@ -150,108 +150,9 @@ def test_strict_mode_env_false_does_not_raise(monkeypatch: pytest.MonkeyPatch) -
 
 
 # ---------------------------------------------------------------------------
-# Inline pass (_run_policy_validators) tests
+# Inline policy-validator tests removed: light batch path does not run the
+# invoice_processing policy ladder (_run_policy_validators).
 # ---------------------------------------------------------------------------
-
-
-def test_inline_pass_validator_raises_surfaces_policy_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When validate_gst_registration_gate raises, _run_policy_validators must
-    return a policy_validator_error violation instead of swallowing the error."""
-    from unittest.mock import MagicMock
-
-    import ledgr_agent.tools.document_tools as dt
-
-    # Patch at the call site (the name already imported into document_tools module).
-    monkeypatch.setattr(dt, "validate_gst_registration_gate", MagicMock(side_effect=RuntimeError("boom")))
-
-    # Build a minimal engine_result with one doc that has a normalized invoice
-    normalized = MagicMock()
-    normalized.doc_gst_total = 10.0
-    normalized.doc_type = "purchase"
-    normalized.lines = []
-
-    doc = MagicMock()
-    doc.path = "/tmp/inv.pdf"
-    doc.normalized = normalized
-
-    engine_result = MagicMock()
-    engine_result.docs = [doc]
-
-    violations = dt._run_policy_validators(engine_result, region="SG", tax_registered=True)
-
-    assert len(violations) == 1, f"expected 1 violation, got {violations}"
-    assert violations[0]["id"] == "policy_validator_error"
-    assert violations[0]["severity"] == "hard_review"
-    assert "boom" in violations[0]["message"]
-
-
-def test_inline_pass_taxable_line_blank_treatment_surfaces_invalid_tax_code(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A taxable line with blank tax_treatment must produce an invalid_tax_code
-    hard violation."""
-    from unittest.mock import MagicMock
-
-    import ledgr_agent.tools.document_tools as dt
-
-    # Patch at the call site — the name bound in document_tools at import time.
-    monkeypatch.setattr(dt, "validate_gst_registration_gate", MagicMock(return_value=[]))
-
-    # Taxable line with blank tax_treatment
-    line = MagicMock()
-    line.gst_amount = 9.0   # non-zero → taxable
-    line.tax_treatment = ""  # blank → should flag
-    line.description = "Consulting services"
-
-    normalized = MagicMock()
-    normalized.doc_gst_total = 9.0
-    normalized.doc_type = "purchase"
-    normalized.lines = [line]
-
-    doc = MagicMock()
-    doc.path = "/tmp/inv2.pdf"
-    doc.normalized = normalized
-
-    engine_result = MagicMock()
-    engine_result.docs = [doc]
-
-    violations = dt._run_policy_validators(engine_result, region="SG", tax_registered=True)
-
-    invalid_tc = [v for v in violations if v["id"] == "invalid_tax_code"]
-    assert len(invalid_tc) == 1, f"expected 1 invalid_tax_code violation, got {violations}"
-    assert invalid_tc[0]["severity"] == "hard_review"
-    assert "Consulting services" in invalid_tc[0]["message"]
-
-
-def test_inline_pass_nt_line_no_violation(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A line with gst_amount=0 (NT/ZR) must NOT produce an invalid_tax_code
-    violation even when tax_treatment is blank."""
-    from unittest.mock import MagicMock
-
-    import ledgr_agent.tools.document_tools as dt
-
-    monkeypatch.setattr(dt, "validate_gst_registration_gate", MagicMock(return_value=[]))
-
-    line = MagicMock()
-    line.gst_amount = 0.0   # zero → not taxable
-    line.tax_treatment = ""
-    line.description = "Zero-rated item"
-
-    normalized = MagicMock()
-    normalized.doc_gst_total = 0.0
-    normalized.doc_type = "purchase"
-    normalized.lines = [line]
-
-    doc = MagicMock()
-    doc.path = "/tmp/inv3.pdf"
-    doc.normalized = normalized
-
-    engine_result = MagicMock()
-    engine_result.docs = [doc]
-
-    violations = dt._run_policy_validators(engine_result, region="SG", tax_registered=True)
-
-    assert violations == [], f"expected no violations for zero-gst line, got {violations}"
 
 
 # ---------------------------------------------------------------------------
@@ -303,21 +204,3 @@ def test_needs_review_with_hard_violation_passthrough() -> None:
     assert result is None
 
 
-def test_inline_pass_policy_load_error_surfaces_violation(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When load_jurisdiction_policy raises, a policy_validator_error must be
-    returned (not swallowed as an empty list)."""
-    from unittest.mock import MagicMock
-
-    import ledgr_agent.tools.document_tools as dt
-
-    # Patch at the call site — the name bound in document_tools at import time.
-    monkeypatch.setattr(dt, "load_jurisdiction_policy", MagicMock(side_effect=ValueError("bad yaml")))
-
-    engine_result = MagicMock()
-    engine_result.docs = []
-
-    violations = dt._run_policy_validators(engine_result, region="SG", tax_registered=True)
-
-    assert len(violations) == 1
-    assert violations[0]["id"] == "policy_validator_error"
-    assert "bad yaml" in violations[0]["message"]
