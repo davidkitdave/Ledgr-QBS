@@ -690,6 +690,10 @@ async def extract_invoice_document_node(ctx) -> Event:
         )
         if floor.effective_direction in ("purchase", "sales") and not floor.conflict:
             ctx.state[DIRECTION_KEY] = floor.effective_direction
+        elif llm_resolved == "unknown" and floor.match_kind == "name_only":
+            # ADR-0027: untrusted name-only vendor matches must not be overridden
+            # by the direction retry LLM — keep routing ambiguous for HITL.
+            ctx.state[DIRECTION_KEY] = "unknown"
         elif llm_resolved == "unknown":
             ctx.state[DIRECTION_KEY] = _retry_resolve_direction_llm(
                 ctx, result.ledger_extract
