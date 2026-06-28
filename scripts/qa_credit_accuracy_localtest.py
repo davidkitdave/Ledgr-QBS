@@ -34,7 +34,7 @@ from accounting_agents.credit_delivery import estimate_upload_pages
 from app.credit_service import CreditService, InMemoryCreditStore, configure_shared_credit_service
 from invoice_processing.shared_libraries.playground_context import playground_default_context
 from ledgr_agent.tools import document_tools
-from ledgr_agent.tools.credit_tools import read_credit_balance
+from ledgr_agent.billing import read_credit_balance
 from ledgr_agent.tools.document_tools import process_document_batch
 
 

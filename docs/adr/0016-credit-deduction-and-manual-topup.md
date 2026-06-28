@@ -1,6 +1,6 @@
 # 0016 — Credit deduction and manual top-up (proposed)
 
-- **Status:** Proposed — **not implemented**
+- **Status:** Partially implemented (2026-06-27) — `ledgr_agent.billing` owns gate/charge; in-tool deduction is default ON; Firestore store in `ledgr_agent/billing.py`.
 - **Date:** 2026-06-17
 - **Deciders:** Ledgr team
 
