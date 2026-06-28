@@ -8,6 +8,7 @@ from typing import Any
 from accounting_agents.ledger_doc_identity import (
     ledger_doc_identity,
     ledger_doc_key_for_export_row,
+    sheet_lacks_invoice_identity_column,
 )
 from invoice_processing.export.exporters import get_exporter
 
@@ -97,17 +98,42 @@ def _batches_from_export_rows(
         for doc in posted_documents
         if doc.get("invoice_number")
     }
+    posted_source_ids = {
+        str(doc.get("source_doc_id") or "").strip()
+        for doc in posted_documents
+        if doc.get("source_doc_id")
+    }
+    posted_sheets = {
+        str(doc.get("sheet") or "Purchase")
+        for doc in posted_documents
+        if doc.get("sheet")
+    }
+    exporter = get_exporter(software) if software else None
 
-    if kind == "invoice" and posted_invoices:
+    if kind == "invoice" and (posted_invoices or posted_source_ids):
         rows = [
             row
             for row in export_rows
             if _invoice_number_from_row(row) in posted_invoices
+            or str(row.get("source_doc_id") or "") in posted_source_ids
         ]
+        if not rows and export_rows and exporter is not None and posted_sheets:
+            # AutoCount sales rows carry no invoice-number column (#34) — match
+            # posted docs by sheet when the exporter lacks identity columns.
+            rows = [
+                row
+                for row in export_rows
+                if sheet_lacks_invoice_identity_column(
+                    exporter,
+                    "sales" if str(row.get("sheet") or "") == "Sales" else "purchase",
+                )
+                and str(row.get("sheet") or "Purchase") in posted_sheets
+            ]
     else:
         rows = list(export_rows)
 
-    exporter = get_exporter(software) if software else None
+    if not exporter and software:
+        exporter = get_exporter(software)
 
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for index, row in enumerate(rows):
