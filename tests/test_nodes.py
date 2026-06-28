@@ -935,6 +935,53 @@ def test_extract_node_unknown_direction_flagged_for_review():
     assert "unknown" in note.lower()
 
 
+def test_extract_node_name_only_vendor_floor_blocks_direction_retry(monkeypatch):
+    """ADR-0027: name-only vendor match + LLM unknown must not be overridden by retry LLM."""
+    from invoice_processing.extract.invoice_extractor import to_normalized
+    from invoice_processing.extract.process_invoice_document import InvoiceProcessResult
+
+    retry_called = {"count": 0}
+
+    def _retry_should_not_run(ctx, extract):
+        retry_called["count"] += 1
+        return "sales"
+
+    monkeypatch.setattr(nodes, "_retry_resolve_direction_llm", _retry_should_not_run)
+
+    def _extract_with_unknown_direction(data, mime, **kw):
+        ex = _ex_invoice("INV-NAMEONLY")
+        return InvoiceProcessResult(
+            normalized=[to_normalized(ex, direction="purchase", base_currency="SGD")],
+            extraction_path="understand",
+            ledger_extract={
+                "documents": [
+                    {
+                        "vendor": "NTUC FairPrice",
+                        "vendor_tax_regno": None,
+                        "direction_for_client": "unknown",
+                    }
+                ]
+            },
+        )
+
+    nodes.EXTRACT_INVOICE_DOCUMENT_FN = _extract_with_unknown_direction
+    state = _base_state(
+        entity_memory=[
+            {
+                "name": "NTUC FairPrice",
+                "reg_no": "201234567A",
+                "role": "Creditor",
+                "mapping_code": "6100",
+            }
+        ],
+    )
+    ctx = FakeContext(state)
+    asyncio.run(nodes.extract_invoice_document_node._func(ctx))
+
+    assert ctx.state[nodes.DIRECTION_KEY] == "unknown"
+    assert retry_called["count"] == 0
+
+
 def test_extract_node_passes_auto_direction_not_purchase(monkeypatch):
     """C8: extract must not silently default direction to purchase."""
     captured: dict = {}

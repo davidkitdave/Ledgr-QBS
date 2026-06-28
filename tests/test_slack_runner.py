@@ -7700,6 +7700,50 @@ def test_persist_and_deliver_defer_ledger_persist_stashes_payload():
     store.append_rows.assert_not_called()
 
 
+def test_flush_deferred_ledger_writes_honours_effective_replace():
+    """Batch-end flush must pass replace=True when any deferred doc requested it."""
+    from unittest.mock import MagicMock
+
+    from accounting_agents.slack_runner import _flush_deferred_ledger_writes
+
+    store = MagicMock()
+    append_calls: list[dict] = []
+
+    def fake_append_rows(*, client_id, fy, slack_client, channel_id, batches, software, kind, client_name, replace):
+        append_calls.append({"replace": replace, "batches": batches})
+        return {"appended": len(batches), "deduped": 0, "filename": "Ledger_FY2026.xlsx"}
+
+    store.append_rows = fake_append_rows
+
+    batch_deferred = [
+        {
+            "payload": {
+                "client_id": "c1",
+                "fy": "2026",
+                "kind": "invoice",
+                "software": "QBS Ledger",
+                "client_name": "Test Client",
+            },
+            "batches": [
+                {"sheet": "Purchase", "doc_key": "Purchase:INV-1", "rows": [{"Invoice Number": "INV-1"}]}
+            ],
+            "effective_replace": True,
+        }
+    ]
+
+    asyncio.run(
+        _flush_deferred_ledger_writes(
+            ledger_store=store,
+            slack_client=MagicMock(),
+            channel_id="C-replace",
+            batch_deferred=batch_deferred,
+        )
+    )
+
+    assert len(append_calls) == 1
+    assert append_calls[0]["replace"] is True
+
+
 # =========================================================================== #
 # Task: batch thinking UX — plan block on the placeholder message             #
 # =========================================================================== #

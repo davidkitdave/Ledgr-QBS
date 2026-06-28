@@ -138,6 +138,21 @@ def ledger_doc_key_for_invoice(
     doc_type = _doc_type_for_sheet(sheet)
     if sheet_lacks_invoice_identity_column(exporter, doc_type):
         row = exporter.rows([inv], doc_type)[0]
+        return ledger_doc_key_for_export_row(exporter, sheet, row, index)
+    return ledger_doc_identity(
+        sheet, inv.invoice_number, getattr(inv, "page_range", None), index=index
+    )
+
+
+def ledger_doc_key_for_export_row(
+    exporter: Any,
+    sheet: str,
+    row: dict[str, Any],
+    index: int,
+) -> str:
+    """Dedupe key for one exporter row dict (clean-agent batch mapper, #34)."""
+    doc_type = _doc_type_for_sheet(sheet)
+    if sheet_lacks_invoice_identity_column(exporter, doc_type):
         date_col = exporter.column_for_field("invoice_date", doc_type)
         code_field = "debtor_code" if doc_type == "sales" else "creditor_code"
         code_col = exporter.column_for_field(code_field, doc_type)
@@ -149,6 +164,11 @@ def ledger_doc_key_for_invoice(
             row.get(amount_col) if amount_col else None,
             index=index,
         )
-    return ledger_doc_identity(
-        sheet, inv.invoice_number, getattr(inv, "page_range", None), index=index
-    )
+    for field in ("invoice_number", "supplier_invoice_no"):
+        col = exporter.column_for_field(field, doc_type)
+        if not col:
+            continue
+        value = row.get(col)
+        if value not in (None, ""):
+            return ledger_doc_identity(sheet, str(value).strip(), index=index)
+    return ledger_doc_identity(sheet, None, index=index)
