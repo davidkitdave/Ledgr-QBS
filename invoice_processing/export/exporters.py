@@ -35,10 +35,7 @@ from .client_context import EntityMemoryEntry
 from .models import BankStatement, InvoiceLine, NormalizedInvoice
 from .tax_classifier import TaxClassifier, classify_invoice
 
-# Data-driven ERP import column maps ("skills") live here — one YAML per ERP.
-# This is the single source of truth for every exporter's column ordering and
-# column→logical-field mapping (QBS/Xero "builtin" + AutoCount/SQL "profile").
-_SKILLS_DIR = Path(__file__).resolve().parents[2] / "ledgr_agent" / "skills"
+from ledgr_agent.internal.skill_profiles import ExportSkillError, load_export_skill
 
 # Preview-only marker for low-confidence COA picks on Slack delivery cards (WS-3.4).
 ACCOUNT_FLAGGED_PREVIEW_MARKER = " ⚠️"
@@ -85,74 +82,6 @@ _NUMERIC_CONTEXT_KEYS = frozenset({
     "source_amount",
     "discount",
 })
-
-# Canonical exporter key → skill filename under _SKILLS_DIR.
-_SKILL_FILES: dict[str, str] = {
-    "qbs": "qbs.yaml",
-    "xero": "xero.yaml",
-    "autocount": "autocount.yaml",
-    "sql_account": "sql_account.yaml",
-}
-
-# Required top-level keys every skill file must declare. A skill missing any of
-# these is malformed and must fail loud at load (never silently emit wrong cols).
-_SKILL_REQUIRED_KEYS = ("software_name", "system", "purchase_cols", "sales_cols")
-
-# Import-time cache so each skill YAML is parsed once.
-_SKILL_CACHE: dict[str, dict[str, Any]] = {}
-
-
-class ExportSkillError(RuntimeError):
-    """Raised when an ERP export skill file is missing or malformed.
-
-    Fail-loud guard: a bad/absent skill must crash at load rather than silently
-    produce an export with wrong or empty columns.
-    """
-
-
-def load_export_skill(system: str) -> dict[str, Any]:
-    """Load (cached) the data-driven export skill for canonical *system*.
-
-    Reads ``ledgr_agent/skills/<system>.yaml`` and validates it carries the
-    required keys with the right shapes.  Raises :class:`ExportSkillError` on a
-    missing file, a parse error, a non-mapping document, a missing required key,
-    or a ``system`` value that disagrees with the requested key — so a broken
-    skill can never reach the exporter as a half-built column map.
-    """
-    cached = _SKILL_CACHE.get(system)
-    if cached is not None:
-        return cached
-
-    filename = _SKILL_FILES.get(system)
-    if filename is None:
-        raise ExportSkillError(
-            f"no export skill registered for system '{system}'; "
-            f"have {sorted(_SKILL_FILES)}"
-        )
-    path = _SKILLS_DIR / filename
-    if not path.is_file():
-        raise ExportSkillError(f"export skill file missing: {path}")
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = yaml.safe_load(f)
-    except yaml.YAMLError as exc:  # malformed YAML
-        raise ExportSkillError(f"export skill '{path}' is not valid YAML: {exc}") from exc
-
-    if not isinstance(data, dict):
-        raise ExportSkillError(f"export skill '{path}' must be a YAML mapping, got {type(data).__name__}")
-    for key in _SKILL_REQUIRED_KEYS:
-        if key not in data:
-            raise ExportSkillError(f"export skill '{path}' is missing required key '{key}'")
-    if not isinstance(data["purchase_cols"], list) or not isinstance(data["sales_cols"], list):
-        raise ExportSkillError(f"export skill '{path}' purchase_cols/sales_cols must be lists")
-    declared = data["system"]
-    if declared != system:
-        raise ExportSkillError(
-            f"export skill '{path}' declares system '{declared}' but is registered as '{system}'"
-        )
-
-    _SKILL_CACHE[system] = data
-    return data
 
 
 def _load_erp_profile(profile_name: str) -> dict[str, Any]:

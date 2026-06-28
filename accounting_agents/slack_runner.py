@@ -119,22 +119,6 @@ _file_futures: dict[str, asyncio.Future] = {}
 _DEFAULT_CLIENT_STORE = FirestoreClientStore()
 
 
-#: Truthy values accepted for feature flags (matches typical Slack-bot conventions).
-_FEATURE_FLAG_TRUTHY = frozenset({"1", "true", "yes"})
-
-
-def _use_clean_agent() -> bool:
-    """Return whether Slack traffic should route through the new ``ledgr_agent`` tools.
-
-    Controlled by the ``LEDGR_USE_CLEAN_AGENT`` environment variable. Default off
-    so the existing ``document_app`` graph keeps serving production unchanged. The
-    flag is the precondition for Plan 6 cutover — once eval + live QA pass it is
-    flipped on, then retired after a soak window. See Plan 6.3.
-    """
-    raw = os.environ.get("LEDGR_USE_CLEAN_AGENT", "")
-    return raw.strip().lower() in _FEATURE_FLAG_TRUTHY
-
-
 def _profile_state_delta(client_store, channel_id: str) -> dict:
     """Return the client's ``to_state()`` keys for seeding the run, or ``{}``.
 
@@ -2191,289 +2175,27 @@ async def process_file_event(
                     "reason": "no_firm",
                 }
 
-        # Plan 6.3 / D.3: when the clean-agent flag is on, run
-        # ``process_document_batch`` directly and map ``BatchResult`` → the
-        # existing Slack delivery structs. Any failure falls through to the
-        # legacy ``document_app`` graph so production never breaks.
-        if _use_clean_agent():
-            try:
-                from accounting_agents.clean_agent_slack import process_file_via_clean_agent
+        from ledgr_agent.runtime.slack_shell import process_file_via_ledgr_agent
 
-                return await process_file_via_clean_agent(
-                    runner=runner,
-                    ledger_store=ledger_store,
-                    db=db,
-                    slack_client=slack_client,
-                    channel_id=channel_id,
-                    file_id=file_id,
-                    session_id=session_id,
-                    app_name=app_name,
-                    data=data,
-                    source_filename=source_filename,
-                    profile_delta=profile_delta,
-                    client_store=client_store,
-                    thread_ts=thread_ts,
-                    status_ts=status_ts,
-                    upload_msg_ts=upload_msg_ts,
-                    replace=replace,
-                    defer_slack_delivery=defer_slack_delivery,
-                    batch_mode=batch_mode,
-                    defer_ledger_persist=defer_ledger_persist,
-                    status_callback=status_callback,
-                    stage_state=_stage_state,
-                )
-            except Exception:  # noqa: BLE001 — fail loud in log, fall through
-                logger.exception(
-                    "clean-agent dispatch failed: channel=%s file=%s — "
-                    "falling back to document_app",
-                    channel_id,
-                    file_id,
-                )
-
-        artifact_name = nodes.artifact_name_for(file_id)
-
-        from invoice_processing.extract.invoice_extractor import mime_for
-
-        artifact_mime = mime_for(source_filename)
-        if artifact_mime == "application/octet-stream":
-            artifact_mime = "application/pdf"
-
-        await runner.artifact_service.save_artifact(
-            app_name=app_name,
-            user_id=channel_id,
-            session_id=session_id,
-            filename=artifact_name,
-            artifact=types.Part(
-                inline_data=types.Blob(data=data, mime_type=artifact_mime)
-            ),
-        )
-
-        await _ensure_session(runner, app_name, channel_id, session_id)
-
-        state_delta = {
-            "channel_id": channel_id,
-            "file_id": file_id,
-            "source_filename": source_filename,
-            nodes.ARTIFACT_NAME_KEY: artifact_name,
-            "input_page_count": input_page_count,
-            **profile_delta,
-        }
-        # Re-extract (ADR-0010): ALWAYS write both keys unconditionally so a
-        # normal re-drop of the same file_id (replace=False, hint="") resets any
-        # stale ``reextract_replace=True`` / leftover hint that a prior re-extract
-        # run wrote into the long-lived per-doc session. Writing only when present
-        # caused the HIGH data-loss bug: the state_delta MERGES into existing
-        # session state, so omitting the key leaves the old value in place.
-        state_delta["review_hint"] = hint or ""
-        state_delta["reextract_replace"] = bool(replace)
-
-        interrupt_id: Optional[str] = None
-        last_text = ""
-        last_stage: Optional[str] = None
-        last_node: Optional[str] = None
-        understand_output: Optional[str] = None
-        try:
-            async for event in runner.run_async(
-                user_id=channel_id,
-                session_id=session_id,
-                new_message=types.Content(
-                    role="user", parts=[types.Part(text="process this document")]
-                ),
-                state_delta=state_delta,
-            ):
-                # Drive the live status off the real event stream: each node tags its
-                # events with node_info.path → friendly stage label. Edit on stage
-                # transitions and when a new node completes within the same stage.
-                node_name = event_node_name(event)
-                stage = event_stage_label(event)
-                stage_key = event_stage_key(event)
-                if node_name is not None and node_name != last_node:
-                    last_node = node_name
-                    run_state: dict = {}
-                    try:
-                        session = await runner.session_service.get_session(
-                            app_name=app_name, user_id=channel_id, session_id=session_id
-                        )
-                        if session and getattr(session, "state", None):
-                            run_state = dict(session.state)
-                    except Exception:  # noqa: BLE001 — cosmetic status only
-                        pass
-                    node_output = _stage_output_for_completed_node(node_name, run_state)
-                    output_stage = _output_stage_for_node(node_name)
-                    if output_stage == "understand" and node_output:
-                        understand_output = node_output
-                    if stage_key is not None:
-                        if stage_key != last_stage:
-                            last_stage = stage_key
-                            handoff_output = None
-                            if stage_key == "policy" and understand_output:
-                                handoff_output = understand_output
-                            elif stage_key != "understand" and node_output and output_stage != "understand":
-                                handoff_output = node_output
-                            _stage_state.advance(stage_key, output=handoff_output)
-                        if node_output and output_stage:
-                            _stage_state.set_output(output_stage, node_output)
-                    if stage is not None:
-                        _update_status(
-                            slack_client,
-                            channel_id,
-                            status_ts,
-                            stage,
-                            blocks=_plan_status_blocks(
-                                _stage_state, source_filename, channel_id
-                            ),
-                        )
-                        if batch_mode and status_callback is not None:
-                            # Surface the live stage onto the shared batch plan block
-                            # so the user sees per-doc thinking in the placeholder.
-                            try:
-                                _snapshot = _stage_state.snapshot()
-                                current_stage = next(
-                                    (s for s in _snapshot if s.get("status") == "in_progress"),
-                                    None,
-                                )
-                                status_callback({
-                                    "file_label": source_filename,
-                                    "stage": (current_stage or {}).get("title") or stage,
-                                    "detail": (current_stage or {}).get("output"),
-                                    "status": "in_progress",
-                                })
-                            except Exception:  # noqa: BLE001 - cosmetic only
-                                logger.debug("batch status callback failed", exc_info=True)
-                iid = find_interrupt_id(event)
-                if iid is not None:
-                    interrupt_id = iid
-                text = extract_final_text(event)
-                if text:
-                    last_text = text
-
-        except Exception as exc:  # noqa: BLE001 — surface to Slack, don't kill batch
-            logger.exception(
-                "document processing failed: file=%s channel=%s",
-                file_id,
-                channel_id,
-            )
-            err_short = str(exc).split("\n", maxsplit=1)[0][:200]
-            if "503" in err_short or "UNAVAILABLE" in err_short:
-                user_msg = (
-                    f"Gemini is temporarily overloaded — couldn't finish reading "
-                    f"`{source_filename}`. Please try again in a minute."
-                )
-            else:
-                user_msg = (
-                    f"Sorry, processing failed for `{source_filename}`: {err_short}"
-                )
-            _stage_state.mark_failed("understand", err_short)
-            _update_status(
-                slack_client,
-                channel_id,
-                status_ts,
-                "❌ Processing failed",
-                blocks=_plan_status_blocks(_stage_state, source_filename, channel_id),
-            )
-            _post_message(slack_client, channel_id, user_msg, thread_ts=thread_ts)
-            _remove_reaction(slack_client, channel_id, upload_msg_ts, "eyes")
-            _add_reaction(slack_client, channel_id, upload_msg_ts, "x")
-            if batch_mode and status_callback is not None:
-                status_callback({
-                    "file_label": source_filename,
-                    "stage": "Processing failed",
-                    "detail": err_short,
-                    "status": "failed",
-                })
-            return {
-                "status": "processing_failed",
-                "channel_id": channel_id,
-                "file_id": file_id,
-                "error": err_short,
-            }
-
-        outcome = await _finalize_run_outcome(
-            events=[],  # events already drained into interrupt_id / last_text above
-            interrupt_id=interrupt_id,
-            last_text=last_text,
+        return await process_file_via_ledgr_agent(
             runner=runner,
             ledger_store=ledger_store,
-            db=db,
             slack_client=slack_client,
             channel_id=channel_id,
+            file_id=file_id,
             session_id=session_id,
             app_name=app_name,
-            user_id=channel_id,
-            file_id=file_id,
-            thread_ts=thread_ts,
-            replace=replace,
-            status_ts=status_ts,
+            data=data,
             source_filename=source_filename,
-            stage_state=_stage_state,
-            defer_slack_delivery=defer_slack_delivery,
+            profile_delta=profile_delta,
+            thread_ts=thread_ts,
+            status_ts=status_ts,
+            upload_msg_ts=upload_msg_ts,
+            input_page_count=input_page_count,
             batch_mode=batch_mode,
-            defer_ledger_persist=defer_ledger_persist,
-            client_store=client_store,
+            status_callback=status_callback,
+            stage_state=_stage_state,
         )
-
-        if outcome["status"] == "paused":
-            _stage_state.advance("commit")
-            _stage_state.set_output("policy", "Waiting for your approval")
-            _update_status(
-                slack_client,
-                channel_id,
-                status_ts,
-                "⏳ Needs your review",
-                blocks=_plan_status_blocks(
-                    _stage_state, source_filename, channel_id
-                ),
-            )
-            if batch_mode and status_callback is not None:
-                status_callback({
-                    "file_label": source_filename,
-                    "stage": "Awaiting your review",
-                    "detail": "paused for approval",
-                    "status": "in_progress",
-                })
-            return outcome
-
-        # Delivery branch — collapse status to one line (delivery card is the headline).
-        append_result = outcome.get("append", {})
-        payload = append_result  # fy/software/kind carried on append result
-        if append_result.get("all_deduped"):
-            _update_status(
-                slack_client,
-                channel_id,
-                status_ts,
-                "📋 Already recorded",
-                blocks=_simple_status_blocks("📋 Already recorded"),
-            )
-            _remove_reaction(slack_client, channel_id, upload_msg_ts, "eyes")
-            _add_reaction(slack_client, channel_id, upload_msg_ts, "ballot_box_with_check")
-            if batch_mode and status_callback is not None:
-                status_callback({
-                    "file_label": source_filename,
-                    "stage": "Already recorded",
-                    "detail": "duplicate of a prior entry",
-                    "status": "complete",
-                })
-            return {"status": "duplicate", "append": append_result}
-
-        terminal = _terminal_status_line(append_result, payload)
-        _update_status(
-            slack_client,
-            channel_id,
-            status_ts,
-            terminal,
-            blocks=_simple_status_blocks(terminal),
-        )
-        # Swap the 👀 reaction for ✅ on the user's original upload message.
-        _remove_reaction(slack_client, channel_id, upload_msg_ts, "eyes")
-        _add_reaction(slack_client, channel_id, upload_msg_ts, "white_check_mark")
-        if batch_mode and status_callback is not None:
-            status_callback({
-                "file_label": source_filename,
-                "stage": "Added to ledger",
-                "detail": terminal,
-                "status": "complete",
-            })
-        return outcome
 
 
 async def _ensure_session(
@@ -3338,23 +3060,6 @@ async def handle_approval_action(
     if interrupt is None:
         logger.warning("no interrupt doc for op_id %s; cannot resume.", op_id)
         return {"status": "missing_interrupt", "op_id": op_id}
-
-    from ledgr_agent.slack.hitl_bridge import CLEAN_AGENT_HITL_KIND
-
-    if interrupt.get("kind") == CLEAN_AGENT_HITL_KIND:
-        from accounting_agents.clean_agent_slack import handle_clean_agent_approval_action
-
-        return await handle_clean_agent_approval_action(
-            runner=runner,
-            ledger_store=ledger_store,
-            db=db,
-            slack_client=slack_client,
-            op_id=op_id,
-            decision=decision,
-            app_name=app_name,
-            edits=edits,
-            client_store=_DEFAULT_CLIENT_STORE,
-        )
 
     channel_id = interrupt["channel_id"]
     session_id = interrupt["session_id"]
@@ -5252,28 +4957,18 @@ def download_pdf_bytes(slack_client: Any, file_id: str) -> bytes:
 
 
 def build_runner(*, session_service=None, artifact_service=None, direct_document: bool = True):
-    """Construct the ADK ``Runner`` bound to ``document_app`` + Firestore sessions.
+    """Construct the ADK ``Runner`` bound to ``ledgr_app`` + Firestore sessions.
 
-    File uploads always use ``document_app`` (root_agent=document_workflow).
-    The LLM RouteDecision coordinator has been retired (ADR-0021) — routing is
-    deterministic and lives in the Slack layer.
-
-    Imports are deferred so importing this module never touches the network.
+    File uploads run through the lean ``ledgr_agent`` tools (``read_doc`` +
+    ``build_sheets``). Imports are deferred so importing this module never
+    touches the network.
     """
-    from google.adk.artifacts.in_memory_artifact_service import InMemoryArtifactService
-    from google.adk.runners import Runner
+    from ledgr_agent.runtime.slack_shell import build_ledgr_runner
 
-    from accounting_agents.agent import document_app
-    from accounting_agents.credit_delivery import wire_shared_credit_service
-    from accounting_agents.sessions import FirestoreSessionService
-
-    wire_shared_credit_service()
-
-    logger.info("build_runner: using document_app (deterministic document entry, ADR-0021)")
-    return Runner(
-        app=document_app,
-        session_service=session_service or FirestoreSessionService(),
-        artifact_service=artifact_service or InMemoryArtifactService(),
+    logger.info("build_runner: using ledgr_app (lean agent, ADR-0026)")
+    return build_ledgr_runner(
+        session_service=session_service,
+        artifact_service=artifact_service,
     )
 
 
@@ -5541,20 +5236,14 @@ def build_async_app(
         if not op_id:
             return
         interrupt = read_interrupt(db, op_id)
-        from ledgr_agent.slack.hitl_bridge import CLEAN_AGENT_HITL_KIND, ledger_rows_to_edit_lines
-
         state = (
             await _read_session_state(runner, app_name, interrupt)
             if interrupt else {}
         )
-        if interrupt and interrupt.get("kind") == CLEAN_AGENT_HITL_KIND:
-            payload = interrupt.get("ledger_payload") or {}
-            lines = ledger_rows_to_edit_lines(payload)
-        else:
-            # Single-invoice assumption (Task 6's apply_decision_node logs a WARNING
-            # when len(invs) > 1 — modal mirrors the same per-doc-session contract).
-            invs = state.get(nodes.NORMALIZED_KEY) or [{}]
-            lines = invs[0].get("lines") or []
+        # Single-invoice assumption (Task 6's apply_decision_node logs a WARNING
+        # when len(invs) > 1 — modal mirrors the same per-doc-session contract).
+        invs = state.get(nodes.NORMALIZED_KEY) or [{}]
+        lines = invs[0].get("lines") or []
         coa_options = [
             (c.get("code"), f"{c.get('code')} — {c.get('description')}")
             for c in (state.get("coa") or [])
