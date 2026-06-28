@@ -5,7 +5,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from accounting_agents.ledger_doc_identity import ledger_doc_identity
+from accounting_agents.ledger_doc_identity import (
+    ledger_doc_identity,
+    ledger_doc_key_for_export_row,
+)
+from invoice_processing.export.exporters import get_exporter
 
 _INVOICE_NUMBER_HEADERS = (
     "Invoice Number",
@@ -83,6 +87,7 @@ def _batches_from_export_rows(
     *,
     posted_documents: list[dict[str, Any]],
     kind: str,
+    software: str = "",
 ) -> list[dict[str, Any]]:
     if not export_rows:
         return []
@@ -102,6 +107,8 @@ def _batches_from_export_rows(
     else:
         rows = list(export_rows)
 
+    exporter = get_exporter(software) if software else None
+
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for index, row in enumerate(rows):
         sheet = str(row.get("sheet") or "Purchase")
@@ -114,10 +121,16 @@ def _batches_from_export_rows(
 
     batches: list[dict[str, Any]] = []
     for index, ((sheet, identity), batch_rows) in enumerate(sorted(grouped.items())):
+        if exporter is not None and kind != "bank":
+            doc_key = ledger_doc_key_for_export_row(
+                exporter, sheet, batch_rows[0], index
+            )
+        else:
+            doc_key = ledger_doc_identity(sheet, identity, index=index)
         batches.append(
             {
                 "sheet": sheet,
-                "doc_key": ledger_doc_identity(sheet, identity, index=index),
+                "doc_key": doc_key,
                 "rows": batch_rows,
             }
         )
@@ -144,6 +157,7 @@ def ledger_payload_from_batch_result(
         export_rows,
         posted_documents=posted_documents,
         kind=kind,
+        software=software,
     )
 
     payload: dict[str, Any] = {
