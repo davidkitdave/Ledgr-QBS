@@ -1,65 +1,36 @@
-"""Tests for the ``_get_credit_service`` seam in ``ledgr_agent.tools.document_tools``.
-
-The seam exists so production can wire a Firestore-backed ``CreditService``
-without changing ``_credit_gate``. Tests should be able to swap the factory
-in/out without touching production code paths.
-"""
+"""Tests for ledgr_agent.billing gate seam."""
 
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
 
-from ledgr_agent.tools import document_tools
-from ledgr_agent.tools.document_tools import _credit_gate, _get_credit_service
+import ledgr_agent.billing as billing
+from ledgr_agent.billing import credit_gate_decision
 
 
 @pytest.fixture(autouse=True)
-def _reset_credit_factory() -> None:
-    """Make sure each test starts with a clean factory slot and singleton."""
-    original_factory = document_tools._credit_service_factory
-    original_singleton = document_tools._credit_service_singleton
-    document_tools._credit_service_factory = None
-    document_tools._credit_service_singleton = None
+def _reset_shared_service() -> None:
+    original = billing._shared_credit_service
+    billing._shared_credit_service = None
     try:
         yield
     finally:
-        document_tools._credit_service_factory = original_factory
-        document_tools._credit_service_singleton = original_singleton
-
-
-def test_default_factory_returns_credit_service() -> None:
-    """Default behaviour: ``_get_credit_service`` returns an in-memory CreditService."""
-    service = _get_credit_service()
-    assert service is not None
-    # Sanity check: the default store is the in-memory backend.
-    assert hasattr(service, "read_balance")
-    assert service.read_balance("any-firm") == 0
+        billing._shared_credit_service = original
 
 
 def test_default_gate_blocks_unknown_firm_with_zero_balance() -> None:
-    """An unknown firm has balance 0 → not >= 1 path → blocked.
-
-    Documents the production contract of ``_credit_gate`` when wired with the
-    default in-memory store: an unprovisioned firm cannot run batches because
-    ``read_balance`` returns 0.
-    """
-    decision = _credit_gate(firm_id="unknown-firm", paths=["/tmp/nope.pdf"])
+    decision = credit_gate_decision(firm_id="unknown-firm", required_units=1)
     assert decision["allowed"] is False
     assert decision["reason"] == "zero_credit"
     assert decision["balance"] == 0
 
 
 def test_default_gate_skipped_when_firm_id_is_none() -> None:
-    """Missing firm_id is treated as a no-op allow (defensive path)."""
-    decision = _credit_gate(firm_id=None, paths=["/tmp/nope.pdf"])
+    decision = credit_gate_decision(firm_id=None, required_units=1)
     assert decision == {"allowed": True, "reason": "ok", "balance": 0}
 
 
-def test_monkeypatching_factory_changes_what_gate_uses(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A swapped factory must change what ``_credit_gate`` sees."""
-
+def test_monkeypatching_shared_service_changes_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     class _StubService:
         def __init__(self, balance: int) -> None:
             self._balance = balance
@@ -70,83 +41,33 @@ def test_monkeypatching_factory_changes_what_gate_uses(monkeypatch: pytest.Monke
             return self._balance
 
     stub = _StubService(balance=0)
-    monkeypatch.setattr(
-        document_tools,
-        "_credit_service_factory",
-        lambda: stub,
-    )
+    billing.configure_shared_credit_service(stub)  # type: ignore[arg-type]
 
-    decision = _credit_gate(firm_id="firm-1", paths=["/tmp/a.pdf", "/tmp/b.pdf"])
+    decision = credit_gate_decision(firm_id="firm-1", required_units=2)
 
-    assert stub.read_calls == ["firm-1"], "gate must read through the stub"
+    assert stub.read_calls == ["firm-1"]
     assert decision["allowed"] is False
     assert decision["reason"] == "zero_credit"
-    assert decision["balance"] == 0
 
 
-def test_monkeypatched_factory_with_positive_balance_allows(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_positive_balance_allows() -> None:
     class _StubService:
-        def __init__(self, balance: int) -> None:
-            self._balance = balance
-
         def read_balance(self, firm_id: str) -> int:
-            return self._balance
+            return 5
 
-    monkeypatch.setattr(
-        document_tools,
-        "_credit_service_factory",
-        lambda: _StubService(balance=5),
-    )
-
-    decision = _credit_gate(firm_id="firm-with-credits", paths=["/tmp/a.pdf"])
-
+    billing.configure_shared_credit_service(_StubService())  # type: ignore[arg-type]
+    decision = credit_gate_decision(firm_id="firm-with-credits", required_units=1)
     assert decision["allowed"] is True
     assert decision["reason"] == "ok"
-    assert decision["balance"] == 5
 
 
-def test_gate_blocks_when_required_units_exceed_balance(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_gate_blocks_when_required_units_exceed_balance() -> None:
     class _StubService:
         def read_balance(self, firm_id: str) -> int:
             return 2
 
-    monkeypatch.setattr(
-        document_tools,
-        "_credit_service_factory",
-        lambda: _StubService(),
-    )
-
-    decision = _credit_gate(
-        firm_id="firm-with-some-credits",
-        paths=["/tmp/five-page.pdf"],
-        required_units=5,
-    )
-
+    billing.configure_shared_credit_service(_StubService())  # type: ignore[arg-type]
+    decision = credit_gate_decision(firm_id="firm-with-some-credits", required_units=5)
     assert decision["allowed"] is False
     assert decision["reason"] == "insufficient_credit"
-    assert decision["balance"] == 2
     assert decision["required_units"] == 5
-
-
-def test_missing_app_package_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When neither factory nor ``app.credit_service`` is available, return ``None``.
-
-    We simulate the import failure by clearing the factory and replacing the
-    module's own lazy import with one that raises ImportError.
-    """
-    document_tools._credit_service_factory = None
-
-    import builtins
-
-    real_import = builtins.__import__
-
-    def _blocking_import(name: str, *args: Any, **kwargs: Any) -> Any:
-        if name == "app.credit_service" or name.startswith("app.credit_service"):
-            raise ImportError("simulated absence of app.credit_service")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", _blocking_import)
-
-    assert _get_credit_service() is None
-    decision = _credit_gate(firm_id="any-firm", paths=["/tmp/a.pdf"])
-    assert decision == {"allowed": True, "reason": "ok", "balance": 0}

@@ -2,17 +2,14 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 
-from ledgr_agent.export.bank_workbook import build_bank_workbook
-from ledgr_agent.extract.bank_statement import extract_bank_statement
-from ledgr_agent.normalize.bank_statement import bank_sheet_title, reconcile_running_balance
-from ledgr_agent.tools.project_bank_workbook import project_bank_workbook
-from ledgr_agent.tools.read_bank_statement_tool import read_bank_statement
+from ledgr_agent.internal.export import build_bank_workbook
+from ledgr_agent.internal.normalize import bank_sheet_title, reconcile_running_balance
+from ledgr_agent.tools.build_sheets import build_sheets
+from ledgr_agent.tools.read_doc import READ_DOC_STATE_KEY
 
 
 def _make_digital_pdf_bytes() -> bytes:
@@ -126,60 +123,19 @@ def test_build_bank_workbook_two_sheets_multi_ccy() -> None:
     assert out["sheets"][0]["columns"][0] == "Date"
 
 
-@patch("ledgr_agent.extract.bank_statement._extract_digital")
-@patch("ledgr_agent.extract.bank_statement._extract_vision")
-def test_extract_bank_statement_bytes_use_digital_not_vision(mock_vis, mock_dig) -> None:
-    from ledgr_agent.models.bank_statement import ReadBankStatement
-
-    mock_dig.return_value = ReadBankStatement.model_validate(_FAKE_STATEMENT)
-    pdf = _make_digital_pdf_bytes()
-    parsed, mode = extract_bank_statement(pdf, "application/pdf", mode="auto")
-    assert mode == "digital"
-    mock_dig.assert_called_once()
-    mock_vis.assert_not_called()
-    assert len(parsed.accounts) == 2
-
-
-def test_read_bank_statement_multi_ccy_fixture(tmp_path) -> None:
-    from ledgr_agent.models.bank_statement import ReadBankStatement
-
-    fixture = Path(__file__).resolve().parents[1] / "fixtures" / "bank_multi_ccy_digital.pdf"
-    if not fixture.is_file():
-        pytest.skip("bank_multi_ccy_digital.pdf fixture missing")
-
-    parsed, mode = extract_bank_statement(
-        fixture.read_bytes(),
-        "application/pdf",
-        path=fixture,
-        mode="auto",
+def test_build_sheets_bank_from_state() -> None:
+    ctx = SimpleNamespace(
+        state={
+            "firm_id": "T_TEST",
+            READ_DOC_STATE_KEY: {
+                **_FAKE_STATEMENT,
+                "file_kind": "bank_statement",
+                "source_path": "/tmp/bank.pdf",
+                "page_count": 1,
+            },
+        }
     )
-    assert mode == "digital"
-    assert len(parsed.accounts) == 2
-    currencies = {a.currency for a in parsed.accounts}
-    assert currencies == {"SGD", "USD"}
-
-
-@patch("ledgr_agent.tools.read_bank_statement_tool.extract_bank_statement")
-def test_read_bank_statement_tool_stores_state(mock_extract, tmp_path) -> None:
-    from ledgr_agent.models.bank_statement import ReadBankStatement
-
-    pdf = tmp_path / "stmt.pdf"
-    pdf.write_bytes(_make_digital_pdf_bytes())
-    mock_extract.return_value = (
-        ReadBankStatement.model_validate(_FAKE_STATEMENT),
-        "digital",
-    )
-    ctx = SimpleNamespace(state={})
-    out = read_bank_statement(ctx, paths=[str(pdf)])
-    assert out["account_count"] == 2
-    assert out["extraction_meta"]["extract_mode"] == "digital"
-    assert ctx.state["read_bank_statement"]["accounts"][0]["bank_name"] == "OCBC"
-    assert ctx.state["read_bank_statement"]["accounts_normalized"]
-
-
-def test_project_bank_workbook_tool_from_state() -> None:
-    ctx = SimpleNamespace(state={"read_bank_statement": _FAKE_STATEMENT})
-    out = project_bank_workbook(ctx, statement=None)
+    out = build_sheets(ctx)
     assert out["status"] == "success"
     assert out["sheet_count"] == 2
-    assert ctx.state["bank_workbook"]["sheet_count"] == 2
+    assert ctx.state["workbook"]["sheet_count"] == 2

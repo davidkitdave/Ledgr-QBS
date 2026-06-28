@@ -1,5 +1,5 @@
-from ledgr_agent.review.grouping import merge_soft_warnings, partition_and_group_reasons
-from ledgr_agent.schemas.review import SoftWarning
+from accounting_agents.review.grouping import merge_soft_warnings, partition_and_group_reasons
+from accounting_agents.batch_schemas import SoftWarning
 
 
 def test_groups_many_account_flags_into_one_soft_warning() -> None:

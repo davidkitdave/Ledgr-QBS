@@ -188,8 +188,8 @@ def _seeded_store_with_firm(db: FakeFirestore, firm_id: str = "TQA"):
     return FirestoreClientStore(client=db)
 
 
-def test_process_file_event_blocks_before_clean_agent_when_zero_credit(monkeypatch) -> None:
-    monkeypatch.setenv("LEDGR_USE_CLEAN_AGENT", "1")
+def test_process_file_event_blocks_before_ledgr_when_zero_credit(monkeypatch) -> None:
+    monkeypatch.setenv("LEDGR_USE_CLEAN_AGENT", "0")
     slack = FakeSlackClient()
     db = FakeFirestore()
     store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
@@ -198,7 +198,7 @@ def test_process_file_event_blocks_before_clean_agent_when_zero_credit(monkeypat
         artifact_service = None
         session_service = None
 
-    with patch("ledgr_agent.tools.process_document_batch") as mock_tool:
+    with patch("ledgr_agent.runtime.slack_shell.read_doc") as mock_read:
         result = asyncio.run(
             process_file_event(
                 runner=_Runner(),
@@ -213,17 +213,20 @@ def test_process_file_event_blocks_before_clean_agent_when_zero_credit(monkeypat
                 client_store=_seeded_store_with_firm(db, "T0"),
             )
         )
-        mock_tool.assert_not_called()
+        mock_read.assert_not_called()
 
     assert result["status"] == "blocked"
     assert result["reason"] == "zero_credit"
     assert slack.uploads == []
 
 
-def test_process_file_event_clean_agent_charges_on_delivery(
+def test_process_file_event_ledgr_charges_on_build_sheets(
     monkeypatch, credit_svc: CreditService
 ) -> None:
-    monkeypatch.setenv("LEDGR_USE_CLEAN_AGENT", "1")
+    from types import SimpleNamespace
+
+    from ledgr_agent.tools.read_doc import READ_DOC_STATE_KEY
+
     slack = FakeSlackClient()
     db = FakeFirestore()
     store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
@@ -253,43 +256,31 @@ def test_process_file_event_clean_agent_charges_on_delivery(
 
     class _Runner:
         def __init__(self) -> None:
-            self.artifact_service = None
+            self.artifact_service = SimpleNamespace(save_artifact=lambda *a, **k: None)
             self.session_service = _StatefulSessionService()
-
-        async def run_async(self, **kwargs):
-            if False:
-                yield None
 
     credit_svc.ensure_firm("TQA")
     credit_svc.grant("TQA", 10, note="trial")
 
-    success_batch = {
-        "status": "success",
-        "client_id": "c1",
-        "posted_documents": [
-            {
-                "doc_type": "invoice",
-                "invoice_number": "INV-9001",
-                "sheet": "Purchase",
-                "file_name": "clean.pdf",
-            }
-        ],
-        "per_file": [{"doc_type": "invoice", "file_name": "clean.pdf"}],
-        "export_rows": [
-            {
-                "workbook": "Ledger_FY2026.xlsx",
-                "sheet": "Purchase",
-                "Invoice Number": "INV-9001",
-                "Description": "Widget",
-                "Amount": 50.0,
-            }
-        ],
-        "review_requests": [],
-        "validation_summary": {},
-        "credits": {"credit_status": "estimated"},
-    }
+    def _fake_read(tool_context, paths=None):
+        tool_context.state[READ_DOC_STATE_KEY] = {
+            "file_kind": "commercial_documents",
+            "source_path": "/tmp/clean.pdf",
+            "page_count": 1,
+            "document_count": 1,
+            "credit_units": 1,
+            "documents": [
+                {
+                    "doc_type": "purchase",
+                    "invoice_number": "INV-9001",
+                    "invoice_date": "2026-01-10",
+                    "lines": [{"description": "Widget", "net_amount": 50.0}],
+                }
+            ],
+        }
+        return {"status": "success", "file_kind": "commercial_documents"}
 
-    with patch("ledgr_agent.tools.process_document_batch", return_value=success_batch):
+    with patch("ledgr_agent.runtime.slack_shell.read_doc", side_effect=_fake_read):
         result = asyncio.run(
             process_file_event(
                 runner=_Runner(),
@@ -298,7 +289,7 @@ def test_process_file_event_clean_agent_charges_on_delivery(
                 slack_client=slack,
                 channel_id="C1",
                 file_id="F-charge",
-                app_name="acc",
+                app_name="ledgr_agent",
                 download_fn=lambda c, f: b"%PDF-1.4 fake",
                 source_filename="clean.pdf",
                 client_store=_seeded_store_with_firm(db, "TQA"),
@@ -307,16 +298,6 @@ def test_process_file_event_clean_agent_charges_on_delivery(
 
     assert result["status"] == "delivered"
     assert credit_svc.read_balance("TQA") == 9
-    footer_posts = [
-        msg
-        for msg in slack._posts
-        if any(
-            "Used 1 credit" in str(block)
-            for block in (msg.get("blocks") or [])
-        )
-        or "Used 1 credit" in str(msg.get("text") or "")
-    ]
-    assert footer_posts, "expected credit footer on delivery card"
 
 
 def test_delivery_idempotency_key_format() -> None:

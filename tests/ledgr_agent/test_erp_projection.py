@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from ledgr_agent.export import erp_projection
-from ledgr_agent.export.erp_projection import DEFAULT_SYSTEMS, project
-from ledgr_agent.tools.project_to_erp import project_to_erp
+from ledgr_agent.internal import export as erp_projection
+from ledgr_agent.internal.export import DEFAULT_SYSTEMS, project
+from ledgr_agent.tools.build_sheets import build_sheets
 
 
 PURCHASE_DOC = {
@@ -49,8 +49,8 @@ CREDIT_NOTE_DOC = {
 def test_module_has_no_invoice_processing_imports() -> None:
     root = Path(__file__).resolve().parents[2]
     for rel in (
-        "ledgr_agent/export/erp_projection.py",
-        "ledgr_agent/tools/project_to_erp.py",
+        "ledgr_agent/internal/export.py",
+        "ledgr_agent/tools/build_sheets.py",
     ):
         tree = ast.parse((root / rel).read_text(encoding="utf-8"))
         for node in ast.walk(tree):
@@ -121,14 +121,32 @@ def test_credit_note_sign_flips_amounts() -> None:
     assert row["Total Amount"] == -109.0
 
 
-def test_project_to_erp_tool_success() -> None:
-    result = project_to_erp(None, PURCHASE_DOC)
+def test_build_sheets_tool_success() -> None:
+    from types import SimpleNamespace
+
+    from ledgr_agent.billing import CreditService, InMemoryCreditStore, configure_shared_credit_service
+    from ledgr_agent.tools.read_doc import READ_DOC_STATE_KEY
+
+    configure_shared_credit_service(CreditService(InMemoryCreditStore()))
+    ctx = SimpleNamespace(
+        state={
+            "firm_id": "T_TEST",
+            READ_DOC_STATE_KEY: {
+                "file_kind": "commercial_documents",
+                "source_path": "bill.pdf",
+                "documents": [PURCHASE_DOC],
+            },
+        }
+    )
+    result = build_sheets(ctx)
     assert result["status"] == "success"
-    assert len(result["results"]) == 4
+    assert result["sheet_count"] == 4
 
 
-def test_project_to_erp_tool_rejects_empty_document() -> None:
-    assert project_to_erp(None, {})["status"] == "error"
+def test_build_sheets_requires_read_doc() -> None:
+    from types import SimpleNamespace
+
+    assert build_sheets(SimpleNamespace(state={}))["status"] == "error"
 
 
 def test_unknown_system_raises() -> None:
