@@ -90,8 +90,8 @@ SlackLedgerStore`. Tracing every import that path touches:
 
 | Module / symbol | Why it is dead weight on the live path |
 |---|---|
-| `accounting_agents.agent.assistant_app` + `build_chat_runner` + `app_mention`→chat routing | The separate chat Q&A agent — see "Chat-lane decision" |
-| `accounting_agents.assistant` + `accounting_agents.assistant_tools.*` | The 10 read-only Q&A tools + helpers — **archive OR port-then-archive**, pending the chat-lane decision |
+| `accounting_agents.agent.assistant_app` + `build_chat_runner` + `app_mention`→chat routing | The separate chat Q&A agent — **archive (reset)**; rebuild Q&A clean later (see "Chat-lane decision") |
+| `accounting_agents.assistant` + `accounting_agents.assistant_tools.*` | The 10 read-only Q&A tools + helpers — **archive (reset), do NOT port**; legacy baggage, rebuilt clean later |
 | `accounting_agents.nodes` (`ApproveDecision`, `ReviewClarifyDecision`, segmentation, graph seams) | The old document-workflow graph; the lean tools replace it |
 | `accounting_agents.hitl` (approval / review / clarify) | HITL is off; the lean path auto-delivers |
 | The `invoice_processing` extraction factory (chunking, `ledger_extract`, `invoice_extractor`, classifiers) | Superseded by `read_doc` + `build_sheets` (ADR-0030). **Keep only** the small `export/` + `partial_failure` slice listed above. |
@@ -103,21 +103,24 @@ The physical relocation (moving the "keep" infra into `ledgr_slack`, trimming
 in "keep" moves with the frontend; anything in "archive" can be cut once its tests
 move with it.
 
-## Chat-lane decision (open — resolved in Stage 3)
+## Chat-lane decision (decided 2026-06-29 — clean reset, do NOT port)
 
 Today `app_mention` + text messages route to `assistant_app` (the chat agent),
 which has ~10 data-grounded read tools (`pnl_for_fy`, `bank_totals`,
 `summarize_by_category`, `gst_threshold_check`, `lookup_coa_account`, …). The
 lean `ledgr_agent` has only `read_doc`, `build_sheets`, `read_credit_balance` —
-tagging it yields conversation but **not** ledger answers. Two paths:
+tagging it yields conversation but **not** ledger answers.
 
-- **(a) Port** those read-only tools onto `ledgr_agent`, route @mentions to it,
-  then archive `assistant` / `assistant_tools` / `assistant_app`. One agent.
-- **(b) Keep** the chat agent as a second lane and archive nothing in that cluster.
+**Decision: clean reset.** Do **not** port the old Q&A tools onto `ledgr_agent`,
+and do **not** keep investing in `assistant_app`. The existing chat/Q&A lane was
+shaped by the `accounting_agents` / `invoice_processing` build and carries
+unnecessary baggage; rather than migrate it, it is **archived with the rest of
+the legacy** and the Q&A is **rebuilt cleanly later**, on its own terms, when we
+choose to add it back properly. No chat-lane code changes happen now — the lean
+agent stays document-only; the reset lands in the archive pass.
 
-To be decided after demonstrating the lean agent's actual response in the
-adk-web / agents-cli playground (Stage 3). Until then, `assistant*` is tagged
-**archive-OR-port** above, not hard-archive.
+This moves `assistant` / `assistant_tools` / `assistant_app` from
+"archive-OR-port" to a hard **archive (reset)** in the map below.
 
 ## Consequences
 
