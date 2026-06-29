@@ -346,7 +346,7 @@ def test_semaphore_caps_concurrent_runs(monkeypatch):
     build_sheets).  We add a small async delay inside build_sheets to allow
     concurrent acquirers to queue up, then verify max_concurrent <= cap.
     """
-    import ledgr_agent.runtime.slack_shell as slack_shell
+    import ledgr_slack.slack_shell as slack_shell
 
     counter = {"now": 0, "max": 0}
 
@@ -422,7 +422,7 @@ def test_semaphore_caps_concurrent_runs(monkeypatch):
 
 
 def test_append_rows_is_offloaded_to_thread(monkeypatch):
-    import ledgr_agent.runtime.slack_shell as slack_shell
+    import ledgr_slack.slack_shell as slack_shell
 
     runner = _InstrumentedRunner(_ledger_payload())
     store = _NoopLedgerStore()

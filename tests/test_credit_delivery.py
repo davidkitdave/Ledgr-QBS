@@ -198,7 +198,7 @@ def test_process_file_event_blocks_before_ledgr_when_zero_credit(monkeypatch) ->
         artifact_service = None
         session_service = None
 
-    with patch("ledgr_agent.runtime.slack_shell.read_doc") as mock_read:
+    with patch("ledgr_slack.slack_shell.read_doc") as mock_read:
         result = asyncio.run(
             process_file_event(
                 runner=_Runner(),
@@ -280,7 +280,7 @@ def test_process_file_event_ledgr_charges_on_build_sheets(
         }
         return {"status": "success", "file_kind": "commercial_documents"}
 
-    with patch("ledgr_agent.runtime.slack_shell.read_doc", side_effect=_fake_read):
+    with patch("ledgr_slack.slack_shell.read_doc", side_effect=_fake_read):
         result = asyncio.run(
             process_file_event(
                 runner=_Runner(),

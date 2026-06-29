@@ -1,6 +1,6 @@
 """Workbook → Slack ledger payload mapping."""
 
-from ledgr_agent.runtime.delivery import workbook_to_ledger_payload
+from ledgr_slack.delivery import workbook_to_ledger_payload
 
 
 def _commercial_sheet(invoice_number: str, index: int) -> dict:

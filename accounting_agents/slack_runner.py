@@ -2175,7 +2175,7 @@ async def process_file_event(
                     "reason": "no_firm",
                 }
 
-        from ledgr_agent.runtime.slack_shell import process_file_via_ledgr_agent
+        from ledgr_slack.slack_shell import process_file_via_ledgr_agent
 
         return await process_file_via_ledgr_agent(
             runner=runner,
@@ -4965,7 +4965,7 @@ def build_runner(*, session_service=None, artifact_service=None, direct_document
     ``build_sheets``). Imports are deferred so importing this module never
     touches the network.
     """
-    from ledgr_agent.runtime.slack_shell import build_ledgr_runner
+    from ledgr_slack.slack_shell import build_ledgr_runner
 
     logger.info("build_runner: using ledgr_app (lean agent, ADR-0026)")
     return build_ledgr_runner(

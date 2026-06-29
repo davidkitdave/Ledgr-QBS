@@ -244,7 +244,7 @@ def _mock_ledgr_read_doc(monkeypatch):
         }
         return {"status": "success", "file_kind": "commercial_documents"}
 
-    monkeypatch.setattr("ledgr_agent.runtime.slack_shell.read_doc", _fake_read)
+    monkeypatch.setattr("ledgr_slack.slack_shell.read_doc", _fake_read)
 
 
 _SOFTWARE_DISPLAY = {
@@ -1463,7 +1463,7 @@ def _run_delivery_with_state(state: dict, monkeypatch, channel_id: str = "C1"):
         return synthesized
 
     monkeypatch.setattr(
-        "ledgr_agent.runtime.slack_shell.build_sheets", _fake_build_sheets
+        "ledgr_slack.slack_shell.build_sheets", _fake_build_sheets
     )
 
     asyncio.run(

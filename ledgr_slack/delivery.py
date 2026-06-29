@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from accounting_agents.ledger_doc_identity import ledger_doc_identity
+from ledgr_slack.ledger_doc_identity import ledger_doc_identity
 from ledgr_agent.internal.skill_profiles import normalize_system_key
 from ledgr_agent.tools.build_sheets import WORKBOOK_STATE_KEY
 

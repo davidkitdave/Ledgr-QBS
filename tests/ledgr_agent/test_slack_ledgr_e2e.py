@@ -122,7 +122,7 @@ def test_process_file_event_ledgr_agent_delivers(monkeypatch) -> None:
         tool_context.state[READ_DOC_STATE_KEY] = _mock_read_payload()
         return {"status": "success", "file_kind": "commercial_documents"}
 
-    with patch("ledgr_agent.runtime.slack_shell.read_doc", side_effect=_fake_read):
+    with patch("ledgr_slack.slack_shell.read_doc", side_effect=_fake_read):
         result = asyncio.run(
             process_file_event(
                 runner=runner,

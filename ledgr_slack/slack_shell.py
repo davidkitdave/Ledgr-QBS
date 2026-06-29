@@ -12,12 +12,12 @@ from typing import Any, Callable, Optional
 from google.genai import types
 
 from ledgr_agent.internal.uploads import artifact_name_for
-from ledgr_agent.runtime.delivery import (
+from ledgr_slack.delivery import (
     compose_delivery_summary,
     workbook_from_session_state,
     workbook_to_ledger_payload,
 )
-from ledgr_agent.runtime.session import run_state_delta
+from ledgr_slack.session import run_state_delta
 from ledgr_agent.tools.build_sheets import WORKBOOK_STATE_KEY, build_sheets
 from ledgr_agent.tools.read_doc import READ_DOC_STATE_KEY, read_doc
 
@@ -249,7 +249,7 @@ async def process_file_via_ledgr_agent(
         _simple_status_blocks,
         _update_status,
     )
-    from invoice_processing.extract.invoice_extractor import mime_for
+    from ledgr_agent.internal.gemini import mime_for
 
     artifact_name = artifact_name_for(file_id)
     artifact_mime = mime_for(source_filename)

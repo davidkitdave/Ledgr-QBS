@@ -80,7 +80,7 @@ def test_unresolved_firm_logs_loudly_and_processes_by_default(monkeypatch, caplo
 
     with caplog.at_level(logging.ERROR, logger="accounting_agents.credit_delivery"):
         with patch(
-            "ledgr_agent.runtime.slack_shell.process_file_via_ledgr_agent",
+            "ledgr_slack.slack_shell.process_file_via_ledgr_agent",
             return_value={"status": "error", "channel_id": "C1", "file_id": "F-nofirm"},
         ):
             result = asyncio.run(
@@ -113,7 +113,7 @@ def test_unresolved_firm_blocks_when_require_firm_set(monkeypatch) -> None:
         artifact_service = None
         session_service = None
 
-    with patch("ledgr_agent.runtime.slack_shell.read_doc") as mock_read:
+    with patch("ledgr_slack.slack_shell.read_doc") as mock_read:
         result = asyncio.run(
             process_file_event(
                 runner=_Runner(),
