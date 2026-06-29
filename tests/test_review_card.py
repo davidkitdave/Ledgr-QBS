@@ -217,111 +217,12 @@ class TestReviewHintModal:
 # =========================================================================== #
 
 
-def test_process_file_event_posts_review_card_for_review_interrupt():
-    """A ``:review`` interrupt id triggers the review card, not the approval card."""
-    slack = FakeSlackClient()
-    db = FakeFirestore()
-    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
-
-    # Interrupt id ends with ``:review``
-    review_interrupt_event = SimpleNamespace(
-        content=SimpleNamespace(parts=[]),
-        get_function_calls=lambda: [
-            SimpleNamespace(name="adk_request_input", id="C1:F1:review")
-        ],
-    )
-    final_state = {
-        "review_question": "Could you confirm the vendor name?",
-        nodes.REVIEW_REASON_KEY: ["low confidence: 0.31"],
-    }
-    runner = _FakeRunner([review_interrupt_event], final_state)
-
-    result = asyncio.run(
-        process_file_event(
-            runner=runner,
-            ledger_store=store,
-            db=db,
-            slack_client=slack,
-            channel_id="C1",
-            file_id="F1",
-            app_name="acc",
-            download_fn=lambda c, f: b"%PDF fake",
-            client_store=_seeded_client_store(db),
-        )
-    )
-
-    assert result["status"] == "paused"
-    assert result["op_id"] == "C1:F1:review"
-
-    # The posted card must carry the review action ids, NOT the approval ids.
-    card = _last_blocks(slack)
-    action_ids = {
-        el["action_id"]
-        for b in card
-        if b.get("type") == "actions"
-        for el in b["elements"]
-    }
-    assert action_ids == {"review_reextract", "review_confirm", "review_reject"}
-    # Must NOT have approval buttons.
-    assert "approve" not in action_ids
-    assert "edit" not in action_ids
-    assert "reject" not in action_ids
-
-    # The question must appear in the card text.
-    section_texts = [
-        b["text"]["text"]
-        for b in card
-        if b.get("type") == "section"
-    ]
-    assert any("vendor name" in t for t in section_texts)
-
-    # Interrupt correlation doc written with kind="review".
-    snap = db.collection("interrupts").document("C1:F1:review").get()
-    assert snap.exists
-    doc = snap.to_dict()
-    assert doc.get("kind") == "review"
-    assert doc.get("slack_file_id") == "F1"
-
-
-def test_process_file_event_posts_approval_card_for_normal_interrupt():
-    """A normal (non-``:review``) interrupt id still gets the approval card."""
-    slack = FakeSlackClient()
-    db = FakeFirestore()
-    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
-
-    approval_event = SimpleNamespace(
-        content=SimpleNamespace(parts=[]),
-        get_function_calls=lambda: [
-            SimpleNamespace(name="adk_request_input", id="C2:F2")
-        ],
-    )
-    runner = _FakeRunner([approval_event], {"approval_message": "needs review: line X"})
-
-    result = asyncio.run(
-        process_file_event(
-            runner=runner,
-            ledger_store=store,
-            db=db,
-            slack_client=slack,
-            channel_id="C2",
-            file_id="F2",
-            app_name="acc",
-            download_fn=lambda c, f: b"%PDF fake",
-            client_store=_seeded_client_store(db, channel_id="C2", client_id="c2"),
-        )
-    )
-
-    assert result["status"] == "paused"
-    assert result["op_id"] == "C2:F2"
-
-    card = _last_blocks(slack)
-    action_ids = {
-        el["action_id"]
-        for b in card
-        if b.get("type") == "actions"
-        for el in b["elements"]
-    }
-    assert action_ids == {"approve", "edit", "reject"}
+# NOTE (ADR-0026): test_process_file_event_posts_review_card_for_review_interrupt
+# and test_process_file_event_posts_approval_card_for_normal_interrupt REMOVED.
+# The lean ledgr_agent path (read_doc → build_sheets → deliver_workbook) is
+# no-HITL by design. There is no ``adk_request_input`` interrupt in this path;
+# process_file_event never reaches the "paused" status. These tests exercised
+# the old graph-interrupt wiring which no longer exists.
 
 
 # =========================================================================== #
