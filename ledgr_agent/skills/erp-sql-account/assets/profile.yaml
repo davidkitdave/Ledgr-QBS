@@ -3,8 +3,8 @@ system: sql_account
 exporter: profile
 
 # Both purchase and sales use the same sheet name in SQL Account
-purchase_sheet: "SLPH_Invoice_Cash_Debit_Credit"
-sales_sheet: "SLPH_Invoice_Cash_Debit_Credit"
+purchase_sheet: "Purchase"
+sales_sheet: "Sales"
 
 # Columns emitted: REQUIRED (yellow) + core tax. Native SQL Account import
 # columns only — full template header is row 6 of the SLPH_Invoice_Cash_Debit_Credit

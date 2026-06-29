@@ -3,8 +3,8 @@ system: autocount
 exporter: profile
 
 # Sheet names per doc type (AutoCount imports AP and AR as separate operations)
-purchase_sheet: "AP Invoice"
-sales_sheet: "AR Invoice"
+purchase_sheet: "Purchase"
+sales_sheet: "Sales"
 
 # AP Invoice columns — exact field row from Import-AP-Invoice.xls row 2, cols 1..21
 purchase_cols:

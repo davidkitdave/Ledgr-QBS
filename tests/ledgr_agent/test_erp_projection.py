@@ -85,7 +85,7 @@ def test_project_all_four_erps_purchase_invoice() -> None:
     assert row["Account Code / COA"] == ""
 
     autocount = out["results"]["autocount"]
-    assert autocount["sheet"] == "AP Invoice"
+    assert autocount["sheet"] == "Purchase"
     ac_row = autocount["rows"][0]
     assert ac_row["DocNo"] == "<<New>>"
     assert ac_row["JournalType"] == "PURCHASE"
@@ -104,7 +104,7 @@ def test_project_all_four_erps_purchase_invoice() -> None:
     assert x_row["*TaxType"] == ""
 
     sql = out["results"]["sql_account"]
-    assert sql["sheet"] == "SLPH_Invoice_Cash_Debit_Credit"
+    assert sql["sheet"] == "Purchase"
     sql_row = sql["rows"][0]
     assert sql_row["DOCNO(20)"] == "INV-1001"
     assert sql_row["CODE(10)"] == ""
