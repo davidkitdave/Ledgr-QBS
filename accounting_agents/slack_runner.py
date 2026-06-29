@@ -965,6 +965,7 @@ async def persist_and_deliver(
                 "batches": batches,
                 "payload": payload,
                 "workbook_name": append_result.get("filename") or "",
+                "effective_replace": effective_replace,
             }
         # Phase 1 (thread-context fix): persist processing_log BEFORE the early
         # return so multi-file batch drops stay visible to the chat lane. The

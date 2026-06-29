@@ -111,3 +111,40 @@ def test_apply_edits_to_ledger_payload_updates_account_and_amount() -> None:
     row = updated["batches"][0]["rows"][0]
     assert row["Account"] == "6200"
     assert row["Amount"] == 55.0
+
+
+def test_ledger_rows_to_edit_lines_maps_autocount_accno() -> None:
+    lines = ledger_rows_to_edit_lines(
+        {
+            "batches": [
+                {
+                    "rows": [
+                        {
+                            "Description": "Supplies",
+                            "AccNo": "510-100",
+                            "Amount": 100.0,
+                            "TaxType": "SV-6",
+                        }
+                    ]
+                }
+            ]
+        }
+    )
+    assert lines[0]["account_code"] == "510-100"
+
+
+def test_apply_edits_to_ledger_payload_updates_autocount_accno() -> None:
+    payload = {
+        "batches": [
+            {
+                "sheet": "Purchase",
+                "rows": [{"Description": "Supplies", "AccNo": "510-100", "Amount": 100.0}],
+            }
+        ]
+    }
+    updated = apply_edits_to_ledger_payload(
+        payload,
+        {"lines": [{"index": 0, "account_code": "610-200"}]},
+    )
+    row = updated["batches"][0]["rows"][0]
+    assert row["AccNo"] == "610-200"

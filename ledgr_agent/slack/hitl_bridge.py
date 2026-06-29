@@ -6,6 +6,28 @@ from typing import Any
 
 CLEAN_AGENT_HITL_KIND = "clean_agent_batch"
 
+_ACCOUNT_CODE_HEADERS = (
+    "Account",
+    "AccountCode",
+    "*AccountCode",
+    "AccNo",
+    "_ACCOUNT(10)",
+)
+
+
+def _account_code_from_row(row: dict[str, Any]) -> str:
+    for header in _ACCOUNT_CODE_HEADERS:
+        if header in row:
+            return str(row.get(header) or "")
+    return ""
+
+
+def _set_account_code_on_row(row: dict[str, Any], account_code: str) -> None:
+    for header in _ACCOUNT_CODE_HEADERS:
+        if header in row:
+            row[header] = account_code
+            return
+
 
 def op_id_for_file(channel_id: str, file_id: str) -> str:
     """Stable interrupt id — matches ``nodes._approval_interrupt_id`` convention."""
@@ -54,7 +76,7 @@ def ledger_rows_to_edit_lines(payload: dict[str, Any]) -> list[dict[str, Any]]:
             lines.append(
                 {
                     "description": row.get("Description") or row.get("Line Description") or "",
-                    "account_code": row.get("Account") or row.get("AccountCode") or "",
+                    "account_code": _account_code_from_row(row),
                     "tax_treatment": row.get("TaxType") or row.get("Tax Code") or "",
                     "net_amount": row.get("Amount") or row.get("Source Amount") or row.get("Net Amount"),
                 }
@@ -76,10 +98,7 @@ def apply_edits_to_ledger_payload(payload: dict[str, Any], edits: dict[str, Any]
             matching = next((item for item in edit_lines if item.get("index") == row_index), None)
             if matching is not None:
                 if matching.get("account_code") is not None:
-                    if "Account" in row_copy:
-                        row_copy["Account"] = matching["account_code"]
-                    elif "AccountCode" in row_copy:
-                        row_copy["AccountCode"] = matching["account_code"]
+                    _set_account_code_on_row(row_copy, matching["account_code"])
                 if matching.get("tax_treatment") is not None:
                     if "TaxType" in row_copy:
                         row_copy["TaxType"] = matching["tax_treatment"]
