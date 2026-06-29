@@ -31,12 +31,13 @@ Do these in order — each step builds on the last:
 
 ## Before you start (5-minute setup)
 
-1. **Pull latest code** on branch `feat/ledgr-my-sst-correctness` (or whatever branch has D.2–D.4 merged).
+1. **Pull latest code** on `main` (or your feature branch with D.2–D.4 merged).
 
 2. **Run unit tests locally** (should be green):
 
    ```bash
-   uv run pytest tests/ledgr_agent tests/test_clean_agent_slack_dispatch.py tests/test_credit_delivery.py -q
+   uv run pytest tests/ledgr_agent tests/test_clean_agent_slack_dispatch.py \
+     tests/test_credit_delivery.py tests/test_durable_credit_wiring.py -q
    ```
 
 3. **Set environment variables** for the dev bot:
@@ -53,10 +54,11 @@ Do these in order — each step builds on the last:
 4. **Restart the bot** from HEAD. A long-running process keeps old code in memory — restart is required after every code pull.
 
    ```bash
-   uv run uvicorn app.main:app --host 0.0.0.0 --port 8080 --reload
+   uv run python slack_bot.py
    ```
 
-   Or your usual socket-mode launcher.
+   Socket mode is the recommended dev launcher. `uvicorn app.main:app` serves HTTP
+   mode (Cloud Run parity) but does not use socket mode unless configured separately.
 
 5. **Grant test credits** inside the **bot process** (not a separate terminal).
 

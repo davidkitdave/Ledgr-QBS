@@ -7,6 +7,31 @@ built by `accounting_agents.slack_runner.build_fastapi_app` behind `app.main:app
 
 ---
 
+## Runtime paths (document processing)
+
+Slack file drops follow one of two paths (controlled by `LEDGR_USE_CLEAN_AGENT`):
+
+| Path | When | Entry | HITL |
+|------|------|-------|------|
+| **Legacy graph** (default) | `LEDGR_USE_CLEAN_AGENT` unset / `0` | `accounting_agents` ADK `Workflow` via `process_file_event` | ADK `RequestInput` nodes |
+| **Clean agent** (cutover target) | `LEDGR_USE_CLEAN_AGENT=1` | `accounting_agents/clean_agent_slack.py` → `process_document_batch` tool | Firestore interrupt (`CLEAN_AGENT_HITL_KIND`) |
+
+Both paths share the same Slack I/O, credit gate, and delivery layer in
+`slack_runner.py`. On clean-agent failure the runner **falls through** to the
+legacy graph. See ADR-0026 and
+[`docs/qa/clean-agent-dev-qa-runbook.md`](../docs/qa/clean-agent-dev-qa-runbook.md).
+
+**Cutover note:** `scripts/deploy-prod.sh` does **not** set `LEDGR_USE_CLEAN_AGENT`
+today — prod still runs the legacy graph until an operator adds the flag to the
+Cloud Run revision env (Plan D.6).
+
+**Credits on Cloud Run:** `build_runner()` calls `wire_shared_credit_service()`,
+which installs `FirestoreCreditStore` when `K_SERVICE` is set (ADR-0016). Dev
+socket mode uses `InMemoryCreditStore` unless you set
+`GOOGLE_APPLICATION_CREDENTIALS`; grant test credits with `LEDGR_DEV_CREDIT_GRANTS`.
+
+---
+
 ## Automated deploy (normal path)
 
 Every merge to `main` triggers `.github/workflows/deploy.yml`:
@@ -63,6 +88,7 @@ flag set — the workflow asserts parity at build time.
 |---------|-------|
 | Service account | `ledgr-runtime@ledgr-qbs.iam.gserviceaccount.com` |
 | `LEDGR_ENV` | `prod` |
+| `LEDGR_USE_CLEAN_AGENT` | **unset** (legacy graph) — set `1` when cutover approved |
 | Gemini | Vertex AI (`GOOGLE_GENAI_USE_VERTEXAI=TRUE`) in `asia-southeast1` |
 | Firestore | `FIRESTORE_PROJECT=ledgr-qbs`, **no** `LEDGR_FIRESTORE_NAMESPACE` |
 | Scaling | `--min-instances 1 --max-instances 1` (in-memory dedup; see ADR) |
@@ -112,6 +138,7 @@ See [`slack/README.md`](../slack/README.md) for manifest paste + reinstall steps
 | Slack events 500 | Missing Firestore ADC or bad signing secret | Cloud Run logs; verify `FIRESTORE_PROJECT` |
 | Deploy OK but Slack unchanged | `SLACK_BASE_URL` / manifest URL mismatch | Align manifest request URLs with service URL |
 | Wrong Firestore data | Dev namespace leaked to prod | Prod must **not** set `LEDGR_FIRESTORE_NAMESPACE` (ADR-0022) |
+| Re-import shows "Already recorded" after month clear | `seen_doc_keys` not purged for cleared month | See month-clear notes in [`docs/dev-environment.md`](../docs/dev-environment.md) |
 
 Logs:
 

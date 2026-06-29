@@ -1,6 +1,6 @@
-# 0016 — Credit deduction and manual top-up (proposed)
+# 0016 — Credit deduction and manual top-up
 
-- **Status:** Proposed — **not implemented**
+- **Status:** Accepted — **partially implemented** (core gate + charge-on-delivery shipped 2026-06-20; App Home / %-alerts pending)
 - **Date:** 2026-06-17
 - **Deciders:** Ledgr team
 
@@ -46,8 +46,21 @@ trial funnel). Ledgr-QBS is Slack + ADK + Firestore, and payment is handled
 **out-of-band** (the firm pays the developer; there is no payment processor
 in the loop).
 
-Today **no billing infrastructure exists** in this repo. The document
-pipeline already exposes the facts we need at the right moment:
+**Implementation status (2026-06-29):**
+
+| Area | Status | Where |
+|------|--------|-------|
+| Credit store + transactional deduct | **Shipped** | `app/credit_service.py` (`FirestoreCreditStore`, `InMemoryCreditStore`) |
+| Prod store selection | **Shipped** | `accounting_agents/credit_delivery.py` (`configure_durable_credit_service_if_prod`) — installs Firestore when `K_SERVICE` or `GOOGLE_APPLICATION_CREDENTIALS` is set |
+| Upload gate + charge-on-delivery | **Shipped** | `accounting_agents/credit_delivery.py`, wired from `slack_runner.py` and `ledgr_agent/agent.py` |
+| Clean-agent path (D.2) | **Shipped** | Gate in `process_file_event`; deduct after delivery; HITL idempotency key `{channel}:{file_id}:deliver` |
+| Dev grants without admin CLI | **Shipped** | `LEDGR_DEV_CREDIT_GRANTS=T…:N` applied at startup via `wire_shared_credit_service()` |
+| Admin CLI (`grant`, `list`) | **Shipped** | `python -m accounting_agents.admin` |
+| Bank per-page billing | **Partial** | Page count captured at gate; full per-page deduct path still evolving |
+| App Home + %-alerts | **Not shipped** | §6 / grilling §6 still open |
+| `list-firms` against Firestore installs | **Not shipped** | Admin `list` reads in-memory / credit store only |
+
+The document pipeline already exposes the facts we need at the right moment:
 `persist_and_deliver()` in `accounting_agents/slack_runner.py` knows, after
 `SlackLedgerStore.append_rows()` returns, how many units were **`appended`**
 (newly written to the ledger) vs **`deduped`** (duplicates of a document
@@ -58,11 +71,24 @@ HITL interrupts, so it is the natural home for credit state too.
 
 ### 1. Storage — one firm doc + a balance doc + an append-only ledger (no buckets, no expiry)
 
+**As implemented (2026-06-29)** — namespaced via `LEDGR_FIRESTORE_NAMESPACE` (ADR-0022):
+
+```
+{_ns}/credit_firms/{firm_id}                  → { balance: int }
+{_ns}/credit_firms/{firm_id}/deducts/{idem}   → { amount, reason }   # idempotency marker
+```
+
+Grants and balance reads go through `CreditService` / `FirestoreCreditStore` in
+`app/credit_service.py`. Dev and tests use `InMemoryCreditStore` unless prod
+creds are present.
+
+**Still planned** (firm identity + full audit ledger rows):
+
 ```
 firms/{firmId}                          → { team_id, team_name,
                                             installer_user_id, installer_name,
                                             installer_email?, installed_at }
-firms/{firmId}/credits                  → { balance: int, updated_at }
+firms/{firmId}/credits                  → { balance: int, updated_at, cycle_start, alerts_sent }
 firms/{firmId}/creditLedger/{entryId}   → { type: "topup" | "deduction",
                                             amount: +N | -N,
                                             balance_after: int,
@@ -222,7 +248,13 @@ the name-matching guesswork entirely.
    last top-up + contact footer.
 8. Live QA on a dev firm: grant → upload-gate at 0 → process → verify
    delivery line, App Home, and ledger audit rows.
-```
+
+**Env vars (implemented):**
+
+| Variable | Purpose |
+|----------|---------|
+| `LEDGR_DEV_CREDIT_GRANTS` | `T…:N` grants applied at bot startup (dev only) |
+| `LEDGR_CHARGE_CREDITS_IN_TOOL` | When `1`, deduct inside `process_document_batch` instead of Slack delivery (debug only; leave unset in prod) |
 
 ## Amendment — Grilling resolutions (2026-06-20)
 

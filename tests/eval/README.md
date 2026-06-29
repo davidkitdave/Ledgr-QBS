@@ -71,10 +71,45 @@ These are intentionally separate because they feed different runners. Known dead
 `eval_config.yaml` (`response_match_score` criterion, `agent_turn_count` metric) are unused;
 they are left in place rather than removed to avoid perturbing the gated pytest path.
 
-## Current state (2026-06-19)
+## Line-level deterministic eval (issue #28)
+
+The document lane also has a **field-match scorer** for per-line tax treatment, COA, and
+direction — separate from the graph `AgentEvaluator` path above.
+
+**Join key:** every export row carries a stable `source_doc_id`
+(`invoice_processing/export/source_doc_id.py`):
+
+```
+{basename}:{reference}:{start}-{end}
+```
+
+`reference` is the invoice number; when missing, falls back to `i{index}`. The Slack
+`file_id` is deliberately **not** used (it rotates per upload).
+
+**Where rows are tagged:** `invoice_processing/export/exporters.py` stamps
+`ROW_PROVENANCE_KEYS` (`source_doc_id`, `tax_treatment`, `account_code`, `direction`)
+on each exported row.
+
+**Scorer:** `ledgr_agent/metrics/golden_field_match.py` groups rows by `source_doc_id`
+in `project_batch` and scores line fields deterministically (ADR-0026 §5).
+
+**Fixture:** `tests/eval/datasets/golden_line_level_sample.json`
+
+**Run:**
+
+```bash
+uv run pytest tests/ledgr_agent/test_line_level_doc_id_eval.py -q
+```
+
+Legacy golden manifests without `source_doc_id` still score at document level only; new
+cases should author `source_doc_id` on each expected document.
+
+## Current state (2026-06-29)
 
 - Chat lane: **6/6 cases (B3–B8)** score tool-trajectory `1.0`, response-quality `5.0`.
 - Document lane: golden + F-cluster gates green; integration tests cover fan-out/fan-in,
   dedupe, and per-FY ledger writes.
+- Line-level eval: `test_line_level_doc_id_eval.py` gates `source_doc_id` tagging and
+  per-line field-match scoring (issue #28).
 - Coverage to grow: more chat cases for MY jurisdiction, SOA, and credit-note Q&A (the doc
   lane already has `F11_credit_note_sales` and `F12_MY_receipt`).

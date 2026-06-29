@@ -52,6 +52,39 @@ Use **`/ledgr-dev settings`** (not `/ledgr`) — the dev app registers a separat
 
 Only invite Ledgr-dev to channels like `#qa-blockkit` or personal DMs. Never invite it to a channel where the production bot is already present or where real client data lives.
 
+## Clean agent path (optional)
+
+To exercise the **clean agent** document spine instead of the legacy ADK graph:
+
+```sh
+export LEDGR_USE_CLEAN_AGENT=1
+export LEDGR_DEV_CREDIT_GRANTS=T0YOURTEAMID:50   # workspace team id + credits
+uv run python slack_bot.py
+```
+
+Without `LEDGR_USE_CLEAN_AGENT=1`, file drops use the legacy `accounting_agents` graph.
+See [`docs/qa/clean-agent-dev-qa-runbook.md`](qa/clean-agent-dev-qa-runbook.md).
+
+Leave `LEDGR_CHARGE_CREDITS_IN_TOOL` **unset** — credits deduct on Slack delivery, not
+inside the tool (ADR-0016).
+
+## Month clear and re-import
+
+When a human clears a month (`replace_recorded_month` chat tool or
+`SlackLedgerStore.remove_rows_for_month`), the store purges matching `seen_doc_keys`
+so re-dropped documents are not silently deduped.
+
+| Symptom | Likely cause | Fix |
+|---------|--------------|-----|
+| Re-import after clear shows "Already recorded" | `seen_doc_keys` still holds the old `doc_key` | Re-run month clear; check pointer `software` is set (AutoCount sales needs row-signature purge) |
+| AutoCount sales re-import deduped | No readable invoice column → signature-based keys | Fixed in `ledger_store.py` (issue #34); ensure client profile `software` is on the pointer |
+
+Dev helper: `scripts/reset_bank_seen_keys.py` (bank sheets only).
+
+Regression guards: `tests/test_ledger_store.py`
+(`test_autocount_sales_clear_month_then_reimport_not_deduped`,
+`test_remove_rows_for_month_purges_doc_keys_for_cleared_month`).
+
 ## Production
 
 Cloud Run runs the **Ledgr-QBS** Slack app (`slack/manifest-qbs.json`) with production tokens from Secret Manager and `LEDGR_ENV=prod`. See `.env.prod.example` for the full variable reference — that file is documentation only; Cloud Run never reads it directly.

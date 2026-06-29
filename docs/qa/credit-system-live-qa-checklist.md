@@ -1,17 +1,15 @@
 # Credit system — live QA checklist
 
-**Spec:** [docs/superpowers/specs/2026-06-17-slack-credit-system-design.md](../superpowers/specs/2026-06-17-slack-credit-system-design.md)  
-**Requirement matrix:** Spec §7 (R1–R15) + R16 (alerts, this doc)
+**Spec:** [docs/adr/0016-credit-deduction-and-manual-topup.md](../adr/0016-credit-deduction-and-manual-topup.md)  
+**Requirement matrix:** ADR-0016 §2–§5 (implemented slices) + §6/§7 (App Home / identity — pending)
 
 Run after each implementation slice and before Northwind Advisory (or any contract customer) go-live.
 
-> **Reconciled 2026-06-20 (ADR-0016 governs; plan: `../superpowers/plans/2026-06-20-slack-credit-system.md`).**
-> The credit model is now: Firm = workspace `team_id`; flat balance (no FIFO buckets);
-> manual `accounting_agents.admin grant` (no `?ref=` invites / auto-grant);
-> `balance ≤ 0` + page-count gate (no Gemini probe); %-of-last-top-up alerts.
-> Steps below that mention invites, `?ref=`, FIFO buckets, `create_install_invite.py`,
-> `grant_credits.py`, or `list_firms.py --ref` are **superseded** — substitute
-> `accounting_agents.admin grant` / `list-firms` and a manual `--note "trial"` grant.
+> **Reconciled 2026-06-29 (ADR-0016 governs).** Core billing is shipped: gate at
+> upload, charge on delivery, `FirestoreCreditStore`, dev grants via
+> `LEDGR_DEV_CREDIT_GRANTS`. Sections **A–C** (invites, probes, auto-grant) and
+> parts of **F/H** (App Home, %-alerts) are **not implemented** — skip or treat as
+> future work. Use **G** + **D** for the current go-live gate.
 
 ## Prerequisites
 
@@ -24,14 +22,23 @@ Run after each implementation slice and before Northwind Advisory (or any contra
 ## Automated gate (run first)
 
 ```bash
-pytest tests/test_credit_service.py tests/test_billing.py tests/test_credit_probe.py \
-       tests/test_firm_service.py tests/test_credits_report.py tests/test_activation_flow.py \
-       tests/test_app_commands.py -q
+uv run pytest tests/test_credit_service.py tests/test_credit_store_firestore.py \
+       tests/test_credit_delivery.py tests/test_durable_credit_wiring.py \
+       tests/test_dev_credit_grants.py tests/test_credit_fail_open_policy.py -q
+```
+
+With clean-agent Slack wiring (D.2):
+
+```bash
+uv run pytest tests/test_clean_agent_slack_dispatch.py tests/test_d1_clean_path_e2e.py -q
 ```
 
 ---
 
 ## QA-A — Install & firm bootstrap (Slice 2) → R1, R2, R3
+
+> **Not implemented** — no install-invite / auto-grant flow. Skip until §7 identity
+> capture ships. For now, grant manually (see QA-G).
 
 | # | Step | Expected | Pass |
 |---|------|----------|------|
@@ -48,6 +55,8 @@ pytest tests/test_credit_service.py tests/test_billing.py tests/test_credit_prob
 
 ## QA-B — Pay-first (Slice 2) → R4
 
+> **Not implemented** — skip.
+
 | # | Step | Expected | Pass |
 |---|------|----------|------|
 | B1 | Install without `?ref=` | `pending_credits`, balance 0 | ☐ |
@@ -57,6 +66,9 @@ pytest tests/test_credit_service.py tests/test_billing.py tests/test_credit_prob
 ---
 
 ## QA-C — Probe & gate (Slice 3–4) → R5, R6
+
+> **Partially implemented** — gate uses page-count ceiling (no Gemini probe). Skip
+> probe-line expectations; verify gate at `balance ≤ 0` and page-count refusal.
 
 | # | Step | Expected | Pass |
 |---|------|----------|------|
@@ -95,6 +107,9 @@ pytest tests/test_credit_service.py tests/test_billing.py tests/test_credit_prob
 
 ## QA-F — Credit visibility (Slice 5) → R11, R12
 
+> **Not implemented** — App Home / `/ledgr credits` / %-bar pending. Delivery-card
+> footer (`Used N credits · M remaining`) is the current visibility surface.
+
 | # | Step | Expected | Pass |
 |---|------|----------|------|
 | F1 | Ledgr → Home tab | Balance + by-channel breakdown | ☐ |
@@ -124,6 +139,8 @@ Manual-grant flow (no invites/auto-grant). Use the firm's real `team_id` from `l
 ---
 
 ## QA-H — Low-balance alerts (Slice 4) → R16
+
+> **Not implemented** — %-of-last-top-up DMs and operator mirrors are still open.
 
 %-of-last-top-up model: denominator = `cycle_start` (balance after the most recent top-up).
 
