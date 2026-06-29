@@ -12,9 +12,20 @@ one does not verify the other.
 |---|---|---|
 | **Purpose** | Build & test the *agent system* — routing, extraction reasoning, tax/jurisdiction logic, HITL gating, node order | Test the *integration & delivery layer* — Slack file intake, Block Kit cards, approval buttons, threads, OAuth, artifact save |
 | **Entry point** | `adk web` (browser) · `playground_runner.py` (CLI) · `scratch/inspect_state.py` (state dump) · `agents-cli eval` (chat) · `pytest` (doc lane) | Local Socket-Mode bot · live Slack workspace QA |
-| **Unit under test** | `coordinator_graph` / `document_workflow` / `assistant_app` and the `invoice_processing` engine | `slack_runner.py` + the agent system behind it |
+| **Unit under test** | `coordinator_graph` / `document_workflow` / `assistant_app` and the `invoice_processing` engine; **`ledgr_agent`** for clean-agent cutover | `slack_runner.py` + the agent system behind it |
 | **What it CANNOT test** | Real Slack rendering, button payloads, OAuth, multi-workspace install | Whether the agent *reasoning* is correct (too slow/expensive to iterate here) |
 | **Iterate here when…** | Changing nodes, prompts, extractors, tax rules, routing | Changing delivery cards, HITL buttons, thread wiring, onboarding |
+
+**Surface 1b — `ledgr_agent` playground (clean agent):** `uv run adk web ledgr_agent`
+or `scripts/qa_adk_playground_cli.sh`. Exercises the accountant `LlmAgent` and
+`process_document_batch` tool directly — the ADR-0026 production target. Credits
+in playground use `LEDGR_DEV_CREDIT_GRANTS` via `wire_shared_credit_service()` in
+`ledgr_agent/agent.py` (not billable Slack delivery).
+
+**Surface 2 + clean agent:** set `LEDGR_USE_CLEAN_AGENT=1` before starting the
+socket bot. File drops then bypass the legacy graph and use
+`accounting_agents/clean_agent_slack.py` (HITL via Firestore interrupt, not ADK
+`RequestInput` nodes). See [`clean-agent-dev-qa-runbook.md`](clean-agent-dev-qa-runbook.md).
 
 **Golden rule:** prove agent correctness on Surface 1 first (fast, inspectable),
 then verify the Slack wrapper on Surface 2. Never debug agent logic by reading
