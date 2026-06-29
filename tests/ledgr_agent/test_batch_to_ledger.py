@@ -123,3 +123,60 @@ def test_ledger_payload_bank_kind_uses_sheet_identity() -> None:
     assert payload["fy"] == "2026"
     assert payload["batches"][0]["sheet"] == "DBS 123456 SGD"
     assert payload["batches"][0]["doc_key"] == "DBS 123456 SGD:DBS 123456 SGD"
+
+
+def test_ledger_payload_autocount_sales_uses_row_signature_doc_key() -> None:
+    """Clean-agent mapper must match legacy append keys for AutoCount AR (#34)."""
+    from datetime import date
+
+    from accounting_agents.ledger_doc_identity import ledger_doc_key_for_invoice
+    from invoice_processing.export.exporters import get_exporter
+    from invoice_processing.export.models import InvoiceLine, NormalizedInvoice
+
+    inv = NormalizedInvoice(
+        doc_type="sales",
+        invoice_number="INV-S1",
+        invoice_date=date(2025, 9, 10),
+        currency="MYR",
+        doc_subtotal=500.0,
+    )
+    inv.customer.name = "Acme Sdn Bhd"
+    inv.lines = [
+        InvoiceLine(
+            description="Consulting Sep",
+            net_amount=500.0,
+            tax_treatment="SR",
+            account_code="4000",
+        )
+    ]
+    exporter = get_exporter("autocount")
+    export_row = exporter.rows([inv], "sales")[0]
+    expected_key = ledger_doc_key_for_invoice(exporter, "Sales", inv, 0)
+
+    batch = {
+        "client_id": "c1",
+        "status": "success",
+        "per_file": [{"doc_type": "invoice", "file_name": "sales.pdf"}],
+        "posted_documents": [
+            {"doc_type": "invoice", "invoice_number": "INV-S1", "sheet": "Sales"}
+        ],
+        "export_rows": [
+            {
+                "workbook": "Ledger_FY2026.xlsx",
+                "sheet": "Sales",
+                **export_row,
+            }
+        ],
+    }
+
+    payload = ledger_payload_from_batch_result(
+        batch,
+        client_id="c1",
+        client_name="Test Client",
+        software="autocount",
+        file_id="F4",
+    )
+
+    assert payload["batches"][0]["doc_key"] == expected_key
+    assert payload["batches"][0]["doc_key"].startswith("Sales:sig:")
+    assert "INV-S1" not in payload["batches"][0]["doc_key"]

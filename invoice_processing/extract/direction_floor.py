@@ -63,6 +63,7 @@ class DirectionFloorResult:
     needs_review: bool
     conflict: bool = False
     review_note: Optional[str] = None
+    match_kind: Optional[MatchKind] = None
 
 
 def apply_direction_floor(
@@ -98,6 +99,7 @@ def apply_direction_floor(
         return DirectionFloorResult(
             effective_direction=llm if llm in ("purchase", "sales", "unknown") else "unknown",
             needs_review=needs_review,
+            match_kind=match_kind,
         )
 
     if llm in ("unknown", "auto", ""):
@@ -106,16 +108,19 @@ def apply_direction_floor(
             return DirectionFloorResult(
                 effective_direction="unknown",
                 needs_review=True,
+                match_kind=match_kind,
             )
         return DirectionFloorResult(
             effective_direction=role_direction,
             needs_review=False,
+            match_kind=match_kind,
         )
 
     if llm in ("purchase", "sales") and llm == role_direction:
         return DirectionFloorResult(
             effective_direction=llm,
             needs_review=False,
+            match_kind=match_kind,
         )
 
     if llm in ("purchase", "sales") and llm != role_direction:
@@ -128,9 +133,11 @@ def apply_direction_floor(
                 "needs review: direction conflicts with remembered vendor role "
                 f"({role_label} → {role_direction}; LLM read {llm})"
             ),
+            match_kind=match_kind,
         )
 
     return DirectionFloorResult(
         effective_direction="unknown",
         needs_review=True,
+        match_kind=match_kind,
     )

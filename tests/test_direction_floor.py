@@ -41,6 +41,7 @@ def test_unknown_llm_direction_name_only_match_still_needs_review():
     assert result.effective_direction == "unknown"
     assert result.needs_review is True
     assert result.conflict is False
+    assert result.match_kind == "name_only"
 
 
 def test_unknown_llm_direction_uses_debtor_role_as_sales_when_reg_no_matches():
