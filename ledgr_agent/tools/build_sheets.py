@@ -24,6 +24,7 @@ def _erp_sheets_from_document(document: dict[str, Any], systems: list[str]) -> l
                 "rows": list(result.get("rows") or []),
                 "system": system_key,
                 "software_name": result.get("software_name"),
+                "invoice_number": document.get("invoice_number") or "",
             }
         )
     return sheets

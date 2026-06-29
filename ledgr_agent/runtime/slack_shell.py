@@ -121,9 +121,19 @@ async def deliver_workbook(
     source_filename: str,
     file_id: str,
     thread_ts: Optional[str] = None,
+    client_store: Any = None,
+    defer_slack_delivery: bool = False,
 ) -> dict[str, Any]:
-    """Append workbook rows to the FY ledger and post a summary message."""
-    from accounting_agents.slack_runner import _post_message
+    """Append workbook rows to the FY ledger and post a summary delivery card.
+
+    Also records a per-document ``processing_log`` entry (so the chat lane can
+    introspect deliveries — Phase 1/2 thread-context). When
+    ``defer_slack_delivery`` is set (batch mode), the rich card is NOT posted
+    per-doc; the summary/batches/payload are stashed under
+    ``append["deferred_delivery"]`` so the batch coordinator can post one
+    aggregate card at batch end.
+    """
+    from accounting_agents.slack_runner import _post_delivery_card, _record_processing_log
 
     session = await runner.session_service.get_session(
         app_name=app_name,
@@ -158,8 +168,48 @@ async def deliver_workbook(
         kind=payload.get("kind") or "invoice",
         client_name=payload.get("client_name") or "",
     )
+    append_result.setdefault("kind", payload.get("kind") or "invoice")
+    append_result.setdefault("software", payload.get("software") or "qbs")
+    append_result.setdefault("fy", str(payload.get("fy") or ""))
     summary = compose_delivery_summary(workbook, payload)
-    _post_message(slack_client, channel_id, summary, thread_ts=thread_ts)
+
+    if defer_slack_delivery:
+        # Batch mode: stash the delivery so the coordinator posts ONE aggregate
+        # card at batch end; do not post a per-doc card here.
+        append_result["deferred_delivery"] = {
+            "summary": summary,
+            "batches": batches,
+            "payload": payload,
+            "workbook_name": append_result.get("filename") or "",
+        }
+    else:
+        _post_delivery_card(
+            slack_client,
+            channel_id,
+            summary=summary,
+            batches=batches,
+            payload=payload,
+            append_result=append_result,
+            thread_ts=thread_ts,
+        )
+
+    # Per-document audit log so the chat lane can resolve thread replies back to
+    # the specific delivery the user is asking about (delivery_message_ts links
+    # the card's parent message; channel_id scopes the lookup).
+    if client_store is not None and not append_result.get("all_deduped"):
+        try:
+            _record_processing_log(
+                state=state,
+                payload=payload,
+                batches=batches,
+                append_result=append_result,
+                client_store=client_store,
+                delivery_message_ts=thread_ts,
+                channel_id=channel_id,
+            )
+        except Exception:  # noqa: BLE001 — audit log must never break delivery
+            logger.warning("processing_log write failed (non-fatal)", exc_info=True)
+
     return {
         "status": "delivered",
         "summary": summary,
@@ -187,6 +237,8 @@ async def process_file_via_ledgr_agent(
     batch_mode: bool = False,
     status_callback: Optional[Callable[[dict], None]] = None,
     stage_state: Any = None,
+    client_store: Any = None,
+    defer_slack_delivery: bool = False,
 ) -> dict[str, Any]:
     """Download-free file bytes → ledgr tools → FY workbook delivery."""
     from accounting_agents.credit_delivery import credit_block_message
@@ -309,6 +361,8 @@ async def process_file_via_ledgr_agent(
         source_filename=source_filename,
         file_id=file_id,
         thread_ts=thread_ts,
+        client_store=client_store,
+        defer_slack_delivery=defer_slack_delivery,
     )
     if stage_state is not None:
         stage_state.mark_complete(output="Delivered")
@@ -335,4 +389,7 @@ async def process_file_via_ledgr_agent(
         "channel_id": channel_id,
         "file_id": file_id,
         "delivery": delivery,
+        # The batch coordinator reads result["append"]["deferred_delivery"] to
+        # stash per-doc rows for a single aggregate card at batch end.
+        "append": delivery.get("append") or {},
     }

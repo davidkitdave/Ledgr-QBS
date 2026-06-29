@@ -2195,6 +2195,8 @@ async def process_file_event(
             batch_mode=batch_mode,
             status_callback=status_callback,
             stage_state=_stage_state,
+            client_store=client_store,
+            defer_slack_delivery=defer_slack_delivery or defer_ledger_persist,
         )
 
 

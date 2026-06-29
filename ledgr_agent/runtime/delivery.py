@@ -24,16 +24,6 @@ def invoice_number_from_row(row: dict[str, Any]) -> str:
     return ""
 
 
-def _pick_client_sheet(sheets: list[dict[str, Any]], software: str) -> dict[str, Any] | None:
-    if not sheets:
-        return None
-    software_key = normalize_system_key(software)
-    for sheet in sheets:
-        if sheet.get("system") == software_key:
-            return sheet
-    return sheets[0]
-
-
 def workbook_to_ledger_payload(
     workbook: dict[str, Any],
     *,
@@ -61,17 +51,22 @@ def workbook_to_ledger_payload(
                 }
             )
     else:
-        target = _pick_client_sheet(sheets, software)
-        if target is not None:
-            sheet_name = str(target.get("title") or delivery.get("sheet") or "Purchase")
-            rows = list(target.get("rows") or [])
-            identity = delivery.get("invoice_number") or invoice_number_from_row(rows[0] if rows else {})
-            if not identity:
-                identity = source_filename
+        software_key = normalize_system_key(software)
+        targets = [s for s in sheets if s.get("system") == software_key] or sheets
+        for index, sheet in enumerate(targets):
+            rows = list(sheet.get("rows") or [])
+            if not rows:
+                continue
+            sheet_name = str(sheet.get("title") or delivery.get("sheet") or "Purchase")
+            identity = (
+                sheet.get("invoice_number")
+                or invoice_number_from_row(rows[0])
+                or f"{source_filename}#{index}"
+            )
             batches.append(
                 {
                     "sheet": sheet_name,
-                    "doc_key": ledger_doc_identity(sheet_name, str(identity)),
+                    "doc_key": ledger_doc_identity(sheet_name, str(identity), index=index),
                     "rows": rows,
                 }
             )
@@ -91,21 +86,27 @@ def workbook_to_ledger_payload(
 
 
 def compose_delivery_summary(workbook: dict[str, Any], payload: dict[str, Any]) -> str:
-    """Short human summary for the Slack delivery card."""
-    delivery = workbook.get("delivery") or {}
+    """Short human summary for the Slack delivery card.
+
+    Mirrors the legacy ``nodes.compose_delivery_summary`` phrasing so the
+    delivery card reads the same on the lean path: an "📒 Added N line(s)/
+    transaction(s) … to your FY{fy} ledger." sentence carrying the row count,
+    document count, and FY pointer.
+    """
     kind = payload.get("kind") or "invoice"
     fy = payload.get("fy") or "unknown"
     batches = payload.get("batches") or []
     row_count = sum(len(batch.get("rows") or []) for batch in batches)
-    source = delivery.get("source_filename") or payload.get("source_filename") or "document"
     if kind == "bank":
-        return f"Added {row_count} bank line(s) from `{source}` to FY{fy} workbook."
-    inv = delivery.get("invoice_number") or ""
-    inv_part = f" ({inv})" if inv else ""
-    sheet = delivery.get("sheet") or (batches[0].get("sheet") if batches else "Purchase")
+        return (
+            f"📒 Added {row_count} transaction{'s' if row_count != 1 else ''} "
+            f"to your FY{fy} bank statement."
+        )
+    doc_count = len(batches)
     return (
-        f"Added {row_count} row(s) from `{source}`{inv_part} "
-        f"to FY{fy} {sheet} sheet."
+        f"📒 Added {row_count} line{'s' if row_count != 1 else ''} from "
+        f"{doc_count} document{'s' if doc_count != 1 else ''} "
+        f"to your FY{fy} ledger."
     )
 
 
