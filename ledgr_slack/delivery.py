@@ -63,11 +63,14 @@ def workbook_to_ledger_payload(
                 or invoice_number_from_row(rows[0])
                 or f"{source_filename}#{index}"
             )
+            batch_fy = str(sheet.get("fy") or delivery.get("fy") or "unknown")
             batches.append(
                 {
                     "sheet": sheet_name,
                     "doc_key": ledger_doc_identity(sheet_name, str(identity), index=index),
                     "rows": rows,
+                    "fy": batch_fy,
+                    "doc_type": sheet.get("doc_type") or delivery.get("doc_type") or "purchase",
                 }
             )
 

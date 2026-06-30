@@ -24,6 +24,50 @@ from ledgr_agent.tools.read_doc import READ_DOC_STATE_KEY, read_doc
 logger = logging.getLogger(__name__)
 
 
+def _group_batches_by_fy(batches: list[dict[str, Any]], default_fy: str) -> dict[str, list[dict[str, Any]]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for batch in batches:
+        fy = str(batch.get("fy") or default_fy or "unknown")
+        groups.setdefault(fy, []).append(batch)
+    return groups
+
+
+async def _append_workbook_batches(
+    *,
+    ledger_store: Any,
+    payload: dict[str, Any],
+    batches: list[dict[str, Any]],
+    slack_client: Any,
+    channel_id: str,
+) -> dict[str, Any]:
+    """Append batches, splitting across FY workbooks when needed."""
+    default_fy = str(payload.get("fy") or "unknown")
+    fy_groups = _group_batches_by_fy(batches, default_fy)
+    merged: dict[str, Any] = {"appended": 0, "deduped": 0}
+    for fy, fy_batches in fy_groups.items():
+        result = await asyncio.to_thread(
+            ledger_store.append_rows,
+            client_id=payload["client_id"],
+            fy=fy,
+            slack_client=slack_client,
+            channel_id=channel_id,
+            batches=fy_batches,
+            software=payload.get("software") or "qbs",
+            kind=payload.get("kind") or "invoice",
+            client_name=payload.get("client_name") or "",
+        )
+        merged["appended"] = int(merged.get("appended") or 0) + int(result.get("appended") or 0)
+        merged["deduped"] = int(merged.get("deduped") or 0) + int(result.get("deduped") or 0)
+        merged.setdefault("kind", payload.get("kind") or "invoice")
+        merged.setdefault("software", payload.get("software") or "qbs")
+        merged["fy"] = fy
+        if result.get("filename"):
+            merged["filename"] = result["filename"]
+        if result.get("slack_file_id"):
+            merged["slack_file_id"] = result["slack_file_id"]
+    return merged
+
+
 def build_ledgr_runner(*, session_service=None, artifact_service=None):
     """Construct ADK ``Runner`` bound to ``ledgr_app``."""
     from google.adk.artifacts.in_memory_artifact_service import InMemoryArtifactService
@@ -128,12 +172,17 @@ async def deliver_workbook(
 
     Also records a per-document ``processing_log`` entry (so the chat lane can
     introspect deliveries — Phase 1/2 thread-context). When
-    ``defer_slack_delivery`` is set (batch mode), the rich card is NOT posted
-    per-doc; the summary/batches/payload are stashed under
-    ``append["deferred_delivery"]`` so the batch coordinator can post one
-    aggregate card at batch end.
+    ``defer_slack_delivery`` is set (batch mode), ledger writes and the rich
+    card are deferred; payloads are stashed under ``append["deferred_ledger"]``
+    and ``append["deferred_delivery"]`` for the batch coordinator.
     """
+    from accounting_agents.credit_delivery import (
+        charge_delivery_credits,
+        resolve_firm_id_from_client,
+        resolve_firm_id_from_state,
+    )
     from accounting_agents.slack_runner import _post_delivery_card, _record_processing_log
+    from ledgr_agent.billing import _charge_disabled
 
     session = await runner.session_service.get_session(
         app_name=app_name,
@@ -157,32 +206,60 @@ async def deliver_workbook(
     if not batches:
         return {"status": "error", "message": "workbook produced no rows"}
 
-    append_result = await asyncio.to_thread(
-        ledger_store.append_rows,
-        client_id=payload["client_id"],
-        fy=str(payload.get("fy") or "unknown"),
-        slack_client=slack_client,
-        channel_id=channel_id,
-        batches=batches,
-        software=payload.get("software") or "qbs",
-        kind=payload.get("kind") or "invoice",
-        client_name=payload.get("client_name") or "",
-    )
-    append_result.setdefault("kind", payload.get("kind") or "invoice")
-    append_result.setdefault("software", payload.get("software") or "qbs")
-    append_result.setdefault("fy", str(payload.get("fy") or ""))
     summary = compose_delivery_summary(workbook, payload)
 
     if defer_slack_delivery:
-        # Batch mode: stash the delivery so the coordinator posts ONE aggregate
-        # card at batch end; do not post a per-doc card here.
+        append_result: dict[str, Any] = {
+            "deferred_ledger": {
+                "summary": summary,
+                "batches": batches,
+                "payload": payload,
+                "effective_replace": False,
+            },
+            "kind": payload.get("kind") or "invoice",
+            "software": payload.get("software") or "qbs",
+            "fy": str(payload.get("fy") or ""),
+            "appended": 0,
+        }
         append_result["deferred_delivery"] = {
             "summary": summary,
             "batches": batches,
             "payload": payload,
-            "workbook_name": append_result.get("filename") or "",
+            "workbook_name": "",
         }
     else:
+        append_result = await _append_workbook_batches(
+            ledger_store=ledger_store,
+            payload=payload,
+            batches=batches,
+            slack_client=slack_client,
+            channel_id=channel_id,
+        )
+        if not append_result.get("all_deduped"):
+            if _charge_disabled():
+                firm_id = resolve_firm_id_from_state(state)
+                if firm_id is None and client_store is not None:
+                    try:
+                        ctx = client_store.get_by_channel(channel_id)
+                        firm_id = resolve_firm_id_from_client(ctx)
+                    except Exception:  # noqa: BLE001 — billing must not break delivery
+                        logger.warning(
+                            "credit firm-id lookup failed for channel=%s (non-fatal)",
+                            channel_id,
+                            exc_info=True,
+                        )
+                        firm_id = None
+                credit_info = charge_delivery_credits(
+                    firm_id=firm_id,
+                    channel_id=channel_id,
+                    file_id=file_id,
+                    kind=str(payload.get("kind") or "invoice"),
+                    payload=payload,
+                    append_result=append_result,
+                    input_page_count=state.get("input_page_count"),
+                )
+                if credit_info:
+                    append_result.update(credit_info)
         _post_delivery_card(
             slack_client,
             channel_id,
@@ -302,8 +379,13 @@ async def process_file_via_ledgr_agent(
 
     if status == "blocked":
         credits = tool_result.get("credits") or {}
-        block_reason = credits.get("block_reason") or "zero_credit"
-        user_msg = credit_block_message({"reason": block_reason, "credits_remaining": credits.get("credits_remaining")})
+        remaining = credits.get("credits_remaining")
+        block_reason = (
+            "insufficient_credit"
+            if isinstance(remaining, int) and remaining > 0
+            else "zero_credit"
+        )
+        user_msg = credit_block_message({"reason": block_reason, "credits_remaining": remaining})
         if stage_state is not None:
             stage_state.mark_failed("understand", "Out of credits")
         _update_status(

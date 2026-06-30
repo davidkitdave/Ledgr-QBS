@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from ledgr_agent.billing import billable_units, charge as billing_charge
-from ledgr_agent.internal.delivery_tags import build_delivery_tags
+from ledgr_agent.billing import billable_units, charge as billing_charge, delivery_idempotency_key
+from ledgr_agent.internal.delivery_tags import (
+    build_delivery_tags,
+    document_sheet_meta,
+    fye_month_from_state,
+)
 from ledgr_agent.internal.export import DEFAULT_SYSTEMS, build_bank_workbook, project
 from ledgr_agent.internal.skill_profiles import normalize_system_key
 from ledgr_agent.tools.read_doc import READ_DOC_STATE_KEY
@@ -102,20 +106,35 @@ def build_sheets(
         else:
             target_systems = list(DEFAULT_SYSTEMS)
         sheets = []
+        fye_month = fye_month_from_state(dict(state))
         for document in documents:
             doc = dict(document)
             doc.setdefault("source_path", source_path)
             if not doc.get("lines"):
-                return {
-                    "status": "error",
-                    "message": "document.lines is required and must not be empty",
-                }
-            sheets.extend(_erp_sheets_from_document(doc, target_systems))
+                continue
+            doc_meta = document_sheet_meta(doc, fye_month=fye_month)
+            for sheet in _erp_sheets_from_document(doc, target_systems):
+                sheet.update(doc_meta)
+                sheets.append(sheet)
+        if not sheets:
+            return {
+                "status": "error",
+                "message": "no commercial documents with line items to book",
+            }
+
+    state_dict = dict(state)
+    slack_file_id = str(state_dict.get("file_id") or "").strip()
+    channel_id = str(state_dict.get("channel_id") or "").strip()
+    charge_file_id = (
+        delivery_idempotency_key(channel_id=channel_id, file_id=slack_file_id)
+        if slack_file_id and channel_id
+        else source_path
+    )
 
     credits = billing_charge(
         tool_context,
         units=credit_units,
-        file_id=source_path,
+        file_id=charge_file_id,
         kind=charge_kind,
     )
 

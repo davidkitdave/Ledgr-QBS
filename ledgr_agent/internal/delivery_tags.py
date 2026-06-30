@@ -26,7 +26,7 @@ def parse_document_date(value: Any) -> date | None:
     return None
 
 
-def _fye_month_from_state(state: dict[str, Any]) -> int:
+def fye_month_from_state(state: dict[str, Any]) -> int:
     raw = state.get("fye_month")
     try:
         month = int(raw) if raw is not None else 12
@@ -48,6 +48,19 @@ def _first_bank_date(read_payload: dict[str, Any]) -> date | None:
     return None
 
 
+def document_sheet_meta(document: dict[str, Any], *, fye_month: int) -> dict[str, Any]:
+    """Per-document FY and sheet metadata for multi-document workbooks."""
+    doc_type = str(document.get("doc_type") or "purchase").strip().lower()
+    if doc_type not in ("purchase", "sales"):
+        doc_type = "purchase"
+    doc_date = parse_document_date(document.get("invoice_date")) or date.today()
+    return {
+        "fy": fy_for_date(doc_date, fye_month),
+        "doc_type": doc_type,
+        "invoice_number": str(document.get("invoice_number") or ""),
+    }
+
+
 def build_delivery_tags(
     *,
     read_payload: dict[str, Any],
@@ -57,7 +70,7 @@ def build_delivery_tags(
     file_kind: str,
 ) -> dict[str, Any]:
     """Return ``delivery`` block for ``session.workbook``."""
-    fye_month = _fye_month_from_state(state)
+    fye_month = fye_month_from_state(state)
     source_filename = str(state.get("source_filename") or Path(source_path).name)
 
     if file_kind == "bank_statement":
@@ -73,7 +86,7 @@ def build_delivery_tags(
         }
 
     documents = read_payload.get("documents") or []
-    document = documents[0] if documents else {}
+    document = next((doc for doc in documents if doc.get("lines")), documents[0] if documents else {})
     doc_type = str(document.get("doc_type") or "purchase").strip().lower()
     if doc_type not in ("purchase", "sales"):
         doc_type = "purchase"
