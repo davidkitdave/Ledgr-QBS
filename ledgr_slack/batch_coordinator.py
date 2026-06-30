@@ -345,9 +345,10 @@ async def handle_message_file_upload(
         # per (client, fy, kind) group — applies to single- and multi-file drops
         # whenever ``defer_ledger_persist`` was used.
         flush_results: list[dict] = []
+        batch_credit: dict | None = None
         if batch_deferred and ledger_store is not None:
             flush_firm_id = resolve_firm_id_from_state(batch_profile_delta)
-            flush_results = await _flush_deferred_ledger_writes(
+            flush_results, batch_credit = await _flush_deferred_ledger_writes(
                 ledger_store=ledger_store,
                 slack_client=sync_client,
                 channel_id=channel_id,
@@ -364,7 +365,9 @@ async def handle_message_file_upload(
         if summary_ts:
             try:
                 delivery_summary, agg_blocks = (
-                    _build_batch_aggregate_blocks(batch_deferred, channel_id)
+                    _build_batch_aggregate_blocks(
+                        batch_deferred, channel_id, credit_summary=batch_credit,
+                    )
                     if batch_deferred else ("", [])
                 )
                 if delivery_summary:

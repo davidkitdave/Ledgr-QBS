@@ -42,10 +42,11 @@ class TestDistributedManifest:
         m = self._manifest()
         assert m["oauth_config"]["scopes"]["bot"] == BOT_SCOPES
 
-    def test_has_four_bot_events(self):
+    def test_has_five_bot_events(self):
         m = self._manifest()
         events = m["settings"]["event_subscriptions"]["bot_events"]
         assert set(events) == {
+            "app_home_opened",
             "member_joined_channel",
             "message.channels",
             "message.groups",

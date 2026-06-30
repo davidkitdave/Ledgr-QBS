@@ -5,6 +5,10 @@
     "background_color": "#1a1a2e"
   },
   "features": {
+    "app_home": {
+      "home_tab_enabled": true,
+      "messages_tab_enabled": false
+    },
     "bot_user": {
       "display_name": "Ledgr",
       "always_online": true
@@ -14,7 +18,7 @@
         "command": "/ledgr",
         "url": "https://ledgr-640071771526.asia-southeast1.run.app/slack/events",
         "description": "Ledgr settings & export",
-        "usage_hint": "settings | export",
+        "usage_hint": "settings | export | credits",
         "should_escape": false
       }
     ]
@@ -44,6 +48,7 @@
     "event_subscriptions": {
       "request_url": "https://ledgr-640071771526.asia-southeast1.run.app/slack/events",
       "bot_events": [
+        "app_home_opened",
         "member_joined_channel",
         "message.channels",
         "message.groups",

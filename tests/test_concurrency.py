@@ -669,8 +669,8 @@ def test_pre_gather_dedup_processes_duplicate_file_id_once():
     with patch("ledgr_slack.batch_coordinator.process_file_event", side_effect=_recording_pfe), \
          patch("ledgr_slack.batch_coordinator.download_pdf_bytes", return_value=b"%PDF fake"), \
          patch("ledgr_slack.batch_coordinator._flush_deferred_ledger_writes", new_callable=AsyncMock,
-               return_value=[{"appended": 2, "deduped": 0, "filename": "x.xlsx",
-                              "slack_file_id": "F-wb"}]):
+               return_value=([{"appended": 2, "deduped": 0, "filename": "x.xlsx",
+                              "slack_file_id": "F-wb"}], None)):
         asyncio.run(handler(event=event, body=body, client=fake_client))
 
     # F-dup-A must appear exactly once despite being in the input list twice.
@@ -733,11 +733,11 @@ def test_fan_out_docs_run_concurrently():
          patch("ledgr_slack.file_event.process_file_event", side_effect=_slow_pfe), \
          patch("ledgr_slack.batch_coordinator.download_pdf_bytes", return_value=b"%PDF fake"), \
          patch("ledgr_slack.batch_coordinator._flush_deferred_ledger_writes", new_callable=AsyncMock,
-               return_value=[{"appended": n_docs, "deduped": 0,
-                                     "filename": "x.xlsx", "slack_file_id": "F-wb"}]), \
+               return_value=([{"appended": n_docs, "deduped": 0,
+                                     "filename": "x.xlsx", "slack_file_id": "F-wb"}], None)), \
          patch("ledgr_slack.batch_coordinator._flush_deferred_ledger_writes", new_callable=AsyncMock,
-               return_value=[{"appended": n_docs, "deduped": 0,
-                              "filename": "x.xlsx", "slack_file_id": "F-wb"}]):
+               return_value=([{"appended": n_docs, "deduped": 0,
+                              "filename": "x.xlsx", "slack_file_id": "F-wb"}], None)):
         t0 = time.monotonic()
         asyncio.run(handler(event=event, body=body, client=fake_client))
         elapsed = time.monotonic() - t0
@@ -1113,11 +1113,11 @@ def test_one_run_one_raises_others_still_complete():
     with patch("ledgr_slack.batch_coordinator.process_file_event", side_effect=_selective_pfe), \
          patch("ledgr_slack.batch_coordinator.download_pdf_bytes", return_value=b"%PDF fake"), \
          patch("ledgr_slack.batch_coordinator._flush_deferred_ledger_writes", new_callable=AsyncMock,
-               return_value=[{"appended": 2, "deduped": 0,
-                                     "filename": "x.xlsx", "slack_file_id": "F-wb"}]), \
+               return_value=([{"appended": 2, "deduped": 0,
+                                     "filename": "x.xlsx", "slack_file_id": "F-wb"}], None)), \
          patch("ledgr_slack.batch_coordinator._flush_deferred_ledger_writes", new_callable=AsyncMock,
-               return_value=[{"appended": 2, "deduped": 0,
-                              "filename": "x.xlsx", "slack_file_id": "F-wb"}]):
+               return_value=([{"appended": 2, "deduped": 0,
+                              "filename": "x.xlsx", "slack_file_id": "F-wb"}], None)):
         asyncio.run(handler(event=event, body=body, client=fake_client))
 
     # All three docs were attempted (none skipped due to a sibling crash).
@@ -1195,11 +1195,11 @@ def test_semaphore_still_bounds_concurrency_under_gather(monkeypatch):  # noqa: 
          patch("ledgr_slack.batch_coordinator.download_pdf_bytes", return_value=b"%PDF"), \
          patch("ledgr_slack.batch_coordinator.download_pdf_bytes", return_value=b"%PDF"), \
          patch("ledgr_slack.batch_coordinator._flush_deferred_ledger_writes", new_callable=AsyncMock,
-               return_value=[{"appended": 6, "deduped": 0,
-                                     "filename": "x.xlsx", "slack_file_id": "F-wb"}]), \
+               return_value=([{"appended": 6, "deduped": 0,
+                                     "filename": "x.xlsx", "slack_file_id": "F-wb"}], None)), \
          patch("ledgr_slack.batch_coordinator._flush_deferred_ledger_writes", new_callable=AsyncMock,
-               return_value=[{"appended": 6, "deduped": 0,
-                              "filename": "x.xlsx", "slack_file_id": "F-wb"}]):
+               return_value=([{"appended": 6, "deduped": 0,
+                              "filename": "x.xlsx", "slack_file_id": "F-wb"}], None)):
         asyncio.run(handler(event=event, body=body, client=fake_client))
 
     assert concurrent_counter["max"] <= 2, (

@@ -363,6 +363,31 @@ def build_async_app(
         bot_user_id = (context or {}).get("bot_user_id") or ""
         await asyncio.to_thread(handle_member_joined, body, None, sync_client, bot_user_id)
 
+    @async_app.event("app_home_opened")
+    async def _app_home_opened(event, body, client, context=None):
+        from ledgr_slack.app_home import publish_app_home
+        from ledgr_slack.credit_adapter import wire_shared_credit_service
+
+        wire_shared_credit_service()
+        user_id = str(event.get("user") or "").strip()
+        team_id = str(body.get("team_id") or event.get("team") or "").strip()
+        if not user_id or not team_id:
+            return
+        await publish_app_home(slack_client=client, user_id=user_id, firm_id=team_id)
+
+    @async_app.action("ledgr_credits_refresh")
+    async def _credits_refresh(ack, body, client, context=None):
+        from ledgr_slack.app_home import publish_app_home
+        from ledgr_slack.credit_adapter import wire_shared_credit_service
+
+        await ack()
+        wire_shared_credit_service()
+        user_id = str(body.get("user", {}).get("id") or "").strip()
+        team_id = str(body.get("team", {}).get("id") or "").strip()
+        if not user_id or not team_id:
+            return
+        await publish_app_home(slack_client=client, user_id=user_id, firm_id=team_id)
+
     # --- text-question + file-upload handler ---
 
     @async_app.event("app_mention")

@@ -143,6 +143,9 @@ class TestParseLedgrCommand:
         from app.commands import parse_ledgr_command
         assert parse_ledgr_command("profile").subcommand == "profile"
 
+    def test_credits_returns_credits(self):
+        assert parse_ledgr_command("credits").subcommand == "credits"
+
 
 class TestLedgrSlashCommandName:
     def test_dev_default(self, monkeypatch):

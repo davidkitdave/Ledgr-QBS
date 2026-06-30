@@ -22,7 +22,7 @@ from app.blocks import (
     profile_summary_blocks,
     welcome_blocks,
 )
-from app.commands import parse_ledgr_command, settings_prefill
+from app.commands import parse_ledgr_command, settings_prefill, ledgr_slash_command_name
 from app.onboarding import parse_modal_state, profile_doc
 
 logger = logging.getLogger(__name__)
@@ -320,8 +320,45 @@ def handle_ledgr_command(ack: Callable, body: dict, client, store) -> None:
             }
             client.chat_postMessage(channel=channel_id, blocks=profile_summary_blocks(profile))
 
+    elif cmd.subcommand == "credits":
+        _handle_credits_command(body=body, client=client, channel_id=channel_id)
+
     else:  # "help" or unknown
         client.chat_postMessage(channel=channel_id, blocks=ledgr_help_blocks())
+
+
+def _handle_credits_command(*, body: dict, client, channel_id: str) -> None:
+    """Ephemeral credit balance card for /ledgr credits."""
+
+    from ledgr_slack.credit_adapter import wire_shared_credit_service
+    from ledgr_slack.credits_view import credits_ephemeral_blocks
+
+    wire_shared_credit_service()
+    firm_id = str(body.get("team_id") or "").strip()
+    user_id = str(body.get("user_id") or "").strip()
+    if not firm_id or not user_id:
+        return
+    channel_name = None
+    try:
+        info = client.conversations_info(channel=channel_id)
+        data = info.data if hasattr(info, "data") else info
+        channel = data.get("channel") if isinstance(data, dict) else None
+        if isinstance(channel, dict) and channel.get("name"):
+            channel_name = str(channel["name"])
+    except Exception:  # noqa: BLE001
+        pass
+    blocks = credits_ephemeral_blocks(
+        firm_id=firm_id,
+        channel_id=channel_id,
+        channel_name=channel_name,
+    )
+    slash = ledgr_slash_command_name()
+    client.chat_postEphemeral(
+        channel=channel_id,
+        user=user_id,
+        text=f"Ledgr credits — run {slash} credits anytime",
+        blocks=blocks,
+    )
 
 
 def _handle_export(*, channel_id: str, client) -> None:

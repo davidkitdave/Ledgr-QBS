@@ -31,8 +31,10 @@ from ledgr_slack.export.exporters import (
 from ledgr_agent.billing import _charge_disabled
 from ledgr_slack.config import _env_prefix
 from ledgr_slack.credit_adapter import (
+    batch_credit_footer_block,
     charge_delivery_credits,
     credit_footer_block,
+    dedup_credit_footer_block,
     delivery_charge_units,
 )
 from ledgr_slack.ledger_store import SlackLedgerStore
@@ -394,6 +396,8 @@ def _post_delivery_card(
 def _build_batch_aggregate_blocks(
     deferred_items: list[dict],
     channel_id: str,
+    *,
+    credit_summary: dict | None = None,
 ) -> tuple[str, list[dict]]:
     """Build the aggregate delivery summary + data-table blocks for a batch.
 
@@ -508,6 +512,19 @@ def _build_batch_aggregate_blocks(
                 "batch per-item note build failed (non-fatal)", exc_info=True,
             )
 
+    if credit_summary:
+        used = credit_summary.get("credits_used")
+        remaining = credit_summary.get("credits_remaining")
+        if isinstance(used, int) and isinstance(remaining, int) and used > 0:
+            blocks.append(
+                batch_credit_footer_block(
+                    credits_used=used,
+                    credits_remaining=remaining,
+                )
+            )
+        elif credit_summary.get("all_deduped"):
+            blocks.append(dedup_credit_footer_block())
+
     return summary, blocks
 
 def _bank_batch_dedup_callout(
@@ -616,7 +633,7 @@ async def _flush_deferred_ledger_writes(
     channel_id: str,
     batch_deferred: list[dict],
     firm_id: str | None = None,
-) -> list[dict]:
+) -> tuple[list[dict], dict | None]:
     """Merge stashed ledger payloads across the batch and write the workbook ONCE.
 
     Each per-doc run in batch mode added a ``deferred_ledger`` to its result
@@ -669,9 +686,10 @@ async def _flush_deferred_ledger_writes(
         item_group_keys[item_index] = item_keys
 
     if not groups:
-        return []
+        return [], None
 
     flush_results: list[dict] = []
+    batch_credit: dict | None = None
     for grp in groups.values():
         if not grp["batches"]:
             continue
@@ -702,12 +720,26 @@ async def _flush_deferred_ledger_writes(
             continue
         append_result = append_result or {}
         flush_results.append(append_result)
-        _charge_deferred_batch_items(
+        credit = _charge_deferred_batch_items(
             contributors=contributors,
             append_result=append_result,
             channel_id=channel_id,
             firm_id=firm_id,
         )
+        if credit:
+            if batch_credit is None:
+                batch_credit = {
+                    "credits_used": 0,
+                    "credits_remaining": credit.get("credits_remaining"),
+                    "all_deduped": bool(credit.get("all_deduped")),
+                }
+            batch_credit["credits_used"] = int(batch_credit.get("credits_used") or 0) + int(
+                credit.get("credits_used") or 0
+            )
+            if credit.get("credits_remaining") is not None:
+                batch_credit["credits_remaining"] = credit["credits_remaining"]
+            if not credit.get("all_deduped"):
+                batch_credit["all_deduped"] = False
         workbook_name = append_result.get("filename") or ""
         if not workbook_name:
             continue
@@ -719,7 +751,7 @@ async def _flush_deferred_ledger_writes(
             }
             if grp["fy"] in item_fys:
                 item["workbook_name"] = workbook_name
-    return flush_results
+    return flush_results, batch_credit
 
 
 def _charge_deferred_batch_items(
@@ -728,14 +760,16 @@ def _charge_deferred_batch_items(
     append_result: dict,
     channel_id: str,
     firm_id: str | None,
-) -> None:
+) -> dict | None:
     """Deduct credits after a successful batch-end flush (ADR-0016)."""
     if not firm_id or not contributors:
-        return
+        return None
 
     total_appended = int(append_result.get("appended") or 0)
     all_deduped = total_appended <= 0 and int(append_result.get("deduped") or 0) > 0
     remaining_units = total_appended
+    total_used = 0
+    last_remaining: int | None = None
 
     for item in contributors:
         payload = item.get("payload") or {}
@@ -770,7 +804,7 @@ def _charge_deferred_batch_items(
         if units <= 0:
             continue
 
-        charge_delivery_credits(
+        charge_result = charge_delivery_credits(
             firm_id=firm_id,
             channel_id=channel_id,
             file_id=file_id,
@@ -779,6 +813,21 @@ def _charge_deferred_batch_items(
             append_result=item_append,
             input_page_count=item.get("input_page_count"),
         )
+        if charge_result:
+            total_used += int(charge_result.get("credits_used") or 0)
+            rem = charge_result.get("credits_remaining")
+            if isinstance(rem, int):
+                last_remaining = rem
+
+    if all_deduped and total_used == 0:
+        return {"credits_used": 0, "credits_remaining": last_remaining, "all_deduped": True}
+    if total_used > 0 and last_remaining is not None:
+        return {
+            "credits_used": total_used,
+            "credits_remaining": last_remaining,
+            "all_deduped": False,
+        }
+    return None
 
 def _simple_status_blocks(text: str) -> list[dict]:
     return [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]

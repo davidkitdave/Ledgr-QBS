@@ -27,6 +27,7 @@ OPTIONAL = [
     ("GOOGLE_CLOUD_PROJECT", "GCP project for Firestore"),
     ("GOOGLE_APPLICATION_CREDENTIALS", "service account json path"),
     ("LEDGR_DEV_CREDIT_GRANTS", "e.g. T01234:100 for test credits"),
+    ("LEDGR_CREDIT_REQUIRE_FIRM", "1 blocks uploads when slack_team_id missing"),
     ("FIRESTORE_EMULATOR_HOST", "127.0.0.1:8090 if using emulator"),
 ]
 
