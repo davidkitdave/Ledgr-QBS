@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from invoice_processing.export.exporters import (
+from ledgr_slack.export.exporters import (
     ExportSkillError,
     QbsLedgerExporter,
     XeroLedgerExporter,

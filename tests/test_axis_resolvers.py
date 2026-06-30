@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 
-from accounting_agents.jurisdiction import REGION_MALAYSIA, REGION_SINGAPORE
-from invoice_processing.export.axis_resolvers import (
+from ledgr_slack.jurisdiction import REGION_MALAYSIA, REGION_SINGAPORE
+from ledgr_slack.export.axis_resolvers import (
     resolve_currency,
     resolve_software,
     resolve_tax_classifier_reference,
 )
-from invoice_processing.export.client_context import _profile_region_and_currency
-from invoice_processing.export.tax_classifier import get_tax_classifier
+from ledgr_slack.client_context import _profile_region_and_currency
+from ledgr_slack.export.tax_classifier import get_tax_classifier
 
 
 class TestResolveSoftware:
@@ -93,8 +93,8 @@ class TestSalesIndeterminateFlagged:
     def test_sales_indeterminate_local_no_gst_flags(self):
         from datetime import date
 
-        from invoice_processing.export.models import InvoiceLine, NormalizedInvoice, PartyInfo
-        from invoice_processing.export.tax_classifier import TaxClassifier
+        from ledgr_slack.export.models import InvoiceLine, NormalizedInvoice, PartyInfo
+        from ledgr_slack.export.tax_classifier import TaxClassifier
 
         clf = TaxClassifier()
         line = InvoiceLine(description="Misc local service", net_amount=100.0, gst_amount=None)

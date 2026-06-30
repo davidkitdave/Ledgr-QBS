@@ -1,37 +1,19 @@
-# ADR-0015 eval gate — fails the build if the F-cluster gate falls
-# below 0.9. Triggered on PRs that touch the extraction / export code
-# and on a weekly schedule (so prompt drift is caught even when no PR
-# lands).
-#
-# Reference: docs/adr/0015-eval-driven-prompt-loop.md
-#
-# The pytest path used here is hermetic (no live LLM) so the gate
-# runs without GOOGLE_API_KEY / GOOGLE_CLOUD_PROJECT secrets. The
-# rubric LLM-as-judge gate runs separately in the nightly workflow
-# (out of scope for the PR gate; it requires credentials and is
-# slower).
-name: ADR-0015 Eval Gate
+name: Ledgr agent live eval
 
 on:
   pull_request:
     paths:
-      - "invoice_processing/extract/**"
-      - "invoice_processing/export/**"
-      - "tests/eval/**"
-      - "scripts/eval_loop.py"
-      - "scripts/check_no_pii.sh"
-      - "docs/adr/0015-eval-driven-prompt-loop.md"
+      - "ledgr_agent/**"
+      - "scripts/ledgr_eval_light.sh"
       - ".github/workflows/eval.yml"
-  push:
-    branches: [main]
   schedule:
-    # Mondays 09:00 SGT (01:00 UTC) — prompt-drift check.
+    # Mondays 09:00 SGT (01:00 UTC)
     - cron: "0 1 * * 1"
   workflow_dispatch:
 
 jobs:
-  f-cluster-gate:
-    name: F-cluster gate (>= 0.9 per ADR-0015)
+  ledgr-light-eval:
+    name: ledgr_agent reference-free invoice eval (live)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -47,11 +29,19 @@ jobs:
       - name: Sync dependencies
         run: uv sync --frozen
 
-      - name: Run ADR-0015 F-cluster gate
-        # The gate is hermetic (offline scoring) so no creds are
-        # required. A failure here means a metric on at least one
-        # F-case has dropped below 0.9, blocking merge.
-        run: uv run pytest tests/eval/test_f_extract_direction.py -m eval -v --color=yes
+      - name: Install agents-cli
+        run: uv tool install "google-agents-cli==0.4.0"
+
+      - name: Run live eval (skip without creds)
+        env:
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT }}
+        run: |
+          if [[ -z "${GOOGLE_API_KEY:-}" && -z "${GOOGLE_CLOUD_PROJECT:-}" ]]; then
+            echo "No Gemini creds in CI secrets — skipping live eval."
+            exit 0
+          fi
+          bash scripts/ledgr_eval_light.sh
 
   pii-guard:
     name: PII guard (no real client / vendor names)
@@ -60,8 +50,4 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: PII guard
-        # Scans invoice_processing/, accounting_agents/, tests/, eval/,
-        # docs/adr/ for known real names. Allowlist in the script
-        # covers the existing B-cluster chat probe (Company-A / Person-1)
-        # plus the historical ADR-0014 reference.
         run: bash scripts/check_no_pii.sh

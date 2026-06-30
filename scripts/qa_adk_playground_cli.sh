@@ -10,8 +10,9 @@ export LEDGR_PLAYGROUND_PROFILE_PATH="${LEDGR_PLAYGROUND_PROFILE_PATH:-playgroun
 echo "=== CLI: read_credit_balance (dev grant ${LEDGR_DEV_CREDIT_GRANTS}) ==="
 uv run python - <<'PY'
 from types import SimpleNamespace
-from accounting_agents.credit_delivery import wire_shared_credit_service
-from ledgr_agent.tools.credit_tools import read_credit_balance
+
+from ledgr_slack.credit_adapter import wire_shared_credit_service
+from ledgr_agent.billing import read_credit_balance
 
 wire_shared_credit_service()
 result = read_credit_balance(
@@ -24,20 +25,17 @@ print("CLI credit check: PASS")
 PY
 
 echo ""
-echo "=== CLI: zero-balance gate JSON ==="
+echo "=== CLI: zero-balance gate (billing.gate) ==="
 uv run python - <<'PY'
-from app.credit_service import CreditService, InMemoryCreditStore
-from ledgr_agent.tools import document_tools
 from types import SimpleNamespace
 
-document_tools._credit_service_factory = lambda: CreditService(InMemoryCreditStore())
-blocked = document_tools.process_document_batch(
-    SimpleNamespace(state={"firm_id": "T_EMPTY", "client_id": "playground"}),
-    paths=["tests/fixtures/stub-invoice.pdf"],
-)
-print("status:", blocked.get("status"))
-print("credits:", blocked.get("credits"))
-assert blocked.get("status") == "blocked"
+from ledgr_agent.billing import CreditService, InMemoryCreditStore, configure_shared_credit_service, gate
+
+configure_shared_credit_service(CreditService(InMemoryCreditStore()))
+blocked = gate(SimpleNamespace(state={"firm_id": "T_EMPTY"}), units=1, kind="bill")
+print("credit_status:", blocked.credit_status if blocked else None)
+assert blocked is not None
+assert blocked.credit_status == "blocked"
 print("CLI gate check: PASS")
 PY
 

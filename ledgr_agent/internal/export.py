@@ -29,31 +29,44 @@ def _line_context(document: dict[str, Any], line: dict[str, Any], doc_type: str)
     qty_raw = line.get("quantity")
     qty = 1.0 if qty_raw is None or qty_raw == "" else float(qty_raw)
 
-    # Light fallback for partial extraction: if the model left net_amount
-    # blank but printed total_amount on the line, derive net as
-    # total_amount minus the inferred tax. If a single-line bill left
-    # tax_amount blank but the header tax_total is populated, fall back
-    # to the header tax. Keeps QBS Sub Total / Tax non-zero when the LLM
-    # skimmed the printed amounts.
+    lines_list = document.get("lines") or []
     tax_raw = line.get("tax_amount")
-    if tax_raw is None or tax_raw == "":
-        header_tax = document.get("tax_total")
-        lines_list = document.get("lines") or []
-        if (
-            header_tax is not None
-            and header_tax != ""
-            and len(lines_list) == 1
-        ):
-            tax_raw = header_tax
-    tax = _signed_amount(tax_raw, sign)
-
     net_raw = line.get("net_amount")
-    if net_raw is None or net_raw == "":
-        total_raw = line.get("total_amount")
-        if total_raw is not None and total_raw != "":
-            net_raw = float(total_raw) - (float(tax_raw) if tax_raw not in (None, "") else 0.0)
-    net = _signed_amount(net_raw, sign)
-    total = round(net + tax, 2)
+    line_total_raw = line.get("total_amount")
+
+    # Line printed only a total (no net/tax): book the total on the amount column only.
+    if (net_raw is None or net_raw == "") and (tax_raw is None or tax_raw == ""):
+        if line_total_raw is not None and line_total_raw != "":
+            total = _signed_amount(line_total_raw, sign)
+            net = 0.0
+            tax = 0.0
+        else:
+            net = 0.0
+            tax = 0.0
+            total = 0.0
+            if len(lines_list) == 1:
+                grand_total = document.get("grand_total")
+                if grand_total is not None and grand_total != "":
+                    total = _signed_amount(grand_total, sign)
+    else:
+        # Single-line fallback: header tax when the line omitted tax_amount.
+        if tax_raw is None or tax_raw == "":
+            header_tax = document.get("tax_total")
+            if (
+                header_tax is not None
+                and header_tax != ""
+                and len(lines_list) == 1
+            ):
+                tax_raw = header_tax
+        tax = _signed_amount(tax_raw, sign)
+
+        if net_raw is None or net_raw == "":
+            if line_total_raw is not None and line_total_raw != "":
+                net_raw = float(line_total_raw) - (
+                    float(tax_raw) if tax_raw not in (None, "") else 0.0
+                )
+        net = _signed_amount(net_raw, sign)
+        total = round(net + tax, 2)
 
     vendor = (document.get("vendor_name") or "").strip()
     customer = (document.get("customer_name") or "").strip()
@@ -71,11 +84,6 @@ def _line_context(document: dict[str, Any], line: dict[str, Any], doc_type: str)
     else:
         unit_amount = round(net / qty, 2) if qty else net
 
-    grand_total = document.get("grand_total")
-    invoice_total = (
-        _signed_amount(grand_total, sign) if grand_total is not None and grand_total != "" else total
-    )
-
     return {
         "invoice_number": document.get("invoice_number") or "",
         "invoice_date": invoice_date,
@@ -89,10 +97,10 @@ def _line_context(document: dict[str, Any], line: dict[str, Any], doc_type: str)
         "taxable_amount": net,
         "tax_amount": tax,
         "total_amount": total,
-        "total": invoice_total,
+        "total": total,
         "source_amount": net,
         "account_code": "",
-        "tax_code": "",
+        "tax_code": str(line.get("tax_treatment") or line.get("tax_code") or "").strip(),
         "creditor_code": "",
         "debtor_code": "",
         "currency": document.get("currency") or "",

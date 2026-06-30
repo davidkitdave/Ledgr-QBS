@@ -32,17 +32,17 @@ def _clean_env(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def _prefix() -> str:
-    from accounting_agents.config import _env_prefix
+    from ledgr_slack.config import _env_prefix
     return _env_prefix()
 
 
 def _model(tier: str) -> str:
-    from accounting_agents.config import _resolve_model
+    from ledgr_slack.config import _resolve_model
     return _resolve_model(tier)
 
 
 def _ns(name: str) -> str:
-    from accounting_agents.config import _ns as ns_fn
+    from ledgr_slack.config import _ns as ns_fn
     return ns_fn(name)
 
 
@@ -150,14 +150,14 @@ class TestStatusMessagePrefix:
 
     def test_dev_status_text_includes_prefix(self, monkeypatch):
         monkeypatch.setenv("LEDGR_ENV", "dev")
-        from accounting_agents.config import _env_prefix
+        from ledgr_slack.config import _env_prefix
         source_filename = "invoice.pdf"
         text = f"{_env_prefix()}📥 Received `{source_filename}` — on it…"
         assert text.startswith("[dev] ")
 
     def test_prod_status_text_has_no_prefix(self, monkeypatch):
         monkeypatch.setenv("LEDGR_ENV", "prod")
-        from accounting_agents.config import _env_prefix
+        from ledgr_slack.config import _env_prefix
         source_filename = "invoice.pdf"
         text = f"{_env_prefix()}📥 Received `{source_filename}` — on it…"
         assert not text.startswith("[dev]")
@@ -165,14 +165,14 @@ class TestStatusMessagePrefix:
 
     def test_plan_label_dev(self, monkeypatch):
         monkeypatch.setenv("LEDGR_ENV", "dev")
-        from accounting_agents.config import _env_prefix
+        from ledgr_slack.config import _env_prefix
         source_filename = "bank.pdf"
         plan_label = f"{_env_prefix()}{source_filename}"
         assert plan_label == "[dev] bank.pdf"
 
     def test_plan_label_prod(self, monkeypatch):
         monkeypatch.setenv("LEDGR_ENV", "prod")
-        from accounting_agents.config import _env_prefix
+        from ledgr_slack.config import _env_prefix
         source_filename = "bank.pdf"
         plan_label = f"{_env_prefix()}{source_filename}"
         assert plan_label == "bank.pdf"

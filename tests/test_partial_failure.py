@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from datetime import date
 
-from invoice_processing.export.models import InvoiceLine, NormalizedInvoice, PartyInfo
-from invoice_processing.extract.partial_failure import (
+from ledgr_slack.export.models import InvoiceLine, NormalizedInvoice, PartyInfo
+from ledgr_slack.delivery_notes import (
     build_partial_failure_warnings,
     format_partial_failure_note,
 )

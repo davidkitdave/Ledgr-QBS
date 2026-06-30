@@ -1,0 +1,15 @@
+{
+  "criteria": {
+    "extraction_faithfulness": {
+      "threshold": 0.8
+    }
+  },
+  "customMetrics": {
+    "extraction_faithfulness": {
+      "codeConfig": {
+        "name": "ledgr_agent.eval.ledgr_light_metrics.extraction_faithfulness"
+      },
+      "description": "LLM judge reads source PDF + extraction (GEPA target metric)."
+    }
+  }
+}

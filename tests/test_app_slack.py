@@ -23,7 +23,7 @@ from app.slack_app import (
     handle_setup_open,
     slack_download_file,
 )
-from invoice_processing.export.client_context import InMemoryClientStore
+from ledgr_slack.client_context import InMemoryClientStore
 
 
 # --------------------------------------------------------------------------- #
@@ -222,10 +222,10 @@ class TestHandleOnboardingSubmit:
         ctx = store.get_by_channel("C-TEST-1")
         assert ctx.tax_registered is False
 
-    def test_profile_status_pending_coa(self):
+    def test_profile_status_active(self):
         store, _, _ = self._run()
         ctx = store.get_by_channel("C-TEST-1")
-        assert ctx.status == "pending_coa"
+        assert ctx.status == "active"
 
     def test_profile_malaysia_region_and_myr(self):
         body = _submit_body(region="MALAYSIA")
@@ -246,20 +246,12 @@ class TestHandleOnboardingSubmit:
 
     def test_chat_post_message_called(self):
         _, _, client = self._run()
-        # Task 3: 2 messages — profile summary first, then COA prompt.
-        assert len(client.posted_messages) == 2
+        assert len(client.posted_messages) == 1
 
     def test_chat_post_message_channel(self):
         _, _, client = self._run()
         msg = client.posted_messages[0]
         assert msg["channel"] == "C-TEST-1"
-
-    def test_chat_post_message_has_coa_prompt_blocks(self):
-        from app.blocks import coa_prompt_blocks
-        _, _, client = self._run()
-        # COA prompt is the second message; first is the profile summary.
-        msg = client.posted_messages[1]
-        assert msg.get("blocks") == coa_prompt_blocks()
 
     def test_different_channel_ids_are_isolated(self):
         store = InMemoryClientStore()
@@ -273,7 +265,7 @@ class TestHandleOnboardingSubmit:
         assert store.get_by_channel("C-AAA").client_name == "ClientA"
         assert store.get_by_channel("C-BBB").client_name == "ClientB"
 
-    def test_onboarding_posts_profile_summary_then_coa_prompt(self):
+    def test_onboarding_posts_profile_summary(self):
         body = _submit_body(
             client_name="Company-A",
             fye_month="10", accounting_software="Xero", gst_value="no",
@@ -292,16 +284,7 @@ class TestHandleOnboardingSubmit:
         )
         assert "Client registered" in joined
         assert "Xero" in joined
-        assert "Profile saved" in joined  # the COA prompt still follows
-
-        # explicit ordering: summary card MUST be posted first, COA prompt second
-        first_text = " ".join(
-            b.get("text", {}).get("text", "")
-            for b in client.posted_messages[0].get("blocks", [])
-            if isinstance(b.get("text"), dict)
-        )
-        assert "Client registered" in first_text
-        assert "Profile saved" not in first_text
+        assert len(client.posted_messages) == 1
 
 
 # --------------------------------------------------------------------------- #

@@ -2,14 +2,14 @@
 
 from datetime import date
 
-from accounting_agents.ledger_doc_identity import (
+from ledgr_slack.ledger_doc_identity import (
     ledger_doc_identity,
     ledger_doc_key_for_invoice,
     ledger_row_signature,
     sheet_lacks_invoice_identity_column,
 )
-from invoice_processing.export.exporters import get_exporter
-from invoice_processing.export.models import InvoiceLine, NormalizedInvoice
+from ledgr_slack.export.exporters import get_exporter
+from ledgr_slack.export.models import InvoiceLine, NormalizedInvoice
 
 
 def test_ledger_doc_identity_includes_page_range_and_reference():

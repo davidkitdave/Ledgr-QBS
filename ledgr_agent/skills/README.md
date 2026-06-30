@@ -6,7 +6,7 @@ directory:
 - ``SKILL.md`` — human-readable metadata and editing notes (not loaded by Python).
 - ``assets/profile.yaml`` — declarative column map for that ERP's import file.
 
-``build_sheets`` (light path) and ``invoice_processing/export/exporters.py`` load
+``build_sheets`` (light path) and ``ledgr_slack/export/exporters.py`` load
 profiles through the single loader in ``ledgr_agent/internal/skill_profiles.py``.
 A malformed or missing profile fails **loud at load**, never silently producing wrong
 columns.

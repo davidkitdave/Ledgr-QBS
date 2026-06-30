@@ -14,7 +14,7 @@ from google.adk.events.event import Event
 from google.adk.events.event_actions import EventActions
 from google.genai import types
 
-from accounting_agents.sessions import FirestoreSessionService
+from ledgr_slack.sessions import FirestoreSessionService
 from tests._fake_firestore import FakeFirestore
 
 

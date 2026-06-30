@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from invoice_processing.export.exporters import (
+from ledgr_slack.export.exporters import (
     QbsLedgerExporter,
     collect_account_flagged_summary,
     decorate_preview_account_flags,
     format_account_flagged_note,
 )
-from invoice_processing.export.models import InvoiceLine, NormalizedInvoice, PartyInfo
-from invoice_processing.export.tax_classifier import get_tax_classifier
+from ledgr_slack.export.models import InvoiceLine, NormalizedInvoice, PartyInfo
+from ledgr_slack.export.tax_classifier import get_tax_classifier
 
 
 def _flagged_purchase_line(*, flagged: bool, code: str = "6100") -> NormalizedInvoice:

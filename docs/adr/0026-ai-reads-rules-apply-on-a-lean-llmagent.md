@@ -125,6 +125,13 @@ the Slack wiring plan lands. Full tax/COA/SOA batch may return as a single modul
 - **Let the LLM decide tax/COA codes ("no Python rules")** — un-auditable, non-reproducible;
   rejected on accounting-correctness grounds, consistent with ADK guidance.
 
+## Addendum (2026-06-29) — eval gate
+
+The production quality gate for `ledgr_agent` is now [ADR-0033](0033-reference-free-ledgr-agent-eval.md):
+reference-free grading (`extraction_self_consistency` + `extraction_faithfulness` + ADK rubric/
+hallucinations metrics). The `LEDGR_USE_CLEAN_AGENT` cutover flag language is retired — the lean
+agent path is the default surface under test.
+
 ## Sources
 
 - ADK — Function tools / division of labor: `adk.dev/tools-custom/function-tools`

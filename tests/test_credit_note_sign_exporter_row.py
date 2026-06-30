@@ -18,8 +18,8 @@ from datetime import date
 
 import pytest
 
-from invoice_processing.export.exporters import QbsLedgerExporter, XeroLedgerExporter
-from invoice_processing.export.models import InvoiceLine, NormalizedInvoice, PartyInfo
+from ledgr_slack.export.exporters import QbsLedgerExporter, XeroLedgerExporter
+from ledgr_slack.export.models import InvoiceLine, NormalizedInvoice, PartyInfo
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +189,7 @@ class TestNonCreditNoteKindsStayPositive:
 class TestDocSignCausalGuard:
     """Prove that reverting _doc_sign to always +1 breaks the sign tests.
 
-    The test patches ``invoice_processing.export.exporters._doc_sign`` to a
+    The test patches ``ledgr_slack.export.exporters._doc_sign`` to a
     lambda that always returns +1 (as if the flip were removed) and then
     asserts that the QBS credit-note row is NOT negative.  If this test ever
     starts failing it means the credit-note row is negative even when _doc_sign
@@ -207,7 +207,7 @@ class TestDocSignCausalGuard:
         If _doc_sign is reverted to +1, the row is no longer negative — and the
         tests in TestQbsCreditNoteSignExporterRow would then fail.
         """
-        import invoice_processing.export.exporters as _exp
+        import ledgr_slack.export.exporters as _exp
 
         monkeypatch.setattr(_exp, "_doc_sign", lambda inv: 1)
 
@@ -229,7 +229,7 @@ class TestDocSignCausalGuard:
 
     def test_causal_guard_xero_with_doc_sign_always_positive(self, monkeypatch):
         """Causal guard (Xero): _doc_sign→+1 makes *UnitAmount positive for credit note."""
-        import invoice_processing.export.exporters as _exp
+        import ledgr_slack.export.exporters as _exp
 
         monkeypatch.setattr(_exp, "_doc_sign", lambda inv: 1)
 

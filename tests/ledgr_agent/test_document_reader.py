@@ -10,7 +10,7 @@ import pytest
 import ledgr_agent.billing as billing
 from ledgr_agent.agent import root_agent
 from ledgr_agent.billing import CreditService, InMemoryCreditStore, configure_shared_credit_service
-from ledgr_agent.internal.schemas import BUNDLE_READER_INSTRUCTION, READER_INSTRUCTION, ReadDocument, ReadDocumentBundle
+from ledgr_agent.internal.schemas import BUNDLE_READER_INSTRUCTION, READ_PROMPT, ReadDocument, ReadDocumentBundle
 from ledgr_agent.tools.read_doc import READ_DOC_STATE_KEY, read_doc
 
 
@@ -33,21 +33,30 @@ def test_schema_exposes_doc_type_and_totals() -> None:
         lines=[{"description": "Widget", "net_amount": 100.0, "total_amount": 100.0}],
     )
     assert doc.doc_type == "purchase"
+    assert doc.line_grain == "itemized"
     assert doc.lines[0].net_amount == 100.0
 
 
-def test_bundle_instruction_describes_file_kind() -> None:
-    text = BUNDLE_READER_INSTRUCTION.lower()
-    assert "file_kind" in text
-    assert "bank_statement" in text
-    assert "commercial_documents" in text
+def test_read_document_schema_orders_line_grain_before_lines() -> None:
+    schema = ReadDocument.model_json_schema()
+    ordering = schema.get("propertyOrdering") or []
+    assert ordering.index("line_grain") < ordering.index("lines")
 
 
-def test_reader_instruction_describes_layout_rule() -> None:
-    text = READER_INSTRUCTION.lower()
-    assert "purchase" in text
-    assert "bill to" in text or "billed to" in text
-    assert "reconcile" in text
+def test_bundle_instruction_is_minimal_and_general() -> None:
+    text = (BUNDLE_READER_INSTRUCTION + " " + READ_PROMPT).lower()
+    assert "factual" in text
+    assert "schema" in text
+    assert "credit_note" not in text
+    assert "telco" not in text
+    assert "every printed field" not in text
+
+
+def test_read_prompt_is_short_and_general() -> None:
+    text = READ_PROMPT.lower()
+    assert "classify" in text or "schema" in text
+    assert "invoice" not in text
+    assert "every printed field" not in text
 
 
 def test_root_agent_has_read_doc_and_build_sheets() -> None:

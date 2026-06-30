@@ -25,7 +25,7 @@ from tests._fake_firestore import FakeFirestore, FakeFirestoreNs
 def test_ns_applies_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LEDGR_FIRESTORE_NAMESPACE", "dev")
     # Re-import to pick up the patched env (config reads os.environ at call time).
-    from accounting_agents.config import _ns
+    from ledgr_slack.config import _ns
 
     assert _ns("clients") == "dev_clients"
     assert _ns("sessions") == "dev_sessions"
@@ -34,7 +34,7 @@ def test_ns_applies_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_ns_no_prefix_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("LEDGR_FIRESTORE_NAMESPACE", raising=False)
-    from accounting_agents.config import _ns
+    from ledgr_slack.config import _ns
 
     assert _ns("clients") == "clients"
     assert _ns("sessions") == "sessions"
@@ -42,7 +42,7 @@ def test_ns_no_prefix_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_ns_no_prefix_when_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LEDGR_FIRESTORE_NAMESPACE", "")
-    from accounting_agents.config import _ns
+    from ledgr_slack.config import _ns
 
     assert _ns("clients") == "clients"
 
@@ -84,8 +84,8 @@ def test_lease_lock_uses_namespaced_clients_collection(
     """FirestoreLeaseLock must target _ns("clients") as its top-level collection."""
     monkeypatch.setenv("LEDGR_FIRESTORE_NAMESPACE", "dev")
 
-    from accounting_agents.config import _ns
-    from accounting_agents.lease_lock import FirestoreLeaseLock
+    from ledgr_slack.config import _ns
+    from ledgr_slack.lease_lock import FirestoreLeaseLock
 
     rec = _RecordingDb(FakeFirestore())
     lock = FirestoreLeaseLock(
@@ -113,8 +113,8 @@ def test_ledger_store_uses_namespaced_clients_collection(
     """SlackLedgerStore must target _ns("clients") as its top-level collection."""
     monkeypatch.setenv("LEDGR_FIRESTORE_NAMESPACE", "dev")
 
-    from accounting_agents.config import _ns
-    from accounting_agents.ledger_store import SlackLedgerStore
+    from ledgr_slack.config import _ns
+    from ledgr_slack.ledger_store import SlackLedgerStore
 
     rec = _RecordingDb(FakeFirestore())
     store = SlackLedgerStore(rec)
@@ -134,9 +134,9 @@ def test_all_stores_agree_on_clients_collection(
     """lease_lock and ledger_store must resolve to the SAME top-level collection."""
     monkeypatch.setenv("LEDGR_FIRESTORE_NAMESPACE", "dev")
 
-    from accounting_agents.config import _ns
-    from accounting_agents.lease_lock import FirestoreLeaseLock
-    from accounting_agents.ledger_store import SlackLedgerStore
+    from ledgr_slack.config import _ns
+    from ledgr_slack.lease_lock import FirestoreLeaseLock
+    from ledgr_slack.ledger_store import SlackLedgerStore
 
     expected = _ns("clients")
 
@@ -167,9 +167,9 @@ def test_stores_use_bare_name_when_namespace_unset(
     """When LEDGR_FIRESTORE_NAMESPACE is unset, stores use bare 'clients'."""
     monkeypatch.delenv("LEDGR_FIRESTORE_NAMESPACE", raising=False)
 
-    from accounting_agents.config import _ns
-    from accounting_agents.lease_lock import FirestoreLeaseLock
-    from accounting_agents.ledger_store import SlackLedgerStore
+    from ledgr_slack.config import _ns
+    from ledgr_slack.lease_lock import FirestoreLeaseLock
+    from ledgr_slack.ledger_store import SlackLedgerStore
 
     expected = _ns("clients")  # == "clients" (no prefix)
     assert expected == "clients"

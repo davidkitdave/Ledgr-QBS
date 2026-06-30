@@ -13,7 +13,7 @@ from app.commands import (
     settings_prefill,
 )
 from app.slack_app import handle_ledgr_command, handle_onboarding_submit
-from invoice_processing.export.client_context import ClientContext, InMemoryClientStore
+from ledgr_slack.client_context import ClientContext, InMemoryClientStore
 
 
 # --------------------------------------------------------------------------- #
@@ -393,7 +393,7 @@ class TestHandleLedgrCommandProfile:
 
     def test_ledgr_profile_posts_summary(self):
         from app.slack_app import handle_ledgr_command
-        from invoice_processing.export.client_context import ClientContext
+        from ledgr_slack.client_context import ClientContext
 
         posted = []
 

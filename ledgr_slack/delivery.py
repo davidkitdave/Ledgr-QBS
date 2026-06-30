@@ -88,6 +88,66 @@ def workbook_to_ledger_payload(
     }
 
 
+def ledger_replace_for_batches(
+    ledger_store: Any,
+    *,
+    client_id: str,
+    fy: str,
+    batches: list[dict[str, Any]],
+) -> bool:
+    """True when batches should replace existing rows for already-seen doc keys."""
+    if not batches:
+        return False
+    row_count = sum(len(batch.get("rows") or []) for batch in batches)
+    if row_count == 0:
+        return False
+    pointer = ledger_store.get_pointer(client_id, fy)
+    seen = set((pointer or {}).get("seen_doc_keys") or [])
+    return any(str(batch.get("doc_key") or "") in seen for batch in batches)
+
+
+def _format_money(value: Any) -> str:
+    if value is None or value == "":
+        return ""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return f"{number:,.2f}"
+
+
+def _document_header_lines(workbook: dict[str, Any]) -> list[str]:
+    """Drive-style metadata lines for postable commercial documents."""
+    lines: list[str] = []
+    for doc in workbook.get("documents_summary") or []:
+        if not isinstance(doc, dict):
+            continue
+        kind = str(doc.get("document_kind") or "").strip().lower()
+        if kind == "statement_of_account":
+            continue
+        vendor = str(doc.get("vendor_name") or "").strip()
+        ref = str(doc.get("invoice_number") or "").strip()
+        date = str(doc.get("invoice_date") or "").strip()
+        currency = str(doc.get("currency") or "").strip()
+        grand = _format_money(doc.get("grand_total"))
+        tax = _format_money(doc.get("tax_total"))
+        parts: list[str] = []
+        if vendor:
+            parts.append(vendor)
+        if ref:
+            parts.append(f"#{ref}")
+        if date:
+            parts.append(date)
+        if grand:
+            suffix = f" {currency}" if currency else ""
+            parts.append(f"total {grand}{suffix}")
+        if tax:
+            parts.append(f"tax {tax}")
+        if parts:
+            lines.append(" · ".join(parts))
+    return lines
+
+
 def compose_delivery_summary(workbook: dict[str, Any], payload: dict[str, Any]) -> str:
     """Short human summary for the Slack delivery card.
 
@@ -106,11 +166,15 @@ def compose_delivery_summary(workbook: dict[str, Any], payload: dict[str, Any]) 
             f"to your FY{fy} bank statement."
         )
     doc_count = len(batches)
-    return (
+    base = (
         f"📒 Added {row_count} line{'s' if row_count != 1 else ''} from "
         f"{doc_count} document{'s' if doc_count != 1 else ''} "
         f"to your FY{fy} ledger."
     )
+    headers = _document_header_lines(workbook)
+    if not headers:
+        return base
+    return base + "\n" + "\n".join(headers)
 
 
 def workbook_from_session_state(state: dict[str, Any]) -> dict[str, Any] | None:

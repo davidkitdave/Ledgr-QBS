@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from accounting_agents.credit_delivery import (
+from ledgr_slack.credit_adapter import (
     charge_delivery_credits,
     credit_gate_for_bytes,
     delivery_charge_units,
@@ -15,11 +15,11 @@ from accounting_agents.credit_delivery import (
     resolve_firm_id_from_state,
     wire_shared_credit_service,
 )
-from accounting_agents.ledger_store import SlackLedgerStore
-from accounting_agents.slack_runner import process_file_event
-from app.credit_service import CreditService, InMemoryCreditStore, configure_shared_credit_service
+from ledgr_slack.ledger_store import SlackLedgerStore
+from ledgr_slack.file_event import process_file_event
+from ledgr_agent.billing import CreditService, InMemoryCreditStore, configure_shared_credit_service
 from tests._fake_firestore import FakeFirestore
-from tests.test_slack_runner import FakeSlackClient
+from tests.test_ledger_store import FakeSlackClient
 
 
 @pytest.fixture(autouse=True)
@@ -169,7 +169,7 @@ def test_credit_gate_blocks_zero_balance(credit_svc: CreditService) -> None:
 
 
 def _seeded_store_with_firm(db: FakeFirestore, firm_id: str = "TQA"):
-    from invoice_processing.export.client_context import FirestoreClientStore
+    from ledgr_slack.client_context import FirestoreClientStore
 
     profile = {
         "client_id": "c1",
@@ -189,7 +189,6 @@ def _seeded_store_with_firm(db: FakeFirestore, firm_id: str = "TQA"):
 
 
 def test_process_file_event_blocks_before_ledgr_when_zero_credit(monkeypatch) -> None:
-    monkeypatch.setenv("LEDGR_USE_CLEAN_AGENT", "0")
     slack = FakeSlackClient()
     db = FakeFirestore()
     store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())

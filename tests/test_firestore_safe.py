@@ -1,6 +1,6 @@
 """Firestore session state sanitization tests."""
 
-from accounting_agents.firestore_safe import find_nested_arrays, firestore_safe_state
+from ledgr_slack.firestore_safe import find_nested_arrays, firestore_safe_state
 
 
 def test_find_nested_arrays_in_table_rows():

@@ -1,0 +1,53 @@
+---
+description: After every Plan-mode plan, spawn a skeptic subagent to adversarially verify claims before implementation
+alwaysApply: true
+---
+
+# Plan adversarial review (mandatory)
+
+Whenever you finish presenting a **plan** (Plan mode output, implementation plan, or multi-step design doc), you **must** spawn a verification subagent **before** asking the user to approve or switching to Agent mode.
+
+Do not skip this step. Do not self-review in place of the subagent.
+
+## Spawn the reviewer
+
+Launch exactly one **`skeptic`** subagent (`readonly: true`, `run_in_background: false`) with:
+
+- The full plan text
+- The original user goal
+- A rubric (below)
+- Instruction: *try to disprove every factual claim; never rubber-stamp*
+
+If `skeptic` is unavailable, use **`explore`** or **`generalPurpose`** with the same adversarial brief and `readonly: true`.
+
+## What the reviewer must verify
+
+| Claim type | How to verify |
+|------------|---------------|
+| File, module, function, API | `Grep` / `Read` — cite path + line |
+| ADR, CONTEXT, domain term | Read `CONTEXT.md`, `docs/adr/` |
+| Google / Gemini / ADK behavior | `user-adk-docs-mcp` (`list_doc_sources` → `fetch_docs`) or `user-google-developer-knowledge` |
+| CLI flags, config keys | Read actual files or run `--help` |
+| "Already exists" / "we removed X" | Prove with repo search, not memory |
+
+Mark each claim: **verified** | **wrong** | **unverified** (with reason).
+
+## Rubric (score 1–10)
+
+1. **Grounding** — paths, APIs, and behaviors exist as stated
+2. **Scope** — plan matches the user ask; no mystery work
+3. **Feasibility** — steps are ordered; no hand-wavy "just call X"
+4. **Risk** — breaking changes, missing tests, creds, migration gaps called out
+5. **Less-is-more** — smallest correct diff; no over-engineering
+
+## Present results to the user
+
+After the subagent returns, show a short summary:
+
+- **Score** (overall + per rubric row)
+- **Blockers** — must fix before implementation
+- **Warnings** — fix or accept explicitly
+- **Unverified** — what was NOT checked and why
+- **Recommendation** — proceed / revise plan / ask user
+
+Revise the plan for any blocker the reviewer found, then re-run skeptic if claims changed materially.

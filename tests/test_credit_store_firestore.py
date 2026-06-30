@@ -7,7 +7,7 @@ no network is touched — mirroring the lease-lock / sessions test pattern.
 
 from __future__ import annotations
 
-from app.credit_service import CreditService, FirestoreCreditStore
+from ledgr_agent.billing import CreditService, FirestoreCreditStore
 from tests._fake_firestore import FakeFirestore
 
 

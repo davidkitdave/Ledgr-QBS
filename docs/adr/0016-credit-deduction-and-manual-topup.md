@@ -46,13 +46,10 @@ trial funnel). Ledgr-QBS is Slack + ADK + Firestore, and payment is handled
 **out-of-band** (the firm pays the developer; there is no payment processor
 in the loop).
 
-Today **no billing infrastructure exists** in this repo. The document
-pipeline already exposes the facts we need at the right moment:
-`persist_and_deliver()` in `accounting_agents/slack_runner.py` knows, after
-`SlackLedgerStore.append_rows()` returns, how many units were **`appended`**
-(newly written to the ledger) vs **`deduped`** (duplicates of a document
-already present). Firestore already backs sessions, client profiles, and
-HITL interrupts, so it is the natural home for credit state too.
+Today **billing** lives in `ledgr_agent.billing` and `ledgr_slack.credit_adapter`.
+The document pipeline exposes the facts we need at delivery time: after
+`SlackLedgerStore.append_rows()`, we know how many units were **appended** vs
+**deduped**. Firestore backs sessions, client profiles, and credit state.
 
 ## Decision
 
@@ -123,23 +120,23 @@ No reserve/commit/release. Instead:
 - **No refund on delete.** A credit represents work performed, not a row that
   currently exists; deleting a delivered document does not return credits.
 
-### 5. Top-up — a developer-run admin CLI
+### 5. Top-up — operator grant (CLI TBD)
 
 Firms install Ledgr into **their own** Slack workspaces (Model B); the
 developer is not a member of those workspaces and cannot run a slash command
-there. The developer *does* hold Firestore credentials. Top-ups are therefore
-a CLI the developer runs after raising a manual invoice:
+there. The developer *does* hold Firestore credentials. Top-ups use
+`ledgr_agent.billing.CreditStore.grant()` (admin CLI to be added).
 
-```
-python -m accounting_agents.admin grant \
-    --firm T0123ABC --amount 500 --ref "INV-2026-014" --note "June top-up"
+Example intent after a manual invoice:
+
+```text
+grant firm=T0123ABC amount=500 ref=INV-2026-014 note="June top-up"
 ```
 
-It increments `balance` and writes a `topup` ledger row (amount, invoice ref,
-note, timestamp) in one transaction, then prints the new balance. Editing
-Firestore by hand is disallowed — it skips the ledger row and breaks the audit
-trail. New firms **start at 0**; a trial/demo is just a `grant` with
-`--note "trial"`. No automatic install-time grant, no expiry timer.
+It increments `balance` and writes a `topup` ledger row in one transaction.
+Editing Firestore by hand is disallowed — it skips the ledger row and breaks the
+audit trail. New firms **start at 0**; a trial/demo is just a grant with
+note `"trial"`. No automatic install-time grant, no expiry timer.
 
 ### 6. Visibility surfaces
 
@@ -270,5 +267,5 @@ plan lives at `docs/superpowers/plans/2026-06-20-slack-credit-system.md`.
    bar + **per-client usage** (free from each deduction row's `channel_id`) + recent
    activity + the account ID + a Request-top-up action posting to the operator channel.
 
-8. **No FIFO buckets, no auto-grant-on-install invites, one `accounting_agents.admin` CLI**
+8. **No FIFO buckets, no auto-grant-on-install invites** — one operator grant path via `CreditStore.grant()`
    (not the spec's three scripts) — `install_invites` and `creditBuckets` are dropped.

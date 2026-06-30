@@ -9,20 +9,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from accounting_agents.credit_delivery import (
+from ledgr_slack.credit_adapter import (
     flag_unresolved_firm_billing_anomaly,
     require_firm_for_billing,
 )
-from accounting_agents.ledger_store import SlackLedgerStore
-from accounting_agents.slack_runner import process_file_event
-from app.credit_service import CreditService, InMemoryCreditStore, configure_shared_credit_service
-from accounting_agents.credit_delivery import wire_shared_credit_service
+from ledgr_slack.ledger_store import SlackLedgerStore
+from ledgr_slack.file_event import process_file_event
+from ledgr_agent.billing import CreditService, InMemoryCreditStore, configure_shared_credit_service
+from ledgr_slack.credit_adapter import wire_shared_credit_service
 from tests._fake_firestore import FakeFirestore
-from tests.test_slack_runner import FakeSlackClient
+from tests.test_ledger_store import FakeSlackClient
 
 
 @pytest.fixture(autouse=True)
@@ -34,7 +34,7 @@ def _credit_svc():
 
 def _client_store_without_firm(db: FakeFirestore):
     """Seed a client profile that has NO firm_id / slack_team_id."""
-    from invoice_processing.export.client_context import FirestoreClientStore
+    from ledgr_slack.client_context import FirestoreClientStore
 
     profile = {
         "client_id": "c1",
@@ -60,7 +60,7 @@ def test_require_firm_for_billing_reads_env(monkeypatch) -> None:
 
 
 def test_flag_unresolved_firm_logs_error(caplog) -> None:
-    with caplog.at_level(logging.ERROR, logger="accounting_agents.credit_delivery"):
+    with caplog.at_level(logging.ERROR, logger="ledgr_slack.credit_adapter"):
         flag_unresolved_firm_billing_anomaly(
             channel_id="C9", file_id="F9", source_filename="x.pdf"
         )
@@ -78,10 +78,10 @@ def test_unresolved_firm_logs_loudly_and_processes_by_default(monkeypatch, caplo
         artifact_service = None
         session_service = None
 
-    with caplog.at_level(logging.ERROR, logger="accounting_agents.credit_delivery"):
+    with caplog.at_level(logging.ERROR, logger="ledgr_slack.credit_adapter"):
         with patch(
-            "ledgr_slack.slack_shell.process_file_via_ledgr_agent",
-            return_value={"status": "error", "channel_id": "C1", "file_id": "F-nofirm"},
+            "ledgr_slack.file_event.process_file_via_ledgr_agent",
+            new=AsyncMock(return_value={"status": "error", "channel_id": "C1", "file_id": "F-nofirm"}),
         ):
             result = asyncio.run(
                 process_file_event(

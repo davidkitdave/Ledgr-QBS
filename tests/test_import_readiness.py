@@ -10,8 +10,8 @@ from __future__ import annotations
 
 from datetime import date
 
-from invoice_processing.export.client_context import EntityMemoryEntry
-from invoice_processing.export.exporters import (
+from ledgr_slack.client_context import EntityMemoryEntry
+from ledgr_slack.export.exporters import (
     AutoCountExporter,
     QbsLedgerExporter,
     SqlAccountExporter,
@@ -20,8 +20,8 @@ from invoice_processing.export.exporters import (
     collect_import_readiness,
     format_import_readiness_note,
 )
-from invoice_processing.export.models import InvoiceLine, NormalizedInvoice, PartyInfo
-from invoice_processing.export.tax_classifier import get_tax_classifier
+from ledgr_slack.export.models import InvoiceLine, NormalizedInvoice, PartyInfo
+from ledgr_slack.export.tax_classifier import get_tax_classifier
 
 MY_CLF = get_tax_classifier("my_sst.yaml")
 SG_CLF = get_tax_classifier("sg_gst.yaml")
@@ -259,7 +259,7 @@ class TestReadinessRegressionQbsXero:
 # per-document visibility on the batch delivery card.
 # ---------------------------------------------------------------------------
 
-from invoice_processing.export.exporters import (  # noqa: E402
+from ledgr_slack.export.exporters import (  # noqa: E402
     compute_doc_flag_breakdown,
     format_extraction_doc_count_note,
     format_flag_breakdown_note,

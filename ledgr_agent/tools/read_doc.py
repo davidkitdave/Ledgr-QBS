@@ -13,6 +13,7 @@ from ledgr_agent.billing import (
     estimate_units_from_bytes,
     gate as billing_gate,
 )
+from ledgr_agent.internal.extraction_notes import annotate_over_extraction_notes
 from ledgr_agent.internal.gemini import (
     count_input_pages,
     default_llm_config,
@@ -22,15 +23,10 @@ from ledgr_agent.internal.gemini import (
     usage_from_response,
 )
 from ledgr_agent.internal.normalize import normalize_bank_statement
-from ledgr_agent.internal.schemas import BUNDLE_READER_INSTRUCTION, ReadDocumentBundle
+from ledgr_agent.internal.schemas import BUNDLE_READER_INSTRUCTION, READ_PROMPT, ReadDocumentBundle
 from ledgr_agent.internal.uploads import resolve_document_paths
 
 _log = logging.getLogger(__name__)
-
-_READ_PROMPT = (
-    "Read the attached financial file. Decide whether it is a bank statement or "
-    "commercial documents, then extract the matching fields in the output schema."
-)
 
 READ_DOC_STATE_KEY = "read_doc"
 
@@ -42,7 +38,7 @@ def _read_bytes_with_gemini(data: bytes, mime: str) -> dict[str, Any]:
     t0 = time.perf_counter()
     resp = client.models.generate_content(
         model=model,
-        contents=[part, _READ_PROMPT, BUNDLE_READER_INSTRUCTION],
+        contents=[part, READ_PROMPT, BUNDLE_READER_INSTRUCTION],
         config=default_llm_config(
             temperature=0,
             response_mime_type="application/json",
@@ -54,6 +50,7 @@ def _read_bytes_with_gemini(data: bytes, mime: str) -> dict[str, Any]:
     if bundle.document_count != len(bundle.documents):
         bundle = bundle.model_copy(update={"document_count": len(bundle.documents)})
     payload = bundle.model_dump()
+    payload = annotate_over_extraction_notes(payload)
     file_kind = payload.get("file_kind") or "commercial_documents"
     extract_mode = "vision"
     if file_kind == "bank_statement":
@@ -164,6 +161,7 @@ def read_doc(tool_context: Any, paths: list[str] | None = None) -> dict[str, Any
         normalized = payload.get("accounts_normalized") or []
         summary.update(
             {
+                "accounts": accounts,
                 "account_count": len(normalized) or len(accounts),
                 "sheet_titles": [a.get("sheet_title") for a in normalized],
                 "reconciled_all": all(a.get("reconciled") for a in normalized) if normalized else False,
@@ -173,8 +171,10 @@ def read_doc(tool_context: Any, paths: list[str] | None = None) -> dict[str, Any
         docs = payload.get("documents") or []
         summary["document_count"] = len(docs)
         summary["credit_units"] = credit_units
+        summary["documents"] = docs
         if docs:
             first = docs[0]
             summary["vendor_name"] = first.get("vendor_name")
             summary["invoice_number"] = first.get("invoice_number")
+            summary["document_kind"] = first.get("document_kind")
     return summary

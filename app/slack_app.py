@@ -16,7 +16,6 @@ from collections import OrderedDict
 from typing import Callable, Optional
 
 from app.blocks import (
-    coa_prompt_blocks,
     export_unavailable_blocks,
     ledgr_help_blocks,
     onboarding_modal,
@@ -24,7 +23,6 @@ from app.blocks import (
     welcome_blocks,
 )
 from app.commands import parse_ledgr_command, settings_prefill
-from app.coa_ingest import coa_rows_from_file, ingest_coa
 from app.onboarding import parse_modal_state, profile_doc
 
 logger = logging.getLogger(__name__)
@@ -200,30 +198,7 @@ def _is_spreadsheet(f: dict) -> bool:
 
 
 # --------------------------------------------------------------------------- #
-# COA ingest dispatch helper
-# --------------------------------------------------------------------------- #
-
-def run_coa_ingest(
-    *,
-    channel_id: str,
-    file_path: str,
-    store,
-    say_fn: Callable,
-) -> None:
-    """Parse a downloaded spreadsheet as a COA and ingest it.
-
-    Extracted as a named function so tests can monkeypatch it directly.
-    """
-    rows = coa_rows_from_file(file_path)
-    ingest_coa(channel_id=channel_id, store=store, rows=rows, say_fn=say_fn)
-
-
-# --------------------------------------------------------------------------- #
-# _event_id — idempotency key for Slack message events. Imported by the live
-# graph runner (accounting_agents/slack_runner) for file dedup. The old
-# build_app file-share dispatch (handle_file_share/run_share) was retired in the
-# ADK consolidation; the live runner routes file drops itself (COA-routing
-# path A — spreadsheets → run_coa_ingest, documents → process_file_event).
+# _event_id — idempotency key for Slack message events.
 # --------------------------------------------------------------------------- #
 
 
@@ -276,11 +251,10 @@ def handle_onboarding_submit(
     store,
     id_factory: Callable[[], str],
 ) -> None:
-    """Ack the modal submit, persist the profile, post COA prompt in channel.
+    """Ack the modal submit, persist the profile, post summary in channel.
 
-    On edit (channel already has a profile): reuses the existing client_id,
-    preserves the existing status and category_mapping so an edit does not
-    reset an active client back to "pending_coa".
+    On edit (channel already has a profile): reuses the existing client_id and
+    preserves category_mapping. Status stays or becomes ``active``.
     """
     ack()
     view = body["view"]
@@ -290,7 +264,6 @@ def handle_onboarding_submit(
     channel_id = view.get("private_metadata") or ""
     team_id = body.get("team", {}).get("id") or body.get("team_id") or ""
 
-    # FIX 1: reuse existing client_id/status/category_mapping on edit
     existing = store.get_by_channel(channel_id)
     if existing is not None:
         client_id = existing.client_id
@@ -300,14 +273,13 @@ def handle_onboarding_submit(
     doc = profile_doc(inp, channel_id=channel_id, team_id=team_id, client_id=client_id)
 
     if existing is not None:
-        doc["status"] = existing.status or "pending_coa"
+        doc["status"] = existing.status or "active"
         doc["category_mapping"] = dict(existing.category_mapping or {})
 
     store.save_profile(doc)
     store.set_channel(channel_id, client_id)
 
     client.chat_postMessage(channel=channel_id, blocks=profile_summary_blocks(doc))
-    client.chat_postMessage(channel=channel_id, blocks=coa_prompt_blocks())
 
 
 def handle_ledgr_command(ack: Callable, body: dict, client, store) -> None:

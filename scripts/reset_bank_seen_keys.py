@@ -39,7 +39,7 @@ load_dotenv(ROOT / ".env")
 
 from google.cloud import firestore  # noqa: E402
 
-from accounting_agents.ledger_store import SlackLedgerStore  # noqa: E402
+from ledgr_slack.ledger_store import SlackLedgerStore  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
