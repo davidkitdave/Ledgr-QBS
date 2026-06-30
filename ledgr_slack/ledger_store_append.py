@@ -13,7 +13,6 @@ from openpyxl import Workbook
 
 from ledgr_slack.export.exporters import BankStatementExporter
 
-from ledgr_slack.ledger_store_base import SlackLedgerStoreBase
 
 logger = logging.getLogger(__name__)
 

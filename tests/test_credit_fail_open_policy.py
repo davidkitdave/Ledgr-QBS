@@ -18,7 +18,7 @@ from ledgr_slack.credit_adapter import (
     require_firm_for_billing,
 )
 from ledgr_slack.ledger_store import SlackLedgerStore
-from ledgr_slack.app import process_file_event
+from ledgr_slack.file_event import process_file_event
 from ledgr_agent.billing import CreditService, InMemoryCreditStore, configure_shared_credit_service
 from ledgr_slack.credit_adapter import wire_shared_credit_service
 from tests._fake_firestore import FakeFirestore

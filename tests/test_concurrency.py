@@ -24,14 +24,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-import ledgr_slack.app as slack_runner
-import ledgr_slack.dedup as _dedup_mod
-LEDGER_ROWS_KEY = "ledger_rows"
-DELIVER_SUMMARY_KEY = "deliver_summary"
-
 from ledgr_slack.file_event import _per_doc_session_id, process_file_event
 from ledgr_slack.sessions import _ensure_session
 from ledgr_slack.ux import _flush_deferred_ledger_writes
+
+LEDGER_ROWS_KEY = "ledger_rows"
+DELIVER_SUMMARY_KEY = "deliver_summary"
 
 # --------------------------------------------------------------------------- #
 # Module-level hermetic fixture: suppress real Gemini calls from read_doc
@@ -596,7 +594,6 @@ def test_pre_gather_dedup_processes_duplicate_file_id_once():
     before fan-out so two list entries sharing an id only run once.
     """
     from unittest.mock import AsyncMock, MagicMock, patch
-    import ledgr_slack.app as slack_runner
     from app.slack_app import _SeenEvents
 
     import ledgr_slack.dedup as _dedup
@@ -697,7 +694,6 @@ def test_fan_out_docs_run_concurrently():
     loop is still sequential.
     """
     from unittest.mock import MagicMock, patch
-    import ledgr_slack.app as slack_runner
     from app.slack_app import _SeenEvents
     from tests._slack_test_helpers import capture_message_handler_with_slack_client
     from tests.test_ledger_store import FakeSlackClient
@@ -1006,7 +1002,6 @@ def test_one_run_one_raises_others_still_complete():
     cancel the remaining coroutines.
     """
     from unittest.mock import AsyncMock, MagicMock, patch
-    import ledgr_slack.app as slack_runner
     from app.slack_app import _SeenEvents
     from tests._slack_test_helpers import capture_message_handler_with_slack_client
     from tests.test_ledger_store import FakeSlackClient
@@ -1085,7 +1080,6 @@ def test_semaphore_still_bounds_concurrency_under_gather(monkeypatch):  # noqa: 
     full message handler fan-out path (not direct process_file_event calls).
     """
     from unittest.mock import MagicMock, patch
-    import ledgr_slack.app as slack_runner
     from app.slack_app import _SeenEvents
     from tests._slack_test_helpers import capture_message_handler_with_slack_client
     from tests.test_ledger_store import FakeSlackClient

@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from app.slack_app import slack_download_file
-from ledgr_slack.client_context import FirestoreClientStore
 
 from ledgr_slack.client_store import (
     _DEFAULT_CLIENT_STORE,
@@ -34,7 +33,6 @@ from ledgr_slack.ux import (
     _fail_doc,
     _post_message,
     _post_status,
-    _remove_reaction,
     _resolve_file_message_ts,
 )
 

@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Optional
 
-import app.native_blocks_compat as compat
 import urllib.parse
 
 import pytest
@@ -18,7 +17,6 @@ from app.blocks import (
     ledger_preview_data_table,
     onboarding_modal,
     processing_plan_headline,
-    profile_summary_blocks,
     welcome_blocks,
 )
 from ledgr_slack.export.models import NormalizedInvoice, PartyInfo

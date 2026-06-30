@@ -10,22 +10,17 @@ from typing import Any, Optional
 
 from fastapi import Request, Response
 
-from app.slack_app import _SeenEvents
 from ledgr_slack.client_context import FirestoreClientStore
 
 from ledgr_slack.batch_coordinator import handle_message_file_upload
 from ledgr_slack.client_store import (
-    _DEFAULT_CLIENT_STORE,
-    _DOCUMENT_ONLY_REPLY,
-    _profile_state_delta,
     _reply_document_only,
     deslugify_channel_name,
 )
-from ledgr_slack.dedup import _file_futures, _seen
-from ledgr_slack.file_event import download_pdf_bytes, process_file_event
+from ledgr_slack.dedup import _seen
 from ledgr_slack.ledger_store import SlackLedgerStore
 from ledgr_slack.sessions import FirestoreSessionService
-from ledgr_slack.ux import _post_message, _resolve_file_name, _strip_slack_mentions
+from ledgr_slack.ux import _strip_slack_mentions
 
 logger = logging.getLogger(__name__)
 
@@ -197,7 +192,6 @@ def build_async_app(
 
     @async_app.event("file_shared")
     async def _file_shared(event, body, client, context=None):
-        sync_client = _sync_client_for(context, client)
         eid = body.get("event_id") or f"{event.get('type')}:{event.get('event_ts') or event.get('ts')}"
         if _seen.seen_before(eid):
             logger.debug("dedup: dropping duplicate file_shared event %s", eid)
@@ -512,7 +506,6 @@ def build_fastapi_app():
 async def _main_async() -> None:
     from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 
-    from ledgr_slack.sessions import FirestoreSessionService
 
     # Socket mode is the local/dev single-workspace path: authenticate with
     # SLACK_BOT_TOKEN directly. Bolt auto-enables the OAuth installation store

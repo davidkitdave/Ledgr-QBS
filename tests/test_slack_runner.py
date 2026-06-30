@@ -18,14 +18,13 @@ from ledgr_slack.app import (
     _derive_setup_prefill,
     build_fastapi_app,
     deslugify_channel_name,
-    process_file_event,
 )
+from ledgr_slack.file_event import process_file_event
 from app.native_blocks_compat import _reset_for_tests
 from tests._fake_firestore import FakeFirestore
 from tests._slack_test_helpers import (
     _FakeRunner,
     ledger_payload,
-    mock_ledgr_read_doc,
     posted_texts,
     seeded_client_store,
 )
@@ -401,7 +400,7 @@ def test_derive_setup_prefill_no_channel_returns_none():
 
 
 def test_resolve_file_name_prefers_file_object_name():
-    from ledgr_slack.app import _resolve_file_name
+    from ledgr_slack.ux import _resolve_file_name
 
     class _Client:
         def files_info(self, file):
@@ -411,7 +410,7 @@ def test_resolve_file_name_prefers_file_object_name():
 
 
 def test_resolve_file_name_falls_back_to_files_info():
-    from ledgr_slack.app import _resolve_file_name
+    from ledgr_slack.ux import _resolve_file_name
 
     class _Resp:
         data = {"file": {"name": "scan.exe"}}
@@ -424,7 +423,7 @@ def test_resolve_file_name_falls_back_to_files_info():
 
 
 def test_resolve_file_name_defaults_only_when_truly_unavailable():
-    from ledgr_slack.app import _resolve_file_name
+    from ledgr_slack.ux import _resolve_file_name
 
     class _Client:
         def files_info(self, file):

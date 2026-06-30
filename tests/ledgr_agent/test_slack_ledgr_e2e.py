@@ -11,11 +11,10 @@ import pytest
 import ledgr_agent.billing as billing
 from ledgr_slack.credit_adapter import wire_shared_credit_service
 from ledgr_slack.ledger_store import SlackLedgerStore
-from ledgr_slack.app import process_file_event
+from ledgr_slack.file_event import process_file_event
 from ledgr_agent.billing import CreditService, InMemoryCreditStore, configure_shared_credit_service
 from ledgr_agent.tools.read_doc import READ_DOC_STATE_KEY
 from tests._fake_firestore import FakeFirestore
-from tests._slack_test_helpers import seeded_client_store
 from tests.test_ledger_store import FakeSlackClient
 from app.native_blocks_compat import _reset_for_tests
 

@@ -14,7 +14,7 @@ from google.adk.runners import Runner
 from google.genai import types
 
 from ledgr_agent.app import ledgr_app
-from ledgr_agent.billing import wire_playground_credits
+from ledgr_agent.billing import _charge_disabled, wire_playground_credits
 from ledgr_agent.internal.gemini import mime_for
 from ledgr_agent.internal.uploads import artifact_name_for
 from ledgr_agent.tools.build_sheets import WORKBOOK_STATE_KEY, build_sheets
@@ -26,7 +26,6 @@ from ledgr_slack.credit_adapter import (
     resolve_firm_id_from_state,
     wire_shared_credit_service,
 )
-from ledgr_agent.billing import _charge_disabled
 from ledgr_slack.delivery import (
     compose_delivery_summary,
     ledger_replace_for_batches,
@@ -39,7 +38,6 @@ from ledgr_slack.ux import (
     _add_reaction,
     _fail_doc,
     _post_delivery_card,
-    _post_message,
     _record_processing_log,
     _remove_reaction,
     _simple_status_blocks,

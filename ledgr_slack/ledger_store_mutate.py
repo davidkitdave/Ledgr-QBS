@@ -15,7 +15,6 @@ from ledgr_slack.ledger_doc_identity import (
     ledger_row_signature,
     sheet_lacks_invoice_identity_column,
 )
-from ledgr_slack.ledger_store_base import SlackLedgerStoreBase
 
 logger = logging.getLogger(__name__)
 

@@ -40,7 +40,7 @@ def make_multipage_pdf(
 
     objects: list[bytes] = []
     kids = " ".join(f"{pid} 0 R" for pid in page_ids)
-    objects.append(f"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".encode())
+    objects.append("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".encode())
     objects.append(
         f"2 0 obj\n<< /Type /Pages /Kids [{kids}] /Count {page_count} >>\nendobj\n".encode()
     )

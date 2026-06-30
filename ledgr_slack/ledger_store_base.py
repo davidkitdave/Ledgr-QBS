@@ -43,10 +43,6 @@ from typing import Any, Optional
 from openpyxl import Workbook, load_workbook
 
 from ledgr_slack.config import _ns
-from ledgr_slack.ledger_doc_identity import (
-    ledger_row_signature,
-    sheet_lacks_invoice_identity_column,
-)
 from ledgr_slack.lease_lock import FirestoreLeaseLock
 
 from ledgr_slack.export.exporters import (
@@ -343,7 +339,7 @@ class SlackLedgerStoreBase:
     @staticmethod
     def _exporter_for(software: str):
         """Return the invoice exporter matching the client's accounting software."""
-        from ledgr_slack.export.exporters import get_exporter, normalize_software_key
+        from ledgr_slack.export.exporters import normalize_software_key
 
         key = normalize_software_key(software)
         if key is not None:

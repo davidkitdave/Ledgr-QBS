@@ -4,6 +4,8 @@ import os
 import sys
 from pathlib import Path
 
+pytest_plugins = ["tests._slack_test_helpers"]
+
 # Pin the Firestore namespace to empty BEFORE load_dotenv so .env cannot
 # override it.  Tests that exercise namespace behaviour set/unset the var
 # explicitly via ``monkeypatch``.  This must come before any import that

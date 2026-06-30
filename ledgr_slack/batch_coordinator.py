@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 from app.blocks import batch_processing_plan_blocks, job_progress_text, job_summary_text
 

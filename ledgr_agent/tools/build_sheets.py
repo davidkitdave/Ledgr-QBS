@@ -97,6 +97,13 @@ def build_sheets(
 
     file_kind = read_payload.get("file_kind") or "commercial_documents"
     source_path = str(read_payload.get("source_path") or "document")
+    state_plain = _plain_state(state)
+    channel_id = str(state_plain.get("channel_id") or "")
+    slack_file_id = str(state_plain.get("file_id") or "")
+    if channel_id and slack_file_id:
+        billing_file_id = delivery_idempotency_key(channel_id=channel_id, file_id=slack_file_id)
+    else:
+        billing_file_id = source_path
     credit_units = _resolve_credit_units(read_payload)
     charge_kind = "bank" if file_kind == "bank_statement" else "bill"
     target_systems: list[str] = []
@@ -142,19 +149,10 @@ def build_sheets(
                 "message": "no commercial documents with line items to book",
             }
 
-    state_dict = dict(state)
-    slack_file_id = str(state_dict.get("file_id") or "").strip()
-    channel_id = str(state_dict.get("channel_id") or "").strip()
-    charge_file_id = (
-        delivery_idempotency_key(channel_id=channel_id, file_id=slack_file_id)
-        if slack_file_id and channel_id
-        else source_path
-    )
-
     credits = billing_charge(
         tool_context,
         units=credit_units,
-        file_id=charge_file_id,
+        file_id=billing_file_id,
         kind=charge_kind,
     )
 

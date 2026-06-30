@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
 
-import pytest
 
 from ledgr_slack.jurisdiction import (
     CROSS_BORDER_KEY,
@@ -12,11 +10,9 @@ from ledgr_slack.jurisdiction import (
     JURISDICTION_AMBIGUOUS,
     JURISDICTION_CROSS_BORDER,
     REGION_MALAYSIA,
-    REGION_REGISTRY,
     REGION_SINGAPORE,
     TAX_JURISDICTION_KEY,
     TAX_SYSTEM_GST,
-    TAX_SYSTEM_HINT_KEY,
     TAX_SYSTEM_OUT_OF_SCOPE,
     TAX_SYSTEM_SST,
     registration_threshold_for_region,
@@ -25,7 +21,7 @@ from ledgr_slack.jurisdiction import (
     supported_regions,
     write_to_state,
 )
-from ledgr_slack.export.models import InvoiceLine, NormalizedInvoice, PartyInfo
+from ledgr_slack.export.models import PartyInfo
 
 
 class TestResolveJurisdiction:

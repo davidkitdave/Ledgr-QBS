@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-LEDGER_ROWS_KEY = "ledger_rows"
-DELIVER_SUMMARY_KEY = "deliver_summary"
-
 from ledgr_slack.app import build_async_app
 from tests._fake_firestore import FakeFirestore
 from tests.test_ledger_store import FakeSlackClient
+
+LEDGER_ROWS_KEY = "ledger_rows"
+DELIVER_SUMMARY_KEY = "deliver_summary"
 
 _TEST_PROFILE: dict = {
     "client_id": "c1",
@@ -133,7 +132,6 @@ def capture_message_handler_with_slack_client(
     ledger_store=None,
 ):
     from app.slack_app import _SeenEvents
-    import ledgr_slack.app as slack_runner
 
     registered: dict = {}
     fake_app = MagicMock()
