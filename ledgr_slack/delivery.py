@@ -101,9 +101,13 @@ def ledger_replace_for_batches(
     row_count = sum(len(batch.get("rows") or []) for batch in batches)
     if row_count == 0:
         return False
-    pointer = ledger_store.get_pointer(client_id, fy)
-    seen = set((pointer or {}).get("seen_doc_keys") or [])
-    return any(str(batch.get("doc_key") or "") in seen for batch in batches)
+    for batch in batches:
+        batch_fy = str(batch.get("fy") or fy)
+        pointer = ledger_store.get_pointer(client_id, batch_fy)
+        seen = set((pointer or {}).get("seen_doc_keys") or [])
+        if str(batch.get("doc_key") or "") in seen:
+            return True
+    return False
 
 
 def _format_money(value: Any) -> str:

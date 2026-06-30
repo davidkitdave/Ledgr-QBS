@@ -699,6 +699,16 @@ async def _flush_deferred_ledger_writes(
                 "batch-end workbook append failed for client=%s fy=%s kind=%s",
                 grp["client_id"], grp["fy"], grp["kind"],
             )
+            flush_results.append(
+                {
+                    "appended": 0,
+                    "deduped": 0,
+                    "flush_failed": True,
+                    "client_id": grp["client_id"],
+                    "fy": grp["fy"],
+                    "kind": grp["kind"],
+                }
+            )
             continue
         append_result = append_result or {}
         flush_results.append(append_result)
