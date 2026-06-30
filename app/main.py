@@ -2,11 +2,11 @@
 
 Run with:
     uvicorn app.main:app --host 0.0.0.0 --port $PORT
-
-Importing this module makes NO network calls.  All token reads and store
-construction happen lazily inside build_fastapi_app() / at first Slack request.
 """
 
-from accounting_agents.slack_runner import build_fastapi_app
+from ledgr_agent.billing import wire_playground_credits
+from ledgr_slack import build_fastapi_app
+
+wire_playground_credits()
 
 app = build_fastapi_app()

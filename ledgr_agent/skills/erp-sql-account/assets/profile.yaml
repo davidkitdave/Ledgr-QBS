@@ -1,0 +1,94 @@
+software_name: SQL Account
+system: sql_account
+exporter: profile
+
+# Both purchase and sales use the same sheet name in SQL Account
+purchase_sheet: "Purchase"
+sales_sheet: "Sales"
+
+# Columns emitted: REQUIRED (yellow) + core tax. Native SQL Account import
+# columns only — full template header is row 6 of the SLPH_Invoice_Cash_Debit_Credit
+# sheet; we emit the required subset plus _TAX/_TAXAMT/_AMOUNT.
+purchase_cols:
+  - DOCNO(20)
+  - DOCDATE
+  - CODE(10)
+  - DESCRIPTION(200)
+  - _ACCOUNT(10)
+  - _DESCRIPTION(200)
+  - _QTY
+  - _UOM(10)
+  - _UNITPRICE
+  - _TAX(10)
+  - _TAXAMT
+  - _AMOUNT
+
+sales_cols:
+  - DOCNO(20)
+  - DOCDATE
+  - CODE(10)
+  - DESCRIPTION(200)
+  - _ACCOUNT(10)
+  - _DESCRIPTION(200)
+  - _QTY
+  - _UOM(10)
+  - _UNITPRICE
+  - _TAX(10)
+  - _TAXAMT
+  - _AMOUNT
+
+# Constant values applied after field mapping (same for both doc types)
+# Note: _QTY is intentionally NOT a constant — it must be sourced from the per-line
+# `qty` context key so qty>1 lines post the correct quantity (see WS-1.1 in the
+# 2026-06-21 plan). Lines without a quantity fall back to 1 in `_row_context`.
+purchase_constants:
+  _UOM(10): "UNIT"
+
+sales_constants:
+  _UOM(10): "UNIT"
+
+required_purchase:
+  - DOCNO(20)
+  - DOCDATE
+  - CODE(10)
+  - _ACCOUNT(10)
+  - _DESCRIPTION(200)
+  - _QTY
+  - _UOM(10)
+  - _UNITPRICE
+
+required_sales:
+  - DOCNO(20)
+  - DOCDATE
+  - CODE(10)
+  - _ACCOUNT(10)
+  - _DESCRIPTION(200)
+  - _QTY
+  - _UOM(10)
+  - _UNITPRICE
+
+purchase_fields:
+  DOCNO(20): invoice_number
+  DOCDATE: invoice_date
+  CODE(10): creditor_code
+  DESCRIPTION(200): description
+  _ACCOUNT(10): account_code
+  _DESCRIPTION(200): description
+  _UNITPRICE: unit_price
+  _QTY: qty
+  _TAX(10): tax_code
+  _TAXAMT: tax_amount
+  _AMOUNT: sub_total
+
+sales_fields:
+  DOCNO(20): invoice_number
+  DOCDATE: invoice_date
+  CODE(10): debtor_code
+  DESCRIPTION(200): description
+  _ACCOUNT(10): account_code
+  _DESCRIPTION(200): description
+  _UNITPRICE: unit_price
+  _QTY: qty
+  _TAX(10): tax_code
+  _TAXAMT: tax_amount
+  _AMOUNT: sub_total

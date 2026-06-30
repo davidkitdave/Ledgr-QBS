@@ -140,15 +140,17 @@ class ExtractedInvoiceBundle(BaseModel):
 _PROMPT = """You are transcribing an invoice/receipt faithfully for a Singapore/Malaysia bookkeeping ledger.
 
 Copy every visible charge row as printed — do NOT collapse itemized rows into bookkeeper summary
-buckets during extraction. When the document only exposes summary/total rows (e.g. a telco
-"Summary of Charges" with SR and ZR buckets and no itemized detail), transcribe those summary
-rows faithfully — one line per visible printed row.
+buckets during extraction. When the document only exposes summary/total rows (e.g. a telco or
+utility "Summary of Charges" with SR and ZR buckets and no itemized detail, or any subscription
+bill that prints only summary buckets), transcribe those summary rows faithfully — one line per
+visible printed row.
 
 How to choose the lines:
 - When itemized product/service rows are printed, capture EACH row verbatim.
-- When a summary/totals section is the ONLY charge breakdown (common on telco/utility bills),
-  transcribe that summary section row-by-row — do NOT enumerate hidden per-call detail from other
-  pages unless those rows are visibly printed on the document.
+- When a summary/totals section is the ONLY charge breakdown on the document (common for
+  telco/utility bills, subscriptions, and any bill that exposes a small set of tax buckets
+  rather than per-line detail), transcribe that summary section row-by-row — do NOT enumerate
+  hidden per-call detail from other pages unless those rows are visibly printed on the document.
 - Split lines by GST tax treatment when the document prints separate buckets: standard-rated
   (GST 9% / 'G') charges; zero-rated/international (0% / 'Z'); exempt as ES.
 - For a simple invoice/receipt with only a handful of distinct printed line items, keep each row.

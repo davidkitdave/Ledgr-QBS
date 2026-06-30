@@ -70,7 +70,6 @@ def test_flag_unresolved_firm_logs_error(caplog) -> None:
 
 def test_unresolved_firm_logs_loudly_and_processes_by_default(monkeypatch, caplog) -> None:
     monkeypatch.delenv("LEDGR_CREDIT_REQUIRE_FIRM", raising=False)
-    monkeypatch.setenv("LEDGR_USE_CLEAN_AGENT", "1")
     slack = FakeSlackClient()
     db = FakeFirestore()
     store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
@@ -79,11 +78,9 @@ def test_unresolved_firm_logs_loudly_and_processes_by_default(monkeypatch, caplo
         artifact_service = None
         session_service = None
 
-    # The clean agent is stubbed to a no-op-ish failure so we only assert the
-    # gate behaviour (loud log + not blocked) without exercising delivery.
     with caplog.at_level(logging.ERROR, logger="accounting_agents.credit_delivery"):
         with patch(
-            "accounting_agents.clean_agent_slack.process_file_via_clean_agent",
+            "ledgr_slack.slack_shell.process_file_via_ledgr_agent",
             return_value={"status": "error", "channel_id": "C1", "file_id": "F-nofirm"},
         ):
             result = asyncio.run(
@@ -108,7 +105,6 @@ def test_unresolved_firm_logs_loudly_and_processes_by_default(monkeypatch, caplo
 
 def test_unresolved_firm_blocks_when_require_firm_set(monkeypatch) -> None:
     monkeypatch.setenv("LEDGR_CREDIT_REQUIRE_FIRM", "1")
-    monkeypatch.setenv("LEDGR_USE_CLEAN_AGENT", "1")
     slack = FakeSlackClient()
     db = FakeFirestore()
     store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
@@ -117,7 +113,7 @@ def test_unresolved_firm_blocks_when_require_firm_set(monkeypatch) -> None:
         artifact_service = None
         session_service = None
 
-    with patch("ledgr_agent.tools.process_document_batch") as mock_tool:
+    with patch("ledgr_slack.slack_shell.read_doc") as mock_read:
         result = asyncio.run(
             process_file_event(
                 runner=_Runner(),
@@ -132,7 +128,7 @@ def test_unresolved_firm_blocks_when_require_firm_set(monkeypatch) -> None:
                 client_store=_client_store_without_firm(db),
             )
         )
-        mock_tool.assert_not_called()
+        mock_read.assert_not_called()
 
     assert result["status"] == "blocked"
     assert result["reason"] == "no_firm"

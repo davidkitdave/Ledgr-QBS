@@ -11,10 +11,11 @@ import logging
 import os
 from typing import Any
 
-from app.credit_service import get_shared_credit_service
-from invoice_processing.extract.invoice_extractor import mime_for
-from invoice_processing.extract.segmentation_gates import count_input_pages
-from ledgr_agent.tools.document_tools import _credit_gate
+from ledgr_agent.billing import (
+    credit_gate_decision,
+    delivery_idempotency_key as billing_delivery_idempotency_key,
+    get_shared_credit_service,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,35 +50,11 @@ def _firestore_creds_present() -> bool:
 def configure_durable_credit_service_if_prod() -> bool:
     """Install the Firestore-backed credit store when running in prod.
 
-    Builds ``CreditService(FirestoreCreditStore())`` and installs it as the
-    shared singleton **before** :func:`wire_shared_credit_service` points the
-    clean-agent tool factory at it — so Slack delivery, the gate, and the
-    clean-agent tool all share the durable store.  In dev/test (no creds and
-    ``LEDGR_ENV != prod``) this is a no-op and the in-memory store is kept.
-
-    Returns ``True`` when the durable store was installed, ``False`` otherwise.
-    Never raises: a wiring failure logs loudly and leaves the in-memory store in
-    place rather than aborting bot startup.
+    Delegates to :mod:`ledgr_agent.billing`.
     """
-    if not (_env_is_prod() or _firestore_creds_present()):
-        return False
-    try:
-        from app.credit_service import (
-            CreditService,
-            FirestoreCreditStore,
-            configure_shared_credit_service,
-        )
+    from ledgr_agent.billing import configure_durable_credit_service_if_prod as _configure
 
-        configure_shared_credit_service(CreditService(FirestoreCreditStore()))
-        logger.info("credit store: durable FirestoreCreditStore installed")
-        return True
-    except Exception:  # noqa: BLE001 — never abort startup over credit wiring
-        logger.error(
-            "credit store: failed to install FirestoreCreditStore; "
-            "falling back to in-memory (credits will NOT persist across restarts)",
-            exc_info=True,
-        )
-        return False
+    return _configure()
 
 
 def resolve_firm_id_from_client(ctx: Any) -> str | None:
@@ -138,55 +115,24 @@ def flag_unresolved_firm_billing_anomaly(
 
 
 def wire_shared_credit_service() -> None:
-    """Point the clean-agent tool at the same store as Slack delivery.
-
-    In prod (or when Firestore creds are present) this first swaps the shared
-    singleton to the durable :class:`FirestoreCreditStore` so the factory below
-    hands the durable store to the clean-agent tool path too.
-    """
-
-    from ledgr_agent.tools import document_tools
+    """Point Slack delivery at the same store as ledgr_agent billing."""
 
     configure_durable_credit_service_if_prod()
-    document_tools._credit_service_factory = get_shared_credit_service
     apply_dev_credit_grants_from_env()
 
 
 def apply_dev_credit_grants_from_env() -> None:
-    """Dev-only bootstrap: ``LEDGR_DEV_CREDIT_GRANTS=T123:50,T456:20``.
+    from ledgr_agent.billing import apply_dev_credit_grants_from_env as _apply
 
-    Grants apply inside the **running bot process** so Slack gate/delivery sees
-    them (unlike a separate ``admin grant`` CLI invocation, which uses a
-    throwaway in-memory store).
-    """
-
-    raw = os.environ.get("LEDGR_DEV_CREDIT_GRANTS", "").strip()
-    if not raw:
-        return
-    service = get_shared_credit_service()
-    for part in raw.split(","):
-        chunk = part.strip()
-        if not chunk or ":" not in chunk:
-            continue
-        firm_id, amount_str = chunk.split(":", 1)
-        firm_id = firm_id.strip()
-        if not firm_id:
-            continue
-        try:
-            amount = int(amount_str.strip())
-        except ValueError:
-            logger.warning("skip invalid LEDGR_DEV_CREDIT_GRANTS entry: %r", chunk)
-            continue
-        service.ensure_firm(firm_id)
-        if amount > 0:
-            service.grant(firm_id, amount, note="dev auto-grant")
-            logger.info("dev credit grant: firm=%s amount=%s", firm_id, amount)
+    _apply()
 
 
 def estimate_upload_pages(data: bytes, filename: str) -> int:
+    from ledgr_agent.internal.gemini import count_input_pages, mime_for
+
     try:
         return max(count_input_pages(data, mime_for(filename)), 1)
-    except Exception:  # noqa: BLE001 — gate falls back to one unit
+    except Exception:  # noqa: BLE001
         return 1
 
 
@@ -194,7 +140,7 @@ def credit_gate_for_bytes(*, firm_id: str, data: bytes, filename: str) -> dict[s
     """Pre-flight gate using page count (bank) or document estimate (default 1)."""
 
     required = estimate_upload_pages(data, filename)
-    return _credit_gate(firm_id=firm_id, paths=[filename], required_units=required)
+    return credit_gate_decision(firm_id=firm_id, required_units=required)
 
 
 def credit_block_message(decision: dict[str, Any]) -> str:
@@ -212,7 +158,7 @@ def credit_block_message(decision: dict[str, Any]) -> str:
 
 
 def delivery_idempotency_key(*, channel_id: str, file_id: str) -> str:
-    return f"{channel_id}:{file_id}:deliver"
+    return billing_delivery_idempotency_key(channel_id=channel_id, file_id=file_id)
 
 
 def delivery_charge_units(

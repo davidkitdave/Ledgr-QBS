@@ -1,22 +1,24 @@
-# ERP import "skills" — data-driven column maps
+# ERP import skills — ADK directory layout
 
-Each `*.yaml` file in this directory is a **skill**: a declarative description of
-one ERP's import-file column layout. The exporters in
-`invoice_processing/export/exporters.py` load these at import (cached) and emit
-the client's `Ledger_FY<year>.xlsx` workbook from them — there are **no**
-hardcoded column dicts in Python anymore.
+Each ``erp-<system>/`` folder is an [ADK Agent Skill](https://adk.dev/skills/index.md)
+directory:
 
-A malformed or missing skill file fails **loud at startup** (see
-`load_export_skill` in `exporters.py`), never silently producing wrong columns.
+- ``SKILL.md`` — human-readable metadata and editing notes (not loaded by Python).
+- ``assets/profile.yaml`` — declarative column map for that ERP's import file.
 
-## Files
+``build_sheets`` (light path) and ``invoice_processing/export/exporters.py`` load
+profiles through the single loader in ``ledgr_agent/internal/skill_profiles.py``.
+A malformed or missing profile fails **loud at load**, never silently producing wrong
+columns.
 
-| File              | `system`      | `exporter` | Notes                                           |
-| ----------------- | ------------- | ---------- | ----------------------------------------------- |
-| `qbs.yaml`        | `qbs`         | `builtin`  | Native QBS Ledger format (no tax-code column).  |
-| `xero.yaml`       | `xero`        | `builtin`  | Xero import columns + `*`-marked required cols. |
-| `autocount.yaml`  | `autocount`   | `profile`  | AutoCount AP/AR import (21 cols each).           |
-| `sql_account.yaml`| `sql_account` | `profile`  | SQL Account `SLPH_Invoice_Cash_Debit_Credit`.   |
+## Directories
+
+| Directory           | `system`      | `exporter` | Notes                                           |
+| ------------------- | ------------- | ---------- | ----------------------------------------------- |
+| `erp-qbs/`          | `qbs`         | `builtin`  | Native QBS Ledger format (no tax-code column).  |
+| `erp-xero/`         | `xero`        | `builtin`  | Xero import columns + `*`-marked required cols. |
+| `erp-autocount/`    | `autocount`   | `profile`  | AutoCount AP/AR import (21 cols each).           |
+| `erp-sql-account/`  | `sql_account` | `profile`  | SQL Account `SLPH_Invoice_Cash_Debit_Credit`.   |
 
 ## Schema
 
@@ -69,5 +71,5 @@ addition to the common keys they declare:
 Exporter output must stay **byte-identical** — the golden-format acceptance
 tests (`tests/test_erp_golden_format.py`, `tests/test_erp_exporters.py`,
 `tests/test_app_blocks.py`) are the bar. Editing a column name, order, or
-mapping here directly changes the generated import file, so any change must be
-verified against those tests.
+mapping in `assets/profile.yaml` directly changes the generated import file, so
+any change must be verified against those tests.

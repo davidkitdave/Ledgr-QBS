@@ -188,8 +188,8 @@ class TestAutoCountHeaderMatchesTemplate:
             out = Path(tmpdir) / "autocount.xlsx"
             exporter.write_workbook(out, purchases=[inv], sales=[])
             wb = load_workbook(out)
-            assert "AP Invoice" in wb.sheetnames, f"Expected 'AP Invoice' sheet, got {wb.sheetnames}"
-            ws = wb["AP Invoice"]
+            assert "Purchase" in wb.sheetnames, f"Expected 'Purchase' sheet, got {wb.sheetnames}"
+            ws = wb["Purchase"]
             generated_header = [ws.cell(row=1, column=c).value for c in range(1, len(_AC_AP_HEADER) + 1)]
         assert generated_header == _AC_AP_HEADER, (
             f"Generated AP header mismatch:\n  got:      {generated_header}\n  expected: {_AC_AP_HEADER}"
@@ -203,8 +203,8 @@ class TestAutoCountHeaderMatchesTemplate:
             out = Path(tmpdir) / "autocount.xlsx"
             exporter.write_workbook(out, purchases=[], sales=[inv])
             wb = load_workbook(out)
-            assert "AR Invoice" in wb.sheetnames, f"Expected 'AR Invoice' sheet, got {wb.sheetnames}"
-            ws = wb["AR Invoice"]
+            assert "Sales" in wb.sheetnames, f"Expected 'Sales' sheet, got {wb.sheetnames}"
+            ws = wb["Sales"]
             generated_header = [ws.cell(row=1, column=c).value for c in range(1, len(_AC_AR_HEADER) + 1)]
         assert generated_header == _AC_AR_HEADER, (
             f"Generated AR header mismatch:\n  got:      {generated_header}\n  expected: {_AC_AR_HEADER}"
@@ -294,7 +294,10 @@ class TestAutoCountMandatoryColumns:
 class TestSqlAccountHeader:
     """SQL generated header must contain every REQUIRED column in order."""
 
-    SQL_SHEET = "SLPH_Invoice_Cash_Debit_Credit"
+    # ERP tab standardization: the generated SQL purchase sheet is named
+    # "Purchase" (was the raw template tab "SLPH_Invoice_Cash_Debit_Credit").
+    # The real-template cross-check below still reads the raw tab name.
+    SQL_SHEET = "Purchase"
 
     def test_purchase_sheet_name_correct(self):
         inv = _make_purchase_inv()

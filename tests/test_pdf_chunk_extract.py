@@ -1,4 +1,13 @@
-"""Hermetic tests for large-PDF page-chunked extraction (issue #16)."""
+"""Hermetic tests for large-PDF page-chunked extraction (issue #16).
+
+The pre-chunk gate at ``should_chunk_pdf`` is intentionally narrow after the
+Phase-0 control experiment on ``feat/minimal-extract-control-experiment``:
+it returns True only when the PDF would exceed Google's documented 50 MB
+inline limit. Page count alone does NOT trigger chunking — see
+``docs/agents/issue-tracker.md`` / issue #28 for the rationale. The chunked
+extraction helpers (``iter_pdf_page_chunks``, ``merge_chunk_bundles``) remain
+in use by the ``ValidationError`` fallback in ``ledger_extract.py``.
+"""
 
 from __future__ import annotations
 
@@ -11,11 +20,15 @@ from invoice_processing.extract.ledger_extract import (
 )
 from invoice_processing.extract.pdf_chunks import (
     CHUNK_PAGE_SIZE,
+    INLINE_PDF_BYTE_LIMIT,
     LARGE_PDF_BYTE_THRESHOLD,
-    LARGE_PDF_PAGE_THRESHOLD,
     iter_pdf_page_chunks,
     merge_chunk_bundles,
     should_chunk_pdf,
+)
+from invoice_processing.shared_libraries.gemini_call_config import (
+    DEFAULT_MAX_OUTPUT_TOKENS,
+    default_llm_config,
 )
 
 pytestmark = pytest.mark.unit
@@ -60,15 +73,52 @@ def _doc(reference: str, page_range: list[int]) -> ExtractedDocument:
     )
 
 
-def test_should_chunk_pdf_when_page_count_exceeds_threshold() -> None:
-    assert should_chunk_pdf(b"x", "application/pdf", page_count=LARGE_PDF_PAGE_THRESHOLD + 1)
-    assert not should_chunk_pdf(b"x", "application/pdf", page_count=LARGE_PDF_PAGE_THRESHOLD)
-
-
-def test_should_chunk_pdf_when_byte_size_exceeds_threshold() -> None:
+def test_should_chunk_pdf_byte_size_exceeds_limit() -> None:
+    """Hard limit: chunk only when bytes exceed Google's 50 MB inline cap."""
     big = b"x" * (LARGE_PDF_BYTE_THRESHOLD + 1)
     assert should_chunk_pdf(big, "application/pdf", page_count=1)
+    # Just under the threshold stays inline.
+    small = b"x" * (LARGE_PDF_BYTE_THRESHOLD - 1)
+    assert not should_chunk_pdf(small, "application/pdf", page_count=1)
+    # Non-PDF MIME never chunks.
     assert not should_chunk_pdf(b"small", "image/png", page_count=1)
+
+
+def test_should_chunk_pdf_page_count_alone_never_triggers_chunk() -> None:
+    """Regression: page count must NOT pre-chunk after the Phase-0 fix.
+
+    The Starhub bill (18 pages, 4.4 MB) and multi-receipt PDF (35 pages,
+    19.4 MB) both go through one Gemini call now — see
+    ``scripts/spike_minimal_extract_vs_pipeline.py`` for the A/B proof.
+    """
+    # Starhub-like: 18 pages, 4.4 MB.
+    assert not should_chunk_pdf(b"x" * (4 * 1024 * 1024), "application/pdf", page_count=18)
+    # Multi-receipt-like: 35 pages, 19.4 MB.
+    assert not should_chunk_pdf(b"x" * (19 * 1024 * 1024), "application/pdf", page_count=35)
+    # Even an absurd 999-page skinny PDF stays inline (well under 50 MB).
+    assert not should_chunk_pdf(b"x" * (10 * 1024 * 1024), "application/pdf", page_count=999)
+
+
+def test_inline_pdf_byte_limit_matches_google_documented_ceiling() -> None:
+    """Google's documented inline PDF cap is 50 MB; the default must match."""
+    assert INLINE_PDF_BYTE_LIMIT == 50 * 1024 * 1024
+    assert LARGE_PDF_BYTE_THRESHOLD == INLINE_PDF_BYTE_LIMIT
+
+
+def test_default_llm_config_pins_max_output_tokens() -> None:
+    """Output budget must be set so a single call can hold a full 35-page JSON.
+
+    Without ``max_output_tokens`` the SDK default was too low and silently
+    truncated multi-receipt output (issue #16 / #28). The Phase-0 spike
+    proved that with ``DEFAULT_MAX_OUTPUT_TOKENS=65536`` all 852 lines for a
+    35-page / 19.4 MB PDF fit in one call.
+    """
+    assert DEFAULT_MAX_OUTPUT_TOKENS == 65536
+    cfg = default_llm_config()
+    assert cfg.max_output_tokens == 65536
+    # Caller overrides win.
+    cfg = default_llm_config(max_output_tokens=8192)
+    assert cfg.max_output_tokens == 8192
 
 
 def test_iter_pdf_page_chunks_splits_pages() -> None:
@@ -146,6 +196,7 @@ def test_chunked_extract_drops_soa_cover_after_merge(monkeypatch) -> None:
         "invoice_processing.extract.pdf_chunks.extract_document_ledger_chunked",
         _fake_chunked,
     )
+    # Drive the chunked path via the byte-guard rather than the removed page guard.
     monkeypatch.setattr(
         "invoice_processing.extract.pdf_chunks.should_chunk_pdf",
         lambda *_a, **_k: True,

@@ -6,26 +6,24 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.credit_service import CreditService, InMemoryCreditStore, configure_shared_credit_service
-from accounting_agents.credit_delivery import wire_shared_credit_service
-from ledgr_agent.tools.credit_tools import read_credit_balance
-from ledgr_agent.tools import document_tools
+from ledgr_agent.billing import (
+    CreditService,
+    InMemoryCreditStore,
+    configure_shared_credit_service,
+    wire_playground_credits,
+)
+from ledgr_agent.billing import read_credit_balance
 
 
 @pytest.fixture(autouse=True)
-def _restore_credit_factory():
-    """Restore document_tools globals and app.credit_service singleton after each test."""
-    import app.credit_service as _cs_mod
+def _restore_shared_service():
+    import ledgr_agent.billing as billing
 
-    saved_factory = document_tools._credit_service_factory
-    saved_singleton = document_tools._credit_service_singleton
-    saved_shared = _cs_mod._shared_credit_service
+    saved = billing._shared_credit_service
     try:
         yield
     finally:
-        document_tools._credit_service_factory = saved_factory
-        document_tools._credit_service_singleton = saved_singleton
-        _cs_mod._shared_credit_service = saved_shared
+        billing._shared_credit_service = saved
 
 
 def test_read_credit_balance_returns_firm_balance() -> None:
@@ -34,7 +32,6 @@ def test_read_credit_balance_returns_firm_balance() -> None:
     service.ensure_firm("T_PLAYGROUND")
     service.grant("T_PLAYGROUND", 12, note="qa")
     configure_shared_credit_service(service)
-    document_tools._credit_service_factory = lambda: service
 
     result = read_credit_balance(
         SimpleNamespace(state={"firm_id": "T_PLAYGROUND", "client_id": "playground"})
@@ -50,12 +47,10 @@ def test_read_credit_balance_errors_without_firm_id() -> None:
     assert "firm_id" in result["message"]
 
 
-def test_wire_shared_credit_service_applies_dev_grants(monkeypatch) -> None:
-    store = InMemoryCreditStore()
-    configure_shared_credit_service(CreditService(store))
-    document_tools._credit_service_factory = None
+def test_wire_playground_credits_applies_dev_grants(monkeypatch) -> None:
+    configure_shared_credit_service(CreditService(InMemoryCreditStore()))
     monkeypatch.setenv("LEDGR_DEV_CREDIT_GRANTS", "T_PLAYGROUND:7")
-    wire_shared_credit_service()
+    wire_playground_credits()
     out = read_credit_balance(
         SimpleNamespace(state={"firm_id": "T_PLAYGROUND", "client_id": "x"})
     )

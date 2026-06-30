@@ -1,6 +1,6 @@
 # 0026 — AI reads, deterministic rules apply (YAML data) on a lean LlmAgent; retire the Workflow graph
 
-- **Status:** Accepted
+- **Status:** Accepted (Phase A light path — 2026-06-27)
 - **Date:** 2026-06-24
 - **Deciders:** Ledgr team
 - **Supersedes (in part):** ADR-0001 (graph-as-root packaging), ADR-0003 (RequestInput HITL),
@@ -71,6 +71,20 @@ surface (ADR-0007) and edits-become-Corrections (ADR-0004) are unchanged.
 **5. Eval is the gate.** A single golden eval set (real SG/MY docs; deterministic field
 match for doc-type, fields, tax/COA — *not* LLM-as-judge) is the regression gate for both
 the engine fixes and the cutover (the "eval + live QA pass" Plan 6 already requires).
+
+### Phase A — light path only (2026-06-27)
+
+`ledgr_agent` is trimmed to three ADK tools:
+
+1. **`read_doc`** — one Gemini read (`ReadDocumentBundle` schema); sets `file_kind`
+2. **`build_sheets`** — unified workbook rows (ERP YAML skills or bank tabs) in `session.workbook`
+3. **`read_credit_balance`**
+
+Removed from the package (not duplicated in-tree): `process_document_batch` factory,
+`policies/ledger/` full COA/tax/route engine, batch metrics, and duplicate read/project
+tools. A **`process_document_batch` legacy stub** remains for unchanged Slack imports until
+the Slack wiring plan lands. Full tax/COA/SOA batch may return as a single module or via
+`legacy/` — not as 15 duplicate folders.
 
 ## Consequences
 

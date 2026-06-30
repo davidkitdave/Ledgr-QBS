@@ -22,6 +22,8 @@ import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
+
 import accounting_agents.slack_runner as slack_runner
 from accounting_agents import nodes
 from accounting_agents.slack_runner import (
@@ -31,6 +33,70 @@ from accounting_agents.slack_runner import (
     answer_question,
     process_file_event,
 )
+
+# --------------------------------------------------------------------------- #
+# Module-level hermetic fixture: suppress real Gemini calls from read_doc
+# --------------------------------------------------------------------------- #
+#
+# The lean path (_run_ledgr_tools) calls read_doc which calls
+# _read_bytes_with_gemini. In hermetic tests there is no API key / live PDF,
+# so we monkeypatch it to return a minimal canned commercial payload so no
+# network call is made. The patch is autouse so ALL tests in this module are
+# protected without per-test boilerplate.
+
+
+_CANNED_READ_DOC_PAYLOAD = {
+    "file_kind": "commercial_documents",
+    "document_count": 1,
+    "documents": [
+        {
+            # ReadDocument schema fields (not line_items / date / buyer_name)
+            "doc_type": "purchase",
+            "document_kind": "invoice",
+            "invoice_number": "INV-001",
+            "invoice_date": "2026-01-15",
+            "due_date": "",
+            "currency": "SGD",
+            "fx_rate": None,
+            "vendor_name": "Test Vendor Pte Ltd",
+            "customer_name": "Test Buyer Pte Ltd",
+            "entity_tax_id": "",
+            "subtotal": 1000.00,
+            "tax_total": 90.0,
+            "grand_total": 1090.0,
+            "lines": [
+                {
+                    "description": "Professional services",
+                    "quantity": 1.0,
+                    "unit_amount": 1000.00,
+                    "net_amount": 1000.00,
+                    "tax_amount": 90.0,
+                    "total_amount": 1090.0,
+                }
+            ],
+            "notes": "",
+        }
+    ],
+    "extraction_meta": {
+        "gemini_call_count": 0,
+        "model": "fake",
+        "extract_mode": "vision",
+        "elapsed_seconds": 0.0,
+        "bytes_sent": 0,
+        "usage": {},
+    },
+}
+
+
+@pytest.fixture(autouse=True)
+def _mock_gemini_read(monkeypatch):
+    """Monkeypatch _read_bytes_with_gemini so no real Gemini call is made."""
+    import ledgr_agent.tools.read_doc as _read_doc_mod
+    monkeypatch.setattr(
+        _read_doc_mod,
+        "_read_bytes_with_gemini",
+        lambda data, mime: dict(_CANNED_READ_DOC_PAYLOAD),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -63,22 +129,43 @@ class _FakeSession:
 
 
 class _RecordingSessionService:
-    """Records (user_id, session_id) for every create/get and run scope."""
+    """Records (user_id, session_id) for every create/get and run scope.
+
+    Stores live session objects per key so that state deltas written via
+    ``append_event`` are visible to subsequent ``get_session`` calls — this
+    mirrors how the real ADK session service works and is required for the lean
+    path (read_doc → build_sheets → deliver_workbook) which writes WORKBOOK_STATE_KEY
+    via ``_apply_state_delta`` and reads it back in ``deliver_workbook``.
+    """
 
     def __init__(self, final_state):
-        self._final_state = final_state
-        self._created: set = set()
+        self._final_state = dict(final_state)  # kept for _InstrumentedRunner seed
+        self._sessions: dict = {}   # (user_id, session_id) -> _FakeSession
         self.create_calls: list = []
+        self.event_calls: list = []
+
+    @property
+    def _created(self):
+        return set(self._sessions.keys())
 
     async def get_session(self, *, app_name, user_id, session_id):
-        if (user_id, session_id) not in self._created:
-            return None
-        return _FakeSession(self._final_state)
+        return self._sessions.get((user_id, session_id))
 
     async def create_session(self, *, app_name, user_id, session_id, state=None):
         self.create_calls.append((user_id, session_id))
-        self._created.add((user_id, session_id))
-        return _FakeSession(state or {})
+        session = _FakeSession(state or {})
+        self._sessions[(user_id, session_id)] = session
+        return session
+
+    async def append_event(self, session, event):
+        """Apply state_delta from the event so get_session sees updated state."""
+        self.event_calls.append(id(session))
+        actions = getattr(event, "actions", None)
+        if actions is not None:
+            delta = getattr(actions, "state_delta", None) or {}
+            if hasattr(session, "state") and delta:
+                session.state.update(delta)
+        return session
 
 
 class _FakeArtifactService:
@@ -106,7 +193,11 @@ class _InstrumentedRunner:
         self, *, user_id, session_id, new_message=None, state_delta=None, run_config=None,
     ):
         self.run_scopes.append((user_id, session_id))
-        self.session_service._created.add((user_id, session_id))
+        # Ensure session exists in _sessions so get_session returns it after run.
+        if (user_id, session_id) not in self.session_service._sessions:
+            self.session_service._sessions[(user_id, session_id)] = _FakeSession(
+                self.session_service._final_state
+            )
         if self._counter is not None:
             self._counter["now"] += 1
             self._counter["max"] = max(self._counter["max"], self._counter["now"])
@@ -156,7 +247,17 @@ class _FakeDb:
 
 def _slack():
     posts: list = []
-    return SimpleNamespace(chat_postMessage=lambda **k: posts.append(k) or {"ts": "1"}, _posts=posts)
+    updates: list = []
+    return SimpleNamespace(
+        chat_postMessage=lambda **k: posts.append(k) or {"ts": "1"},
+        chat_update=lambda **k: updates.append(k) or {"ok": True},
+        reactions_add=lambda **k: {"ok": True},
+        reactions_remove=lambda **k: {"ok": True},
+        files_upload_v2=lambda **k: {"ok": True, "file": {"id": "F-fake"}},
+        files_upload=lambda **k: {"ok": True, "file": {"id": "F-fake"}},
+        _posts=posts,
+        _updates=updates,
+    )
 
 
 class _FakeProfileStore:
@@ -179,6 +280,10 @@ class _FakeProfileStore:
     def get_by_channel(self, channel_id):
         assert channel_id
         return self._ctx
+
+    def append_processing_log(self, *args, **kwargs):
+        """No-op: concurrency tests don't assert on audit-log writes."""
+        pass
 
 
 def _profile_store(**kwargs):
@@ -215,13 +320,15 @@ def test_concurrent_file_events_use_distinct_session_ids():
 
     asyncio.run(drive())
 
+    # Lean path: sessions are created via _run_ledgr_tools → _ensure_session →
+    # create_session, recorded in _sessions keyed by (user_id, session_id).
     # Both runs targeted the SAME user_id (channel) but DISTINCT per-doc sessions.
-    scopes = set(runner.run_scopes)
-    assert ("C1", _per_doc_session_id("C1", "F1")) in scopes
-    assert ("C1", _per_doc_session_id("C1", "F2")) in scopes
-    assert _per_doc_session_id("C1", "F1") != _per_doc_session_id("C1", "F2")
-    # user_id stayed the channel for both (client-profile resolution unchanged).
-    assert {uid for uid, _ in runner.run_scopes} == {"C1"}
+    created = set(runner.session_service._sessions.keys())
+    sid_f1 = _per_doc_session_id("C1", "F1")
+    sid_f2 = _per_doc_session_id("C1", "F2")
+    assert ("C1", sid_f1) in created, f"F1 session not created; got {created}"
+    assert ("C1", sid_f2) in created, f"F2 session not created; got {created}"
+    assert sid_f1 != sid_f2, "Session ids must differ per file"
 
 
 # --------------------------------------------------------------------------- #
@@ -230,13 +337,61 @@ def test_concurrent_file_events_use_distinct_session_ids():
 
 
 def test_semaphore_caps_concurrent_runs(monkeypatch):
-    # Force a small cap independent of the environment.
-    monkeypatch.setattr(slack_runner, "_SEM", asyncio.Semaphore(2))
+    """Lean path: _SEM in slack_runner caps concurrent runs.
+
+    In the lean path runner.run_async is never called, so we instrument the
+    semaphore directly by replacing _SEM with a counting wrapper that tracks
+    concurrent acquisitions.  The semaphore is acquired in process_file_event
+    before calling process_file_via_ledgr_agent (which runs read_doc +
+    build_sheets).  We add a small async delay inside build_sheets to allow
+    concurrent acquirers to queue up, then verify max_concurrent <= cap.
+    """
+    import ledgr_slack.slack_shell as slack_shell
+
     counter = {"now": 0, "max": 0}
-    runner = _InstrumentedRunner(_ledger_payload(), run_delay=0.02, counter=counter)
+
+    class _InstrumentedSemaphore:
+        """Wraps asyncio.Semaphore and tracks peak concurrent holders."""
+
+        def __init__(self, value):
+            self._sem = asyncio.Semaphore(value)
+            self._value = value
+
+        async def __aenter__(self):
+            await self._sem.acquire()
+            counter["now"] += 1
+            counter["max"] = max(counter["max"], counter["now"])
+            return self
+
+        async def __aexit__(self, *args):
+            counter["now"] -= 1
+            self._sem.release()
+
+        def locked(self):
+            return self._sem.locked()
+
+    cap = 2
+    monkeypatch.setattr(slack_runner, "_SEM", _InstrumentedSemaphore(cap))
+
+    # Add a delay inside build_sheets so concurrent runs overlap in the semaphore.
+    real_build_sheets = slack_shell.__dict__.get("build_sheets") or __import__(
+        "ledgr_agent.tools.build_sheets", fromlist=["build_sheets"]
+    ).build_sheets
+
+    import time as _time
+
+    def _slow_build_sheets(ctx):
+        _time.sleep(0.02)
+        return real_build_sheets(ctx)
+
+    monkeypatch.setattr(slack_shell, "build_sheets", _slow_build_sheets)
+
+    runner = _InstrumentedRunner(_ledger_payload())
     store = _NoopLedgerStore()
     db = _FakeDb()
     slack = _slack()
+
+    n_docs = 6
 
     async def drive():
         await asyncio.gather(*[
@@ -246,15 +401,19 @@ def test_semaphore_caps_concurrent_runs(monkeypatch):
                 download_fn=lambda c, f: b"%PDF",
                 client_store=_profile_store(),
             )
-            for i in range(6)
+            for i in range(n_docs)
         ])
 
     asyncio.run(drive())
 
-    # Never more than 2 runs in flight at once despite 6 simultaneous drops.
-    assert counter["max"] <= 2
-    # All six still completed (queued, not dropped).
-    assert len(runner.run_scopes) == 6
+    # Never more than cap runs in flight at once despite n_docs simultaneous drops.
+    assert counter["max"] <= cap, (
+        f"semaphore did not cap: max_concurrent={counter['max']} > cap={cap}"
+    )
+    # All six must have completed (queued, not dropped).
+    assert store.append_calls == n_docs, (
+        f"expected {n_docs} deliveries, got {store.append_calls}"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -263,6 +422,8 @@ def test_semaphore_caps_concurrent_runs(monkeypatch):
 
 
 def test_append_rows_is_offloaded_to_thread(monkeypatch):
+    import ledgr_slack.slack_shell as slack_shell
+
     runner = _InstrumentedRunner(_ledger_payload())
     store = _NoopLedgerStore()
     db = _FakeDb()
@@ -275,7 +436,10 @@ def test_append_rows_is_offloaded_to_thread(monkeypatch):
         offloaded.append(fn)
         return await real_to_thread(fn, *args, **kwargs)
 
+    # The lean path's deliver_workbook lives in slack_shell.py and uses its
+    # own asyncio.to_thread.  Patch both modules so the spy captures all calls.
     monkeypatch.setattr(slack_runner.asyncio, "to_thread", spy_to_thread)
+    monkeypatch.setattr(slack_shell.asyncio, "to_thread", spy_to_thread)
 
     result = asyncio.run(
         process_file_event(

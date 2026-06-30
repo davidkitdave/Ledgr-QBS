@@ -149,6 +149,17 @@ class NormalizedInvoice:
     # onto each exporter row dict but never written to the human-facing Excel.
     source_doc_id: Optional[str] = None
 
+    # Faithful tax breakdown captured by extraction (fix 1d, Phase-1 port).
+    # Previously the extracted ``tax_lines[]`` field was discarded downstream;
+    # this list preserves what the bill itself prints so reconciliation,
+    # exporters, and reviewers can see the same SR / ZR / exempt split that
+    # Drive's Gemini sidebar shows. Each entry is the verbatim (label, rate,
+    # base, amount) tuple. Populated by
+    # ``extracted_document_to_normalized``; not used by the canonical tax
+    # classifier (which still drives per-line SR/ZR/ES labels) — purely an
+    # audit / Drive-parity surface.
+    tax_breakdown: list[dict] = field(default_factory=list)
+
     @property
     def counterparty(self) -> PartyInfo:
         """The other party: supplier for purchases, customer for sales."""

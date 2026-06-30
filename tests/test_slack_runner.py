@@ -136,7 +136,7 @@ class _FakeSession:
 
 class _FakeSessionService:
     def __init__(self, final_state):
-        self._final_state = final_state
+        self._final_state = dict(final_state or {})
         self.created = False
 
     async def get_session(self, *, app_name, user_id, session_id):
@@ -147,7 +147,13 @@ class _FakeSessionService:
 
     async def create_session(self, *, app_name, user_id, session_id, state=None):
         self.created = True
-        return _FakeSession(state or {})
+        if state:
+            self._final_state.update(state)
+        return _FakeSession(self._final_state)
+
+    async def append_event(self, session, event):
+        delta = getattr(getattr(event, "actions", None), "state_delta", None) or {}
+        self._final_state.update(delta)
 
 
 class _FakeRunner:
@@ -201,18 +207,70 @@ _TEST_PROFILE: dict = {
     "region": "SINGAPORE",
     "base_currency": "SGD",
     "status": "active",
+    "firm_id": "T_TEST",
+    "slack_team_id": "T_TEST",
+}
+
+
+@pytest.fixture(autouse=True)
+def _mock_ledgr_read_doc(monkeypatch):
+    """Hermetic read for process_file_event tests (ledgr v1 path)."""
+    import ledgr_agent.billing as billing
+    from app.credit_service import CreditService, InMemoryCreditStore, configure_shared_credit_service
+
+    billing._shared_credit_service = None
+    service = CreditService(InMemoryCreditStore())
+    service.ensure_firm("T_TEST")
+    service.grant("T_TEST", 100, note="test")
+    configure_shared_credit_service(service)
+
+    def _fake_read(tool_context, paths=None):
+        from ledgr_agent.tools.read_doc import READ_DOC_STATE_KEY
+
+        tool_context.state[READ_DOC_STATE_KEY] = {
+            "file_kind": "commercial_documents",
+            "source_path": "/tmp/invoice.pdf",
+            "page_count": 1,
+            "document_count": 1,
+            "credit_units": 1,
+            "documents": [
+                {
+                    "doc_type": "purchase",
+                    "invoice_number": "INV-1",
+                    "invoice_date": "2026-06-24",
+                    "lines": [{"description": "x", "net_amount": 10.0}],
+                }
+            ],
+        }
+        return {"status": "success", "file_kind": "commercial_documents"}
+
+    monkeypatch.setattr("ledgr_slack.slack_shell.read_doc", _fake_read)
+
+
+_SOFTWARE_DISPLAY = {
+    "qbs": "QBS Ledger",
+    "xero": "Xero",
+    "autocount": "AutoCount",
+    "sql_account": "SQL Account",
 }
 
 
 def _seeded_client_store(db: FakeFirestore, channel_id: str = "C1",
-                        client_id: str = "c1") -> "FirestoreClientStore":  # noqa: F821 — string forward-ref; import is local
+                        client_id: str = "c1",
+                        software: str | None = None) -> "FirestoreClientStore":  # noqa: F821 — string forward-ref; import is local
     """Write a minimal QBS client profile + channel reverse-index into ``db``
     and return a :class:`FirestoreClientStore` bound to that fake. The default
     channel/client ids match the rest of this test module.
+
+    ``software`` overrides the profile's accounting software (the lean delivery
+    path derives the card's ERP shape from the profile), so card-rendering tests
+    can exercise Xero/AutoCount/SQL previews.
     """
     from invoice_processing.export.client_context import FirestoreClientStore
 
     profile = dict(_TEST_PROFILE, client_id=client_id)
+    if software:
+        profile["accounting_software"] = _SOFTWARE_DISPLAY.get(software, software)
     db.collection("clients").document(client_id).set(profile)
     db.collection("channels").document(channel_id).set({"client_id": client_id})
     return FirestoreClientStore(client=db)
@@ -315,15 +373,16 @@ def test_process_file_event_completion_appends_ledger_once():
     # non-prod envs so ADK web's FastAPI artifact route matches (the
     # slash in ``inbox/...`` would 404 in dev). Prod keeps the namespaced
     # form for collision safety alongside other artifacts.
-    from accounting_agents import nodes as _nodes
-    expected_artifact = _nodes.artifact_name_for("F1")
+    from ledgr_agent.internal.uploads import artifact_name_for
+
+    expected_artifact = artifact_name_for("F1")
     assert ("C1", expected_artifact) in runner.artifact_service.saved
     assert downloaded["file_id"] == "F1"
     # The ledger workbook was uploaded exactly once, with one row.
     assert len(slack.uploads) == 1
-    assert result["append"]["appended"] == 1
+    assert result["delivery"]["append"]["appended"] == 1
     # The delivery summary was posted.
-    assert any("FY2026 ledger" in u for u in _posted_texts(slack))
+    assert any("FY2026" in u for u in _posted_texts(slack))
 
 
 def test_process_file_event_defer_slack_delivery_writes_processing_log():
@@ -439,6 +498,10 @@ def test_process_file_event_completion_writes_processing_log_with_delivery_ts():
     assert written[0]["channel_id"] == "C1"
 
 
+_SKIP_GRAPH_HITL = pytest.mark.skip(reason="ledgr v1 file path has no graph HITL pause")
+
+
+@_SKIP_GRAPH_HITL
 def test_process_file_event_interrupt_posts_card_and_writes_doc():
     slack = FakeSlackClient()
     db = FakeFirestore()
@@ -984,60 +1047,13 @@ def test_event_stage_label_maps_known_nodes():
     assert event_stage_label(SimpleNamespace()) is None
 
 
-def test_process_file_event_posts_status_once_and_updates_per_stage():
-    slack = FakeSlackClient()
-    db = FakeFirestore()
-    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
-
-    # A realistic single-document stream: classify → extract → tax → final text.
-    events = [
-        _node_event("classify_node"),
-        _node_event("extract_invoice_document_node"),
-        _node_event("tax_node"),
-        _node_event("deliver_node", text="done"),
-    ]
-    runner = _FakeRunner(events, _ledger_payload())
-
-    result = asyncio.run(
-        process_file_event(
-            runner=runner,
-            ledger_store=store,
-            db=db,
-            slack_client=slack,
-            channel_id="C1",
-            file_id="F1",
-            app_name="acc",
-            download_fn=lambda c, f: b"%PDF fake",
-            source_filename="invoice.pdf",
-            client_store=_seeded_client_store(db),
-        )
-    )
-    assert result["status"] == "delivered"
-
-    # Exactly ONE status message was posted (the initial "received" message). The
-    # delivery summary is a separate post; assert the status post is distinct and
-    # there is only one "received" message.
-    received = [p for p in _post_calls(slack) if "Received" in p.get("text", "")]
-    assert len(received) == 1
-    assert "invoice.pdf" in received[0]["text"]
-
-    # The status message was edited in place through the stages (distinct labels)
-    # plus the terminal ✅. The status post is the FIRST chat_postMessage, whose
-    # returned ts is "1.000" (FakeSlackClient numbers posts 1-based).
-    status_ts = "1.000"
-    update_texts = [u["text"] for u in slack.updates]
-    lowered = [t.lower() for t in update_texts]
-    assert any("taking a look" in t for t in lowered)            # classify
-    assert any("understanding this document" in t for t in lowered)   # extract (invoice)
-    assert any("reconciling" in t for t in lowered)              # tax/approval
-    assert update_texts[-1].startswith("✅ Added to")
-    # Every update targeted the single status message ts.
-    assert all(u["ts"] == status_ts for u in slack.updates)
-    # In-flight updates carry the processing accordion (plan block or fallback).
-    updates_with_blocks = [u for u in slack.updates if u.get("blocks")]
-    assert updates_with_blocks, "stage updates must include processing plan blocks"
-    blocks_str = str(updates_with_blocks[0]["blocks"])
-    assert "Understanding document" in blocks_str or "Applying your rules" in blocks_str
+# NOTE: test_process_file_event_posts_status_once_and_updates_per_stage was
+# removed in the lean-agent migration. It exercised per-stage status edits driven
+# by streamed graph events (classify → extract → tax labels via event_stage_label
+# + an in-flight plan accordion). The lean ledgr_agent path runs read_doc/
+# build_sheets tools directly with no graph event stream, so those per-stage
+# updates no longer exist (the path posts a single "Received" status then
+# "✅ Processed"). See ADR-0026.
 
 
 def test_processing_status_uses_compact_header_not_accordion():
@@ -1127,6 +1143,7 @@ def test_clean_path_summary_line_still_emits():
     )
 
 
+@_SKIP_GRAPH_HITL
 def test_reviewer_card_still_emits():
     """Interrupt path must still post the reviewer block-kit card (approve/edit/reject).
 
@@ -1274,6 +1291,7 @@ def test_process_file_event_status_update_failure_does_not_crash_run():
     assert len(slack.uploads) == 1
 
 
+@_SKIP_GRAPH_HITL
 def test_process_file_event_interrupt_sets_needs_review_status():
     slack = FakeSlackClient()
     db = FakeFirestore()
@@ -1376,6 +1394,48 @@ def _last_blocks(slack: FakeSlackClient):
 # =========================================================================== #
 
 
+def _workbook_from_ledger_rows(ledger_rows: dict) -> dict:
+    """Synthesize a lean-path ``WORKBOOK_STATE_KEY`` payload from a legacy
+    ``LEDGER_ROWS_KEY`` seed so the rich delivery card renders the seeded rows.
+
+    The lean delivery path (``deliver_workbook``) reads the ``workbook`` session
+    key produced by ``build_sheets``; these card-rendering tests express their
+    fixtures as ``ledger_rows`` batches, so we translate batch→sheet here and
+    let the real card builder consume them through ``workbook_to_ledger_payload``.
+    """
+    from ledgr_agent.internal.skill_profiles import normalize_system_key
+
+    kind = str(ledger_rows.get("kind") or "invoice")
+    software_key = normalize_system_key(str(ledger_rows.get("software") or "qbs"))
+    sheets: list[dict] = []
+    for batch in ledger_rows.get("batches") or []:
+        rows = list(batch.get("rows") or [])
+        sheet = {
+            "title": str(batch.get("sheet") or "Purchase"),
+            "columns": list(rows[0].keys()) if rows else [],
+            "rows": rows,
+            "system": "bank" if kind == "bank" else software_key,
+            "invoice_number": (str(batch.get("doc_key") or "").split(":")[-1]),
+        }
+        sheets.append(sheet)
+    first_sheet = sheets[0]["title"] if sheets else "Purchase"
+    return {
+        "status": "success",
+        "file_kind": "bank_statement" if kind == "bank" else "commercial_documents",
+        "sheet_count": len(sheets),
+        "sheets": sheets,
+        "delivery": {
+            "fy": str(ledger_rows.get("fy") or "unknown"),
+            "kind": kind,
+            "doc_type": "purchase",
+            "sheet": first_sheet,
+            "source_filename": "invoice.pdf",
+        },
+        "credits": {},
+        "systems": [software_key],
+    }
+
+
 def _run_delivery_with_state(state: dict, monkeypatch, channel_id: str = "C1"):
     """Helper: run process_file_event with a fake state and return all post calls."""
     monkeypatch.setenv("LEDGR_NATIVE_BLOCKS", "1")
@@ -1388,6 +1448,23 @@ def _run_delivery_with_state(state: dict, monkeypatch, channel_id: str = "C1"):
     )
     runner = _FakeRunner([final_event], state)
 
+    # The lean delivery path reads the ``workbook`` session key (built by
+    # build_sheets). Translate the test's ``ledger_rows`` seed into that shape so
+    # the rich card renders the fixture rows rather than the read_doc stub.
+    from ledgr_agent.tools.build_sheets import WORKBOOK_STATE_KEY
+
+    ledger_rows = state.get(nodes.LEDGER_ROWS_KEY) or {}
+    synthesized = _workbook_from_ledger_rows(ledger_rows)
+    software = str(ledger_rows.get("software") or "qbs")
+
+    def _fake_build_sheets(tool_context, systems=None):
+        tool_context.state[WORKBOOK_STATE_KEY] = synthesized
+        return synthesized
+
+    monkeypatch.setattr(
+        "ledgr_slack.slack_shell.build_sheets", _fake_build_sheets
+    )
+
     asyncio.run(
         process_file_event(
             runner=runner,
@@ -1399,7 +1476,7 @@ def _run_delivery_with_state(state: dict, monkeypatch, channel_id: str = "C1"):
             app_name="acc",
             download_fn=lambda client, file_id: b"%PDF-1.4 fake",
             source_filename="invoice.pdf",
-            client_store=_seeded_client_store(db),
+            client_store=_seeded_client_store(db, channel_id=channel_id, software=software),
         )
     )
     return _post_calls(slack)
@@ -2396,6 +2473,7 @@ def test_doc_label_from_state_default_filename():
     assert "document" in label
 
 
+@_SKIP_GRAPH_HITL
 def test_process_file_event_interrupt_persists_doc_label_and_renders_it():
     """Approval card header names the document; interrupt doc carries the same label.
 
@@ -5101,70 +5179,15 @@ def _completion_runner():
     return final_event
 
 
-def test_process_file_event_hint_flows_into_state_delta_as_review_hint():
-    slack = FakeSlackClient()
-    db = FakeFirestore()
-    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
-    runner = _StateCapturingRunner([_completion_runner()], _ledger_payload())
-
-    asyncio.run(
-        process_file_event(
-            runner=runner, ledger_store=store, db=db, slack_client=slack,
-            channel_id="C1", file_id="F1", app_name="acc",
-            download_fn=lambda c, f: b"%PDF-1.4 fake",
-            source_filename="re-extract-F1.pdf",
-            hint="read as a credit note",
-            client_store=_seeded_client_store(db),
-        )
-    )
-
-    assert runner.run_state_delta.get("review_hint") == "read as a credit note"
-
-
-def test_process_file_event_replace_flows_to_append_rows():
-    slack = FakeSlackClient()
-    db = FakeFirestore()
-    ledger = _CapturingLedgerStore()
-    runner = _FakeRunner([_completion_runner()], _ledger_payload())
-
-    asyncio.run(
-        process_file_event(
-            runner=runner, ledger_store=ledger, db=db, slack_client=slack,
-            channel_id="C1", file_id="F1", app_name="acc",
-            download_fn=lambda c, f: b"%PDF-1.4 fake",
-            source_filename="re-extract-F1.pdf",
-            hint="read as a credit note",
-            replace=True,
-            client_store=_seeded_client_store(db),
-        )
-    )
-
-    assert ledger.append_calls, "append_rows must have been called"
-    assert ledger.append_calls[0]["replace"] is True
-
-
-def test_process_file_event_default_path_does_not_replace_or_hint():
-    """The normal file-drop path RESETS the re-extract keys (so a re-shared file
-    can't inherit a stale hint/replace flag) and calls append_rows replace=False."""
-    slack = FakeSlackClient()
-    db = FakeFirestore()
-    ledger = _CapturingLedgerStore()
-    runner = _StateCapturingRunner([_completion_runner()], _ledger_payload())
-
-    asyncio.run(
-        process_file_event(
-            runner=runner, ledger_store=ledger, db=db, slack_client=slack,
-            channel_id="C1", file_id="F1", app_name="acc",
-            download_fn=lambda c, f: b"%PDF-1.4 fake",
-            source_filename="invoice.pdf",
-            client_store=_seeded_client_store(db),
-        )
-    )
-
-    # Reset (not absent): a fresh drop overwrites any stale leaked values.
-    assert runner.run_state_delta.get("review_hint") == ""
-    assert runner.run_state_delta.get("reextract_replace") is False
-    assert ledger.append_calls[0]["replace"] is False
+# NOTE: the re-extract hint/replace tests
+# (test_process_file_event_hint_flows_into_state_delta_as_review_hint,
+#  test_process_file_event_replace_flows_to_append_rows,
+#  test_process_file_event_default_path_does_not_replace_or_hint)
+# were removed in the lean-agent migration. They exercised the re-extract/review
+# flow: a ``hint`` forwarded into ``review_hint`` state and a ``replace`` flag
+# threaded into ``append_rows(replace=...)``. The lean ledgr_agent path is
+# no-HITL/no-re-extract by design (ADR-0026): it ignores ``hint``/``replace`` and
+# its ``run_state_delta`` carries no review_hint/reextract_replace keys.
 
 
 # --- _execute_pending_reextract ------------------------------------------- #
@@ -5282,90 +5305,13 @@ class _CapturingLedgerStoreMulti:
         }
 
 
-def test_normal_drop_after_reextract_does_not_inherit_replace_flag():
-    """HIGH regression: re-extract run on file_id X sets reextract_replace=True in
-    session state. A subsequent normal drop of the SAME file_id on the SAME
-    long-lived per-doc session MUST call append_rows with replace=False — not the
-    stale True from the prior run."""
-    slack = FakeSlackClient()
-    db = FakeFirestore()
-    ledger = _CapturingLedgerStoreMulti()
-    # Use a _FakeRunner that reuses the same _FakeSessionService between calls so
-    # the second run sees the session that the first run created — the realistic
-    # long-lived-session scenario.
-    runner = _FakeRunner([_completion_runner()], _ledger_payload())
-    client_store = _seeded_client_store(db)
-
-    # First call: re-extract (replace=True) — seeds reextract_replace=True into state.
-    asyncio.run(
-        process_file_event(
-            runner=runner, ledger_store=ledger, db=db, slack_client=slack,
-            channel_id="C1", file_id="F1", app_name="acc",
-            download_fn=lambda c, f: b"%PDF-1.4 fake",
-            source_filename="invoice.pdf",
-            hint="read as a credit note",
-            replace=True,
-            client_store=client_store,
-        )
-    )
-    assert ledger.append_calls[0]["replace"] is True
-
-    # Reset the runner's events so the second run also completes cleanly.
-    runner._events = [_completion_runner()]
-    # The session now exists with reextract_replace=True in state; the second
-    # NORMAL drop must overwrite it to False via the unconditional state_delta.
-    asyncio.run(
-        process_file_event(
-            runner=runner, ledger_store=ledger, db=db, slack_client=slack,
-            channel_id="C1", file_id="F1", app_name="acc",
-            download_fn=lambda c, f: b"%PDF-1.4 fake",
-            source_filename="invoice.pdf",
-            # No hint, no replace — normal drop.
-            client_store=client_store,
-        )
-    )
-    # Second call must have replace=False (not the stale True from the first run).
-    assert len(ledger.append_calls) == 2
-    assert ledger.append_calls[1]["replace"] is False
-
-
-def test_normal_drop_after_reextract_does_not_inherit_review_hint():
-    """HIGH regression: a normal re-drop of file_id X must NOT forward the hint
-    that a prior re-extract run seeded into the session's state_delta."""
-    slack = FakeSlackClient()
-    db = FakeFirestore()
-    runner = _StateCapturingRunner([_completion_runner()], _ledger_payload())
-    client_store = _seeded_client_store(db)
-
-    # First call: re-extract seeds review_hint into state_delta.
-    asyncio.run(
-        process_file_event(
-            runner=runner, ledger_store=SlackLedgerStore(FakeFirestore(), opener=slack.opener()),
-            db=db, slack_client=slack,
-            channel_id="C1", file_id="F1", app_name="acc",
-            download_fn=lambda c, f: b"%PDF-1.4 fake",
-            source_filename="invoice.pdf",
-            hint="read as a credit note",
-            replace=True,
-            client_store=client_store,
-        )
-    )
-    assert runner.run_state_delta.get("review_hint") == "read as a credit note"
-
-    # Second call: normal drop — state_delta must carry review_hint="" (not the stale hint).
-    runner._events = [_completion_runner()]
-    asyncio.run(
-        process_file_event(
-            runner=runner, ledger_store=SlackLedgerStore(FakeFirestore(), opener=slack.opener()),
-            db=db, slack_client=slack,
-            channel_id="C1", file_id="F1", app_name="acc",
-            download_fn=lambda c, f: b"%PDF-1.4 fake",
-            source_filename="invoice.pdf",
-            client_store=client_store,
-        )
-    )
-    assert runner.run_state_delta.get("review_hint") == ""
-    assert runner.run_state_delta.get("reextract_replace") is False
+# NOTE: the re-extract inheritance regressions
+# (test_normal_drop_after_reextract_does_not_inherit_replace_flag,
+#  test_normal_drop_after_reextract_does_not_inherit_review_hint)
+# were removed in the lean-agent migration. They guarded a re-extract run from
+# leaking its reextract_replace/review_hint into a later normal drop on the same
+# long-lived session. The lean ledgr_agent path is no-HITL/no-re-extract by design
+# (ADR-0026) and never seeds those keys, so there is nothing to inherit.
 
 
 # --- MEDIUM regression: duplicate path also fires the identity-change note --- #
@@ -5443,23 +5389,13 @@ def _proactive_card_posts(slack: FakeSlackClient) -> list:
     return out
 
 
-def test_finalize_posts_proactive_offer_when_reviewer_fired_and_not_clarify():
-    """Reviewer FIRED (non-empty reasons) + verdict != CLARIFY + delivered →
-    the proactive re-extract offer is posted (threaded under the delivery)."""
-    state = dict(_ledger_payload())
-    state[nodes.REVIEW_REASON_KEY] = ["unreconciled: Invoice (FX off)"]
-    state[nodes.REVIEW_VERDICT_KEY] = nodes.REVIEW_VERDICT_HINTS
-
-    slack, result = _run_finalize_delivery(state)
-
-    assert result["status"] == "delivered"
-    offers = _proactive_card_posts(slack)
-    assert len(offers) == 1
-    button = offers[0]["blocks"][1]["elements"][0]
-    assert button["action_id"] == "proactive_redo"
-    assert button["value"] == "F1"
-    # The humanized reason is rendered, not the raw machine string.
-    assert "the totals didn't reconcile" in offers[0]["blocks"][0]["text"]["text"]
+# NOTE: test_finalize_posts_proactive_offer_when_reviewer_fired_and_not_clarify
+# was removed in the lean-agent migration. It asserted that a fired reviewer
+# (REVIEW_REASON_KEY/REVIEW_VERDICT_KEY) posts a proactive re-extract offer card
+# after delivery. The lean ledgr_agent path is no-HITL/no-reviewer by design
+# (ADR-0026) — it never runs the reviewer and never posts the proactive offer.
+# The companion "no offer" tests below stay: they verify the lean path's clean
+# delivery posts the summary and NEVER posts a proactive offer.
 
 
 def test_finalize_posts_no_offer_on_clean_happy_path():

@@ -2,11 +2,26 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
-from invoice_processing.classify.document_classifier import ClassificationResult
-from invoice_processing.extract.invoice_extractor import ExtractedInvoice, ExtractedLine
-from ledgr_agent.tools.document_tools import process_document_batch
-from ledgr_agent.tools.playground_uploads import materialize_playground_uploads, resolve_document_paths
+import pytest
+
+import ledgr_agent.billing as billing
+from ledgr_agent.internal.schemas import ReadDocument, ReadDocumentBundle
+from ledgr_agent.billing import CreditService, InMemoryCreditStore, configure_shared_credit_service
+from ledgr_agent.internal.uploads import materialize_playground_uploads, resolve_document_paths
+from ledgr_agent.tools.read_doc import read_doc
+
+
+@pytest.fixture(autouse=True)
+def _credit_setup() -> None:
+    billing._shared_credit_service = None
+    service = CreditService(InMemoryCreditStore())
+    service.ensure_firm("T_TEST")
+    service.grant("T_TEST", 10, note="test")
+    configure_shared_credit_service(service)
+    yield
+    billing._shared_credit_service = None
 
 
 PDF_BYTES = b"%PDF-1.4 fake playground upload"
@@ -99,132 +114,61 @@ def test_resolve_document_paths_ignores_wrong_guess_and_uses_upload() -> None:
     assert resolution["ignored_paths"] == ["invoice.png"]
 
 
-def test_process_document_batch_recovers_empty_paths_playground_upload() -> None:
+@patch("ledgr_agent.tools.read_doc.make_client")
+def test_read_doc_recovers_empty_paths_playground_upload(mock_make_client) -> None:
     ctx = FakeToolContext(
+        state={"firm_id": "T_TEST"},
         user_content_parts=[
             _part(PDF_BYTES, "application/pdf", file_name="uploaded-invoice.pdf")
         ],
     )
-
-    def _classify(path, **_kw):
-        return ClassificationResult(
-            doc_type="invoice",
-            confidence=0.99,
-            issuer_name="Supplier Inc",
-            bill_to_name="Playground Client",
-            reason="test",
-        )
-
-    def _direction(cls, **_kw):
-        return "purchase"
-
-    def _extract_stub(path, **_kw):
-        return ExtractedInvoice(
-            doc_type="invoice",
-            invoice_number="INV-PLAY-2",
-            invoice_date="2026-06-24",
-            currency="SGD",
-            issuer_name="Supplier Inc",
-            issuer_gst_regno="200012345A",
-            bill_to_name="Playground Client",
-            lines=[
-                ExtractedLine(
-                    description="Office supplies",
-                    net_amount=100.0,
-                    gst_amount=9.0,
-                    tax_label="SR",
-                )
-            ],
-            subtotal=100.0,
-            gst_total=9.0,
-            total=109.0,
-            issuer_tax_system="NONE",
-        )
-
-    def stub_cat(inv, **kw):
-        if inv.lines:
-            inv.lines[0].account_code = "6100"
-
-    result = process_document_batch(
-        ctx,
-        paths=[],
-        classify_fn=_classify,
-        direction_fn=_direction,
-        extract_fn=_extract_stub,
-        categorize_fn=stub_cat,
+    bundle = ReadDocumentBundle(
+        file_kind="commercial_documents",
+        documents=[
+            ReadDocument(
+                doc_type="purchase",
+                vendor_name="Supplier Inc",
+                invoice_number="INV-PLAY-2",
+                lines=[{"description": "Office supplies", "net_amount": 100.0}],
+            )
+        ],
+        document_count=1,
     )
+    mock_resp = MagicMock()
+    mock_resp.text = bundle.model_dump_json()
+    mock_make_client.return_value.models.generate_content.return_value = mock_resp
+
+    result = read_doc(ctx, paths=[])
 
     assert result["status"] == "success"
-    assert result["validation_summary"]["source_resolution"] == "playground_upload"
+    assert result["vendor_name"] == "Supplier Inc"
 
 
-def test_process_document_batch_recovers_playground_upload(tmp_path) -> None:
+@patch("ledgr_agent.tools.read_doc.make_client")
+def test_read_doc_recovers_playground_upload(mock_make_client) -> None:
     ctx = FakeToolContext(
+        state={"firm_id": "T_TEST"},
         user_content_parts=[
             _part(PDF_BYTES, "application/pdf", file_name="uploaded-invoice.pdf")
         ],
     )
-
-    def _classify(path, **_kw):
-        return ClassificationResult(
-            doc_type="invoice",
-            confidence=0.99,
-            issuer_name="Supplier Inc",
-            bill_to_name="Playground Client",
-            reason="test",
-        )
-
-    def _direction(cls, **_kw):
-        return "purchase"
-
-    def _extract_stub(path, **_kw):
-        return ExtractedInvoice(
-            doc_type="invoice",
-            invoice_number="INV-PLAY-1",
-            invoice_date="2026-06-24",
-            currency="SGD",
-            issuer_name="Supplier Inc",
-            issuer_gst_regno="200012345A",
-            bill_to_name="Playground Client",
-            lines=[
-                ExtractedLine(
-                    description="Office supplies",
-                    net_amount=100.0,
-                    gst_amount=9.0,
-                    tax_label="SR",
-                )
-            ],
-            subtotal=100.0,
-            gst_total=9.0,
-            total=109.0,
-            issuer_tax_system="NONE",
-        )
-
-    def stub_cat(inv, **kw):
-        if inv.lines:
-            inv.lines[0].account_code = "6100"
-
-    result = process_document_batch(
-        ctx,
-        paths=["invoice.png"],
-        classify_fn=_classify,
-        direction_fn=_direction,
-        extract_fn=_extract_stub,
-        categorize_fn=stub_cat,
+    bundle = ReadDocumentBundle(
+        file_kind="commercial_documents",
+        documents=[
+            ReadDocument(
+                doc_type="purchase",
+                vendor_name="Supplier Inc",
+                invoice_number="INV-PLAY-1",
+                lines=[{"description": "Office supplies", "net_amount": 100.0}],
+            )
+        ],
+        document_count=1,
     )
+    mock_resp = MagicMock()
+    mock_resp.text = bundle.model_dump_json()
+    mock_make_client.return_value.models.generate_content.return_value = mock_resp
+
+    result = read_doc(ctx, paths=["invoice.png"])
 
     assert result["status"] == "success"
-    assert result["documents_processed"] == 1
-    assert result["validation_summary"]["source_resolution"] == "playground_upload"
-    assert result["validation_summary"]["ignored_paths"] == ["invoice.png"]
-    assert result["posted_documents"][0]["invoice_number"] == "INV-PLAY-1"
-
-
-def test_resolve_document_paths_empty_when_no_upload_and_bad_paths() -> None:
-    ctx = FakeToolContext(user_content_parts=[])
-
-    existing, missing, resolution = resolve_document_paths(ctx, ["invoice.png"])
-
-    assert existing == []
-    assert missing == ["invoice.png"]
-    assert resolution == {}
+    assert result["invoice_number"] == "INV-PLAY-1"

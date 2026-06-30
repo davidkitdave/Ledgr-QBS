@@ -73,7 +73,7 @@ from invoice_processing.export.exporters import (
 )
 from invoice_processing.export.models import BankStatement, NormalizedInvoice
 from invoice_processing.export.routing import DocRoute, route_document
-from ledgr_agent.review.grouping import partition_and_group_reasons
+from accounting_agents.review.grouping import partition_and_group_reasons
 # Jurisdiction + LLM tax reasoning (multi-country support, replaces the
 # previous SG-only TaxClassifier call inside tax_node).
 from .jurisdiction import (

@@ -1,12 +1,24 @@
-# Legacy agent archive
+# Legacy packages (retirement in progress)
 
-Pre-consolidation rule engines and research CLIs moved here. They are **not**
-wired into the live Slack / ADK graph (`accounting_agents/slack_runner.py`).
+`accounting_agents/` and `invoice_processing/` are **deprecated**. The live
+agent spine, billing, policy rulebook, and runtime entry now live in
+`ledgr_agent/`.
 
-| Path | Purpose |
-|------|---------|
-| `invoice_processing/shared_libraries/alf_engine.py` | ALF rule engine (tests + rule_writer only) |
-| `invoice_processing/shared_libraries/acting/general_invoice_agent.py` | Standalone 9-agent CLI |
-| `invoice_processing/shared_libraries/investigation/investigate_agent_reconst.py` | Offline audit batch tool |
+## Status
 
-Thin shims remain at the original import paths where tests still reference them.
+| Package | Role | Replacement |
+|---------|------|-------------|
+| `ledgr_agent/` | Self-sufficient ADK agent | **Active** |
+| `accounting_agents/` | Legacy Slack Bolt runtime + old graph | `ledgr_agent.runtime` (cutover in progress) |
+| `invoice_processing/` | Hardcoded extraction factory | `ledgr_agent` light read + `policies/ledger/` |
+
+## Migration gate
+
+Before `git mv` into this folder:
+
+1. `ledgr_agent` has zero imports from either legacy package (grep gate — done).
+2. Fast unit suite green (`uv run pytest`).
+3. Production Slack path uses `ledgr_agent` tools for document processing + billing.
+
+After a sprint of prod use on the `ledgr_agent`-only path, delete the archived
+trees per ADR retirement plan.

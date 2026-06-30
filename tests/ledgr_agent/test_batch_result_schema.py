@@ -1,4 +1,5 @@
-from ledgr_agent.schemas import BatchResult, CreditSummary, ReviewRequest, SoftWarning
+from accounting_agents.batch_schemas import BatchResult, ReviewRequest, SoftWarning
+from ledgr_agent.internal.schemas import CreditSummary
  
  
 def test_batch_result_minimal_success_payload() -> None:

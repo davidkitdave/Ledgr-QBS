@@ -56,11 +56,5 @@ def test_firestore_creds_present_installs_durable_store(monkeypatch) -> None:
 
 
 def test_wire_shared_credit_service_keeps_in_memory_in_dev(monkeypatch) -> None:
-    from ledgr_agent.tools import document_tools
-
-    saved_factory = document_tools._credit_service_factory
-    try:
-        cd.wire_shared_credit_service()
-        assert isinstance(get_shared_credit_service()._store, InMemoryCreditStore)
-    finally:
-        document_tools._credit_service_factory = saved_factory
+    cd.wire_shared_credit_service()
+    assert isinstance(get_shared_credit_service()._store, InMemoryCreditStore)

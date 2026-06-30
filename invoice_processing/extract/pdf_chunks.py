@@ -1,8 +1,20 @@
-"""Split large PDFs into page windows for extraction (issue #16).
+"""Page-window chunking for very large PDFs (only the ``ValidationError`` fallback uses this).
 
-Gemini can truncate JSON when a single multi-receipt PDF spans many pages.
-Chunking keeps each multimodal call within a safe output budget while
-preserving 1-based page_range semantics on merge.
+The pre-chunker at ``should_chunk_pdf`` is intentionally narrow: it returns
+True **only** when the inline PDF would exceed Google's documented 50 MB
+inline limit, or when the caller passes an explicit opt-in via env. All
+other PDFs go through one Gemini call, because:
+
+- Gemini 2.5 supports up to 1000 pages / 50 MB inline per call natively.
+- ``default_llm_config`` now pins ``max_output_tokens=65536`` so the full
+  structured JSON fits even for a 35-page, 96-receipt, 852-line PDF.
+- The Phase-0 control experiment on
+  ``feat/minimal-extract-control-experiment`` proved that blind page-window
+  chunking *caused* truncation (680 of 852 lines lost on multi-receipt) and
+  fragmented clean single-doc PDFs (18-page Starhub bill -> 12 fake
+  ``invoice`` docs). Keep ``iter_pdf_page_chunks`` / ``merge_chunk_bundles``
+  because the ``ValidationError`` fallback in ``ledger_extract`` still uses
+  them when the un-chunked call genuinely fails to validate.
 """
 
 from __future__ import annotations
@@ -16,9 +28,13 @@ if TYPE_CHECKING:
     from .ledger_extract import ExtractedDocumentBundle
 
 CHUNK_PAGE_SIZE = int(os.environ.get("LEDGR_PDF_CHUNK_PAGES", "5"))
-LARGE_PDF_PAGE_THRESHOLD = int(os.environ.get("LEDGR_LARGE_PDF_PAGES", "10"))
+
+# Google documented inline limit for Gemini 2.5 (50 MB). PDFs beyond this
+# genuinely cannot be sent inline; they must be chunked (or staged via the
+# Files API — out of scope here).
+INLINE_PDF_BYTE_LIMIT = 50 * 1024 * 1024
 LARGE_PDF_BYTE_THRESHOLD = int(
-    os.environ.get("LEDGR_LARGE_PDF_BYTES", str(10 * 1024 * 1024))
+    os.environ.get("LEDGR_LARGE_PDF_BYTES", str(INLINE_PDF_BYTE_LIMIT))
 )
 
 
@@ -28,16 +44,22 @@ def should_chunk_pdf(
     *,
     page_count: int | None = None,
 ) -> bool:
-    """Return True when a single-call extraction is likely to truncate."""
+    """Return True only when the PDF is too big to send inline in one call.
+
+    Page count is intentionally NOT considered — it was the source of the
+    Starhub / multi-receipt noise. The Phase-0 spike on a fresh
+    ``feat/minimal-extract-control-experiment`` branch proved one
+    ``generate_content`` call fits 35 pages / 19.4 MB / 852 lines without
+    truncation when ``max_output_tokens=65536`` is set. Chunking was added
+    in issue #16 to work around missing output budget, not because page
+    count itself caused problems.
+
+    The caller may opt in to a stricter byte guard via env
+    (``LEDGR_LARGE_PDF_BYTES``); the default matches Google's 50 MB limit.
+    """
     if mime_type != "application/pdf":
         return False
-    if len(data) > LARGE_PDF_BYTE_THRESHOLD:
-        return True
-    if page_count is None:
-        from .segmentation_gates import count_input_pages
-
-        page_count = count_input_pages(data, mime_type)
-    return page_count > LARGE_PDF_PAGE_THRESHOLD
+    return len(data) > LARGE_PDF_BYTE_THRESHOLD
 
 
 def iter_pdf_page_chunks(
