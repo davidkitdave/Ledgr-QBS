@@ -1,9 +1,11 @@
-"""Slack frontend package for Ledgr.
-
-This package owns all Slack-facing code. It depends on ``ledgr_agent`` (the
-pure agent library) but ``ledgr_agent`` must NEVER import from here.
-"""
-
-from accounting_agents.slack_runner import build_fastapi_app  # noqa: F401
+"""Slack frontend package for Ledgr."""
 
 __all__ = ["build_fastapi_app"]
+
+
+def __getattr__(name: str):
+    if name == "build_fastapi_app":
+        from ledgr_slack.app import build_fastapi_app
+
+        return build_fastapi_app
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -9,17 +9,42 @@ import tempfile
 from types import SimpleNamespace
 from typing import Any, Callable, Optional
 
+from google.adk.artifacts.in_memory_artifact_service import InMemoryArtifactService
+from google.adk.runners import Runner
 from google.genai import types
 
+from ledgr_agent.app import ledgr_app
+from ledgr_agent.billing import wire_playground_credits
+from ledgr_agent.internal.gemini import mime_for
 from ledgr_agent.internal.uploads import artifact_name_for
+from ledgr_agent.tools.build_sheets import WORKBOOK_STATE_KEY, build_sheets
+from ledgr_agent.tools.read_doc import READ_DOC_STATE_KEY, read_doc
+from ledgr_slack.credit_adapter import (
+    charge_delivery_credits,
+    credit_block_message,
+    resolve_firm_id_from_client,
+    resolve_firm_id_from_state,
+    wire_shared_credit_service,
+)
+from ledgr_agent.billing import _charge_disabled
 from ledgr_slack.delivery import (
     compose_delivery_summary,
+    ledger_replace_for_batches,
     workbook_from_session_state,
     workbook_to_ledger_payload,
 )
 from ledgr_slack.session import run_state_delta
-from ledgr_agent.tools.build_sheets import WORKBOOK_STATE_KEY, build_sheets
-from ledgr_agent.tools.read_doc import READ_DOC_STATE_KEY, read_doc
+from ledgr_slack.sessions import FirestoreSessionService, _apply_state_delta, _ensure_session
+from ledgr_slack.ux import (
+    _add_reaction,
+    _fail_doc,
+    _post_delivery_card,
+    _post_message,
+    _record_processing_log,
+    _remove_reaction,
+    _simple_status_blocks,
+    _update_status,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -70,14 +95,6 @@ async def _append_workbook_batches(
 
 def build_ledgr_runner(*, session_service=None, artifact_service=None):
     """Construct ADK ``Runner`` bound to ``ledgr_app``."""
-    from google.adk.artifacts.in_memory_artifact_service import InMemoryArtifactService
-    from google.adk.runners import Runner
-
-    from accounting_agents.credit_delivery import wire_shared_credit_service
-    from accounting_agents.sessions import FirestoreSessionService
-    from ledgr_agent.app import ledgr_app
-    from ledgr_agent.billing import wire_playground_credits
-
     wire_shared_credit_service()
     wire_playground_credits()
 
@@ -86,25 +103,6 @@ def build_ledgr_runner(*, session_service=None, artifact_service=None):
         session_service=session_service or FirestoreSessionService(),
         artifact_service=artifact_service or InMemoryArtifactService(),
     )
-
-
-async def _merge_session_state(
-    runner: Any,
-    app_name: str,
-    user_id: str,
-    session_id: str,
-    state_delta: dict[str, Any],
-) -> dict[str, Any]:
-    from accounting_agents.slack_runner import _apply_state_delta, _ensure_session
-
-    await _ensure_session(runner, app_name, user_id, session_id)
-    await _apply_state_delta(runner, app_name, user_id, session_id, state_delta)
-    session = await runner.session_service.get_session(
-        app_name=app_name,
-        user_id=user_id,
-        session_id=session_id,
-    )
-    return dict(session.state) if session and getattr(session, "state", None) else dict(state_delta)
 
 
 async def _run_ledgr_tools(
@@ -122,8 +120,6 @@ async def _run_ledgr_tools(
     bare state context (no ADK artifact access), so we read from disk rather than
     recover the saved artifact via ``ctx.load_artifact``.
     """
-    from accounting_agents.slack_runner import _apply_state_delta, _ensure_session
-
     await _ensure_session(runner, app_name, user_id, session_id)
     await _apply_state_delta(runner, app_name, user_id, session_id, state_delta)
     session = await runner.session_service.get_session(
@@ -133,12 +129,12 @@ async def _run_ledgr_tools(
     )
     state = dict(session.state) if session and getattr(session, "state", None) else dict(state_delta)
     ctx = SimpleNamespace(state=state)
-    read_out = read_doc(ctx, paths=[doc_path] if doc_path else [])
+    read_out = await asyncio.to_thread(read_doc, ctx, paths=[doc_path] if doc_path else [])
     status = str(read_out.get("status") or "error")
     if status != "success":
         return read_out
 
-    build_out = build_sheets(ctx)
+    build_out = await asyncio.to_thread(build_sheets, ctx)
     await _apply_state_delta(
         runner,
         app_name,
@@ -170,20 +166,10 @@ async def deliver_workbook(
 ) -> dict[str, Any]:
     """Append workbook rows to the FY ledger and post a summary delivery card.
 
-    Also records a per-document ``processing_log`` entry (so the chat lane can
-    introspect deliveries — Phase 1/2 thread-context). When
-    ``defer_slack_delivery`` is set (batch mode), ledger writes and the rich
+    When ``defer_slack_delivery`` is set (batch mode), ledger writes and the rich
     card are deferred; payloads are stashed under ``append["deferred_ledger"]``
     and ``append["deferred_delivery"]`` for the batch coordinator.
     """
-    from accounting_agents.credit_delivery import (
-        charge_delivery_credits,
-        resolve_firm_id_from_client,
-        resolve_firm_id_from_state,
-    )
-    from accounting_agents.slack_runner import _post_delivery_card, _record_processing_log
-    from ledgr_agent.billing import _charge_disabled
-
     session = await runner.session_service.get_session(
         app_name=app_name,
         user_id=user_id,
@@ -206,6 +192,12 @@ async def deliver_workbook(
     if not batches:
         return {"status": "error", "message": "workbook produced no rows"}
 
+    effective_replace = ledger_replace_for_batches(
+        ledger_store,
+        client_id=payload["client_id"],
+        fy=str(payload.get("fy") or "unknown"),
+        batches=batches,
+    )
     summary = compose_delivery_summary(workbook, payload)
 
     if defer_slack_delivery:
@@ -214,7 +206,7 @@ async def deliver_workbook(
                 "summary": summary,
                 "batches": batches,
                 "payload": payload,
-                "effective_replace": False,
+                "effective_replace": effective_replace,
             },
             "kind": payload.get("kind") or "invoice",
             "software": payload.get("software") or "qbs",
@@ -226,6 +218,7 @@ async def deliver_workbook(
             "batches": batches,
             "payload": payload,
             "workbook_name": "",
+            "effective_replace": effective_replace,
         }
     else:
         append_result = await _append_workbook_batches(
@@ -236,8 +229,13 @@ async def deliver_workbook(
             channel_id=channel_id,
         )
         if not append_result.get("all_deduped"):
-            if _charge_disabled():
-                firm_id = resolve_firm_id_from_state(state)
+            credits_block = workbook.get("credits") or {}
+            should_charge = _charge_disabled() or (
+                isinstance(credits_block, dict)
+                and credits_block.get("credit_status") == "estimated"
+            )
+            if should_charge:
+                firm_id = resolve_firm_id_from_state({**state, **profile_delta})
                 if firm_id is None and client_store is not None:
                     try:
                         ctx = client_store.get_by_channel(channel_id)
@@ -254,7 +252,7 @@ async def deliver_workbook(
                     channel_id=channel_id,
                     file_id=file_id,
                     kind=str(payload.get("kind") or "invoice"),
-                    payload=payload,
+                    payload={**payload, "input_page_count": state.get("input_page_count")},
                     append_result=append_result,
                     input_page_count=state.get("input_page_count"),
                 )
@@ -270,9 +268,6 @@ async def deliver_workbook(
             thread_ts=thread_ts,
         )
 
-    # Per-document audit log so the chat lane can resolve thread replies back to
-    # the specific delivery the user is asking about (delivery_message_ts links
-    # the card's parent message; channel_id scopes the lookup).
     if client_store is not None and not append_result.get("all_deduped"):
         try:
             _record_processing_log(
@@ -318,16 +313,6 @@ async def process_file_via_ledgr_agent(
     defer_slack_delivery: bool = False,
 ) -> dict[str, Any]:
     """Download-free file bytes → ledgr tools → FY workbook delivery."""
-    from accounting_agents.credit_delivery import credit_block_message
-    from accounting_agents.slack_runner import (
-        _add_reaction,
-        _post_message,
-        _remove_reaction,
-        _simple_status_blocks,
-        _update_status,
-    )
-    from ledgr_agent.internal.gemini import mime_for
-
     artifact_name = artifact_name_for(file_id)
     artifact_mime = mime_for(source_filename)
     if artifact_mime == "application/octet-stream":
@@ -354,8 +339,6 @@ async def process_file_via_ledgr_agent(
         input_page_count=input_page_count,
     )
 
-    # Stage the bytes on disk so read_doc can read them directly: the lean Slack
-    # shortcut hands tools a bare state context with no ADK artifact access.
     fd, doc_path = tempfile.mkstemp(
         prefix="ledgr_", suffix=os.path.splitext(source_filename)[1] or ".pdf"
     )
@@ -380,56 +363,55 @@ async def process_file_via_ledgr_agent(
     if status == "blocked":
         credits = tool_result.get("credits") or {}
         remaining = credits.get("credits_remaining")
-        block_reason = (
-            "insufficient_credit"
-            if isinstance(remaining, int) and remaining > 0
-            else "zero_credit"
-        )
-        user_msg = credit_block_message({"reason": block_reason, "credits_remaining": remaining})
-        if stage_state is not None:
-            stage_state.mark_failed("understand", "Out of credits")
-        _update_status(
+        if (
+            credits.get("credit_status") == "blocked"
+            and isinstance(remaining, int)
+            and remaining > 0
+        ):
+            block_reason = "insufficient_credit"
+        else:
+            block_reason = (
+                "insufficient_credit"
+                if isinstance(remaining, int) and remaining > 0
+                else "zero_credit"
+            )
+        user_msg = credit_block_message({
+            "reason": block_reason,
+            "credits_remaining": remaining,
+        })
+        return _fail_doc(
             slack_client,
             channel_id,
-            status_ts,
-            "❌ Out of credits",
-            blocks=_simple_status_blocks("❌ Out of credits"),
+            source_filename=source_filename,
+            status_headline="❌ Out of credits",
+            user_message=user_msg,
+            return_status="blocked",
+            stage_state=stage_state,
+            stage_error="Out of credits",
+            status_ts=status_ts,
+            upload_msg_ts=upload_msg_ts,
+            thread_ts=thread_ts,
+            file_id=file_id,
+            extra_return={"tool_result": tool_result},
         )
-        _post_message(slack_client, channel_id, user_msg, thread_ts=thread_ts)
-        _remove_reaction(slack_client, channel_id, upload_msg_ts, "eyes")
-        _add_reaction(slack_client, channel_id, upload_msg_ts, "x")
-        return {
-            "status": "blocked",
-            "channel_id": channel_id,
-            "file_id": file_id,
-            "tool_result": tool_result,
-        }
 
     if status == "error":
         detail = str(tool_result.get("message") or "processing failed")
-        if stage_state is not None:
-            stage_state.mark_failed("understand", detail)
-        _update_status(
+        return _fail_doc(
             slack_client,
             channel_id,
-            status_ts,
-            "❌ Processing failed",
-            blocks=_simple_status_blocks("❌ Processing failed"),
-        )
-        _post_message(
-            slack_client,
-            channel_id,
-            f"Sorry, I couldn't process `{source_filename}` — {detail}.",
+            source_filename=source_filename,
+            status_headline="❌ Processing failed",
+            user_message=f"Sorry, I couldn't process `{source_filename}` — {detail}.",
+            return_status="error",
+            stage_state=stage_state,
+            stage_error=detail,
+            status_ts=status_ts,
+            upload_msg_ts=upload_msg_ts,
             thread_ts=thread_ts,
+            file_id=file_id,
+            extra_return={"tool_result": tool_result},
         )
-        _remove_reaction(slack_client, channel_id, upload_msg_ts, "eyes")
-        _add_reaction(slack_client, channel_id, upload_msg_ts, "x")
-        return {
-            "status": "error",
-            "channel_id": channel_id,
-            "file_id": file_id,
-            "tool_result": tool_result,
-        }
 
     delivery = await deliver_workbook(
         runner=runner,
@@ -471,7 +453,5 @@ async def process_file_via_ledgr_agent(
         "channel_id": channel_id,
         "file_id": file_id,
         "delivery": delivery,
-        # The batch coordinator reads result["append"]["deferred_delivery"] to
-        # stash per-doc rows for a single aggregate card at batch end.
         "append": delivery.get("append") or {},
     }

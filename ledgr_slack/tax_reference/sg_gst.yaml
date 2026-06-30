@@ -1,0 +1,112 @@
+# Singapore GST taxonomy — drives per-line tax-code classification and target-system mapping.
+tax_system: GST
+home_country: SG
+registration_threshold:
+  amount: 1000000
+  currency: SGD
+  label: "SG GST registration (s.40B GST Act)"
+# Source: docs/research/sg-gst-tax-codes.md (IRAS General Guide for Businesses 17th Ed.;
+# List of International Services, GST Act s.21(3)). Rate by time-of-supply; code STRING by treatment.
+
+# Standard rate by invoice date (time of supply). 9% from 2024-01-01.
+rate_by_date:
+  - { from: "2007-07-01", to: "2022-12-31", rate: 0.07 }
+  - { from: "2023-01-01", to: "2023-12-31", rate: 0.08 }
+  - { from: "2024-01-01", to: null,         rate: 0.09 }
+
+# Canonical treatments (the agent's internal codes).
+treatments:
+  SR: { name: "Standard-Rated", claimable: true,  zero_rate: false }
+  ZR: { name: "Zero-Rated",     claimable: true,  zero_rate: true  }
+  ES: { name: "Exempt",         claimable: false, zero_rate: true  }
+  OS: { name: "Out-of-Scope",   claimable: null,  zero_rate: true  }
+  IM: { name: "Imported/RC",    claimable: null,  zero_rate: true  }
+  NT: { name: "No-Tax",         claimable: false, zero_rate: true  }
+
+# Canonical treatment -> exact target-system tax-code string, by document direction.
+# Xero SG orgs: short codes SR / ZR / No Tax (matches Slack preview + client chart).
+code_map:
+  xero:
+    purchase: { SR: "SR", ZR: "ZR", ES: "No Tax", OS: "No Tax", IM: "No Tax", NT: "No Tax" }
+    sales:    { SR: "SR", ZR: "ZR", ES: "No Tax", OS: "No Tax", NT: "No Tax" }
+  qbs:        # QBS Ledger app — short GST codes
+    purchase: { SR: "TX", ZR: "ZR", ES: "ES", OS: "NT", IM: "IM", NT: "NT" }
+    sales:    { SR: "SR", ZR: "ZR", ES: "ES", OS: "OS", NT: "NT" }
+  # AutoCount (SG) and SQL Account (SG) share the IRAS short-code GST convention
+  # (docs/research/sg-gst-tax-codes.md §7.2). Codes are rate-invariant — the 7/8/9%
+  # variant lives on the GST amount, not the code string (§1). These are the
+  # documented defaults; reconcile against the company's GST code master on first
+  # run (§9.5). Without these blocks an SG client on AutoCount/SQL rendered BLANK
+  # tax codes (hole B.1).
+  autocount:
+    purchase: { SR: "TX", ZR: "ZR", ES: "ES", OS: "NT", IM: "IM", NT: "NT" }
+    sales:    { SR: "SR", ZR: "ZR", ES: "ES", OS: "OS", NT: "NT" }
+  sql_account:
+    purchase: { SR: "TX", ZR: "ZR", ES: "ES", OS: "NT", IM: "IM", NT: "NT" }
+    sales:    { SR: "SR", ZR: "ZR", ES: "ES", OS: "OS", NT: "NT" }
+
+# Signal lexicons (lowercased substring match). Tie-break hints only — the classifier
+# uses these only when no printed tax_keyword and no GST arithmetic reconcile match.
+signals:
+  # GST Act s.21(3) international services + export -> Zero-Rated (ZR).
+  zero_rated:
+    - idd
+    - international call
+    - international roaming
+    - roaming
+    - overseas call
+    - international leased
+    - international freight
+    - air freight
+    - sea freight
+    - ocean freight
+    - airfreight
+    - seafreight
+    - international transport
+    - export
+    - airway bill
+    - bill of lading
+    - shipping (overseas)
+    - international shipping
+    - zero-rated
+    - zero rated
+    - "(zr)"
+    - " zr "
+    - "0%"
+  # Fourth Schedule exempt supplies -> Exempt (ES).
+  exempt:
+    - interest income
+    - loan interest
+    - bank interest
+    - residential rent
+    - residential property
+    - investment precious metal
+    - digital payment token
+    - financial service
+    - exempt
+    - "(es)"
+  # Out-of-scope / no-GST signals.
+  no_tax:
+    - salary
+    - payroll
+    - cpf
+    - government fee
+    - bank transfer
+    - out of scope
+    - "(os)"
+    - "(nt)"
+  # Explicit standard-rated wording.
+  standard_rated:
+    - standard-rated
+    - standard rated
+    - "(sr)"
+    - "(tx)"
+    - gst 9%
+    - gst 8%
+    - gst 7%
+
+# Confidence below this routes the line to human review.
+review:
+  confidence_threshold: 0.8
+  # GST charged but |gst - net*rate| / max(net,1) exceeds this -> flag rate mismatch.
+  rate_tolerance: 0.01

@@ -5,20 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 
-def profile_state_delta(client_store: Any, channel_id: str) -> dict[str, Any]:
-    """Return client profile keys to seed the ledgr_agent session."""
-    ctx = client_store.get_by_channel(channel_id)
-    if ctx is None:
-        return {}
-    delta = ctx.to_state()
-    from accounting_agents.credit_delivery import resolve_firm_id_from_client
-
-    resolved_firm = resolve_firm_id_from_client(ctx)
-    if resolved_firm:
-        delta["firm_id"] = resolved_firm
-    return delta
-
-
 def run_state_delta(
     *,
     channel_id: str,

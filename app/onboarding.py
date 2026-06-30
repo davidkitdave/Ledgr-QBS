@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from accounting_agents.jurisdiction import REGION_REGISTRY
+from ledgr_slack.jurisdiction import REGION_REGISTRY
 
 
 @dataclass
@@ -107,7 +107,7 @@ def profile_doc(
     """Build the spec §1 Firestore profile dict from parsed modal input.
 
     Base currency is derived from ``inp.region`` via ``REGION_REGISTRY``.
-    Defaults: status="pending_coa", category_mapping={}.
+    Defaults: status="active", category_mapping={}.
     """
     base_currency = REGION_REGISTRY[inp.region]["currency"]
     return {
@@ -120,6 +120,6 @@ def profile_doc(
         "gst_registered": inp.gst_registered,
         "region": inp.region,
         "base_currency": base_currency,
-        "status": "pending_coa",
+        "status": "active",
         "category_mapping": {},
     }
