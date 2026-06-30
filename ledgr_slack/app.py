@@ -368,25 +368,27 @@ def build_async_app(
         from ledgr_slack.app_home import publish_app_home
         from ledgr_slack.credit_adapter import wire_shared_credit_service
 
+        sync_client = _sync_client_for(context, client)
         wire_shared_credit_service()
         user_id = str(event.get("user") or "").strip()
         team_id = str(body.get("team_id") or event.get("team") or "").strip()
         if not user_id or not team_id:
             return
-        await publish_app_home(slack_client=client, user_id=user_id, firm_id=team_id)
+        await publish_app_home(slack_client=sync_client, user_id=user_id, firm_id=team_id)
 
     @async_app.action("ledgr_credits_refresh")
     async def _credits_refresh(ack, body, client, context=None):
         from ledgr_slack.app_home import publish_app_home
         from ledgr_slack.credit_adapter import wire_shared_credit_service
 
+        sync_client = _sync_client_for(context, client)
         await ack()
         wire_shared_credit_service()
         user_id = str(body.get("user", {}).get("id") or "").strip()
         team_id = str(body.get("team", {}).get("id") or "").strip()
         if not user_id or not team_id:
             return
-        await publish_app_home(slack_client=client, user_id=user_id, firm_id=team_id)
+        await publish_app_home(slack_client=sync_client, user_id=user_id, firm_id=team_id)
 
     # --- text-question + file-upload handler ---
 

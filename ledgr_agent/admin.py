@@ -37,7 +37,7 @@ def _list_installations() -> list[dict[str, Any]]:
         rows.append(
             {
                 "team_id": team_id,
-                "team_name": str(data.get("team_name") or data.get("team") or {}).get("name", "")
+                "team_name": str(data.get("team_name") or (data.get("team") or {}).get("name", ""))
                 if isinstance(data.get("team"), dict)
                 else str(data.get("team_name") or ""),
                 "installed_at": data.get("installed_at") or data.get("is_enterprise_install"),
