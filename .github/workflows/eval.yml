@@ -29,6 +29,9 @@ jobs:
       - name: Sync dependencies
         run: uv sync --frozen
 
+      - name: Install agents-cli
+        run: uv tool install "google-agents-cli==0.4.0"
+
       - name: Run live eval (skip without creds)
         env:
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
