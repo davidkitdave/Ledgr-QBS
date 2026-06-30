@@ -11,6 +11,14 @@ class _PointerStore:
         return {"seen_doc_keys": list(self._seen)}
 
 
+class _MultiFyPointerStore:
+    def __init__(self, seen_by_fy: dict[str, list[str]]) -> None:
+        self._seen_by_fy = seen_by_fy
+
+    def get_pointer(self, client_id: str, fy: str) -> dict:
+        return {"seen_doc_keys": list(self._seen_by_fy.get(fy, []))}
+
+
 def _commercial_sheet(invoice_number: str, index: int) -> dict:
     return {
         "title": "Purchase",
@@ -143,3 +151,27 @@ def test_ledger_replace_for_batches_false_for_new_doc_key() -> None:
     store = _PointerStore(["Purchase:INV-OLD"])
     batches = [{"doc_key": "Purchase:INV-NEW", "rows": [{"Invoice Number": "INV-NEW"}]}]
     assert ledger_replace_for_batches(store, client_id="c1", fy="2026", batches=batches) is False
+
+
+def test_ledger_replace_for_batches_checks_each_batch_fy_not_payload_fy() -> None:
+    """Re-upload across FYs must replace when a later-FY doc was already seen."""
+    store = _MultiFyPointerStore(
+        {
+            "FY2025": ["Purchase:INV-OLD"],
+            "FY2026": [],
+        }
+    )
+    batches = [
+        {
+            "doc_key": "Purchase:INV-NEW",
+            "fy": "FY2026",
+            "rows": [{"Invoice Number": "INV-NEW"}],
+        },
+        {
+            "doc_key": "Purchase:INV-OLD",
+            "fy": "FY2025",
+            "rows": [{"Invoice Number": "INV-OLD"}],
+        },
+    ]
+    # payload.fy would be FY2026 (first doc); old code only checked FY2026 and missed INV-OLD.
+    assert ledger_replace_for_batches(store, client_id="c1", fy="FY2026", batches=batches) is True
