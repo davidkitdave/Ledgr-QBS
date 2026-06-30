@@ -29,22 +29,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from accounting_agents import nodes
 from accounting_agents.hitl import write_interrupt
 from accounting_agents.ledger_store import SlackLedgerStore
 from accounting_agents.slack_runner import (
     handle_review_action,
-    process_file_event,
 )
 from app.blocks import review_card_blocks, review_hint_modal, review_outcome_blocks
 from app.native_blocks_compat import _reset_for_tests
 from tests._fake_firestore import FakeFirestore
 from tests.test_ledger_store import FakeSlackClient
 from tests.test_slack_runner import (
-    _FakeRunner,
-    _last_blocks,
     _posted_texts,
-    _seeded_client_store,
 )
 
 

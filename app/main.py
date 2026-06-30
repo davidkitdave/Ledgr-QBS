@@ -5,8 +5,8 @@ Run with:
 """
 
 from ledgr_agent.billing import wire_playground_credits
+from ledgr_slack import build_fastapi_app
 
 wire_playground_credits()
-from ledgr_slack import build_fastapi_app
 
 app = build_fastapi_app()

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import pytest
 
 from ledgr_agent.internal.export import build_bank_workbook
 from ledgr_agent.internal.normalize import bank_sheet_title, reconcile_running_balance

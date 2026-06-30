@@ -12,8 +12,6 @@ import os
 from typing import Any
 
 from ledgr_agent.billing import (
-    apply_dev_credit_grants_from_env,
-    configure_durable_credit_service_if_prod,
     credit_gate_decision,
     delivery_idempotency_key as billing_delivery_idempotency_key,
     get_shared_credit_service,

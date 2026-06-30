@@ -373,7 +373,6 @@ def test_process_file_event_completion_appends_ledger_once():
     # non-prod envs so ADK web's FastAPI artifact route matches (the
     # slash in ``inbox/...`` would 404 in dev). Prod keeps the namespaced
     # form for collision safety alongside other artifacts.
-    from accounting_agents import nodes as _nodes
     from ledgr_agent.internal.uploads import artifact_name_for
 
     expected_artifact = artifact_name_for("F1")

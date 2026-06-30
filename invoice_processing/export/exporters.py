@@ -21,7 +21,6 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Optional
 
-import yaml
 from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
 
@@ -35,7 +34,7 @@ from .client_context import EntityMemoryEntry
 from .models import BankStatement, InvoiceLine, NormalizedInvoice
 from .tax_classifier import TaxClassifier, classify_invoice
 
-from ledgr_agent.internal.skill_profiles import ExportSkillError, load_export_skill
+from ledgr_agent.internal.skill_profiles import ExportSkillError as ExportSkillError, load_export_skill
 
 # Preview-only marker for low-confidence COA picks on Slack delivery cards (WS-3.4).
 ACCOUNT_FLAGGED_PREVIEW_MARKER = " ⚠️"

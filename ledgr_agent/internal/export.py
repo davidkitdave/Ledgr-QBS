@@ -3,42 +3,15 @@
 from __future__ import annotations
 
 
-from datetime import date, datetime
-from pathlib import Path
 from typing import Any
 
 from ledgr_agent.internal.normalize import _fmt_date, _num, normalize_bank_statement
 from ledgr_agent.internal.skill_profiles import (
     DEFAULT_SYSTEMS,
-    ExportSkillError,
+    ExportSkillError as ExportSkillError,
     load_export_skill,
     normalize_system_key,
 )
-
-
-def _fmt_date(value: Any) -> str:
-    if value is None or value == "":
-        return ""
-    if isinstance(value, (date, datetime)):
-        return value.strftime("%d/%m/%Y")
-    text = str(value).strip()
-    if not text:
-        return ""
-    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y"):
-        try:
-            return datetime.strptime(text, fmt).strftime("%d/%m/%Y")
-        except ValueError:
-            continue
-    return text
-
-
-def _num(value: Any) -> Any:
-    if value is None or value == "":
-        return ""
-    try:
-        return round(float(value), 2)
-    except (TypeError, ValueError):
-        return value
 
 
 def _doc_sign(document_kind: str) -> int:

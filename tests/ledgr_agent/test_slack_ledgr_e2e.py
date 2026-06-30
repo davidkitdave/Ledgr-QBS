@@ -15,7 +15,7 @@ from accounting_agents.slack_runner import process_file_event
 from app.credit_service import CreditService, InMemoryCreditStore, configure_shared_credit_service
 from ledgr_agent.tools.read_doc import READ_DOC_STATE_KEY
 from tests._fake_firestore import FakeFirestore
-from tests.test_slack_runner import FakeSlackClient, _seeded_client_store
+from tests.test_slack_runner import FakeSlackClient
 from app.native_blocks_compat import _reset_for_tests
 
 
