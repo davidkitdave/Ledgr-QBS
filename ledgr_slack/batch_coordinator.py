@@ -10,6 +10,7 @@ from typing import Any, Optional
 from app.blocks import batch_processing_plan_blocks, job_progress_text, job_summary_text
 
 from ledgr_slack.client_store import _profile_state_delta
+from ledgr_slack.credit_adapter import resolve_firm_id_from_state
 from ledgr_slack.dedup import _seen
 from ledgr_slack.file_event import (
     download_pdf_bytes,
@@ -345,11 +346,13 @@ async def handle_message_file_upload(
         # whenever ``defer_ledger_persist`` was used.
         flush_results: list[dict] = []
         if batch_deferred and ledger_store is not None:
+            flush_firm_id = resolve_firm_id_from_state(batch_profile_delta)
             flush_results = await _flush_deferred_ledger_writes(
                 ledger_store=ledger_store,
                 slack_client=sync_client,
                 channel_id=channel_id,
                 batch_deferred=batch_deferred,
+                firm_id=flush_firm_id,
             )
 
         ledger_appended = sum(int(r.get("appended") or 0) for r in flush_results)

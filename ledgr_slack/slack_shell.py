@@ -217,6 +217,9 @@ async def deliver_workbook(
             "payload": payload,
             "workbook_name": "",
             "effective_replace": effective_replace,
+            "file_id": file_id,
+            "input_page_count": state.get("input_page_count"),
+            "credits": workbook.get("credits") or {},
         }
     else:
         append_result = await _append_workbook_batches(
@@ -335,6 +338,7 @@ async def process_file_via_ledgr_agent(
         artifact_name=artifact_name,
         profile_delta=profile_delta,
         input_page_count=input_page_count,
+        defer_slack_delivery=defer_slack_delivery,
     )
 
     fd, doc_path = tempfile.mkstemp(
@@ -426,6 +430,23 @@ async def process_file_via_ledgr_agent(
         client_store=client_store,
         defer_slack_delivery=defer_slack_delivery,
     )
+    if str(delivery.get("status") or "") != "delivered":
+        detail = str(delivery.get("message") or "delivery failed")
+        return _fail_doc(
+            slack_client,
+            channel_id,
+            source_filename=source_filename,
+            status_headline="❌ Delivery failed",
+            user_message=f"Sorry, I couldn't deliver `{source_filename}` — {detail}.",
+            return_status="error",
+            stage_state=stage_state,
+            stage_error=detail,
+            status_ts=status_ts,
+            upload_msg_ts=upload_msg_ts,
+            thread_ts=thread_ts,
+            file_id=file_id,
+            extra_return={"tool_result": tool_result, "delivery": delivery},
+        )
     if stage_state is not None:
         stage_state.mark_complete(output="Delivered")
     _update_status(

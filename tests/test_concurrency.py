@@ -991,6 +991,71 @@ def test_hitl_second_write_accumulates_via_flush():
     assert len(store.calls[1]["batches"]) == 1
 
 
+def test_flush_deferred_groups_by_batch_fy_not_payload_fy():
+    """Multi-FY docs must flush into separate workbooks even when payload.fy matches."""
+    from unittest.mock import MagicMock
+
+    store = _RecordingLedgerStore()
+    item_fy25 = _invoice_deferred(
+        doc_key="F-mfy:Purchase:INV-25",
+        date="2026-01-10",
+        invoice_number="INV-25",
+    )
+    item_fy25["batches"][0]["fy"] = "FY2025"
+    item_fy26 = _invoice_deferred(
+        doc_key="F-mfy:Purchase:INV-26",
+        date="2026-02-15",
+        invoice_number="INV-26",
+    )
+    item_fy26["batches"][0]["fy"] = "FY2026"
+
+    asyncio.run(
+        _flush_deferred_ledger_writes(
+            ledger_store=store,
+            slack_client=MagicMock(),
+            channel_id="C-mfy",
+            batch_deferred=[item_fy25, item_fy26],
+        )
+    )
+
+    assert len(store.calls) == 2
+    flushed_fys = {call["fy"] for call in store.calls}
+    assert flushed_fys == {"FY2025", "FY2026"}
+
+
+def test_flush_deferred_charges_slack_owned_billing(monkeypatch):
+    """Batch-end flush deducts credits when in-tool billing is disabled."""
+    from unittest.mock import MagicMock
+
+    from ledgr_agent.billing import CreditService, InMemoryCreditStore, configure_shared_credit_service
+
+    monkeypatch.setenv("LEDGR_DISABLE_IN_TOOL_CHARGE", "1")
+    svc = CreditService(InMemoryCreditStore())
+    svc.ensure_firm("T-flush")
+    svc.grant("T-flush", 5, note="trial")
+    configure_shared_credit_service(svc)
+
+    deferred = _invoice_deferred(
+        doc_key="F-charge:Purchase:INV-1",
+        date="2026-01-10",
+        invoice_number="INV-1",
+    )
+    deferred["file_id"] = "F-charge"
+    deferred["credits"] = {"credit_status": "estimated"}
+
+    asyncio.run(
+        _flush_deferred_ledger_writes(
+            ledger_store=_RecordingLedgerStore(),
+            slack_client=MagicMock(),
+            channel_id="C-charge",
+            batch_deferred=[deferred],
+            firm_id="T-flush",
+        )
+    )
+
+    assert svc.read_balance("T-flush") == 4
+
+
 # ------------------------------------------------------------------ (6) gather exception safety
 
 

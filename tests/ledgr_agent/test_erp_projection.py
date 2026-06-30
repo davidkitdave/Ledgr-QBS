@@ -176,6 +176,40 @@ def test_project_tax_bucket_rows_map_description_and_tax_fields() -> None:
     assert rows[1]["Tax Amount"] == 0.0
 
 
+def test_build_sheets_soa_does_not_inflate_credit_units() -> None:
+    """SOA pages are skipped for export and must not add to the credit estimate."""
+    from types import SimpleNamespace
+
+    from ledgr_agent.billing import CreditService, InMemoryCreditStore, configure_shared_credit_service
+    from ledgr_agent.tools.read_doc import READ_DOC_STATE_KEY
+
+    configure_shared_credit_service(CreditService(InMemoryCreditStore()))
+    ctx = SimpleNamespace(
+        state={
+            "firm_id": "T_TEST",
+            "channel_id": "C1",
+            "file_id": "F1",
+            "defer_slack_delivery": True,
+            READ_DOC_STATE_KEY: {
+                "file_kind": "commercial_documents",
+                "source_path": "mixed.pdf",
+                "page_count": 1,
+                "documents": [
+                    {
+                        "document_kind": "statement_of_account",
+                        "lines": [{"description": "IA-001", "net_amount": 100.0}],
+                    },
+                    PURCHASE_DOC,
+                ],
+            },
+        }
+    )
+    result = build_sheets(ctx)
+    assert result["status"] == "success"
+    assert result["credits"]["credits_estimated"] == 1
+    assert result["credits"]["credit_status"] == "estimated"
+
+
 def test_build_sheets_skips_statement_of_account() -> None:
     from types import SimpleNamespace
 

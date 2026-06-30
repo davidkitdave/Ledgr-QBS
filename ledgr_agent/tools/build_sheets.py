@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from ledgr_agent.billing import billable_units, charge as billing_charge, delivery_idempotency_key
+from ledgr_agent.billing import (
+    billable_units,
+    charge as billing_charge,
+    delivery_idempotency_key,
+    get_shared_credit_service,
+    resolve_firm_id,
+)
+from ledgr_agent.internal.schemas import CreditSummary
 from ledgr_agent.internal.delivery_tags import (
     build_delivery_tags,
     document_sheet_meta,
@@ -55,17 +62,49 @@ def _bank_sheets_from_statement(statement: dict[str, Any]) -> list[dict[str, Any
     return list(built.get("sheets") or [])
 
 
+def _postable_commercial_documents(read_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        doc
+        for doc in (read_payload.get("documents") or [])
+        if isinstance(doc, dict)
+        and (doc.get("document_kind") or "").strip().lower() != "statement_of_account"
+    ]
+
+
 def _resolve_credit_units(read_payload: dict[str, Any]) -> int:
     stored = read_payload.get("credit_units")
     if stored is not None:
         return max(int(stored), 1)
     file_kind = read_payload.get("file_kind") or "commercial_documents"
     page_count = int(read_payload.get("page_count") or 1)
-    document_count = int(read_payload.get("document_count") or len(read_payload.get("documents") or []))
+    if file_kind == "commercial_documents":
+        document_count = len(_postable_commercial_documents(read_payload))
+    else:
+        document_count = int(
+            read_payload.get("document_count") or len(read_payload.get("documents") or [])
+        )
     return billable_units(
         file_kind=file_kind,
         page_count=page_count,
         document_count=document_count,
+    )
+
+
+def _estimate_credits(tool_context: Any, *, units: int) -> CreditSummary:
+    firm_id = resolve_firm_id(tool_context)
+    if not firm_id:
+        return CreditSummary(
+            credits_estimated=units,
+            credits_used=0,
+            credits_remaining=None,
+            credit_status="not_billable",
+        )
+    balance = get_shared_credit_service().read_balance(firm_id)
+    return CreditSummary(
+        credits_estimated=units,
+        credits_used=0,
+        credits_remaining=balance,
+        credit_status="estimated",
     )
 
 
@@ -114,12 +153,7 @@ def build_sheets(
             return {"status": "error", "message": "read_doc has no bank accounts"}
         sheets = _bank_sheets_from_statement(read_payload)
     else:
-        all_documents = read_payload.get("documents") or []
-        documents = [
-            doc
-            for doc in all_documents
-            if (doc.get("document_kind") or "").strip().lower() != "statement_of_account"
-        ]
+        documents = _postable_commercial_documents(read_payload)
         if not documents:
             return {
                 "status": "error",
@@ -149,12 +183,16 @@ def build_sheets(
                 "message": "no commercial documents with line items to book",
             }
 
-    credits = billing_charge(
-        tool_context,
-        units=credit_units,
-        file_id=billing_file_id,
-        kind=charge_kind,
-    )
+    defer_billing = bool(state_plain.get("defer_slack_delivery"))
+    if defer_billing:
+        credits = _estimate_credits(tool_context, units=credit_units)
+    else:
+        credits = billing_charge(
+            tool_context,
+            units=credit_units,
+            file_id=billing_file_id,
+            kind=charge_kind,
+        )
 
     delivery = build_delivery_tags(
         read_payload=read_payload,

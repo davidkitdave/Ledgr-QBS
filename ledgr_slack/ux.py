@@ -28,8 +28,13 @@ from ledgr_slack.export.exporters import (
     normalize_software_key,
 )
 
+from ledgr_agent.billing import _charge_disabled
 from ledgr_slack.config import _env_prefix
-from ledgr_slack.credit_adapter import credit_footer_block
+from ledgr_slack.credit_adapter import (
+    charge_delivery_credits,
+    credit_footer_block,
+    delivery_charge_units,
+)
 from ledgr_slack.ledger_store import SlackLedgerStore
 
 logger = logging.getLogger(__name__)
@@ -610,6 +615,7 @@ async def _flush_deferred_ledger_writes(
     slack_client: Any,
     channel_id: str,
     batch_deferred: list[dict],
+    firm_id: str | None = None,
 ) -> list[dict]:
     """Merge stashed ledger payloads across the batch and write the workbook ONCE.
 
@@ -627,35 +633,40 @@ async def _flush_deferred_ledger_writes(
     Errors here are non-fatal: the delivery message still posts; the workbook
     may simply miss the late write until a later file drop re-runs the same FY.
     """
-    # Group deferred_ledger entries by (client_id, fy, software, kind).
-    # ``client_id`` and ``software`` may be missing on some payloads; fall back
-    # to the "hint" values collected on the result for that doc.
+    # Group deferred payloads by (client_id, fy, software, kind). Each batch
+    # carries its own ``fy`` from ``document_sheet_meta``; never merge unlike FYs.
     groups: dict[tuple[str, str, str, str], dict] = {}
-    for item in batch_deferred:
+    item_group_keys: dict[int, set[tuple[str, str, str, str]]] = {}
+    for item_index, item in enumerate(batch_deferred):
         payload = item.get("payload") or {}
         client_id = payload.get("client_id") or "unknown"
-        fy = str(payload.get("fy") or "unknown")
         software = payload.get("software") or ""
         kind = payload.get("kind") or "invoice"
-        key = (client_id, fy, software, kind)
-        grp = groups.setdefault(
-            key,
-            {
-                "client_id": client_id,
-                "fy": fy,
-                "software": software,
-                "kind": kind,
-                "client_name": payload.get("client_name") or "",
-                "batches": [],
-                "effective_replace": False,
-            },
-        )
-        # Concatenate this doc's batches into the group. The ledger store
-        # dedupes on doc_key, so even if we re-stash the same doc_id twice
-        # (rare) it won't double-write.
-        grp["batches"].extend(item.get("batches") or [])
-        if item.get("effective_replace"):
-            grp["effective_replace"] = True
+        item_keys: set[tuple[str, str, str, str]] = set()
+        batches = item.get("batches") or []
+        if not batches:
+            continue
+        for batch in batches:
+            fy = str(batch.get("fy") or payload.get("fy") or "unknown")
+            key = (client_id, fy, software, kind)
+            item_keys.add(key)
+            grp = groups.setdefault(
+                key,
+                {
+                    "client_id": client_id,
+                    "fy": fy,
+                    "software": software,
+                    "kind": kind,
+                    "client_name": payload.get("client_name") or "",
+                    "batches": [],
+                    "effective_replace": False,
+                    "items": [],
+                },
+            )
+            grp["batches"].append(batch)
+            if item.get("effective_replace"):
+                grp["effective_replace"] = True
+        item_group_keys[item_index] = item_keys
 
     if not groups:
         return []
@@ -664,6 +675,12 @@ async def _flush_deferred_ledger_writes(
     for grp in groups.values():
         if not grp["batches"]:
             continue
+        group_key = (grp["client_id"], grp["fy"], grp["software"], grp["kind"])
+        contributors = [
+            batch_deferred[idx]
+            for idx, keys in item_group_keys.items()
+            if group_key in keys
+        ]
         try:
             append_result = await asyncio.to_thread(
                 ledger_store.append_rows,
@@ -683,21 +700,85 @@ async def _flush_deferred_ledger_writes(
                 grp["client_id"], grp["fy"], grp["kind"],
             )
             continue
-        flush_results.append(append_result or {})
-        workbook_name = (append_result or {}).get("filename") or ""
+        append_result = append_result or {}
+        flush_results.append(append_result)
+        _charge_deferred_batch_items(
+            contributors=contributors,
+            append_result=append_result,
+            channel_id=channel_id,
+            firm_id=firm_id,
+        )
+        workbook_name = append_result.get("filename") or ""
         if not workbook_name:
             continue
-        # Back-patch the resolved workbook name onto every deferred delivery
-        # entry that belongs to this (client, fy) group.
-        for item in batch_deferred:
+        for item in contributors:
             payload = item.get("payload") or {}
-            if (
-                (payload.get("client_id") or "unknown") == grp["client_id"]
-                and str(payload.get("fy") or "unknown") == grp["fy"]
-                and (payload.get("kind") or "invoice") == grp["kind"]
-            ):
+            item_fys = {
+                str(batch.get("fy") or payload.get("fy") or "unknown")
+                for batch in (item.get("batches") or [])
+            }
+            if grp["fy"] in item_fys:
                 item["workbook_name"] = workbook_name
     return flush_results
+
+
+def _charge_deferred_batch_items(
+    *,
+    contributors: list[dict],
+    append_result: dict,
+    channel_id: str,
+    firm_id: str | None,
+) -> None:
+    """Deduct credits after a successful batch-end flush (ADR-0016)."""
+    if not firm_id or not contributors:
+        return
+
+    total_appended = int(append_result.get("appended") or 0)
+    all_deduped = total_appended <= 0 and int(append_result.get("deduped") or 0) > 0
+    remaining_units = total_appended
+
+    for item in contributors:
+        payload = item.get("payload") or {}
+        credits_block = item.get("credits") or {}
+        should_charge = _charge_disabled() or credits_block.get("credit_status") == "estimated"
+        if not should_charge:
+            continue
+
+        file_id = str(item.get("file_id") or payload.get("file_id") or "").strip()
+        if not file_id:
+            continue
+
+        row_count = sum(len(b.get("rows") or []) for b in (item.get("batches") or []))
+        if row_count <= 0:
+            continue
+
+        if all_deduped or remaining_units <= 0:
+            item_append = {"appended": 0, "all_deduped": True}
+        elif len(contributors) == 1:
+            item_append = append_result
+            remaining_units = 0
+        else:
+            item_append = {"appended": 1, "all_deduped": False}
+            remaining_units -= 1
+
+        units = delivery_charge_units(
+            kind=str(payload.get("kind") or "invoice"),
+            payload={**payload, "input_page_count": item.get("input_page_count")},
+            append_result=item_append,
+            input_page_count=item.get("input_page_count"),
+        )
+        if units <= 0:
+            continue
+
+        charge_delivery_credits(
+            firm_id=firm_id,
+            channel_id=channel_id,
+            file_id=file_id,
+            kind=str(payload.get("kind") or "invoice"),
+            payload={**payload, "input_page_count": item.get("input_page_count")},
+            append_result=item_append,
+            input_page_count=item.get("input_page_count"),
+        )
 
 def _simple_status_blocks(text: str) -> list[dict]:
     return [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
