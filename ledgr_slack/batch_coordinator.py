@@ -358,6 +358,7 @@ async def handle_message_file_upload(
 
         ledger_appended = sum(int(r.get("appended") or 0) for r in flush_results)
         ledger_deduped = sum(int(r.get("deduped") or 0) for r in flush_results)
+        flush_failures = sum(1 for r in flush_results if r.get("flush_failed"))
 
         # Edit the summary in-place with the final tally (ADR-0007). Always
         # merge delivery preview blocks from extracted rows when the batch
@@ -370,7 +371,13 @@ async def handle_message_file_upload(
                     )
                     if batch_deferred else ("", [])
                 )
-                if delivery_summary:
+                if flush_failures > 0:
+                    final_text = (
+                        ":warning: *Ledger save failed* — your workbook was not updated. "
+                        "Please re-upload your file(s)."
+                    )
+                    agg_blocks = []
+                elif delivery_summary:
                     final_text = delivery_summary
                     if ledger_deduped > 0 and ledger_appended == 0:
                         final_text += " _(workbook unchanged)_"
@@ -451,7 +458,7 @@ async def handle_message_file_upload(
                     )
             # Phase 2 backfill: patch delivery_message_ts onto per-doc log
             # entries written during the batch loop (summary_ts is the thread parent).
-            if batch_file_ids and store is not None:
+            if batch_file_ids and store is not None and flush_failures == 0:
                 profile = store.get_by_channel(channel_id)
                 cid = getattr(profile, "client_id", None) or ""
                 if cid:

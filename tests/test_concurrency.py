@@ -1056,6 +1056,34 @@ def test_flush_deferred_charges_slack_owned_billing(monkeypatch):
     assert svc.read_balance("T-flush") == 4
 
 
+def test_flush_deferred_records_failure_when_append_raises():
+    """append_rows exceptions must surface as flush_failed, not silent empty results."""
+    from unittest.mock import MagicMock
+
+    class _FailingStore:
+        def append_rows(self, **kwargs):  # noqa: ANN003
+            raise RuntimeError("slack upload failed")
+
+    deferred = _invoice_deferred(
+        doc_key="F-fail:Purchase:INV-1",
+        date="2026-01-10",
+        invoice_number="INV-1",
+    )
+
+    results = asyncio.run(
+        _flush_deferred_ledger_writes(
+            ledger_store=_FailingStore(),
+            slack_client=MagicMock(),
+            channel_id="C-fail",
+            batch_deferred=[deferred],
+        )
+    )
+
+    assert len(results) == 1
+    assert results[0].get("flush_failed") is True
+    assert results[0].get("appended") == 0
+
+
 # ------------------------------------------------------------------ (6) gather exception safety
 
 
