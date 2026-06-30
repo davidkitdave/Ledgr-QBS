@@ -1,0 +1,69 @@
+# Reference-free invoice eval for ledgr_agent (agents-cli / ADK).
+# JSON twin: eval_config_ledgr_light.json (ADK AgentEvaluator loads JSON).
+
+criteria:
+  rubric_based_tool_use_quality_v1:
+    threshold: 1.0
+    judge_model_options:
+      judge_model: gemini-2.5-flash
+      num_samples: 3
+    rubrics:
+      - rubric_id: read_doc_called
+        rubric_content:
+          text_property: The agent called the read_doc tool.
+      - rubric_id: build_sheets_after_read
+        rubric_content:
+          text_property: The agent called build_sheets after read_doc.
+  hallucinations_v1:
+    threshold: 0.8
+    judge_model_options:
+      judge_model: gemini-2.5-flash
+      num_samples: 3
+  extraction_self_consistency:
+    threshold: 1.0
+  extraction_faithfulness:
+    threshold: 0.8
+  extraction_classification:
+    threshold: 1.0
+  extraction_bookable_granularity:
+    threshold: 1.0
+  extraction_itemized_fidelity:
+    threshold: 1.0
+  extraction_tax_bucket_fidelity:
+    threshold: 1.0
+
+metrics_to_run:
+  - rubric_based_tool_use_quality_v1
+  - hallucinations_v1
+  - extraction_self_consistency
+  - extraction_faithfulness
+  - extraction_classification
+  - extraction_bookable_granularity
+  - extraction_itemized_fidelity
+  - extraction_tax_bucket_fidelity
+
+custom_metrics:
+  extraction_self_consistency:
+    code_config:
+      name: ledgr_agent.eval.ledgr_light_metrics.extraction_self_consistency
+    description: Arithmetic self-consistency on read_doc output (reference-free).
+  extraction_faithfulness:
+    code_config:
+      name: ledgr_agent.eval.ledgr_light_metrics.extraction_faithfulness
+    description: LLM judge reads source PDF + extraction (reference-free).
+  extraction_classification:
+    code_config:
+      name: ledgr_agent.eval.ledgr_light_metrics.extraction_classification
+    description: Model correctly identifies file_kind and document_kind (data-driven).
+  extraction_bookable_granularity:
+    code_config:
+      name: ledgr_agent.eval.ledgr_light_metrics.extraction_bookable_granularity
+    description: Hierarchy-scope cases must not over-extract supporting detail rows.
+  extraction_itemized_fidelity:
+    code_config:
+      name: ledgr_agent.eval.ledgr_light_metrics.extraction_itemized_fidelity
+    description: Itemized-scope cases must not collapse printed product lines.
+  extraction_tax_bucket_fidelity:
+    code_config:
+      name: ledgr_agent.eval.ledgr_light_metrics.extraction_tax_bucket_fidelity
+    description: Tax-bucket cases must emit SR+ZR rows with Xero-style descriptions.
