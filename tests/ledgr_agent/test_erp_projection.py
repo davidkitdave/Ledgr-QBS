@@ -41,7 +41,7 @@ PURCHASE_DOC = {
 
 CREDIT_NOTE_DOC = {
     **PURCHASE_DOC,
-    "document_kind": "credit_note",
+    "document_kind": "other",
     "invoice_number": "CN-2001",
 }
 
@@ -113,12 +113,147 @@ def test_project_all_four_erps_purchase_invoice() -> None:
     assert sql_row["_AMOUNT"] == 100.0
 
 
-def test_credit_note_sign_flips_amounts() -> None:
+def test_other_document_kind_reads_amounts_as_printed() -> None:
     out = project(CREDIT_NOTE_DOC, systems=["qbs"])
     row = out["results"]["qbs"]["rows"][0]
-    assert row["Sub Total"] == -100.0
-    assert row["Tax Amount"] == -9.0
-    assert row["Total Amount"] == -109.0
+    assert row["Sub Total"] == 100.0
+    assert row["Tax Amount"] == 9.0
+    assert row["Total Amount"] == 109.0
+
+
+def test_project_populates_tax_code_from_tax_treatment() -> None:
+    doc = {
+        **PURCHASE_DOC,
+        "lines": [
+            {
+                **PURCHASE_DOC["lines"][0],
+                "tax_treatment": "Standard-Rated 9%",
+            }
+        ],
+    }
+    out = project(doc, systems=["qbs", "xero"])
+    assert out["results"]["qbs"]["rows"][0]["Tax Treatment"] == "Standard-Rated 9%"
+    assert out["results"]["xero"]["rows"][0]["*TaxType"] == "Standard-Rated 9%"
+
+
+TAX_BUCKET_DOC = {
+    "doc_type": "purchase",
+    "document_kind": "invoice",
+    "line_grain": "summary",
+    "vendor_name": "Fictional Telco Pte Ltd",
+    "invoice_number": "TEL-SRZR-001",
+    "invoice_date": "2026-06-20",
+    "currency": "SGD",
+    "subtotal": 1200.0,
+    "tax_total": 99.0,
+    "grand_total": 1299.0,
+    "lines": [
+        {
+            "description": "Telephone charges (SR)",
+            "net_amount": 1100.0,
+            "tax_amount": 99.0,
+            "tax_treatment": "Standard-Rated 9%",
+        },
+        {
+            "description": "Telephone charges (ZR)",
+            "net_amount": 100.0,
+            "tax_amount": 0.0,
+            "tax_treatment": "Zero-Rated 0%",
+        },
+    ],
+}
+
+
+def test_project_tax_bucket_rows_map_description_and_tax_fields() -> None:
+    out = project(TAX_BUCKET_DOC, systems=["qbs"])
+    rows = out["results"]["qbs"]["rows"]
+    assert len(rows) == 2
+    assert rows[0]["Description"] == "Telephone charges (SR)"
+    assert rows[0]["Tax Treatment"] == "Standard-Rated 9%"
+    assert rows[0]["Tax Amount"] == 99.0
+    assert rows[1]["Description"] == "Telephone charges (ZR)"
+    assert rows[1]["Tax Treatment"] == "Zero-Rated 0%"
+    assert rows[1]["Tax Amount"] == 0.0
+
+
+def test_build_sheets_skips_statement_of_account() -> None:
+    from types import SimpleNamespace
+
+    from ledgr_agent.billing import CreditService, InMemoryCreditStore, configure_shared_credit_service
+    from ledgr_agent.tools.read_doc import READ_DOC_STATE_KEY
+
+    configure_shared_credit_service(CreditService(InMemoryCreditStore()))
+    soa_doc = {
+        "document_kind": "statement_of_account",
+        "vendor_name": "Fictional Supplies Sdn Bhd",
+        "lines": [{"description": "IA-001", "net_amount": 100.0}],
+    }
+    ctx = SimpleNamespace(
+        state={
+            "firm_id": "T_TEST",
+            READ_DOC_STATE_KEY: {
+                "file_kind": "commercial_documents",
+                "source_path": "soa.pdf",
+                "documents": [soa_doc, PURCHASE_DOC],
+            },
+        }
+    )
+    result = build_sheets(ctx)
+    assert result["status"] == "success"
+    assert result["sheet_count"] == 4
+
+
+def test_build_sheets_keeps_credit_note_postable() -> None:
+    from types import SimpleNamespace
+
+    from ledgr_agent.billing import CreditService, InMemoryCreditStore, configure_shared_credit_service
+    from ledgr_agent.tools.read_doc import READ_DOC_STATE_KEY
+
+    configure_shared_credit_service(CreditService(InMemoryCreditStore()))
+    credit_doc = {
+        "document_kind": "credit_note",
+        "vendor_name": "Fictional Audio Sdn Bhd",
+        "invoice_number": "CNA-01",
+        "lines": [{"description": "Speaker C", "net_amount": 50.0, "total_amount": 50.0}],
+    }
+    ctx = SimpleNamespace(
+        state={
+            "firm_id": "T_TEST",
+            READ_DOC_STATE_KEY: {
+                "file_kind": "commercial_documents",
+                "source_path": "credit.pdf",
+                "documents": [credit_doc],
+            },
+        }
+    )
+    result = build_sheets(ctx)
+    assert result["status"] == "success"
+    assert result["sheet_count"] == 4
+
+
+def test_build_sheets_rejects_soa_only() -> None:
+    from types import SimpleNamespace
+
+    from ledgr_agent.tools.read_doc import READ_DOC_STATE_KEY
+
+    ctx = SimpleNamespace(
+        state={
+            READ_DOC_STATE_KEY: {
+                "file_kind": "commercial_documents",
+                "source_path": "soa_only.pdf",
+                "documents": [
+                    {
+                        "document_kind": "statement_of_account",
+                        "vendor_name": "Fictional Supplies Sdn Bhd",
+                        "lines": [{"description": "IA-001", "net_amount": 100.0}],
+                    }
+                ],
+            },
+        }
+    )
+    result = build_sheets(ctx)
+    assert result["status"] == "error"
+    assert "statement of account" in result["message"]
 
 
 def test_build_sheets_tool_success() -> None:
@@ -182,13 +317,35 @@ AUDITAIR_LIKE_DOC = {
 }
 
 
-def test_auditair_like_partial_line_uses_total_as_net_and_header_tax() -> None:
-    """Auditair-shaped doc: line net/tax null but total_amount + header tax present."""
+def test_partial_line_without_net_or_tax_uses_line_total_amount() -> None:
+    """When net/tax are missing, per-line total_amount is used (not document grand_total)."""
     out = project(AUDITAIR_LIKE_DOC, systems=["qbs"])
     row = out["results"]["qbs"]["rows"][0]
-    assert row["Sub Total"] == 2800.0
-    assert row["Tax Amount"] == 252.0
+    assert row["Sub Total"] == 0.0
+    assert row["Tax Amount"] == 0.0
     assert row["Total Amount"] == 3052.0
+
+
+def test_multi_line_total_amount_is_per_line_not_invoice_grand_total() -> None:
+    doc = {
+        **PURCHASE_DOC,
+        "grand_total": 500.0,
+        "lines": [
+            {
+                "description": "Line A",
+                "net_amount": 100.0,
+                "tax_amount": 9.0,
+            },
+            {
+                "description": "Line B",
+                "net_amount": 200.0,
+                "tax_amount": 18.0,
+            },
+        ],
+    }
+    out = project(doc, systems=["qbs"])
+    rows = out["results"]["qbs"]["rows"]
+    assert [r["Total Amount"] for r in rows] == [109.0, 218.0]
 
 
 def test_partial_line_does_not_infer_when_multiple_lines() -> None:

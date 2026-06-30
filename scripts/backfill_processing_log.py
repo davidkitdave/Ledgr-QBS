@@ -37,8 +37,8 @@ from dotenv import load_dotenv  # noqa: E402
 load_dotenv(ROOT / ".env")
 os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "FALSE")
 
-from accounting_agents.sessions import FirestoreSessionService  # noqa: E402
-from invoice_processing.export.client_context import (  # noqa: E402
+from ledgr_slack.sessions import FirestoreSessionService  # noqa: E402
+from ledgr_slack.client_context import (  # noqa: E402
     FirestoreClientStore,
 )
 

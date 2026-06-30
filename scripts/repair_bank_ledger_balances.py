@@ -48,8 +48,8 @@ if str(_ROOT) not in sys.path:
 
 from openpyxl import load_workbook  # noqa: E402
 
-from accounting_agents.ledger_store import SlackLedgerStore  # noqa: E402
-from invoice_processing.export.exporters import BankStatementExporter  # noqa: E402
+from ledgr_slack.ledger_store import SlackLedgerStore  # noqa: E402
+from ledgr_slack.export.exporters import BankStatementExporter  # noqa: E402
 
 
 # Legacy column name → current canonical name.

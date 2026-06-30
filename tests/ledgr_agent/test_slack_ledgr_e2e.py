@@ -9,13 +9,14 @@ from unittest.mock import patch
 import pytest
 
 import ledgr_agent.billing as billing
-from accounting_agents.credit_delivery import wire_shared_credit_service
-from accounting_agents.ledger_store import SlackLedgerStore
-from accounting_agents.slack_runner import process_file_event
-from app.credit_service import CreditService, InMemoryCreditStore, configure_shared_credit_service
+from ledgr_slack.credit_adapter import wire_shared_credit_service
+from ledgr_slack.ledger_store import SlackLedgerStore
+from ledgr_slack.app import process_file_event
+from ledgr_agent.billing import CreditService, InMemoryCreditStore, configure_shared_credit_service
 from ledgr_agent.tools.read_doc import READ_DOC_STATE_KEY
 from tests._fake_firestore import FakeFirestore
-from tests.test_slack_runner import FakeSlackClient
+from tests._slack_test_helpers import seeded_client_store
+from tests.test_ledger_store import FakeSlackClient
 from app.native_blocks_compat import _reset_for_tests
 
 
@@ -66,7 +67,7 @@ class _LedgrRunner:
 
 
 def _seeded_store_with_firm(db: FakeFirestore, firm_id: str = "T_TEST"):
-    from invoice_processing.export.client_context import FirestoreClientStore
+    from ledgr_slack.client_context import FirestoreClientStore
 
     profile = {
         "client_id": "c1",
@@ -142,6 +143,72 @@ def test_process_file_event_ledgr_agent_delivers(monkeypatch) -> None:
     assert result["status"] == "delivered"
     assert len(slack.uploads) == 1
     assert slack._posts, "expected delivery summary message"
+
+
+def test_hierarchy_bill_delivers_summary_line_count_not_detail_rows(monkeypatch) -> None:
+    """Slack row count mirrors read_doc lines[] — three bookable rows, not appendix noise."""
+    slack = FakeSlackClient()
+    db = FakeFirestore()
+    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+    runner = _LedgrRunner()
+
+    summary_lines = [
+        {"description": "Internet Services", "net_amount": 169.42, "tax_amount": 0.0},
+        {"description": "Mobile Services", "net_amount": 1041.93, "tax_amount": 0.0},
+        {"description": "Switch Services", "net_amount": 12.0, "tax_amount": 0.0},
+    ]
+
+    def _fake_read(tool_context, paths=None):
+        tool_context.state[READ_DOC_STATE_KEY] = {
+            "file_kind": "commercial_documents",
+            "source_path": "/tmp/telco.pdf",
+            "page_count": 3,
+            "document_count": 1,
+            "credit_units": 1,
+            "documents": [
+                {
+                    "doc_type": "purchase",
+                    "document_kind": "invoice",
+                    "vendor_name": "StarHub Ltd",
+                    "invoice_number": "800448392",
+                    "invoice_date": "2025-12-04",
+                    "currency": "SGD",
+                    "subtotal": 1223.35,
+                    "tax_total": 104.80,
+                    "grand_total": 1328.15,
+                    "lines": summary_lines,
+                }
+            ],
+        }
+        return {"status": "success", "file_kind": "commercial_documents"}
+
+    with patch("ledgr_slack.slack_shell.read_doc", side_effect=_fake_read):
+        result = asyncio.run(
+            process_file_event(
+                runner=runner,
+                ledger_store=store,
+                db=db,
+                slack_client=slack,
+                channel_id="C1",
+                file_id="F-telco-summary",
+                app_name="ledgr_agent",
+                download_fn=lambda c, f: b"%PDF-1.4 fake",
+                source_filename="telco.pdf",
+                client_store=_seeded_store_with_firm(db),
+                thread_ts="1716000000.000201",
+            )
+        )
+
+    assert result["status"] == "delivered"
+    delivery = result.get("delivery") or {}
+    summary = delivery.get("summary") or ""
+    assert "3 line" in summary
+    payload = delivery.get("payload") or {}
+    batches = payload.get("batches") or []
+    row_count = sum(len(b.get("rows") or []) for b in batches)
+    assert row_count == 3
+    for row in batches[0]["rows"]:
+        assert row["Total Amount"] != 1328.15
 
 
 def test_process_file_event_blocked_at_zero_credit(monkeypatch) -> None:

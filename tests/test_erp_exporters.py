@@ -8,13 +8,13 @@ from __future__ import annotations
 from datetime import date
 
 
-from invoice_processing.export.client_context import EntityMemoryEntry
-from invoice_processing.export.code_resolver import (
+from ledgr_slack.client_context import EntityMemoryEntry
+from ledgr_slack.export.code_resolver import (
     resolve_creditor_code,
     resolve_tax_code,
 )
-from invoice_processing.export.categorizer import UNMAPPED_ACCOUNT_CODE
-from invoice_processing.export.exporters import (
+from ledgr_slack.export.exporters import UNMAPPED_ACCOUNT_CODE
+from ledgr_slack.export.exporters import (
     AutoCountExporter,
     QbsLedgerExporter,
     SqlAccountExporter,
@@ -23,8 +23,8 @@ from invoice_processing.export.exporters import (
     get_exporter,
     validate_export_account_code,
 )
-from invoice_processing.export.models import InvoiceLine, NormalizedInvoice, PartyInfo
-from invoice_processing.export.tax_classifier import get_tax_classifier
+from ledgr_slack.export.models import InvoiceLine, NormalizedInvoice, PartyInfo
+from ledgr_slack.export.tax_classifier import get_tax_classifier
 
 
 MY_CLF = get_tax_classifier("my_sst.yaml")

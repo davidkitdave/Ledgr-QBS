@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import logging
 
-from accounting_agents.credit_delivery import apply_dev_credit_grants_from_env, wire_shared_credit_service
-from app.credit_service import get_shared_credit_service
+from ledgr_slack.credit_adapter import apply_dev_credit_grants_from_env, wire_shared_credit_service
+from ledgr_agent.billing import get_shared_credit_service
 
 logger = logging.getLogger(__name__)
 
 
 def test_apply_dev_credit_grants_from_env(monkeypatch) -> None:
-    from app.credit_service import configure_shared_credit_service, CreditService, InMemoryCreditStore
+    from ledgr_agent.billing import configure_shared_credit_service, CreditService, InMemoryCreditStore
 
     store = InMemoryCreditStore()
     configure_shared_credit_service(CreditService(store))
@@ -23,7 +23,7 @@ def test_apply_dev_credit_grants_from_env(monkeypatch) -> None:
 
 
 def test_wire_shared_credit_service_applies_dev_grants(monkeypatch) -> None:
-    from app.credit_service import configure_shared_credit_service, CreditService, InMemoryCreditStore
+    from ledgr_agent.billing import configure_shared_credit_service, CreditService, InMemoryCreditStore
 
     store = InMemoryCreditStore()
     configure_shared_credit_service(CreditService(store))

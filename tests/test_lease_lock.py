@@ -26,12 +26,12 @@ import threading
 import pytest
 from openpyxl import load_workbook
 
-from accounting_agents.lease_lock import (
+from ledgr_slack.lease_lock import (
     DEFAULT_LEASE_SECONDS,
     FirestoreLeaseLock,
     LeaseAcquireTimeout,
 )
-from accounting_agents.ledger_store import SlackLedgerStore
+from ledgr_slack.ledger_store import SlackLedgerStore
 from tests._fake_firestore import FakeFirestore, FakeFirestoreNs
 from tests.test_ledger_store import FakeSlackClient, _row
 

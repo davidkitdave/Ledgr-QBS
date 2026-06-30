@@ -212,9 +212,9 @@ class TestProfileDoc:
         assert doc["region"] == "MALAYSIA"
         assert doc["base_currency"] == "MYR"
 
-    def test_status_pending_coa(self):
+    def test_status_active(self):
         doc = profile_doc(self._inp(), channel_id="C", team_id="T", client_id="x")
-        assert doc["status"] == "pending_coa"
+        assert doc["status"] == "active"
 
     def test_category_mapping_empty_dict(self):
         doc = profile_doc(self._inp(), channel_id="C", team_id="T", client_id="x")

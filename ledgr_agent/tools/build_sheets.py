@@ -17,6 +17,18 @@ from ledgr_agent.tools.read_doc import READ_DOC_STATE_KEY
 WORKBOOK_STATE_KEY = "workbook"
 
 
+def _plain_state(state: Any) -> dict[str, Any]:
+    """ADK ``State`` supports ``__getitem__`` but not ``dict(state)`` — use ``to_dict()``."""
+    if state is None:
+        return {}
+    if isinstance(state, dict):
+        return dict(state)
+    to_dict = getattr(state, "to_dict", None)
+    if callable(to_dict):
+        return to_dict()
+    return {}
+
+
 def _erp_sheets_from_document(document: dict[str, Any], systems: list[str]) -> list[dict[str, Any]]:
     projected = project(document, systems)
     sheets: list[dict[str, Any]] = []
@@ -95,9 +107,17 @@ def build_sheets(
             return {"status": "error", "message": "read_doc has no bank accounts"}
         sheets = _bank_sheets_from_statement(read_payload)
     else:
-        documents = read_payload.get("documents") or []
+        all_documents = read_payload.get("documents") or []
+        documents = [
+            doc
+            for doc in all_documents
+            if (doc.get("document_kind") or "").strip().lower() != "statement_of_account"
+        ]
         if not documents:
-            return {"status": "error", "message": "read_doc has no commercial documents"}
+            return {
+                "status": "error",
+                "message": "read_doc has no postable commercial documents (only statement of account)",
+            }
         profile_software = state.get("software")
         if systems:
             target_systems = systems
@@ -141,7 +161,7 @@ def build_sheets(
     delivery = build_delivery_tags(
         read_payload=read_payload,
         sheets=sheets,
-        state=dict(state),
+        state=_plain_state(state),
         source_path=source_path,
         file_kind=file_kind,
     )
@@ -155,5 +175,28 @@ def build_sheets(
     }
     if file_kind == "commercial_documents":
         result["systems"] = target_systems
+        result["documents_summary"] = [
+            {
+                "invoice_number": doc.get("invoice_number") or "",
+                "vendor_name": doc.get("vendor_name") or "",
+                "invoice_date": doc.get("invoice_date") or "",
+                "currency": doc.get("currency") or "",
+                "subtotal": doc.get("subtotal"),
+                "tax_total": doc.get("tax_total"),
+                "grand_total": doc.get("grand_total"),
+                "document_kind": doc.get("document_kind") or "",
+                "tax_breakdown": [
+                    {
+                        "tax_treatment": comp.get("tax_treatment") or "",
+                        "tax_rate_percent": comp.get("tax_rate_percent"),
+                        "taxable_amount": comp.get("taxable_amount"),
+                        "tax_amount": comp.get("tax_amount"),
+                    }
+                    for comp in (doc.get("tax_breakdown") or [])
+                ],
+            }
+            for doc in (read_payload.get("documents") or [])
+            if (doc.get("document_kind") or "").strip().lower() != "statement_of_account"
+        ]
     state[WORKBOOK_STATE_KEY] = result
     return result

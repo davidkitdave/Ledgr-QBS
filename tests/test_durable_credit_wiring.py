@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import pytest
 
-import accounting_agents.credit_delivery as cd
-from app.credit_service import (
+import ledgr_slack.credit_adapter as cd
+from ledgr_agent.billing import (
     CreditService,
     FirestoreCreditStore,
     InMemoryCreditStore,

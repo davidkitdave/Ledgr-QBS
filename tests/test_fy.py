@@ -1,4 +1,4 @@
-"""Tests for invoice_processing.export.fy — financial-year model.
+"""Tests for ledgr_slack.export.fy — financial-year model.
 
 All cases are from §3 of the design spec
 (docs/superpowers/specs/2026-06-12-ledgr-client-onboarding-fy-routing-design.md).
@@ -7,7 +7,7 @@ All cases are from §3 of the design spec
 import pytest
 from datetime import date
 
-from invoice_processing.export.fy import last_day_of_month, fy_for_date
+from ledgr_slack.export.fy import last_day_of_month, fy_for_date
 
 
 # --------------------------------------------------------------------------- #

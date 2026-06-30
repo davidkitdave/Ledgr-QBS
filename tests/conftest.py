@@ -1,4 +1,4 @@
-"""Pytest configuration for invoice_processing tests."""
+"""Pytest configuration for Ledgr unit tests."""
 
 import os
 import sys

@@ -1,7 +1,7 @@
 software_name: QBS Ledger
 system: qbs
 exporter: builtin
-# Native QBS Ledger format (no tax-code column; Tax Amount carries SR 9% / ZR 0).
+# Native QBS Ledger has no tax-code column; Ledgr adds Tax Treatment for breakdown visibility.
 
 purchase_cols:
   - Invoice Number
@@ -14,6 +14,7 @@ purchase_cols:
   - Currency Rate
   - Sub Total
   - Tax Amount
+  - Tax Treatment
   - Total Amount
   - Account Code / COA
 
@@ -27,6 +28,7 @@ sales_cols:
   - Currency Rate
   - Amount
   - Tax Amount
+  - Tax Treatment
   - Total
   - Account Code / COA
 
@@ -50,6 +52,7 @@ logical_fields:
   Sub Total: sub_total
   Amount: sub_total      # QBS sales: "Amount" carries the line net
   Tax Amount: tax_amount
+  Tax Treatment: tax_code
   Total Amount: total
   Total: total
   Account Code / COA: account_code

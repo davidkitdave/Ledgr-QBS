@@ -45,14 +45,14 @@ REAL_NAMES=(
 # prior eval runs, snapshots of model output, not source of truth.
 # Regenerating them would re-introduce data drift.
 SCAN_DIRS=(
-  "invoice_processing"
-  "accounting_agents"
+  "ledgr_slack"
+  "ledgr_agent"
+  "app"
   "tests"
   "eval"
   "docs/adr"
   "docs/qa"
   "scripts"
-  "app"
 )
 
 # Broader PII patterns. Each entry is a ripgrep regex; matches that
@@ -104,6 +104,7 @@ failures=0
 for name in "${REAL_NAMES[@]}"; do
   # rg gives us file:line:content; we filter out the guard's own file.
   matches=$(rg --no-heading --line-number -t py -t md -t yaml -t json -t sh \
+    -g '!**/archive/**' \
     -e "$name" "${SCAN_DIRS[@]}" 2>/dev/null \
     | rg -v '^scripts/check_no_pii\.sh:' || true)
   if [[ -z "$matches" ]]; then
@@ -143,12 +144,13 @@ done
 # docs that document the test convention. Real UENs registered in
 # Singapore use a year prefix (19xx or 20xx) but real ones also share
 # the same shape, so we restrict the check to source modules
-# (invoice_processing/, accounting_agents/, app/) and config files
+# (ledgr_slack/, ledgr_agent/, app/) and config files
 # (eval/, docs/adr/, scripts/, .github/) where a *real* UEN would
 # leak. The tests/ tree is allowed to carry synthetic UENs.
-matches=$(rg --no-heading --line-number \
+  matches=$(rg --no-heading --line-number \
+  -g '!**/archive/**' \
   -e '\b[0-9]{9}[A-Z]\b' \
-  invoice_processing accounting_agents app eval docs/adr docs/qa scripts 2>/dev/null \
+  ledgr_slack ledgr_agent app eval docs/adr docs/qa scripts 2>/dev/null \
   | rg -v '2000000[0-9]{2}[A-Z]' \
   | rg -v '201234567A' \
   | rg -v '201712345A' \

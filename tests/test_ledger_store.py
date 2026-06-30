@@ -19,7 +19,7 @@ import uuid
 
 from openpyxl import load_workbook
 
-from accounting_agents.ledger_store import SlackLedgerStore
+from ledgr_slack.ledger_store import SlackLedgerStore
 from tests._fake_firestore import FakeFirestore
 
 
@@ -418,7 +418,7 @@ def test_bank_workbook_one_sheet_per_account():
 
 def test_bank_sheet_title_multi_currency_same_account():
     """Multi-currency account 072-955554-5 → 3 distinct 'Bank - 5545 - CCY' titles."""
-    from invoice_processing.export.exporters import bank_sheet_title
+    from ledgr_slack.export.exporters import bank_sheet_title
 
     titles = {
         bank_sheet_title(
@@ -437,7 +437,7 @@ def test_bank_sheet_title_multi_currency_same_account():
 
 def test_bank_sheet_title_strips_llm_packed_digits():
     """bank_name 'OCBC - 5001' + account_number '5001' collapses to 'OCBC - 5001 - SGD'."""
-    from invoice_processing.export.exporters import bank_sheet_title
+    from ledgr_slack.export.exporters import bank_sheet_title
 
     assert bank_sheet_title(
         bank_name="OCBC - 5001", account_number="5001", currency="SGD",
@@ -446,7 +446,7 @@ def test_bank_sheet_title_strips_llm_packed_digits():
 
 def test_bank_sheet_title_falls_back_to_bank_name_digits():
     """If account_number is missing, last4 are pulled from bank_name digits."""
-    from invoice_processing.export.exporters import bank_sheet_title
+    from ledgr_slack.export.exporters import bank_sheet_title
 
     # No " - " separator in bank_name → whole string is the label; last4 come
     # from the trailing digits embedded in the label. (DBS itself is short
@@ -457,7 +457,7 @@ def test_bank_sheet_title_falls_back_to_bank_name_digits():
 
 
 def test_bank_sheet_title_pads_short_digits():
-    from invoice_processing.export.exporters import bank_sheet_title
+    from ledgr_slack.export.exporters import bank_sheet_title
 
     assert bank_sheet_title(
         bank_name="DBS", account_number="12", currency="SGD",
@@ -465,7 +465,7 @@ def test_bank_sheet_title_pads_short_digits():
 
 
 def test_bank_sheet_title_sanitizes_excel_invalid_chars():
-    from invoice_processing.export.exporters import bank_sheet_title
+    from ledgr_slack.export.exporters import bank_sheet_title
 
     # Excel forbids []:*?/\\ — must be stripped from the label, not crash openpyxl.
     title = bank_sheet_title(
@@ -480,8 +480,8 @@ def test_bank_workbook_multi_currency_one_account():
     """Three currency sections of the same account → three Excel tabs with headers."""
     slack = FakeSlackClient()
     store = _make_store(slack)
-    from invoice_processing.export.exporters import BankStatementExporter
-    from invoice_processing.export.models import BankStatement, BankTransaction
+    from ledgr_slack.export.exporters import BankStatementExporter
+    from ledgr_slack.export.models import BankStatement, BankTransaction
     from datetime import date as _date
 
     exporter = BankStatementExporter()
@@ -543,8 +543,8 @@ def test_bank_april_then_may_same_fy_workbook():
     """April then May on the same account append to one FY workbook tab."""
     slack = FakeSlackClient()
     store = _make_store(slack)
-    from invoice_processing.export.exporters import BankStatementExporter
-    from invoice_processing.export.models import BankStatement, BankTransaction
+    from ledgr_slack.export.exporters import BankStatementExporter
+    from ledgr_slack.export.models import BankStatement, BankTransaction
     from datetime import date as _date
 
     exporter = BankStatementExporter()
@@ -602,8 +602,8 @@ def test_bank_sheet_has_no_dedupe_column():
     """The written bank sheet must contain NO _ledgr_doc_key column at all."""
     slack = FakeSlackClient()
     store = _make_store(slack)
-    from invoice_processing.export.exporters import BankStatementExporter
-    from invoice_processing.export.models import BankStatement, BankTransaction
+    from ledgr_slack.export.exporters import BankStatementExporter
+    from ledgr_slack.export.models import BankStatement, BankTransaction
     from datetime import date as _date
 
     exporter = BankStatementExporter()
@@ -741,8 +741,8 @@ def test_file_deleted_from_slack_starts_fresh_and_clears_dedup():
 
 from datetime import date  # noqa: E402
 
-from invoice_processing.export.exporters import BankStatementExporter  # noqa: E402
-from invoice_processing.export.models import BankStatement, BankTransaction  # noqa: E402
+from ledgr_slack.export.exporters import BankStatementExporter  # noqa: E402
+from ledgr_slack.export.models import BankStatement, BankTransaction  # noqa: E402
 
 
 def _bank_stmt(
@@ -1321,7 +1321,7 @@ def test_is_formula_or_missing_treats_non_numeric_as_untrusted():
 def test_recompute_balances_does_not_crash_on_non_numeric_bf_balance():
     """A B/F row whose Balance cell is 'SGD' must carry forward, not raise — and a
     later numeric B/F still seeds the running balance and chains correctly."""
-    from invoice_processing.export.exporters import BankStatementExporter as _BX
+    from ledgr_slack.export.exporters import BankStatementExporter as _BX
     rows = [
         {"Description": _BX.OPENING_MARKER, "Balance": "SGD", "Deposit": None, "Withdrawal": None},
         {"Description": _BX.OPENING_MARKER, "Balance": 1000.0, "Deposit": None, "Withdrawal": None},
@@ -2213,9 +2213,9 @@ def _autocount_sales_batch(sheet: str, inv_number: str, *, idx: int = 0) -> dict
     """
     from datetime import date
 
-    from accounting_agents.ledger_doc_identity import ledger_doc_key_for_invoice
-    from invoice_processing.export.exporters import get_exporter
-    from invoice_processing.export.models import InvoiceLine, NormalizedInvoice
+    from ledgr_slack.ledger_doc_identity import ledger_doc_key_for_invoice
+    from ledgr_slack.export.exporters import get_exporter
+    from ledgr_slack.export.models import InvoiceLine, NormalizedInvoice
 
     inv = NormalizedInvoice(
         doc_type="sales",
@@ -2521,6 +2521,30 @@ def test_replace_true_matched_invoice_removes_old_rows_appends_new():
     assert len(rows_after) == 2
 
 
+def test_replace_true_empty_batch_does_not_purge_existing_rows():
+    """replace=True with zero new rows must not delete workbook rows for that invoice."""
+    slack, store = _make_invoice_store_with_named_invoices()
+    rows_before = store.read_rows("c1", "2026", slack, "C1")
+    assert len(rows_before) == 3
+
+    result = store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        software="qbs", kind="invoice",
+        replace=True,
+        batches=[{
+            "sheet": "Purchase",
+            "doc_key": "Purchase:INV-10",
+            "rows": [],
+        }],
+    )
+
+    assert result["deduped"] >= 1
+    assert result["appended"] == 0
+    rows_after = store.read_rows("c1", "2026", slack, "C1")
+    assert len(rows_after) == 3
+    assert [r["Description"] for r in rows_after].count("Line A") == 1
+
+
 def test_replace_true_xero_invoice_number_header():
     """Regression: Xero workbooks use *InvoiceNumber, not Invoice Number."""
     slack, store = _make_xero_invoice_store_with_named_invoices()
@@ -2737,7 +2761,7 @@ def test_redrop_multi_invoice_pdf_dedupes_all_docs():
 
 def _make_autocount_store_with_supplier_invoices() -> tuple["FakeSlackClient", "SlackLedgerStore"]:
     """Seed AutoCount AP rows keyed by SupplierInvoiceNo (DocNo is always <<New>>)."""
-    from invoice_processing.export.exporters import AutoCountExporter
+    from ledgr_slack.export.exporters import AutoCountExporter
 
     slack = FakeSlackClient()
     store = _make_store(slack)
@@ -2781,7 +2805,7 @@ def _make_autocount_store_with_supplier_invoices() -> tuple["FakeSlackClient", "
 def test_replace_true_autocount_matches_supplier_invoice_no():
     """MAP5 — replace must match SupplierInvoiceNo, not the constant DocNo."""
     slack, store = _make_autocount_store_with_supplier_invoices()
-    from invoice_processing.export.exporters import AutoCountExporter
+    from ledgr_slack.export.exporters import AutoCountExporter
 
     exporter = AutoCountExporter()
     cols = exporter.purchase_cols

@@ -1,4 +1,4 @@
-"""Unit tests for invoice_processing/export/tax_classifier.py.
+"""Unit tests for ledgr_slack/export/tax_classifier.py.
 
 Covers:
 - Chubb regression: clean SG tax invoice with explicit 9% GST → SR, no flag.
@@ -12,8 +12,8 @@ from __future__ import annotations
 
 from datetime import date
 
-from invoice_processing.export.models import InvoiceLine, NormalizedInvoice, PartyInfo
-from invoice_processing.export.tax_classifier import TaxClassifier, classify_invoice, get_tax_classifier
+from ledgr_slack.export.models import InvoiceLine, NormalizedInvoice, PartyInfo
+from ledgr_slack.export.tax_classifier import TaxClassifier, classify_invoice, get_tax_classifier
 
 
 # ---------------------------------------------------------------------------
@@ -820,7 +820,7 @@ class TestGetTaxClassifierIntegration:
 
     def test_xero_exporter_with_my_classifier_produces_sst_tax_type(self):
         """Xero exporter + MY classifier → *TaxType must NOT be 'SR' SG code."""
-        from invoice_processing.export.exporters import get_exporter
+        from ledgr_slack.export.exporters import get_exporter
 
         clf = get_tax_classifier("my_sst.yaml")
         exporter = get_exporter("xero", classifier=clf)
@@ -843,7 +843,7 @@ class TestGetTaxClassifierIntegration:
 
     def test_xero_exporter_with_sg_classifier_unchanged(self):
         """SG Xero exporter still produces 'SR' for a standard-rated purchase (no regression)."""
-        from invoice_processing.export.exporters import get_exporter
+        from ledgr_slack.export.exporters import get_exporter
 
         clf = get_tax_classifier("sg_gst.yaml")
         exporter = get_exporter("xero", classifier=clf)
@@ -926,7 +926,7 @@ class TestIndeterminateNullBehavior:
 
     def test_none_treatment_exports_blank_tax_amount(self):
         """An indeterminate (None treatment) line exports as 0 tax amount, not SR amount."""
-        from invoice_processing.export.exporters import QbsLedgerExporter
+        from ledgr_slack.export.exporters import QbsLedgerExporter
         inv = NormalizedInvoice(
             doc_type="purchase",
             invoice_date=date(2024, 6, 1),

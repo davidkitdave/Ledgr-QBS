@@ -7,7 +7,7 @@ Firestore-backed store will be added in a later slice behind the same
 
 import pytest
 
-from app.credit_service import CreditService, InMemoryCreditStore
+from ledgr_agent.billing import CreditService, InMemoryCreditStore
 
 
 @pytest.fixture

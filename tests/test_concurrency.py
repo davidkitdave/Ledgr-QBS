@@ -24,15 +24,14 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-import accounting_agents.slack_runner as slack_runner
-from accounting_agents import nodes
-from accounting_agents.slack_runner import (
-    _ensure_session,
-    _flush_deferred_ledger_writes,
-    _per_doc_session_id,
-    answer_question,
-    process_file_event,
-)
+import ledgr_slack.app as slack_runner
+import ledgr_slack.dedup as _dedup_mod
+LEDGER_ROWS_KEY = "ledger_rows"
+DELIVER_SUMMARY_KEY = "deliver_summary"
+
+from ledgr_slack.file_event import _per_doc_session_id, process_file_event
+from ledgr_slack.sessions import _ensure_session
+from ledgr_slack.ux import _flush_deferred_ledger_writes
 
 # --------------------------------------------------------------------------- #
 # Module-level hermetic fixture: suppress real Gemini calls from read_doc
@@ -106,7 +105,7 @@ def _mock_gemini_read(monkeypatch):
 
 def _ledger_payload():
     return {
-        nodes.LEDGER_ROWS_KEY: {
+        LEDGER_ROWS_KEY: {
             "client_id": "c1",
             "fy": "2026",
             "kind": "invoice",
@@ -119,7 +118,7 @@ def _ledger_payload():
                 }
             ],
         },
-        nodes.DELIVER_SUMMARY_KEY: "done",
+        DELIVER_SUMMARY_KEY: "done",
     }
 
 
@@ -229,6 +228,9 @@ class _NoopLedgerStore:
     def latest_fy(self, client_id):
         return None
 
+    def get_pointer(self, client_id, fy):
+        return None
+
 
 class _FakeFirestoreDoc:
     def set(self, *a, **k):
@@ -270,7 +272,7 @@ class _FakeProfileStore:
     care that the soft-gate lets the run proceed.
     """
     def __init__(self, software: str = "QBS Ledger", client_id: str = "c1"):
-        from invoice_processing.export.client_context import ClientContext
+        from ledgr_slack.client_context import ClientContext
         self._ctx = ClientContext(
             client_id=client_id,
             accounting_software=software,
@@ -371,7 +373,7 @@ def test_semaphore_caps_concurrent_runs(monkeypatch):
             return self._sem.locked()
 
     cap = 2
-    monkeypatch.setattr(slack_runner, "_SEM", _InstrumentedSemaphore(cap))
+    monkeypatch.setattr("ledgr_slack.file_event._SEM", _InstrumentedSemaphore(cap))
 
     # Add a delay inside build_sheets so concurrent runs overlap in the semaphore.
     real_build_sheets = slack_shell.__dict__.get("build_sheets") or __import__(
@@ -438,7 +440,7 @@ def test_append_rows_is_offloaded_to_thread(monkeypatch):
 
     # The lean path's deliver_workbook lives in slack_shell.py and uses its
     # own asyncio.to_thread.  Patch both modules so the spy captures all calls.
-    monkeypatch.setattr(slack_runner.asyncio, "to_thread", spy_to_thread)
+    monkeypatch.setattr(asyncio, "to_thread", spy_to_thread)
     monkeypatch.setattr(slack_shell.asyncio, "to_thread", spy_to_thread)
 
     result = asyncio.run(
@@ -454,35 +456,6 @@ def test_append_rows_is_offloaded_to_thread(monkeypatch):
     # The synchronous ledger write was dispatched through to_thread.
     assert store.append_rows in offloaded
     assert store.append_calls == 1
-
-
-def test_answer_question_offloads_read_rows_to_thread(monkeypatch):
-    runner = _InstrumentedRunner({}, app_name="acc")
-    store = _NoopLedgerStore()
-    slack = _slack()
-
-    offloaded: list = []
-    real_to_thread = asyncio.to_thread
-
-    async def spy_to_thread(fn, *args, **kwargs):
-        offloaded.append(fn)
-        return await real_to_thread(fn, *args, **kwargs)
-
-    monkeypatch.setattr(slack_runner.asyncio, "to_thread", spy_to_thread)
-
-    asyncio.run(
-        answer_question(
-            runner=runner, ledger_store=store, slack_client=slack,
-            channel_id="C1", question="how much?", app_name="acc",
-            message_ts="100.1",
-        )
-    )
-
-    # The synchronous Slack-IO read was dispatched through to_thread.
-    assert store.read_rows in offloaded
-    # Chat session id (ADR-0008): a top-level message with no raw thread_ts
-    # buckets by UTC day. 100.1 → epoch 100s → 1970-01-01.
-    assert ("C1", "C1:chat:day-1970-01-01") in runner.run_scopes
 
 
 # --------------------------------------------------------------------------- #
@@ -623,10 +596,11 @@ def test_pre_gather_dedup_processes_duplicate_file_id_once():
     before fan-out so two list entries sharing an id only run once.
     """
     from unittest.mock import AsyncMock, MagicMock, patch
-    from accounting_agents import slack_runner
+    import ledgr_slack.app as slack_runner
     from app.slack_app import _SeenEvents
 
-    slack_runner._seen = _SeenEvents()
+    import ledgr_slack.dedup as _dedup
+    _dedup._seen = _SeenEvents()
 
     # Build a files list with a duplicated file id.
     files_with_dup = [
@@ -661,11 +635,13 @@ def test_pre_gather_dedup_processes_duplicate_file_id_once():
     # is called with only 2 unique items (not 3).
     # Verify by patching process_file_event and running through the handler.
 
-    from tests.test_slack_runner import _capture_message_handler_with_slack_client, FakeSlackClient
+    from tests._slack_test_helpers import capture_message_handler_with_slack_client
+    from tests.test_ledger_store import FakeSlackClient
 
-    slack_runner._seen = _SeenEvents()
+    import ledgr_slack.dedup as _dedup
+    _dedup._seen = _SeenEvents()
     slack = FakeSlackClient()
-    handler, _ = _capture_message_handler_with_slack_client(slack)
+    handler, _ = capture_message_handler_with_slack_client(slack)
 
     body = {"event_id": "Ev-dedup-test-1"}
     event = {
@@ -693,11 +669,11 @@ def test_pre_gather_dedup_processes_duplicate_file_id_once():
             },
         }
 
-    with patch.object(slack_runner, "process_file_event", side_effect=_recording_pfe), \
-         patch.object(slack_runner, "download_pdf_bytes", return_value=b"%PDF fake"), \
-         patch.object(slack_runner, "_flush_deferred_ledger_writes", new_callable=AsyncMock,
-                      return_value=[{"appended": 2, "deduped": 0, "filename": "x.xlsx",
-                                     "slack_file_id": "F-wb"}]):
+    with patch("ledgr_slack.batch_coordinator.process_file_event", side_effect=_recording_pfe), \
+         patch("ledgr_slack.batch_coordinator.download_pdf_bytes", return_value=b"%PDF fake"), \
+         patch("ledgr_slack.batch_coordinator._flush_deferred_ledger_writes", new_callable=AsyncMock,
+               return_value=[{"appended": 2, "deduped": 0, "filename": "x.xlsx",
+                              "slack_file_id": "F-wb"}]):
         asyncio.run(handler(event=event, body=body, client=fake_client))
 
     # F-dup-A must appear exactly once despite being in the input list twice.
@@ -721,13 +697,15 @@ def test_fan_out_docs_run_concurrently():
     loop is still sequential.
     """
     from unittest.mock import MagicMock, patch
-    from accounting_agents import slack_runner
+    import ledgr_slack.app as slack_runner
     from app.slack_app import _SeenEvents
-    from tests.test_slack_runner import _capture_message_handler_with_slack_client, FakeSlackClient
+    from tests._slack_test_helpers import capture_message_handler_with_slack_client
+    from tests.test_ledger_store import FakeSlackClient
 
-    slack_runner._seen = _SeenEvents()
+    import ledgr_slack.dedup as _dedup
+    _dedup._seen = _SeenEvents()
     slack = FakeSlackClient()
-    handler, _ = _capture_message_handler_with_slack_client(slack)
+    handler, _ = capture_message_handler_with_slack_client(slack)
 
     n_docs = 5
     body = {"event_id": "Ev-fan-out-timing"}
@@ -755,11 +733,15 @@ def test_fan_out_docs_run_concurrently():
             },
         }
 
-    with patch.object(slack_runner, "process_file_event", side_effect=_slow_pfe), \
-         patch.object(slack_runner, "download_pdf_bytes", return_value=b"%PDF fake"), \
-         patch.object(slack_runner, "_flush_deferred_ledger_writes", new_callable=AsyncMock,
-                      return_value=[{"appended": n_docs, "deduped": 0,
-                                     "filename": "x.xlsx", "slack_file_id": "F-wb"}]):
+    with patch("ledgr_slack.batch_coordinator.process_file_event", side_effect=_slow_pfe), \
+         patch("ledgr_slack.file_event.process_file_event", side_effect=_slow_pfe), \
+         patch("ledgr_slack.batch_coordinator.download_pdf_bytes", return_value=b"%PDF fake"), \
+         patch("ledgr_slack.batch_coordinator._flush_deferred_ledger_writes", new_callable=AsyncMock,
+               return_value=[{"appended": n_docs, "deduped": 0,
+                                     "filename": "x.xlsx", "slack_file_id": "F-wb"}]), \
+         patch("ledgr_slack.batch_coordinator._flush_deferred_ledger_writes", new_callable=AsyncMock,
+               return_value=[{"appended": n_docs, "deduped": 0,
+                              "filename": "x.xlsx", "slack_file_id": "F-wb"}]):
         t0 = time.monotonic()
         asyncio.run(handler(event=event, body=body, client=fake_client))
         elapsed = time.monotonic() - t0
@@ -792,7 +774,7 @@ def test_post_gather_reduce_order_independence():
     output, confirming this test is a meaningful guard.
     """
     import openpyxl
-    from accounting_agents.ledger_store import SlackLedgerStore
+    from ledgr_slack.ledger_store import SlackLedgerStore
 
     # Real QBS-exporter column names (QbsLedgerExporter.purchase_cols).
     cols = [
@@ -901,7 +883,7 @@ def test_invoice_date_sort_in_append_rows_to_sheet():
     and the sort was a no-op.
     """
     import openpyxl
-    from accounting_agents.ledger_store import SlackLedgerStore
+    from ledgr_slack.ledger_store import SlackLedgerStore
 
     # --- QBS layout (Invoice Date / Invoice Number) ---
     qbs_cols = ["Invoice Number", "Invoice Date", "Vendor Name", "Source Amount"]
@@ -1024,14 +1006,17 @@ def test_one_run_one_raises_others_still_complete():
     cancel the remaining coroutines.
     """
     from unittest.mock import AsyncMock, MagicMock, patch
-    from accounting_agents import slack_runner
+    import ledgr_slack.app as slack_runner
     from app.slack_app import _SeenEvents
-    from tests.test_slack_runner import _capture_message_handler_with_slack_client, FakeSlackClient
+    from tests._slack_test_helpers import capture_message_handler_with_slack_client
+    from tests.test_ledger_store import FakeSlackClient
 
-    slack_runner._seen = _SeenEvents()
+    import ledgr_slack.dedup as _dedup
+    _dedup._seen = _SeenEvents()
     slack = FakeSlackClient()
-    handler, _ = _capture_message_handler_with_slack_client(slack)
-    slack_runner._seen = _SeenEvents()
+    handler, _ = capture_message_handler_with_slack_client(slack)
+    import ledgr_slack.dedup as _dedup
+    _dedup._seen = _SeenEvents()
 
     body = {"event_id": "Ev-exc-safety"}
     event = {
@@ -1065,11 +1050,14 @@ def test_one_run_one_raises_others_still_complete():
             },
         }
 
-    with patch.object(slack_runner, "process_file_event", side_effect=_selective_pfe), \
-         patch.object(slack_runner, "download_pdf_bytes", return_value=b"%PDF fake"), \
-         patch.object(slack_runner, "_flush_deferred_ledger_writes", new_callable=AsyncMock,
-                      return_value=[{"appended": 2, "deduped": 0,
-                                     "filename": "x.xlsx", "slack_file_id": "F-wb"}]):
+    with patch("ledgr_slack.batch_coordinator.process_file_event", side_effect=_selective_pfe), \
+         patch("ledgr_slack.batch_coordinator.download_pdf_bytes", return_value=b"%PDF fake"), \
+         patch("ledgr_slack.batch_coordinator._flush_deferred_ledger_writes", new_callable=AsyncMock,
+               return_value=[{"appended": 2, "deduped": 0,
+                                     "filename": "x.xlsx", "slack_file_id": "F-wb"}]), \
+         patch("ledgr_slack.batch_coordinator._flush_deferred_ledger_writes", new_callable=AsyncMock,
+               return_value=[{"appended": 2, "deduped": 0,
+                              "filename": "x.xlsx", "slack_file_id": "F-wb"}]):
         asyncio.run(handler(event=event, body=body, client=fake_client))
 
     # All three docs were attempted (none skipped due to a sibling crash).
@@ -1097,19 +1085,22 @@ def test_semaphore_still_bounds_concurrency_under_gather(monkeypatch):  # noqa: 
     full message handler fan-out path (not direct process_file_event calls).
     """
     from unittest.mock import MagicMock, patch
-    from accounting_agents import slack_runner
+    import ledgr_slack.app as slack_runner
     from app.slack_app import _SeenEvents
-    from tests.test_slack_runner import _capture_message_handler_with_slack_client, FakeSlackClient
+    from tests._slack_test_helpers import capture_message_handler_with_slack_client
+    from tests.test_ledger_store import FakeSlackClient
 
     # Force cap to 2 independent of env.
-    monkeypatch.setattr(slack_runner, "_SEM", asyncio.Semaphore(2))
-    slack_runner._seen = _SeenEvents()
+    monkeypatch.setattr("ledgr_slack.file_event._SEM", asyncio.Semaphore(2))
+    import ledgr_slack.dedup as _dedup
+    _dedup._seen = _SeenEvents()
 
     concurrent_counter = {"now": 0, "max": 0}
 
     async def _counting_pfe(**kwargs):
         # Simulate the semaphore being acquired inside process_file_event.
-        async with slack_runner._SEM:
+        import ledgr_slack.file_event as _fe
+        async with _fe._SEM:
             concurrent_counter["now"] += 1
             concurrent_counter["max"] = max(concurrent_counter["max"], concurrent_counter["now"])
             await asyncio.sleep(0.01)
@@ -1127,8 +1118,9 @@ def test_semaphore_still_bounds_concurrency_under_gather(monkeypatch):  # noqa: 
         }
 
     slack = FakeSlackClient()
-    handler, _ = _capture_message_handler_with_slack_client(slack)
-    slack_runner._seen = _SeenEvents()
+    handler, _ = capture_message_handler_with_slack_client(slack)
+    import ledgr_slack.dedup as _dedup
+    _dedup._seen = _SeenEvents()
 
     body = {"event_id": "Ev-sem-gather"}
     event = {
@@ -1140,11 +1132,15 @@ def test_semaphore_still_bounds_concurrency_under_gather(monkeypatch):  # noqa: 
     }
     fake_client = MagicMock()
 
-    with patch.object(slack_runner, "process_file_event", side_effect=_counting_pfe), \
-         patch.object(slack_runner, "download_pdf_bytes", return_value=b"%PDF"), \
-         patch.object(slack_runner, "_flush_deferred_ledger_writes", new_callable=AsyncMock,
-                      return_value=[{"appended": 6, "deduped": 0,
-                                     "filename": "x.xlsx", "slack_file_id": "F-wb"}]):
+    with patch("ledgr_slack.batch_coordinator.process_file_event", side_effect=_counting_pfe), \
+         patch("ledgr_slack.batch_coordinator.download_pdf_bytes", return_value=b"%PDF"), \
+         patch("ledgr_slack.batch_coordinator.download_pdf_bytes", return_value=b"%PDF"), \
+         patch("ledgr_slack.batch_coordinator._flush_deferred_ledger_writes", new_callable=AsyncMock,
+               return_value=[{"appended": 6, "deduped": 0,
+                                     "filename": "x.xlsx", "slack_file_id": "F-wb"}]), \
+         patch("ledgr_slack.batch_coordinator._flush_deferred_ledger_writes", new_callable=AsyncMock,
+               return_value=[{"appended": 6, "deduped": 0,
+                              "filename": "x.xlsx", "slack_file_id": "F-wb"}]):
         asyncio.run(handler(event=event, body=body, client=fake_client))
 
     assert concurrent_counter["max"] <= 2, (

@@ -1,4 +1,4 @@
-"""Tests for socket-mode event deduplication in accounting_agents.slack_runner.
+"""Tests for socket-mode event deduplication in ledgr_slack.app.
 
 Verifies that a re-delivered Slack event (same event_id) does NOT trigger a
 second side-effect for member_joined_channel, file_shared, or message events.
@@ -89,7 +89,7 @@ def _capture_handlers():
 
 def test_member_joined_dedup_calls_handler_once():
     """Same event_id delivered twice → handle_member_joined invoked only once."""
-    from accounting_agents import slack_runner
+    import ledgr_slack.app as slack_runner
 
     fresh_seen = _SeenEvents()
     body = _make_body("Ev001", "member_joined_channel")
@@ -100,10 +100,10 @@ def test_member_joined_dedup_calls_handler_once():
     fake_app, registered = _capture_handlers()
     mock_thread = AsyncMock()
 
-    with patch.object(slack_runner, "_seen", fresh_seen), \
+    with patch("ledgr_slack.dedup._seen", fresh_seen), \
          patch("asyncio.to_thread", mock_thread), \
          patch("slack_bolt.async_app.AsyncApp", return_value=fake_app), \
-         patch("invoice_processing.export.client_context.InMemoryClientStore"):
+         patch("ledgr_slack.client_context.InMemoryClientStore"):
 
         runner_mock = MagicMock()
         runner_mock.app_name = "acc"
@@ -139,7 +139,7 @@ def test_file_shared_dedup_does_not_call_process():
     not be invoked from this path at all. Dedup is still enforced via the
     ``file:{id}`` guard for the COA ingest path.
     """
-    from accounting_agents import slack_runner
+    import ledgr_slack.app as slack_runner
 
     fresh_seen = _SeenEvents()
     body = _make_body("Ev002", "file_shared")
@@ -154,10 +154,10 @@ def test_file_shared_dedup_does_not_call_process():
     fake_app, registered = _capture_handlers()
     mock_pfe = AsyncMock(return_value={"status": "delivered"})
 
-    with patch.object(slack_runner, "_seen", fresh_seen), \
-         patch("accounting_agents.slack_runner.process_file_event", mock_pfe), \
+    with patch("ledgr_slack.dedup._seen", fresh_seen), \
+         patch("ledgr_slack.file_event.process_file_event", mock_pfe), \
          patch("slack_bolt.async_app.AsyncApp", return_value=fake_app), \
-         patch("invoice_processing.export.client_context.InMemoryClientStore"):
+         patch("ledgr_slack.client_context.InMemoryClientStore"):
 
         runner_mock = MagicMock()
         runner_mock.app_name = "acc"
@@ -184,9 +184,9 @@ def test_file_shared_dedup_does_not_call_process():
 # ---------------------------------------------------------------------------
 
 
-def test_message_dedup_calls_answer_once():
-    """Same message event_id delivered twice → answer_question called only once."""
-    from accounting_agents import slack_runner
+def test_message_dedup_calls_document_reply_once():
+    """Same message event_id delivered twice → document-only reply called only once."""
+    import ledgr_slack.app as slack_runner
 
     fresh_seen = _SeenEvents()
     body = _make_body("Ev003", "message")
@@ -199,12 +199,13 @@ def test_message_dedup_calls_answer_once():
     fake_client = MagicMock()
 
     fake_app, registered = _capture_handlers()
-    mock_aq = AsyncMock(return_value={"status": "answered", "text": "x"})
+    mock_reply = MagicMock()
 
-    with patch.object(slack_runner, "_seen", fresh_seen), \
-         patch("accounting_agents.slack_runner.answer_question", mock_aq), \
+    with patch("ledgr_slack.dedup._seen", fresh_seen), \
+         patch("ledgr_slack.dedup._seen", fresh_seen), \
+         patch("ledgr_slack.app._reply_document_only", mock_reply), \
          patch("slack_bolt.async_app.AsyncApp", return_value=fake_app), \
-         patch("invoice_processing.export.client_context.InMemoryClientStore"):
+         patch("ledgr_slack.client_context.InMemoryClientStore"):
 
         runner_mock = MagicMock()
         runner_mock.app_name = "acc"
@@ -219,8 +220,8 @@ def test_message_dedup_calls_answer_once():
 
         # First delivery.
         asyncio.run(handler(event=event, body=body, client=fake_client))
-        assert mock_aq.call_count == 1
+        assert mock_reply.call_count == 1
 
         # Duplicate delivery.
         asyncio.run(handler(event=event, body=body, client=fake_client))
-        assert mock_aq.call_count == 1  # still 1
+        assert mock_reply.call_count == 1  # still 1

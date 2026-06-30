@@ -6,8 +6,7 @@ annotations, FastAPI resolves `req: Request` against the MODULE globals — so
 When it was a local import, every Slack route returned HTTP 422
 ("missing query param 'req'").
 
-Tests build_fastapi_app() from accounting_agents.slack_runner (the new prod
-entry point after ADK consolidation Tasks 3+4).
+Tests build_fastapi_app() from ledgr_slack.app (the prod entry point).
 
 Uses pytest monkeypatch (not with-patch context managers) so that patches stay
 active during lazy _get_handler() construction triggered by TestClient requests.
@@ -21,26 +20,23 @@ from fastapi.testclient import TestClient
 @pytest.fixture()
 def fastapi_app(monkeypatch):
     """Build build_fastapi_app() with all network/Slack deps monkeypatched."""
-    import accounting_agents.sessions as _sessions_mod
-    import accounting_agents.slack_runner as _runner_mod
-    import invoice_processing.export.client_context as _ctx_mod
+    import ledgr_slack.sessions as _sessions_mod
+    import ledgr_slack.app as _runner_mod
+    import ledgr_slack.client_context as _ctx_mod
     import slack_bolt.adapter.fastapi.async_handler as _handler_mod
 
     fake_async_app = MagicMock()
     fake_handler = MagicMock()
     fake_handler.handle = AsyncMock(return_value=MagicMock(status_code=401))
 
-    # Module-level attributes in slack_runner — patch directly.
     monkeypatch.setattr(_runner_mod, "build_runner", MagicMock(return_value=MagicMock()))
     monkeypatch.setattr(_runner_mod, "build_async_app", MagicMock(return_value=fake_async_app))
     monkeypatch.setattr(_runner_mod, "SlackLedgerStore", MagicMock(return_value=MagicMock()))
-
-    # Function-local imports inside _get_handler — patch the SOURCE modules.
     monkeypatch.setattr(_sessions_mod, "FirestoreSessionService", MagicMock(return_value=MagicMock()))
     monkeypatch.setattr(_ctx_mod, "FirestoreClientStore", MagicMock(return_value=MagicMock()))
     monkeypatch.setattr(_handler_mod, "AsyncSlackRequestHandler", MagicMock(return_value=fake_handler))
 
-    from accounting_agents.slack_runner import build_fastapi_app
+    from ledgr_slack.app import build_fastapi_app
     return build_fastapi_app()
 
 

@@ -1,5 +1,5 @@
 """Hermetic tests for FirestoreClientStore, get_by_channel, make_load_client_by_channel_callback,
-InMemoryClientStore channel support, and write methods (save_profile, set_channel, save_coa,
+InMemoryClientStore channel support, and write methods (save_profile, set_channel,
 set_status) on both stores.
 
 No MagicMock fluent chains. No live GCP calls. Uses a hand-rolled fake Firestore client
@@ -13,7 +13,7 @@ that supports exactly the call shapes the production code makes:
 from __future__ import annotations
 
 
-from invoice_processing.export.client_context import (
+from ledgr_slack.client_context import (
     ClientContext,
     FirestoreClientStore,
     InMemoryClientStore,
@@ -167,26 +167,6 @@ CLIENT_DOC = {
     },
 }
 
-COA_DOCS = [
-    {
-        "code": "4-1000",
-        "description": "Sales Revenue",
-        "account_type": "Income",
-        "financial_statement": "P&L",
-        "nature": "Credit",
-        "keywords": "sales revenue",
-    },
-    {
-        # blank code — keyed by description (QBS style)
-        "code": None,
-        "description": "Accounts Payable",
-        "account_type": "Liability",
-        "financial_statement": "Balance Sheet",
-        "nature": "Credit",
-        "keywords": "payable AP",
-    },
-]
-
 ENTITY_MEMORY_DOCS = [
     {
         "name": "Telco B",
@@ -204,7 +184,6 @@ def _make_fake_firestore() -> FakeFirestore:
     client_doc_ref = FakeDocRef(
         data=CLIENT_DOC,
         subcollections={
-            "coa": COA_DOCS,
             "entity_memory": ENTITY_MEMORY_DOCS,
         },
     )
@@ -271,22 +250,6 @@ class TestFirestoreClientStoreGet:
         # None value preserved (unmapped category)
         assert "Bank Fees" in ctx.category_mapping
         assert ctx.category_mapping["Bank Fees"] is None
-
-    def test_coa_parsed(self):
-        ctx = self._store().get(CLIENT_ID)
-        assert len(ctx.coa) == 2
-
-    def test_coa_code_based_account(self):
-        ctx = self._store().get(CLIENT_ID)
-        revenue = next(a for a in ctx.coa if a.code == "4-1000")
-        assert revenue.description == "Sales Revenue"
-        assert revenue.key == "4-1000"
-
-    def test_coa_blank_code_keyed_by_description(self):
-        ctx = self._store().get(CLIENT_ID)
-        payable = next(a for a in ctx.coa if a.code is None)
-        assert payable.description == "Accounts Payable"
-        assert payable.key == "Accounts Payable"
 
     def test_entity_memory_parsed(self):
         ctx = self._store().get(CLIENT_ID)
@@ -432,15 +395,9 @@ WRITE_PROFILE = {
     "gst_registered": True,
     "region": "SINGAPORE",
     "base_currency": "SGD",
-    "status": "pending_coa",
+    "status": "active",
     "category_mapping": {},
 }
-
-WRITE_COA = [
-    {"code": "4-1000", "description": "Revenue", "account_type": "Income",
-     "financial_statement": "P&L", "nature": "Credit", "keywords": "revenue"},
-]
-
 
 class TestFirestoreClientStoreWrite:
 
@@ -455,7 +412,7 @@ class TestFirestoreClientStoreWrite:
         assert ctx.client_name == "Newco Pte Ltd"
         assert ctx.fye_month == 12
         assert ctx.tax_registered is True
-        assert ctx.status == "pending_coa"
+        assert ctx.status == "active"
         assert ctx.accounting_software == "QBS Ledger"
 
     def test_set_channel_then_get_by_channel(self):
@@ -465,16 +422,6 @@ class TestFirestoreClientStoreWrite:
         ctx = store.get_by_channel("C-NEW-1")
         assert ctx is not None
         assert ctx.client_id == "new-client-1"
-
-    def test_save_coa_then_get(self):
-        store = self._store()
-        store.save_profile(WRITE_PROFILE)
-        store.save_coa("new-client-1", WRITE_COA)
-        ctx = store.get("new-client-1")
-        assert ctx is not None
-        assert len(ctx.coa) == 1
-        assert ctx.coa[0].code == "4-1000"
-        assert ctx.coa[0].description == "Revenue"
 
     def test_set_status_then_get(self):
         store = self._store()
@@ -515,30 +462,6 @@ class TestFirestoreClientStoreWrite:
         assert ctx is not None
         assert ctx.client_id == WRITE_PROFILE["client_id"]
 
-    def test_save_coa_replaces_does_not_orphan(self):
-        # Item 7: a 2-row COA replacing a 5-row COA must yield exactly 2 docs,
-        # not leave higher-index docs (2,3,4) orphaned.
-        store = self._store()
-        store.save_profile(WRITE_PROFILE)
-
-        five = [
-            {"code": f"{i}-000", "description": f"Acct {i}", "account_type": "Asset",
-             "financial_statement": "BS", "nature": "Debit", "keywords": ""}
-            for i in range(5)
-        ]
-        store.save_coa("new-client-1", five)
-        assert len(store.get("new-client-1").coa) == 5
-
-        two = [
-            {"code": f"{i}-000", "description": f"Acct {i}", "account_type": "Asset",
-             "financial_statement": "BS", "nature": "Debit", "keywords": ""}
-            for i in range(2)
-        ]
-        store.save_coa("new-client-1", two)
-        ctx = store.get("new-client-1")
-        assert len(ctx.coa) == 2
-        assert {a.code for a in ctx.coa} == {"0-000", "1-000"}
-
 
 # --------------------------------------------------------------------------- #
 # InMemoryClientStore write round-trips
@@ -554,15 +477,9 @@ INMEM_PROFILE = {
     "gst_registered": False,
     "region": "SINGAPORE",
     "base_currency": "SGD",
-    "status": "pending_coa",
+    "status": "active",
     "category_mapping": {"Sales": "4-1000"},
 }
-
-INMEM_COA = [
-    {"code": "1-1000", "description": "Cash", "account_type": "Asset",
-     "financial_statement": "Balance Sheet", "nature": "Debit", "keywords": "cash"},
-]
-
 
 class TestInMemoryClientStoreWrite:
 
@@ -574,7 +491,7 @@ class TestInMemoryClientStoreWrite:
         assert ctx.client_name == "MemCo"
         assert ctx.fye_month == 3
         assert ctx.tax_registered is False
-        assert ctx.status == "pending_coa"
+        assert ctx.status == "active"
         assert ctx.category_mapping == {"Sales": "4-1000"}
 
     def test_save_profile_with_channel_id_indexes_channel(self):
@@ -593,15 +510,6 @@ class TestInMemoryClientStoreWrite:
         assert ctx is not None
         assert ctx.client_id == "mem-write-1"
 
-    def test_save_coa_then_get(self):
-        store = InMemoryClientStore()
-        store.save_profile(INMEM_PROFILE)
-        store.save_coa("mem-write-1", INMEM_COA)
-        ctx = store.get("mem-write-1")
-        assert ctx is not None
-        assert len(ctx.coa) == 1
-        assert ctx.coa[0].description == "Cash"
-
     def test_set_status_then_get(self):
         store = InMemoryClientStore()
         store.save_profile(INMEM_PROFILE)
@@ -609,10 +517,6 @@ class TestInMemoryClientStoreWrite:
         ctx = store.get("mem-write-1")
         assert ctx is not None
         assert ctx.status == "active"
-
-    def test_save_coa_unknown_client_is_noop(self):
-        store = InMemoryClientStore()
-        store.save_coa("unknown", INMEM_COA)  # must not raise
 
     def test_set_status_unknown_client_is_noop(self):
         store = InMemoryClientStore()

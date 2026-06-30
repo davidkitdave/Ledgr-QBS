@@ -1,4 +1,4 @@
-"""Tests for invoice_processing.export.routing — document routing (spec §4).
+"""Tests for ledgr_slack.export.routing — document routing (spec §4).
 
 All cases from §4 of the design spec:
 docs/superpowers/specs/2026-06-12-ledgr-client-onboarding-fy-routing-design.md
@@ -6,7 +6,7 @@ docs/superpowers/specs/2026-06-12-ledgr-client-onboarding-fy-routing-design.md
 
 from datetime import date
 
-from invoice_processing.export.routing import DocRoute, route_document
+from ledgr_slack.export.routing import DocRoute, route_document
 
 
 # --------------------------------------------------------------------------- #

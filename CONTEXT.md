@@ -37,38 +37,15 @@ The rebuilt, lean `ledgr_agent` ADK `LlmAgent`. The phrase "clean agent" names
 So "is the clean agent in prod?" is answered at the *tool/spine* level, not the
 LlmAgent level. Governing principle (ADR-0026): the **LLM reads** (extraction via
 the tool) and **deterministic Python applies** tax treatment and COA codes — the
-LLM never decides tax codes. The legacy [[Engine]] graph (`accounting_agents`) is
-the thing being retired in favour of this.
+LLM never decides tax codes. Production Slack uses `ledgr_slack` +
+`ledgr_agent` only (ADR-0032).
 
 ## Engine (processing pipeline)
-The document-processing path: classify → **understand** → categorise → tax →
-workbook. It is **intelligent at the document boundary, deterministic after**.
+The live document path: **read** (one Gemini call) → **project** (deterministic
+ERP rows via skill YAML). See [[Light path]] and ADR-0030/0031.
 
-- **Understand** — one multimodal Gemini call per standard invoice/receipt/telco
-  bill, returning a Drive-style [[Document Summary]] plus [[Ledger lines]] in a
-  single structured schema (`DocumentLedgerExtract`). This replaces the old
-  faithful-capture + regex-normalize bridge for those doc types.
-- **Policy** — reconcile, tax rules, COA categorisation, and export projection
-  stay plain Python (auditable, testable).
-- The Engine runs inside a **slim ADK Workflow graph** — never as a chain of
-  per-step LLM agents (an earlier rewrite burned tokens and was retired; see
-  docs/adr/0001). See [[Understand layer]] and ADR-0011.
-
-**Verified empirically (2026-06-26, issue #28, branch
-`feat/minimal-extract-control-experiment`):** one direct `generate_content`
-call on the real Starhub bill (18 pages, 4.4 MB) returns 1 doc / 3 lines /
-clean SR+ZR GST breakdown in 8.9 s; the chunked factory returns 12 fake docs
-/ 216 noisy lines in 209.8 s. The chunked path *causes* the truncation it
-was added to prevent. The minimal direct-call path is now wired into
-`ledgr_agent` as a `FunctionTool` alongside the full pipeline
-(ADR-0030). "Smart factory" was the wrong instinct for a per-bill read;
-Drive-style direct extraction is the correct shape.
-
-**Light path (ADR-0031):** after the read, add **policy rounds only when
-proven necessary** — R1 one LLM read alone → R2 deterministic tax → R3 COA
-from the client's list (LLM batched match) → R4 route + export. The spike
-`scripts/spike_light_vs_factory.py` climbs that ladder per fixture before
-any production cutover.
+The retired multi-step factory (classify → chunk → extract → categorize → tax)
+was removed in 2026-07; historical ADRs before ADR-0030 describe that path.
 
 ## Light path
 The **experimental minimum spine** for replacing the heavy extraction factory
@@ -358,6 +335,28 @@ Both live per-client in Firestore; both extend the learning system (ADR-0004).
 (`accounting_agents/slack_runner.py`) as the ADK Tool-Confirmation idempotency
 marker — an entirely unrelated mechanism. Using the same word would create
 ambiguity in search and review.
+
+## Schema-as-prompt extraction
+How `ledgr_agent` tells Gemini what to extract from a financial PDF. Instead of
+long per-document-type rules in the free-text prompt, the **Pydantic schema field
+descriptions** carry the extraction guidance (Google's recommended pattern:
+descriptions "act as a prompt for the model"). The model **classifies** the
+document itself via enums (`file_kind`, `document_kind`, `doc_type`) — invoice,
+receipt, bank statement — without being told what kind of file it is. The
+free-text prompt stays minimal (role + read-only + reconcile). Arithmetic and
+classification are validated by reference-free eval metrics, never by hardcoded
+repair fallbacks in export code. See ADR-0034. See also ADR-0035 for bookable-row
+granularity, metadata-first delivery, and the Google-researched improvement loop.
+
+## Bookable row granularity
+How many `lines[]` rows `read_doc` returns per document: summary-level (charge
+categories or tax buckets on hierarchical bills) vs itemized (every printed
+product row on standard invoices). The model commits via `line_grain`
+(`itemized` | `summary`) on `ReadDocument` before filling `lines[]` (with
+`propertyOrdering` in the JSON schema). Decided by schema field descriptions and eval
+tags (`max_bookable_lines`, `min_bookable_lines`), not Python doc-type switches.
+Document metadata (vendor, reference, dates, totals) lives in header fields and
+Slack delivery text — not as fake line items in the Excel workbook. See ADR-0035.
 
 ## Delivery endpoint *(roadmap)*
 A per-destination projection of the [[Canonical Schema]] — one understanding of a

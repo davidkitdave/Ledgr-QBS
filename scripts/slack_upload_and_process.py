@@ -3,7 +3,7 @@
 
 Slack does not deliver ``message`` events for a bot's own posts, so ``files.upload``
 from the bot token will not trigger the socket-mode handler. This script uploads
-then calls :func:`process_file_event` directly — review cards still land in-channel.
+then calls :func:`process_file_event` directly — delivery lands in-channel.
 """
 
 from __future__ import annotations
@@ -24,15 +24,14 @@ os.environ.setdefault("GOOGLE_GENAI_USE_VERTEXAI", "FALSE")
 
 from slack_sdk import WebClient
 
-from accounting_agents.ledger_store import SlackLedgerStore
-from accounting_agents.sessions import FirestoreSessionService
-from accounting_agents.slack_runner import (
+from ledgr_slack.ledger_store import SlackLedgerStore
+from ledgr_slack.sessions import FirestoreSessionService
+from ledgr_slack.app import (
     build_runner,
     download_pdf_bytes,
-    handle_approval_action,
     process_file_event,
 )
-from invoice_processing.export.client_context import FirestoreClientStore
+from ledgr_slack.client_context import FirestoreClientStore
 
 
 async def upload_and_process(
@@ -40,7 +39,6 @@ async def upload_and_process(
     *,
     channel_id: str,
     comment: str = "",
-    auto_approve: bool = False,
 ) -> dict:
     pdf = pdf.expanduser()
     if not pdf.exists():
@@ -63,7 +61,7 @@ async def upload_and_process(
     runner = build_runner()
     ledger_store = SlackLedgerStore(db)
 
-    result = await process_file_event(
+    return await process_file_event(
         runner=runner,
         ledger_store=ledger_store,
         db=db,
@@ -76,24 +74,6 @@ async def upload_and_process(
         client_store=FirestoreClientStore(),
     )
 
-    if auto_approve and result.get("status") == "paused":
-        op_id = result.get("op_id") or ""
-        if op_id.endswith(":review"):
-            print(f"Paused at extract review ({op_id}); auto-approve skipped.", file=sys.stderr)
-            return result
-        approve_result = await handle_approval_action(
-            runner=runner,
-            ledger_store=ledger_store,
-            db=db,
-            slack_client=client,
-            op_id=op_id,
-            decision="approve",
-            app_name=runner.app_name,
-        )
-        return {"upload": result, "approve": approve_result}
-
-    return result
-
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Upload PDF to Slack and process via Ledgr")
@@ -104,11 +84,6 @@ def main() -> None:
         help="Slack channel id (default: #acme-client-test)",
     )
     parser.add_argument("--comment", default="", help="Optional upload comment")
-    parser.add_argument(
-        "--approve",
-        action="store_true",
-        help="Auto-approve at the HITL gate (writes Excel + posts data_table preview)",
-    )
     args = parser.parse_args()
 
     result = asyncio.run(
@@ -116,7 +91,6 @@ def main() -> None:
             args.pdf,
             channel_id=args.channel,
             comment=args.comment,
-            auto_approve=args.approve,
         )
     )
     print(result)

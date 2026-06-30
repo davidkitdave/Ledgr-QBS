@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from invoice_processing.shared_libraries import model_config as mc
+from ledgr_slack import model_config as mc
 
 
 @pytest.fixture(autouse=True)
