@@ -1156,7 +1156,7 @@ def test_flush_deferred_records_failure_when_append_raises():
         invoice_number="INV-1",
     )
 
-    results = asyncio.run(
+    results, _batch_credit = asyncio.run(
         _flush_deferred_ledger_writes(
             ledger_store=_FailingStore(),
             slack_client=MagicMock(),
