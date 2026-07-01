@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 
 from ledgr_slack.jurisdiction import REGION_MALAYSIA, REGION_SINGAPORE
 from ledgr_slack.export.axis_resolvers import (
@@ -56,6 +58,8 @@ class TestResolveCurrency:
 
 
 class TestResolveTaxClassifierReference:
+    pytestmark = pytest.mark.legacy
+
     def test_none_reference_flagged_no_classifier(self):
         res = resolve_tax_classifier_reference(None)
         assert res.flagged is True
@@ -90,6 +94,8 @@ class TestLegacyProfileNoSilentSingapore:
 
 
 class TestSalesIndeterminateFlagged:
+    pytestmark = pytest.mark.legacy
+
     def test_sales_indeterminate_local_no_gst_flags(self):
         from datetime import date
 

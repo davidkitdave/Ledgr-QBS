@@ -2,6 +2,8 @@
 
 from datetime import date
 
+import pytest
+
 from ledgr_slack.ledger_doc_identity import (
     ledger_doc_identity,
     ledger_doc_key_for_invoice,
@@ -55,6 +57,7 @@ def _sales_invoice() -> NormalizedInvoice:
     return inv
 
 
+@pytest.mark.legacy
 def test_sheet_lacks_invoice_identity_only_autocount_sales():
     """The fallback guard fires for AutoCount sales ONLY — never the others."""
     assert sheet_lacks_invoice_identity_column(get_exporter("autocount"), "sales") is True
@@ -81,6 +84,7 @@ def test_ledger_row_signature_distinguishes_amount_and_code():
     assert base != ledger_row_signature("Sales", "11/09/2025", "ACME", 500.0)
 
 
+@pytest.mark.legacy
 def test_doc_key_for_invoice_autocount_sales_uses_signature():
     inv = _sales_invoice()
     key = ledger_doc_key_for_invoice(get_exporter("autocount"), "Sales", inv, 0)
@@ -89,6 +93,7 @@ def test_doc_key_for_invoice_autocount_sales_uses_signature():
     assert "INV-S1" not in key
 
 
+@pytest.mark.legacy
 def test_doc_key_for_invoice_other_erps_keep_invoice_number():
     """QBS/Xero/SQL/AutoCount-purchase keep the invoice_number identity (no sig)."""
     inv = _sales_invoice()

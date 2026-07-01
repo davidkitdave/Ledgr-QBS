@@ -59,8 +59,9 @@ Run explicitly: `uv run pytest -m legacy`
 
 **Candidate for future legacy mark** (still in default CI today):
 
-- `tests/test_erp_exporters.py` — NormalizedInvoice exporter shapes
-- `tests/test_axis_resolvers.py` — ties to TaxClassifier reference loading
+- ~~`tests/test_erp_exporters.py`~~ — marked `legacy` (NormalizedInvoice exporters)
+- ~~`tests/test_axis_resolvers.py`~~ — `TestResolveTaxClassifierReference` + `TestSalesIndeterminateFlagged` marked `legacy`
+- ~~`tests/test_ledger_doc_identity.py`~~ — exporter-based doc-key tests marked `legacy`; core `ledger_doc_identity()` tests stay in CI
 
 ---
 
@@ -82,7 +83,7 @@ Run explicitly: `uv run pytest -m legacy`
 
 | Lever | Change |
 |-------|--------|
-| **Faster CI** | `addopts = "-m 'not slow and not legacy'"`; CI uses `pytest -n auto` |
+| **Faster CI** | `addopts = "-m 'not slow and not legacy'"`; CI uses `pytest -n auto` (~753 tests, ~5s) |
 | **Slow tests** | Bank formula edge cases in `test_ledger_store.py` auto-marked `slow` |
 | **Trim deps** | Eval-only deps in `google-adk[eval]`; `xlrd` for legacy golden reads only |
 | **CI split** | `ci.yml` = ruff + hermetic pytest; `eval.yml` = live Gemini weekly |
@@ -119,7 +120,7 @@ uv run pytest tests/integration
 
 ## Next cleanup candidates (not done yet)
 
-1. Mark `test_erp_exporters.py` as `legacy` if light-path xlsx never uses NormalizedInvoice exporters.
-2. Delete `docs/qa/tournament_round2_soa_report.json` after confirming no one references it.
-3. Update `CONTEXT.md` eval paths (`tests/eval/...` → `ledgr_agent/eval/...`).
-4. Add `pytest-xdist` note to CI if parallel runs flake on shared env (currently stable).
+1. ~~Mark `test_erp_exporters.py` as `legacy`~~ — done
+2. Delete `docs/qa/tournament_round2_soa_report.json` after confirming no one references it — done
+3. Update `CONTEXT.md` eval paths (`tests/eval/...` → `ledgr_agent/eval/...`) — done in prior commit
+4. Consider marking `test_partial_failure.py` if light path never uses NormalizedInvoice reconcile flags

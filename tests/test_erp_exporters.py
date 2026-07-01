@@ -1,9 +1,15 @@
 """WS5 — Multi-ERP exporter tests (AutoCount, SQL Account).
 
 Synthetic fixtures only — no real client golden file yet.
+
+Not on the live Slack hot path (light path uses ledgr_agent/internal/export.py).
 """
 
 from __future__ import annotations
+
+import pytest
+
+pytestmark = pytest.mark.legacy
 
 from datetime import date
 
