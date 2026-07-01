@@ -23,5 +23,7 @@ def run_state_delta(
         "temp:artifact_name": artifact_name,
         "input_page_count": input_page_count,
         "defer_slack_delivery": defer_slack_delivery,
+        # Slack owns the single delivery charge + coin footer (not build_sheets).
+        "charge_at_slack_delivery": True,
         **profile_delta,
     }

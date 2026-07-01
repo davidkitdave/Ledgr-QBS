@@ -552,6 +552,74 @@
       "forbid_document_kinds": [
         "statement_of_account"
       ]
+    },
+    {
+      "eval_id": "bank_reverse_chron",
+      "expected_file_kind": "bank_statement",
+      "session_input": {
+        "app_name": "ledgr_agent",
+        "user_id": "eval_user",
+        "state": {
+          "fye_month": 12,
+          "software": "QBS Ledger",
+          "firm_id": "T_EVAL",
+          "client_id": "eval_client"
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "bank_reverse_chron-inv-01",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Process this document and build the workbook."
+              },
+              {
+                "inline_data": {
+                  "mime_type": "application/pdf",
+                  "data": "JVBERi0xLjQKJWJhbmtfcmV2ZXJzZV9jaHJvbi5wZGYKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2JqCjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFszIDAgUl0gL0NvdW50IDEgPj4KZW5kb2JqCjMgMCBvYmoKPDwgL1R5cGUgL1BhZ2UgL1BhcmVudCAyIDAgUiAvTWVkaWFCb3ggWzAgMCA2MTIgNzkyXSAvQ29udGVudHMgNCAwIFIgL1Jlc291cmNlcyA8PCAvRm9udCA8PCAvRjEgNSAwIFIgPj4gPj4gPj4KZW5kb2JqCjQgMCBvYmoKPDwgL0xlbmd0aCAzMTggL0ZpbHRlciAvRmxhdGVEZWNvZGUgPj4Kc3RyZWFtCnicdZLLbsIwEEX3fMUs20Xp2ImBZsejRSDxULHUtRVM6xYc5BhV/H2dNHEImIkU2cmdM57rGfHO8xsBQoDvOgTQPQQYdhH6cfHmB3gYCf0DGyusPEhtH4F/XylJrRzPFiMo5Lei3kstGqZpdtIWllkCA0RCo5j1+oGMvseejJE6PSewmU4CQlYL19KobJsAEpgPl0CRMniCqNkFkmmdvDpKrfSnO/9e6FQmQBDdP7zNYb6XiTMFqpjIPDXqaFWmoRUfyn5tjfgV+0J0zHJl3deqTIDu+8YY5kL/tzHTVhqZWxgbuS0BgSC0y7BalesA3ZuFUUMf8kXrmBfI0oPrMveMiTycNvDp7H0Fa3EupqcNoiF4dA/ux6y43hrOjdD5ThpnUNiTIpivQ9gdejzw07Z3N9SagwsvX/kfSDi0bQplbmRzdHJlYW0KZW5kb2JqCjUgMCBvYmoKPDwgL1R5cGUgL0ZvbnQgL1N1YnR5cGUgL1R5cGUxIC9CYXNlRm9udCAvSGVsdmV0aWNhID4+CmVuZG9iagp4cmVmCjAgNgowMDAwMDAwMDAwIDY1NTM1IGYgCjAwMDAwMDAwMzMgMDAwMDAgbiAKMDAwMDAwMDA4MiAwMDAwMCBuIAowMDAwMDAwMTM5IDAwMDAwIG4gCjAwMDAwMDAyNjUgMDAwMDAgbiAKMDAwMDAwMDY1NSAwMDAwMCBuIAp0cmFpbGVyCjw8IC9TaXplIDYgL1Jvb3QgMSAwIFIgPj4Kc3RhcnR4cmVmCjcyNQolJUVPRgo="
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "eval_id": "multi_receipt_large",
+      "expected_file_kind": "commercial_documents",
+      "session_input": {
+        "app_name": "ledgr_agent",
+        "user_id": "eval_user",
+        "state": {
+          "fye_month": 12,
+          "software": "QBS Ledger",
+          "firm_id": "T_EVAL",
+          "client_id": "eval_client"
+        }
+      },
+      "conversation": [
+        {
+          "invocation_id": "multi_receipt_large-inv-01",
+          "user_content": {
+            "role": "user",
+            "parts": [
+              {
+                "text": "Process this document and build the workbook."
+              },
+              {
+                "inline_data": {
+                  "mime_type": "application/pdf",
+                  "data": "JVBERi0xLjQKJW11bHRpX3JlY2VpcHRfbGFyZ2UucGRmCjEgMCBvYmoKPDwgL1R5cGUgL0NhdGFsb2cgL1BhZ2VzIDIgMCBSID4+CmVuZG9iagoyIDAgb2JqCjw8IC9UeXBlIC9QYWdlcyAvS2lkcyBbMyAwIFIgNCAwIFIgNSAwIFIgNiAwIFIgNyAwIFIgOCAwIFIgOSAwIFIgMTAgMCBSXSAvQ291bnQgOCA+PgplbmRvYmoKMyAwIG9iago8PCAvVHlwZSAvUGFnZSAvUGFyZW50IDIgMCBSIC9NZWRpYUJveCBbMCAwIDYxMiA3OTJdIC9Db250ZW50cyAxMSAwIFIgL1Jlc291cmNlcyA8PCAvRm9udCA8PCAvRjEgMTkgMCBSID4+ID4+ID4+CmVuZG9iago0IDAgb2JqCjw8IC9UeXBlIC9QYWdlIC9QYXJlbnQgMiAwIFIgL01lZGlhQm94IFswIDAgNjEyIDc5Ml0gL0NvbnRlbnRzIDEyIDAgUiAvUmVzb3VyY2VzIDw8IC9Gb250IDw8IC9GMSAxOSAwIFIgPj4gPj4gPj4KZW5kb2JqCjUgMCBvYmoKPDwgL1R5cGUgL1BhZ2UgL1BhcmVudCAyIDAgUiAvTWVkaWFCb3ggWzAgMCA2MTIgNzkyXSAvQ29udGVudHMgMTMgMCBSIC9SZXNvdXJjZXMgPDwgL0ZvbnQgPDwgL0YxIDE5IDAgUiA+PiA+PiA+PgplbmRvYmoKNiAwIG9iago8PCAvVHlwZSAvUGFnZSAvUGFyZW50IDIgMCBSIC9NZWRpYUJveCBbMCAwIDYxMiA3OTJdIC9Db250ZW50cyAxNCAwIFIgL1Jlc291cmNlcyA8PCAvRm9udCA8PCAvRjEgMTkgMCBSID4+ID4+ID4+CmVuZG9iago3IDAgb2JqCjw8IC9UeXBlIC9QYWdlIC9QYXJlbnQgMiAwIFIgL01lZGlhQm94IFswIDAgNjEyIDc5Ml0gL0NvbnRlbnRzIDE1IDAgUiAvUmVzb3VyY2VzIDw8IC9Gb250IDw8IC9GMSAxOSAwIFIgPj4gPj4gPj4KZW5kb2JqCjggMCBvYmoKPDwgL1R5cGUgL1BhZ2UgL1BhcmVudCAyIDAgUiAvTWVkaWFCb3ggWzAgMCA2MTIgNzkyXSAvQ29udGVudHMgMTYgMCBSIC9SZXNvdXJjZXMgPDwgL0ZvbnQgPDwgL0YxIDE5IDAgUiA+PiA+PiA+PgplbmRvYmoKOSAwIG9iago8PCAvVHlwZSAvUGFnZSAvUGFyZW50IDIgMCBSIC9NZWRpYUJveCBbMCAwIDYxMiA3OTJdIC9Db250ZW50cyAxNyAwIFIgL1Jlc291cmNlcyA8PCAvRm9udCA8PCAvRjEgMTkgMCBSID4+ID4+ID4+CmVuZG9iagoxMCAwIG9iago8PCAvVHlwZSAvUGFnZSAvUGFyZW50IDIgMCBSIC9NZWRpYUJveCBbMCAwIDYxMiA3OTJdIC9Db250ZW50cyAxOCAwIFIgL1Jlc291cmNlcyA8PCAvRm9udCA8PCAvRjEgMTkgMCBSID4+ID4+ID4+CmVuZG9iagoxMSAwIG9iago8PCAvTGVuZ3RoIDI5MyAvRmlsdGVyIC9GbGF0ZURlY29kZSA+PgpzdHJlYW0KeJx9zs1qg0AUhuF9ruJAN+0i6Zz582dTSKIQCEHC5ALETluL1pBO779WbBZ6juPg6v2YZ+tWzzkCIri3FYLoPwQjNgIi/fd3LTyes112KBxsL6f9MYMXKMp3D/gE7nMywf9JfuvaFPK6CnX3VTZw9qGsGyiCh2N4nS9Ncn/MV76+Bjh1KZx3xVoIQbxkIjn2+zL4FKSQdi36S7VGj+0h+BauP7fqo/z28IDQH8SNEcRI2XHkulA2KduJBbic9zpm4FRrGbgc4JIEaT2FMx0uwNW8VwkDp9qIgasBrkiQMlM408kFuCZ6wcCJVsYMXA9wTYKkncKZTi3ADdEjAydaTBi4GeCGBGE0hTOdXoBbopcMnGoFA7cD3JKgeOq+Z5n7BUWWFlYKZW5kc3RyZWFtCmVuZG9iagoxMiAwIG9iago8PCAvTGVuZ3RoIDI5NiAvRmlsdGVyIC9GbGF0ZURlY29kZSA+PgpzdHJlYW0KeJx91MFqg0AQxvF7nmKgl/aQdGZdXfVSSKIQCEHC9gHEbluL1pBu379GbA46o8qe/h/7O7m1q+ecgAjs+4oA+5cgxA2C0bfTtvB4znbZobCwfT3tjxm8QFF+OFBPYL8mE/qf5NeuTSGvK19332UDZ+fLuoHCOzj6t/kyTO6XucrVFw+nLoXzrlgjomF6o8Z+X3qXgkIVrbH/uDbUY3vwroXL77X6LH8cPBjoHzKbEJlREI0j2/myScUOF+DxvNexAOfaSIDHAzxmQVpP4UJHC/Bk3geJAOdaI8CTAZ6woCCcwoVOyXDieuThXKtiAU54k/c3cyIVTeRSFyzIielJkDMtJZKcBjmxIjJTudDpBTnzIyAlyLkWJbka5IoVxVP4PcvsH2eqFxQKZW5kc3RyZWFtCmVuZG9iagoxMyAwIG9iago8PCAvTGVuZ3RoIDI5MyAvRmlsdGVyIC9GbGF0ZURlY29kZSA+PgpzdHJlYW0KeJx9zs1qg0AUhuF9ruJAN+3CdP5H3RSSKARCkDC5gMFOW4vWkE7vv6nYLPQcZ2BW78c8G7d6LjlwDu5txYHdLgfN1gys+ntdB4+nYlvsKweb83F3KOAFKv8eQD6B+5xM+P+kvPZdDmVTx6b/8i2cQvRNC1UMcIiv86XO7p+FOjSXCMc+h9O2ShjjyE/airHf+RhyEEyYhJkEbbUa230MHVx+rvWH/w7wwCXcjpBrzZCVNOPK9dG3OdmxBbma9yol5FhrKLka5AoVKTWVEx1fkOt5LzNCjrWWkutBrlGR1FM50YkFuUF6RsiRVqSU3Axyg4qEmcqJTi7ILdJzQo60PKPkdpBbVMTtVE50akGeIr0g5FjLKHk6yFNUlE7h96xwvyrZF9IKZW5kc3RyZWFtCmVuZG9iagoxNCAwIG9iago8PCAvTGVuZ3RoIDI5NiAvRmlsdGVyIC9GbGF0ZURlY29kZSA+PgpzdHJlYW0KeJx91MFqg0AQxvF7nmKgl/ZgOjO7avRSSKIQCEFk+wCSbltLUkO6ff8mYnMwM7rg6f+xv9Mu3ey5JCAC9z4jwMshiHGOkNrr3x3hsS5WxaZysHzdrbcFvEDVfHiwT+C+RhP6n5Tn7phD2e5D2303B6h9aNoDVMHDNrzdL+Psdpnf+/YUYNflUK+qCJEyoU956NdN8DkwchJhEoltbId2E/wRTr/n/Wfz4+GBMrh8nM1jFFYmGVauC80hVzvU5Sz0diHLxTZR5IxXuUFRZO1IrnU0Iaf73mSKXGpTTU69nESRicdypeMJOQs9KnKh5YUm517OooiTsVzpzITcCD0pcqGlTJObXm5EEaVjudLZCbnwFhArcqlFTW57uRVFizH8lhXuDyLSF6YKZW5kc3RyZWFtCmVuZG9iagoxNSAwIG9iago8PCAvTGVuZ3RoIDI5NiAvRmlsdGVyIC9GbGF0ZURlY29kZSA+PgpzdHJlYW0KeJyVzs1qg0AUhuF9ruJAN+3CdH6cGXVTSKIQCEHC9AIGO20tWkM6vf8asS3oOdI64Or9OM/Gru4LDpyDfV5xYP3joNiagYmvf9vC7Snf5vvSwubxuDvk8ACle/Gg7sC+TSb8e1JcujaDoq5C3b27Bk4+uLqBMng4hKf5UqU/x3zl63OAY5fBaVtGjAnkkjJi7Hcu+AwEEzpiOkJbFY/tPvgWzp+X6tV9eLgRCvpPqrViyErqcWW74JqM7NiCXM/7OCHkWKspuR7kGhXF8VROdHxBbua9TAk51hpKbga5QUVSTeVEJxbkCdIzQo60IqHkySBPUJHQUznRyQV5ivT873KeUvJ0kKeoiJupnOhiWi6xXvxDzgi5ZFd5fxkTJRP4b5bbL+YHGAcKZW5kc3RyZWFtCmVuZG9iagoxNiAwIG9iago8PCAvTGVuZ3RoIDI5NCAvRmlsdGVyIC9GbGF0ZURlY29kZSA+PgpzdHJlYW0KeJyV1E1rgzAcx/F7X8UfdtkOdvnnyYfLoK1CoRSR7AUEl3YOnaXL3v86cT3ERJwBT98f+ZyyUavnAgER1GmFQG4HQZA1gZj//lUHj1W+zfelgs3rcXfI4QVKfTYgn0B9OBP8mxTXvsugaGrb9J+6hcpY3bRQWgMH+zZdivR+malNc7Fw7DOotmVECENPH9Ox32lrMqCEyojIiCaeVvCx3VvTweX7Wr/rLwMPDOH2cVwL4lkxOa5Ub3WbBTsyI6fTnifL5VyG5HSQU6+Ic1ce6HBGzqY9S5fLWRySs0HOvCImXHmgozNy7unJcjlNQnI+yLlXRKUrD3RsRi48PS6XYxqSi0EuvCKMXXmg4zNyz1uA9B9yEpLLQS69osSF37Nc/QB0CxfqCmVuZHN0cmVhbQplbmRvYmoKMTcgMCBvYmoKPDwgL0xlbmd0aCAyOTQgL0ZpbHRlciAvRmxhdGVEZWNvZGUgPj4Kc3RyZWFtCniclc5Pa4MwGMfxe1/FA7tsB7s8+WPUy6CtQqEUkewFBJdtDp2ly97/rLge0kRsAjl9f+SzUavnAgER1PsKgQwXQZA1Ackvr+rgscq3+b5UsHk97g45vECpPwzIJ1BfzgT/J8W57zIomto2/bduoTJWNy2U1sDBvt0uRXr9zNSmOVk49hlU2zIihHl+EpJO/U5bkwElNI5IHNHE0wo+tXtrOjj9nutP/WPggUkYDpdrQTwrFk8r1VvdZsGOzMg9Gp4sl/M4JE9GeeIVce7KAx3OyNPbnqXL5UyG5OkoT70iJlx5oKNhOff1ZLmcJgE5Jxf50PhENHbkoY7NyNHT43I5piE5jnL0ilC68kDHZ+TU09M75CQkp6OcekWJC79mufoDOQUYDwplbmRzdHJlYW0KZW5kb2JqCjE4IDAgb2JqCjw8IC9MZW5ndGggMjkyIC9GaWx0ZXIgL0ZsYXRlRGVjb2RlID4+CnN0cmVhbQp4nJXOT0vDMBjH8ftexQNe9NCZP0+SthdhWwuDMcqILyDUqJXWjhnfv7PUHdKk1ARy+v7IZ6NXjyUFSkG/riiQ66UgyJqAwt9Xd3B/KrbFvtKweT7uDgU8QWXeLKQPoD+8Cf2blJe+y6Fsatf0n6aFk3WmaaFyFg7uZboU2e0zW9vm7ODY53DaVgkhyAO9YmO/M87mwAiTCZEJC6iEwLHdO9vB+ftSv5svC3fI4XoEXwsSWHE5rnTvTJtHOzIjx2mP6XI5ypgcBzkGRYi+PNLRGbmY9jxbLucqJheDXARFXPjySMdm5DLQk+VylsbkcpDLoIhJXx7p+IxcBXq6XE6zmFwNchUUUeXLIx3OyEMa9g85icnTQZ4GRakPv2WF/gESkRg0CmVuZHN0cmVhbQplbmRvYmoKMTkgMCBvYmoKPDwgL1R5cGUgL0ZvbnQgL1N1YnR5cGUgL1R5cGUxIC9CYXNlRm9udCAvSGVsdmV0aWNhID4+CmVuZG9iagp4cmVmCjAgMjAKMDAwMDAwMDAwMCA2NTUzNSBmIAowMDAwMDAwMDM0IDAwMDAwIG4gCjAwMDAwMDAwODMgMDAwMDAgbiAKMDAwMDAwMDE4MyAwMDAwMCBuIAowMDAwMDAwMzExIDAwMDAwIG4gCjAwMDAwMDA0MzkgMDAwMDAgbiAKMDAwMDAwMDU2NyAwMDAwMCBuIAowMDAwMDAwNjk1IDAwMDAwIG4gCjAwMDAwMDA4MjMgMDAwMDAgbiAKMDAwMDAwMDk1MSAwMDAwMCBuIAowMDAwMDAxMDc5IDAwMDAwIG4gCjAwMDAwMDEyMDggMDAwMDAgbiAKMDAwMDAwMTU3NCAwMDAwMCBuIAowMDAwMDAxOTQzIDAwMDAwIG4gCjAwMDAwMDIzMDkgMDAwMDAgbiAKMDAwMDAwMjY3OCAwMDAwMCBuIAowMDAwMDAzMDQ3IDAwMDAwIG4gCjAwMDAwMDM0MTQgMDAwMDAgbiAKMDAwMDAwMzc4MSAwMDAwMCBuIAowMDAwMDA0MTQ2IDAwMDAwIG4gCnRyYWlsZXIKPDwgL1NpemUgMjAgL1Jvb3QgMSAwIFIgPj4Kc3RhcnR4cmVmCjQyMTcKJSVFT0YK"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "expected_document_kind": "receipt",
+      "expected_document_count": 48
     }
   ]
 }

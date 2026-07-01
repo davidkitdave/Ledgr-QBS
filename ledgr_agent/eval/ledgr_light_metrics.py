@@ -22,6 +22,7 @@ from google.adk.evaluation.evaluator import EvaluationResult, PerInvocationResul
 from google.genai import types
 
 from ledgr_agent.internal.gemini import default_llm_config, make_client, std_model
+from ledgr_agent.internal.normalize import reconcile_running_balance
 from ledgr_agent.internal.schemas import ReadDocumentBundle
 
 _log = logging.getLogger(__name__)
@@ -56,10 +57,7 @@ def score_self_consistency_on_extraction(bundle: dict[str, Any]) -> dict[str, fl
 
     file_kind = bundle.get("file_kind") or ""
     if file_kind == "bank_statement":
-        accounts = bundle.get("accounts") or []
-        if not accounts:
-            return {"overall": 0.0, "has_payload": 0.0}
-        return {"overall": 1.0, "has_payload": 1.0, "bank_skipped": 1.0}
+        return {"overall": 0.0, "has_payload": 0.0, "bank_excluded": 1.0}
 
     documents = bundle.get("documents") or []
     if not documents:
@@ -405,6 +403,62 @@ def _result_from_scores(
     )
 
 
+def score_bank_reconcile_on_extraction(
+    bundle: dict[str, Any],
+    *,
+    min_pass_rate: float = 0.95,
+) -> float:
+    """Score bank running-balance reconcile on ``read_doc`` output (0.0–1.0)."""
+    if not bundle or bundle.get("file_kind") != "bank_statement":
+        return 1.0
+    accounts = bundle.get("accounts_normalized") or bundle.get("accounts") or []
+    if not accounts:
+        return 0.0
+    account_scores: list[float] = []
+    for acct in accounts:
+        if not isinstance(acct, dict):
+            account_scores.append(0.0)
+            continue
+        txns = acct.get("transactions") or []
+        if not txns:
+            account_scores.append(0.0)
+            continue
+        if acct.get("reconciled") is not None:
+            math_ok = [t.get("math_ok") for t in txns if t.get("math_ok") is not None]
+            if math_ok:
+                rate = sum(1 for ok in math_ok if ok) / len(math_ok)
+            else:
+                ok, _ = reconcile_running_balance(acct)
+                rate = 1.0 if ok else 0.0
+        else:
+            trial = dict(acct)
+            ok, _ = reconcile_running_balance(trial)
+            rate = 1.0 if ok else 0.0
+        account_scores.append(1.0 if rate >= min_pass_rate else rate)
+    return statistics.mean(account_scores) if account_scores else 0.0
+
+
+def extraction_bank_reconcile(
+    eval_metric: EvalMetric,
+    actual_invocations: list[Invocation],
+    expected_invocations: Optional[list[Invocation]] = None,
+    conversation_scenario: Optional[ConversationScenario] = None,
+) -> EvaluationResult:
+    """Running-balance reconcile for bank statements (reference-free)."""
+    threshold = float(getattr(eval_metric.criterion, "threshold", 0.95) or 0.95)
+    scores: list[float] = []
+    for inv in actual_invocations:
+        bundle = _extraction_bundle_from_invocation(inv)
+        if bundle is None:
+            scores.append(0.0)
+            continue
+        if bundle.get("file_kind") != "bank_statement":
+            scores.append(1.0)
+            continue
+        scores.append(score_bank_reconcile_on_extraction(bundle))
+    return _result_from_scores(scores, actual_invocations, threshold)
+
+
 def extraction_self_consistency(
     eval_metric: EvalMetric,
     actual_invocations: list[Invocation],
@@ -418,6 +472,9 @@ def extraction_self_consistency(
         bundle = _extraction_bundle_from_invocation(inv)
         if bundle is None:
             scores.append(0.0)
+            continue
+        if bundle.get("file_kind") == "bank_statement":
+            scores.append(1.0)
             continue
         scored = score_self_consistency_on_extraction(bundle)
         scores.append(float(scored.get("overall", 0.0)))

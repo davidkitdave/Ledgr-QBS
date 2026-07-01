@@ -64,6 +64,71 @@ def _num(value: Any) -> Any:
         return value
 
 
+def _parse_date(value: Any) -> date | None:
+    text = _fmt_date(value)
+    if not text:
+        return None
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text[:10], fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _sort_transactions_by_date(transactions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return transactions sorted ascending by date; undated rows keep stable tail order."""
+
+    def sort_key(txn: dict[str, Any]) -> tuple:
+        parsed = _parse_date(txn.get("date"))
+        return (0, parsed) if parsed is not None else (1, date.max)
+
+    return sorted(transactions, key=sort_key)
+
+
+def recompute_transaction_balances(
+    *,
+    opening_balance: float | None,
+    transactions: list[dict[str, Any]],
+) -> None:
+    """Rewrite each txn ``balance`` from opening + running wd/dep arithmetic."""
+    running: float | None = (
+        float(opening_balance) if opening_balance is not None else None
+    )
+    for txn in transactions:
+        withdrawal = txn.get("withdrawal") or 0.0
+        deposit = txn.get("deposit") or 0.0
+        if running is not None:
+            running = round(
+                running - float(withdrawal or 0) + float(deposit or 0),
+                2,
+            )
+            txn["balance"] = running
+        elif txn.get("balance") is not None:
+            running = float(txn["balance"])
+
+
+def _maybe_reverse_printed_order(account: dict[str, Any]) -> None:
+    """When Gemini returns newest-first rows, flip to chronological before sort."""
+    txns = account.get("transactions") or []
+    if len(txns) < 2:
+        return
+
+    def _trial(rows: list[dict[str, Any]]) -> bool:
+        trial = {
+            "opening_balance": account.get("opening_balance"),
+            "transactions": [dict(t) for t in rows],
+        }
+        ok, _ = reconcile_running_balance(trial)
+        return ok
+
+    if _trial(txns):
+        return
+    reversed_txns = list(reversed(txns))
+    if _trial(reversed_txns):
+        account["transactions"] = reversed_txns
+
+
 def reconcile_running_balance(
     account: dict[str, Any],
     *,
@@ -130,6 +195,12 @@ def normalize_bank_statement(
             bank_name=normalized["bank_name"],
             account_number=normalized.get("account_number"),
             currency=currency,
+        )
+        _maybe_reverse_printed_order(normalized)
+        normalized["transactions"] = _sort_transactions_by_date(normalized["transactions"])
+        recompute_transaction_balances(
+            opening_balance=normalized.get("opening_balance"),
+            transactions=normalized["transactions"],
         )
         reconcile_running_balance(normalized)
         accounts_out.append(normalized)

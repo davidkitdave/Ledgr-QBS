@@ -14,7 +14,7 @@ from google.adk.runners import Runner
 from google.genai import types
 
 from ledgr_agent.app import ledgr_app
-from ledgr_agent.billing import _charge_disabled, wire_playground_credits
+from ledgr_agent.billing import _charge_disabled, get_shared_credit_service, wire_playground_credits
 from ledgr_agent.internal.gemini import mime_for
 from ledgr_agent.internal.uploads import artifact_name_for
 from ledgr_agent.tools.build_sheets import WORKBOOK_STATE_KEY, build_sheets
@@ -66,7 +66,7 @@ async def _append_workbook_batches(
     """Append batches, splitting across FY workbooks when needed."""
     default_fy = str(payload.get("fy") or "unknown")
     fy_groups = _group_batches_by_fy(batches, default_fy)
-    merged: dict[str, Any] = {"appended": 0, "deduped": 0}
+    merged: dict[str, Any] = {"appended": 0, "deduped": 0, "fy_groups": []}
     for fy, fy_batches in fy_groups.items():
         result = await asyncio.to_thread(
             ledger_store.append_rows,
@@ -88,6 +88,17 @@ async def _append_workbook_batches(
             merged["filename"] = result["filename"]
         if result.get("slack_file_id"):
             merged["slack_file_id"] = result["slack_file_id"]
+        merged["fy_groups"].append(
+            {
+                "fy": fy,
+                "filename": result.get("filename"),
+                "slack_file_id": result.get("slack_file_id"),
+                "appended": int(result.get("appended") or 0),
+                "deduped": int(result.get("deduped") or 0),
+                "n_docs": len(fy_batches),
+                "n_rows": sum(len(b.get("rows") or []) for b in fy_batches),
+            }
+        )
     return merged
 
 
@@ -195,13 +206,15 @@ async def deliver_workbook(
         client_id=payload["client_id"],
         fy=str(payload.get("fy") or "unknown"),
         batches=batches,
+        kind=str(payload.get("kind") or "invoice"),
     )
-    summary = compose_delivery_summary(workbook, payload)
+    pre_summary = compose_delivery_summary(workbook, payload, append_result=None)
+    summary = pre_summary
 
     if defer_slack_delivery:
         append_result: dict[str, Any] = {
             "deferred_ledger": {
-                "summary": summary,
+                "summary": pre_summary,
                 "batches": batches,
                 "payload": payload,
                 "effective_replace": effective_replace,
@@ -212,7 +225,7 @@ async def deliver_workbook(
             "appended": 0,
         }
         append_result["deferred_delivery"] = {
-            "summary": summary,
+            "summary": pre_summary,
             "batches": batches,
             "payload": payload,
             "workbook_name": "",
@@ -259,6 +272,21 @@ async def deliver_workbook(
                 )
                 if credit_info:
                     append_result.update(credit_info)
+        else:
+            firm_id = resolve_firm_id_from_state({**state, **profile_delta})
+            if firm_id is None and client_store is not None:
+                try:
+                    ctx = client_store.get_by_channel(channel_id)
+                    firm_id = resolve_firm_id_from_client(ctx)
+                except Exception:  # noqa: BLE001
+                    firm_id = None
+            if firm_id:
+                append_result["credits_used"] = 0
+                append_result["credits_remaining"] = int(
+                    get_shared_credit_service().read_balance(firm_id)
+                )
+                append_result["all_deduped"] = True
+        summary = compose_delivery_summary(workbook, payload, append_result=append_result)
         _post_delivery_card(
             slack_client,
             channel_id,

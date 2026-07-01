@@ -226,7 +226,7 @@ class _NoopLedgerStore:
     def latest_fy(self, client_id):
         return None
 
-    def get_pointer(self, client_id, fy):
+    def get_pointer(self, client_id, fy, kind="invoice"):
         return None
 
 

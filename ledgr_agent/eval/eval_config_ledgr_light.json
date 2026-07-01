@@ -45,6 +45,9 @@
     },
     "extraction_tax_bucket_fidelity": {
       "threshold": 1.0
+    },
+    "extraction_bank_reconcile": {
+      "threshold": 0.95
     }
   },
   "customMetrics": {
@@ -83,6 +86,12 @@
         "name": "ledgr_agent.eval.ledgr_light_metrics.extraction_tax_bucket_fidelity"
       },
       "description": "Tax-bucket cases must emit SR+ZR rows with Xero-style descriptions."
+    },
+    "extraction_bank_reconcile": {
+      "codeConfig": {
+        "name": "ledgr_agent.eval.ledgr_light_metrics.extraction_bank_reconcile"
+      },
+      "description": "Bank statements must reconcile running balances after normalize."
     }
   },
   "metricsToRun": [
@@ -93,6 +102,18 @@
     "extraction_classification",
     "extraction_bookable_granularity",
     "extraction_itemized_fidelity",
-    "extraction_tax_bucket_fidelity"
+    "extraction_tax_bucket_fidelity",
+    "extraction_bank_reconcile"
+  ],
+  "metrics_to_run": [
+    "rubric_based_tool_use_quality_v1",
+    "hallucinations_v1",
+    "extraction_self_consistency",
+    "extraction_faithfulness",
+    "extraction_classification",
+    "extraction_bookable_granularity",
+    "extraction_itemized_fidelity",
+    "extraction_tax_bucket_fidelity",
+    "extraction_bank_reconcile"
   ]
 }

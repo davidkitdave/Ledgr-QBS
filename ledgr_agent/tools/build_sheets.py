@@ -16,6 +16,7 @@ from ledgr_agent.internal.delivery_tags import (
     build_delivery_tags,
     document_sheet_meta,
     fye_month_from_state,
+    sanitize_outlier_document_dates,
 )
 from ledgr_agent.internal.export import DEFAULT_SYSTEMS, build_bank_workbook, project
 from ledgr_agent.internal.skill_profiles import normalize_system_key
@@ -168,7 +169,9 @@ def build_sheets(
             target_systems = list(DEFAULT_SYSTEMS)
         sheets = []
         fye_month = fye_month_from_state(state_plain)
-        for document in documents:
+        doc_copies = [dict(doc) if isinstance(doc, dict) else doc for doc in documents]
+        sanitize_outlier_document_dates(doc_copies)
+        for document in doc_copies:
             doc = dict(document)
             doc.setdefault("source_path", source_path)
             if not doc.get("lines"):
@@ -183,7 +186,10 @@ def build_sheets(
                 "message": "no commercial documents with line items to book",
             }
 
-    defer_billing = bool(state_plain.get("defer_slack_delivery"))
+    defer_billing = bool(
+        state_plain.get("defer_slack_delivery")
+        or state_plain.get("charge_at_slack_delivery")
+    )
     if defer_billing:
         credits = _estimate_credits(tool_context, units=credit_units)
     else:

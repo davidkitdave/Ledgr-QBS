@@ -21,6 +21,13 @@ _INVOICE_SHEETS = ("Purchase", "Sales")
 
 
 class _SlackLedgerStoreAppendMixin:
+    @staticmethod
+    def _strip_non_invoice_sheets(wb: Workbook) -> None:
+        """Remove bank tabs accidentally merged into a legacy invoice workbook."""
+        for name in list(wb.sheetnames):
+            if name not in _INVOICE_SHEETS:
+                del wb[name]
+
     def append_rows(
         self,
         *,
@@ -92,10 +99,22 @@ class _SlackLedgerStoreAppendMixin:
         client_name: str = "",
         replace: bool = False,
     ) -> dict:
-        pointer = self.get_pointer(client_id, fy)
+        pointer = self.get_pointer(client_id, fy, kind=kind)
 
         # Capture the PREVIOUS file id before we overwrite the pointer.
         prev_file_id: Optional[str] = pointer.get("slack_file_id") if pointer else None
+
+        # Never download a workbook written for the other kind (legacy mixed pointers).
+        if pointer and pointer.get("kind") not in (None, kind):
+            logger.warning(
+                "Pointer kind=%r mismatch for append kind=%r — starting fresh FY%s %s workbook.",
+                pointer.get("kind"),
+                kind,
+                fy,
+                kind,
+            )
+            prev_file_id = None
+            pointer = None
 
         # Read the Firestore-side set of already-processed doc keys.
         seen_doc_keys: set = self._get_seen_doc_keys(pointer)
@@ -121,6 +140,8 @@ class _SlackLedgerStoreAppendMixin:
             try:
                 data = self._download_workbook(slack_client, prev_file_id)
                 wb = self._load_workbook(data)
+                if kind != "bank":
+                    self._strip_non_invoice_sheets(wb)
             except Exception as exc:
                 if self._slack_file_unavailable(exc):
                     logger.warning(

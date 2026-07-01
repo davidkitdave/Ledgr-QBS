@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import logging
-import time
 from typing import Any
-
-from google.genai import types
 
 from ledgr_agent.billing import (
     billable_units,
@@ -16,14 +13,13 @@ from ledgr_agent.billing import (
 from ledgr_agent.internal.extraction_notes import annotate_over_extraction_notes
 from ledgr_agent.internal.gemini import (
     count_input_pages,
-    default_llm_config,
     lite_model,
     make_client,
     mime_for,
-    usage_from_response,
+    std_model,
 )
 from ledgr_agent.internal.normalize import normalize_bank_statement
-from ledgr_agent.internal.schemas import BUNDLE_READER_INSTRUCTION, READ_PROMPT, ReadDocumentBundle
+from ledgr_agent.internal.read_doc_retry import gemini_read_once, read_bytes_with_retry
 from ledgr_agent.internal.uploads import resolve_document_paths
 
 _log = logging.getLogger(__name__)
@@ -33,38 +29,31 @@ READ_DOC_STATE_KEY = "read_doc"
 
 def _read_bytes_with_gemini(data: bytes, mime: str) -> dict[str, Any]:
     client = make_client()
-    part = types.Part.from_bytes(data=data, mime_type=mime)
-    model = lite_model()
-    t0 = time.perf_counter()
-    resp = client.models.generate_content(
-        model=model,
-        contents=[part, READ_PROMPT, BUNDLE_READER_INSTRUCTION],
-        config=default_llm_config(
-            temperature=0,
-            response_mime_type="application/json",
-            response_schema=ReadDocumentBundle,
-        ),
+
+    def _read_once(chunk: bytes, chunk_mime: str, model: str):
+        return gemini_read_once(client, chunk, chunk_mime, model)
+
+    bundle, meta = read_bytes_with_retry(
+        data,
+        mime,
+        read_once=_read_once,
+        lite_model=lite_model(),
+        std_model=std_model(),
     )
-    elapsed = round(time.perf_counter() - t0, 2)
-    bundle = ReadDocumentBundle.model_validate_json(resp.text or "{}")
     if bundle.document_count != len(bundle.documents):
         bundle = bundle.model_copy(update={"document_count": len(bundle.documents)})
     payload = bundle.model_dump()
     payload = annotate_over_extraction_notes(payload)
     file_kind = payload.get("file_kind") or "commercial_documents"
-    extract_mode = "vision"
+    extract_mode = meta.get("extract_mode") or "vision"
     if file_kind == "bank_statement":
         payload["accounts_normalized"] = normalize_bank_statement(
             payload,
             extract_mode=extract_mode,
         )
     payload["extraction_meta"] = {
-        "gemini_call_count": 1,
-        "model": model,
+        **meta,
         "extract_mode": extract_mode,
-        "elapsed_seconds": elapsed,
-        "bytes_sent": len(data),
-        "usage": usage_from_response(resp),
     }
     return payload
 

@@ -332,6 +332,94 @@ def test_dedupe_only_reshare_skips_shell_workbook():
     assert result2["slack_file_id"] == first_file_id
 
 
+def test_invoice_and_bank_same_fy_separate_workbooks():
+    """Invoice and bank drops on the same FY must not share one Slack workbook."""
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+
+    inv_result = store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        kind="invoice",
+        batches=[{"sheet": "Purchase", "doc_key": "inv-1", "rows": [
+            {"Invoice Number": "INV-1", "Description": "Office supplies", "Source Amount": 50.0},
+        ]}],
+    )
+    bank_result = store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        kind="bank",
+        batches=[{"sheet": "DBS - 5545 - SGD", "doc_key": "bank-1", "rows": [
+            {"Description": "BALANCE B/F", "Balance": 100.0, "Currency": "SGD"},
+            {"Date": "15/04/2024", "Description": "SALARY", "Deposit": 50.0,
+             "Balance": 150.0, "Currency": "SGD"},
+        ]}],
+    )
+
+    assert inv_result["filename"] == "Ledger_FY2026.xlsx"
+    assert bank_result["filename"] == "BankStatement_FY2026.xlsx"
+    assert inv_result["slack_file_id"] != bank_result["slack_file_id"]
+
+    inv_ptr = store.get_pointer("c1", "2026", kind="invoice")
+    bank_ptr = store.get_pointer("c1", "2026", kind="bank")
+    assert inv_ptr["slack_file_id"] == inv_result["slack_file_id"]
+    assert bank_ptr["slack_file_id"] == bank_result["slack_file_id"]
+
+    inv_wb = load_workbook(io.BytesIO(slack.files[inv_result["slack_file_id"]]))
+    bank_wb = load_workbook(io.BytesIO(slack.files[bank_result["slack_file_id"]]))
+    assert "Purchase" in inv_wb.sheetnames
+    assert "DBS - 5545 - SGD" not in inv_wb.sheetnames
+    assert "DBS - 5545 - SGD" in bank_wb.sheetnames
+    assert "Purchase" not in bank_wb.sheetnames
+
+    # Bank after invoice must not download the ledger file (reverse direction).
+    bank_result2 = store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        kind="bank",
+        batches=[{"sheet": "OCBC - 0001", "doc_key": "bank-2", "rows": [
+            {"Description": "BALANCE B/F", "Balance": 200.0, "Currency": "SGD"},
+            {"Date": "01/02/2026", "Description": "PAYMENT", "Withdrawal": 10.0,
+             "Balance": 190.0, "Currency": "SGD"},
+        ]}],
+    )
+    assert bank_result2["slack_file_id"] != inv_result["slack_file_id"]
+    merged_bank = load_workbook(io.BytesIO(slack.files[bank_result2["slack_file_id"]]))
+    assert "DBS - 5545 - SGD" in merged_bank.sheetnames
+    assert "OCBC - 0001" in merged_bank.sheetnames
+    assert "Purchase" not in merged_bank.sheetnames
+
+
+def test_invoice_append_strips_legacy_bank_tab_from_ledger_workbook():
+    """Legacy hybrid ledgers lose bank tabs on the next invoice append."""
+    slack = FakeSlackClient()
+    store = _make_store(slack)
+    store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        kind="bank",
+        batches=[{"sheet": "OCBC - 0001", "doc_key": "bank-1", "rows": [
+            {"Description": "BALANCE B/F", "Balance": 1000.0, "Currency": "SGD"},
+        ]}],
+    )
+    # Simulate legacy pollution: bank tab on invoice pointer workbook.
+    inv_ptr = store.get_pointer("c1", "2026", kind="invoice")
+    bank_ptr = store.get_pointer("c1", "2026", kind="bank")
+    assert inv_ptr is None
+    assert bank_ptr is not None
+    # Seed invoice pointer by copying bank file id into ledger pointer (legacy bug).
+    store._set_pointer(
+        "c1", "2026", bank_ptr["slack_file_id"], seen_doc_keys=set(), kind="invoice"
+    )
+    store.append_rows(
+        client_id="c1", fy="2026", slack_client=slack, channel_id="C1",
+        kind="invoice",
+        batches=[{"sheet": "Purchase", "doc_key": "inv-clean", "rows": [
+            {"Invoice Number": "INV-CLEAN", "Description": "Supplies", "Source Amount": 10.0},
+        ]}],
+    )
+    latest_id = store.get_pointer("c1", "2026", kind="invoice")["slack_file_id"]
+    wb = load_workbook(io.BytesIO(slack.files[latest_id]))
+    assert "Purchase" in wb.sheetnames
+    assert "OCBC - 0001" not in wb.sheetnames
+
+
 def test_purge_seen_doc_keys_allows_reappend():
     slack = FakeSlackClient()
     store = _make_store(slack)
@@ -354,7 +442,7 @@ def test_purge_seen_doc_keys_allows_reappend():
     )
     assert result2["deduped"] == 1
 
-    purged = store.purge_seen_doc_keys("c1", "2026", [doc_key])
+    purged = store.purge_seen_doc_keys("c1", "2026", [doc_key], kind="bank")
     assert purged == 1
 
     result3 = store.append_rows(
@@ -1858,9 +1946,11 @@ def test_amend_row_legacy_pointer_without_client_name_does_not_crash():
         ]}],
     )
     # Manually strip client_name from the pointer to simulate a legacy doc.
+    from ledgr_slack.ledger_store_base import pointer_doc_id
+
     ptr_ref = (
         store._db.collection("clients").document("c1")
-        .collection("ledgers").document("2026")
+        .collection("ledgers").document(pointer_doc_id("2026", "invoice"))
     )
     existing = ptr_ref.get().to_dict()
     existing.pop("client_name", None)

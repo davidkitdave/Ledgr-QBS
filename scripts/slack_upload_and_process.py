@@ -26,11 +26,8 @@ from slack_sdk import WebClient
 
 from ledgr_slack.ledger_store import SlackLedgerStore
 from ledgr_slack.sessions import FirestoreSessionService
-from ledgr_slack.app import (
-    build_runner,
-    download_pdf_bytes,
-    process_file_event,
-)
+from ledgr_slack.app import build_runner
+from ledgr_slack.file_event import download_pdf_bytes, process_file_event
 from ledgr_slack.client_context import FirestoreClientStore
 
 

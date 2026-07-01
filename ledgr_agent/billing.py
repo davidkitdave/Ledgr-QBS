@@ -29,6 +29,9 @@ class CreditStore(Protocol):
         self, firm_id: str, amount: int, reason: str, idempotency_key: str,
         *, channel_id: str | None = None,
     ) -> int: ...
+    def apply_dev_seed_if_unseeded(
+        self, firm_id: str, amount: int, note: str,
+    ) -> tuple[int, bool]: ...
 
 
 class InMemoryCreditStore:
@@ -38,6 +41,7 @@ class InMemoryCreditStore:
         self._balances: Dict[str, int] = {}
         self._seen_deducts: Set[Tuple[str, str]] = set()
         self._firms: Set[str] = set()
+        self._dev_seeded: Set[str] = set()
 
     def ensure_firm(self, firm_id: str) -> None:
         self._firms.add(firm_id)
@@ -49,6 +53,21 @@ class InMemoryCreditStore:
     def apply_grant(self, firm_id: str, amount: int, note: str) -> int:
         self._balances[firm_id] = self._balances.get(firm_id, 0) + amount
         return self._balances[firm_id]
+
+    def apply_dev_seed_if_unseeded(
+        self, firm_id: str, amount: int, note: str,
+    ) -> tuple[int, bool]:
+        self.ensure_firm(firm_id)
+        if firm_id in self._dev_seeded:
+            return self.read_balance(firm_id), False
+        balance = self.read_balance(firm_id)
+        if balance > 0:
+            self._dev_seeded.add(firm_id)
+            return balance, False
+        self._dev_seeded.add(firm_id)
+        if int(amount) <= 0:
+            return balance, False
+        return self.apply_grant(firm_id, amount, note), True
 
     def apply_deduct(
         self, firm_id: str, amount: int, reason: str, idempotency_key: str,
@@ -156,6 +175,36 @@ class FirestoreCreditStore:
 
         return int(_txn(self._db().transaction()))
 
+    def apply_dev_seed_if_unseeded(
+        self, firm_id: str, amount: int, note: str,
+    ) -> tuple[int, bool]:
+        ns = self._ns_module()
+        ref = self._firm_ref(firm_id)
+        delta = int(amount)
+
+        @ns.transactional
+        def _txn(txn: Any) -> tuple[int, bool]:
+            snap = ref.get(transaction=txn)
+            data = snap.to_dict() or {}
+            current = self._balance_of(snap)
+            if data.get("dev_credit_seeded"):
+                return current, False
+            if current > 0:
+                txn.set(ref, {"dev_credit_seeded": True}, merge=True)
+                return current, False
+            if delta <= 0:
+                txn.set(ref, {"dev_credit_seeded": True}, merge=True)
+                return current, False
+            new_balance = current + delta
+            txn.set(
+                ref,
+                {"balance": new_balance, "dev_credit_seeded": True},
+                merge=True,
+            )
+            return new_balance, True
+
+        return _txn(self._db().transaction())
+
     def apply_deduct(
         self, firm_id: str, amount: int, reason: str, idempotency_key: str,
         *, channel_id: str | None = None,
@@ -200,6 +249,13 @@ class CreditService:
     def grant(self, firm_id: str, amount: int, note: str = "") -> int:
         return self._store.apply_grant(firm_id, amount, note)
 
+    def dev_seed_if_unseeded(self, firm_id: str, amount: int, note: str = "") -> bool:
+        """Grant dev credits once per firm; manual top-ups use ``grant()`` instead."""
+
+        self.ensure_firm(firm_id)
+        _balance, granted = self._store.apply_dev_seed_if_unseeded(firm_id, amount, note)
+        return granted
+
     def deduct(
         self, firm_id: str, amount: int, reason: str, idempotency_key: str,
         *, channel_id: str | None = None,
@@ -232,7 +288,7 @@ def _env_is_prod() -> bool:
 
 
 def _firestore_creds_present() -> bool:
-    for var in ("GOOGLE_APPLICATION_CREDENTIALS", "K_SERVICE"):
+    for var in ("GOOGLE_APPLICATION_CREDENTIALS", "K_SERVICE", "FIRESTORE_EMULATOR_HOST"):
         if (os.environ.get(var) or "").strip():
             return True
     return False
@@ -255,7 +311,7 @@ def configure_durable_credit_service_if_prod() -> bool:
 
 
 def apply_dev_credit_grants_from_env() -> None:
-    """``LEDGR_DEV_CREDIT_GRANTS=T123:50,T456:20`` for adk web / agents-cli."""
+    """``LEDGR_DEV_CREDIT_GRANTS=T123:50`` — seed once per firm, not on every boot."""
 
     raw = os.environ.get("LEDGR_DEV_CREDIT_GRANTS", "").strip()
     if not raw:
@@ -274,10 +330,11 @@ def apply_dev_credit_grants_from_env() -> None:
         except ValueError:
             logger.warning("skip invalid LEDGR_DEV_CREDIT_GRANTS entry: %r", chunk)
             continue
-        service.ensure_firm(firm_id)
-        if amount > 0:
-            service.grant(firm_id, amount, note="dev auto-grant")
-            logger.info("dev credit grant: firm=%s amount=%s", firm_id, amount)
+        if amount <= 0:
+            service.ensure_firm(firm_id)
+            continue
+        if service.dev_seed_if_unseeded(firm_id, amount, note="dev auto-grant"):
+            logger.info("dev credit seed: firm=%s amount=%s", firm_id, amount)
 
 
 def wire_playground_credits() -> None:

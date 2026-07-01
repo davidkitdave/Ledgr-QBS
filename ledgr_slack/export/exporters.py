@@ -1549,7 +1549,38 @@ class BankStatementExporter:
                 if _parse_ddmmyyyy(t.get("Date")) is not None
                 else (1, datetime.max)
             )
+        cls._recompute_blocks_continuous(ordered)
         return ordered
+
+    @classmethod
+    def _recompute_blocks_continuous(cls, blocks: list[dict]) -> None:
+        """Rewrite txn Balance values after sort so Math_Check chains correctly."""
+        running: Optional[float] = None
+        for block in blocks:
+            stated_bf = block.get("stated_bf")
+            if running is None and stated_bf is not None:
+                try:
+                    running = float(stated_bf)
+                except (TypeError, ValueError):
+                    running = None
+            for txn in block.get("transactions") or []:
+                wd = txn.get("Withdrawal") or 0
+                dep = txn.get("Deposit") or 0
+                try:
+                    wd_f = float(wd) if wd not in (None, "") else 0.0
+                    dep_f = float(dep) if dep not in (None, "") else 0.0
+                except (TypeError, ValueError):
+                    wd_f, dep_f = 0.0, 0.0
+                if running is not None:
+                    running = round(running + dep_f - wd_f, 2)
+                    txn["Balance"] = running
+                else:
+                    bal = txn.get("Balance")
+                    if bal not in (None, ""):
+                        try:
+                            running = float(bal)
+                        except (TypeError, ValueError):
+                            pass
 
     @classmethod
     def rebuild_account_sheet(

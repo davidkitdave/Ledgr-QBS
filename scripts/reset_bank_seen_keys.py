@@ -75,9 +75,9 @@ def main() -> int:
 
     db = firestore.Client()
     store = SlackLedgerStore(db)
-    pointer = store.get_pointer(args.client_id, args.fy)
+    pointer = store.get_pointer(args.client_id, args.fy, kind="bank")
     if not pointer:
-        print(f"No ledger pointer for client={args.client_id} fy={args.fy}")
+        print(f"No bank pointer for client={args.client_id} fy={args.fy}")
         return 1
 
     seen = list(pointer.get("seen_doc_keys") or [])
@@ -95,7 +95,9 @@ def main() -> int:
         print("\nDry-run — pass --apply to purge keys.")
         return 0
 
-    purged = store.purge_seen_doc_keys(args.client_id, args.fy, targets)
+    purged = store.purge_seen_doc_keys(
+        args.client_id, args.fy, targets, kind="bank"
+    )
     print(f"\nPurged {purged} key(s). Re-drop the bank PDF to re-merge.")
     return 0
 

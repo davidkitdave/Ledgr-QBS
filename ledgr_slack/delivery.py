@@ -94,6 +94,7 @@ def ledger_replace_for_batches(
     client_id: str,
     fy: str,
     batches: list[dict[str, Any]],
+    kind: str = "invoice",
 ) -> bool:
     """True when batches should replace existing rows for already-seen doc keys."""
     if not batches:
@@ -101,7 +102,7 @@ def ledger_replace_for_batches(
     row_count = sum(len(batch.get("rows") or []) for batch in batches)
     if row_count == 0:
         return False
-    pointer = ledger_store.get_pointer(client_id, fy)
+    pointer = ledger_store.get_pointer(client_id, fy, kind=kind)
     seen = set((pointer or {}).get("seen_doc_keys") or [])
     return any(str(batch.get("doc_key") or "") in seen for batch in batches)
 
@@ -148,18 +149,47 @@ def _document_header_lines(workbook: dict[str, Any]) -> list[str]:
     return lines
 
 
-def compose_delivery_summary(workbook: dict[str, Any], payload: dict[str, Any]) -> str:
+def compose_delivery_summary(
+    workbook: dict[str, Any],
+    payload: dict[str, Any],
+    *,
+    append_result: dict[str, Any] | None = None,
+) -> str:
     """Short human summary for the Slack delivery card.
 
     Mirrors the legacy ``nodes.compose_delivery_summary`` phrasing so the
     delivery card reads the same on the lean path: an "📒 Added N line(s)/
     transaction(s) … to your FY{fy} ledger." sentence carrying the row count,
-    document count, and FY pointer.
+    document count, and FY pointer. When a drop spans multiple FY workbooks,
+    lists each destination (``compose_batch_delivery_summary``).
     """
+    from app.blocks import compose_batch_delivery_summary
+
     kind = payload.get("kind") or "invoice"
-    fy = payload.get("fy") or "unknown"
     batches = payload.get("batches") or []
     row_count = sum(len(batch.get("rows") or []) for batch in batches)
+    fy_groups = (append_result or {}).get("fy_groups") or []
+    if kind != "bank" and len(fy_groups) > 1:
+        groups = [
+            {
+                "fy": g.get("fy"),
+                "kind": kind,
+                "software": payload.get("software") or "qbs",
+                "n_rows": g.get("n_rows") or 0,
+                "n_docs": g.get("n_docs") or 0,
+                "client_name": payload.get("client_name") or "",
+            }
+            for g in fy_groups
+        ]
+        base = compose_batch_delivery_summary(
+            groups=groups,
+            client_name=str(payload.get("client_name") or ""),
+        )
+        headers = _document_header_lines(workbook)
+        return base + ("\n" + "\n".join(headers) if headers else "")
+
+    fy = append_result.get("fy") if append_result else payload.get("fy")
+    fy = fy or "unknown"
     if kind == "bank":
         return (
             f"📒 Added {row_count} transaction{'s' if row_count != 1 else ''} "

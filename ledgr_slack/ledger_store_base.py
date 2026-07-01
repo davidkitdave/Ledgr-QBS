@@ -6,8 +6,9 @@ The ADK graph is **Slack-agnostic**: nodes only prepare a serializable
 ``state["ledger_rows"]`` payload. This store — owned by the runner layer — is
 the only place that talks to Slack about the ledger workbook. Each drop:
 
-1. Look up the Firestore pointer ``clients/{client_id}/ledgers/{fy}`` to find the
-   channel's current workbook ``slack_file_id`` (if any).
+1. Look up the Firestore pointer ``clients/{client_id}/ledgers/{fy}_{ledger|bank}`` to find the
+   channel's current workbook ``slack_file_id`` (if any). Invoice and bank workbooks
+   use separate pointer docs so they never share one Slack file.
 2. If a pointer exists, **download the current workbook bytes** from Slack (via
    the parked SSRF-hardened downloader) and open it; else start a **fresh
    workbook** with the right exporter's sheet layout.
@@ -60,6 +61,24 @@ _LEDGERS_SUBCOLLECTION = "ledgers"
 
 #: Sheet titles for the invoice ledger workbook (mirrors LedgerExporter).
 _INVOICE_SHEETS = ("Purchase", "Sales")
+
+
+def _workbook_kind(kind: str) -> str:
+    """Map append ``kind`` to a stable workbook pointer suffix."""
+    return "bank" if kind == "bank" else "ledger"
+
+
+def pointer_doc_id(fy: str, kind: str) -> str:
+    """Firestore doc id for one FY workbook (ledger vs bank are separate)."""
+    return f"{fy}_{_workbook_kind(kind)}"
+
+
+def fy_label_from_pointer_doc_id(doc_id: str) -> str:
+    """Strip ``_ledger`` / ``_bank`` suffix; legacy docs use bare ``fy``."""
+    for suffix in ("_ledger", "_bank"):
+        if doc_id.endswith(suffix):
+            return doc_id[: -len(suffix)]
+    return doc_id
 
 
 def _is_slack_host(host: str) -> bool:
@@ -145,7 +164,17 @@ class SlackLedgerStoreBase:
     # Firestore pointer
     # ------------------------------------------------------------------ #
 
-    def _pointer_ref(self, client_id: str, fy: str) -> Any:
+    def _pointer_ref(self, client_id: str, fy: str, kind: str = "invoice") -> Any:
+        doc_id = pointer_doc_id(fy, kind)
+        return (
+            self._db.collection(_ns(_CLIENTS_COLLECTION))
+            .document(client_id)
+            .collection(_LEDGERS_SUBCOLLECTION)
+            .document(doc_id)
+        )
+
+    def _legacy_pointer_ref(self, client_id: str, fy: str) -> Any:
+        """Pre-split pointer doc at bare ``{fy}`` (migration fallback only)."""
         return (
             self._db.collection(_ns(_CLIENTS_COLLECTION))
             .document(client_id)
@@ -153,12 +182,25 @@ class SlackLedgerStoreBase:
             .document(str(fy))
         )
 
-    def get_pointer(self, client_id: str, fy: str) -> Optional[dict]:
-        """Return the ledger pointer doc for ``(client_id, fy)`` or ``None``."""
-        snap = self._pointer_ref(client_id, fy).get()
-        if not snap.exists:
+    def get_pointer(
+        self, client_id: str, fy: str, kind: str = "invoice"
+    ) -> Optional[dict]:
+        """Return the workbook pointer for ``(client_id, fy, kind)`` or ``None``."""
+        snap = self._pointer_ref(client_id, fy, kind).get()
+        if snap.exists:
+            return snap.to_dict()
+
+        # Legacy: single doc at ``{fy}`` before ledger/bank split.
+        legacy_snap = self._legacy_pointer_ref(client_id, fy).get()
+        if not legacy_snap.exists:
             return None
-        return snap.to_dict()
+        legacy = legacy_snap.to_dict() or {}
+        legacy_kind = legacy.get("kind", "invoice")
+        if kind == "bank" and legacy_kind != "bank":
+            return None
+        if kind != "bank" and legacy_kind == "bank":
+            return None
+        return legacy
 
     def latest_fy(self, client_id: str) -> Optional[str]:
         """Return the highest FY label that has a ledger pointer, or ``None``."""
@@ -167,10 +209,11 @@ class SlackLedgerStoreBase:
             .document(client_id)
             .collection(_LEDGERS_SUBCOLLECTION)
         )
-        fys = [snap.id for snap in coll.stream()]
+        fys = sorted(
+            {fy_label_from_pointer_doc_id(snap.id) for snap in coll.stream()}
+        )
         if not fys:
             return None
-        fys.sort()
         return fys[-1]
 
     def fy_pointers(self, client_id: str) -> list[dict]:
@@ -188,7 +231,7 @@ class SlackLedgerStoreBase:
         out: list[dict] = []
         for snap in coll.stream():
             data = snap.to_dict() or {}
-            data["fy"] = snap.id
+            data["fy"] = fy_label_from_pointer_doc_id(snap.id)
             out.append(data)
         return out
 
@@ -278,13 +321,20 @@ class SlackLedgerStoreBase:
         fy: str,
         slack_file_id: str,
         seen_doc_keys: Optional[list] = None,
+        *,
+        kind: str = "invoice",
         **extra: Any,
     ) -> None:
-        doc: dict = {"slack_file_id": slack_file_id, "fy": str(fy), "client_id": client_id}
+        doc: dict = {
+            "slack_file_id": slack_file_id,
+            "fy": str(fy),
+            "client_id": client_id,
+            "kind": kind,
+        }
         if seen_doc_keys is not None:
             doc["seen_doc_keys"] = list(seen_doc_keys)
         doc.update(extra)
-        self._pointer_ref(client_id, fy).set(doc, merge=True)
+        self._pointer_ref(client_id, fy, kind).set(doc, merge=True)
 
     def _get_seen_doc_keys(self, pointer: Optional[dict]) -> set:
         """Return the set of already-processed doc keys from the Firestore pointer."""
@@ -487,9 +537,11 @@ class SlackLedgerStoreBase:
         client_id: str,
         fy: str,
         doc_keys: list[str],
+        *,
+        kind: str = "invoice",
     ) -> int:
         """Remove ``doc_keys`` from the FY pointer so batches can re-append."""
-        pointer = self.get_pointer(client_id, fy)
+        pointer = self.get_pointer(client_id, fy, kind=kind)
         if not pointer:
             return 0
         seen = self._get_seen_doc_keys(pointer)
@@ -501,13 +553,17 @@ class SlackLedgerStoreBase:
         if purged == 0:
             return 0
         slack_file_id = pointer.get("slack_file_id") or ""
-        extra = {k: v for k, v in pointer.items()
-                 if k not in ("slack_file_id", "seen_doc_keys", "fy", "client_id")}
+        extra = {
+            k: v
+            for k, v in pointer.items()
+            if k not in ("slack_file_id", "seen_doc_keys", "fy", "client_id", "kind")
+        }
         self._set_pointer(
             client_id,
             fy,
             slack_file_id,
             seen_doc_keys=list(seen),
+            kind=kind,
             **extra,
         )
         return purged
@@ -549,8 +605,8 @@ class SlackLedgerStoreBase:
                 fy,
                 new_file_id,
                 seen_doc_keys=list(seen_doc_keys),
-                channel_id=channel_id,
                 kind=kind,
+                channel_id=channel_id,
                 client_name=client_name,
                 **extra,
             )

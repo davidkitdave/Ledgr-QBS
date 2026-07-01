@@ -22,6 +22,37 @@ def test_parse_document_date_iso() -> None:
     assert parse_document_date("2026-01-15") == date(2026, 1, 15)
 
 
+def test_document_date_from_receipt_number_yyyymmdd() -> None:
+    from ledgr_agent.internal.delivery_tags import document_date_from_fields, document_sheet_meta
+
+    doc = {
+        "doc_type": "purchase",
+        "invoice_number": "202602020015",
+        "invoice_date": "Feb 02 22:22:28 GMT+08:00 2020",
+    }
+    assert document_date_from_fields(doc) == date(2026, 2, 2)
+    meta = document_sheet_meta(doc, fye_month=12)
+    assert meta["fy"] == 2026
+
+
+def test_sanitize_outlier_document_dates_snaps_2006() -> None:
+    from ledgr_agent.internal.delivery_tags import document_sheet_meta, sanitize_outlier_document_dates
+
+    docs = [
+        {"doc_type": "purchase", "invoice_date": "2025-11-15", "invoice_number": "A1"},
+        {"doc_type": "purchase", "invoice_date": "2025-12-01", "invoice_number": "A2"},
+        {"doc_type": "purchase", "invoice_date": "2025-12-02", "invoice_number": "A3"},
+        {
+            "doc_type": "purchase",
+            "invoice_date": "2006-02-23",
+            "invoice_number": "POS065203",
+        },
+    ]
+    sanitize_outlier_document_dates(docs)
+    meta = document_sheet_meta(docs[-1], fye_month=12)
+    assert meta["fy"] == 2025
+
+
 def test_build_delivery_tags_purchase_invoice() -> None:
     read_payload = {
         "file_kind": "commercial_documents",

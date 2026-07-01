@@ -29,7 +29,12 @@ def main() -> int:
     parser.add_argument("--client-id", default="", help="Firestore client id (default: dev-<channel>)")
     parser.add_argument("--client-name", default="Dev Test Client", help="Display name")
     parser.add_argument("--firm-id", default="", help="Billing firm id (default: slack team from API or T_TEST)")
-    parser.add_argument("--credits", type=int, default=100, help="Dev credits to grant (in-memory/Firestore store)")
+    parser.add_argument("--credits", type=int, default=100, help="Dev credits to seed or top up")
+    parser.add_argument(
+        "--top-up",
+        action="store_true",
+        help="Add credits even if this firm was seeded before (manual refill)",
+    )
     args = parser.parse_args()
 
     channel_id = args.channel.strip()
@@ -74,16 +79,27 @@ def main() -> int:
     store.save_profile(profile)
     store.set_channel(channel_id, client_id)
 
-    grants = os.getenv("LEDGR_DEV_CREDIT_GRANTS", "").strip()
-    entry = f"{firm_id}:{args.credits}"
-    if entry not in grants.split(","):
-        os.environ["LEDGR_DEV_CREDIT_GRANTS"] = (
-            f"{grants},{entry}".strip(",") if grants else entry
-        )
-
     from ledgr_slack.credit_adapter import wire_shared_credit_service
+    from ledgr_agent.billing import get_shared_credit_service
 
     wire_shared_credit_service()
+    svc = get_shared_credit_service()
+    svc.ensure_firm(firm_id)
+    balance = svc.read_balance(firm_id)
+    if args.credits > 0:
+        if args.top_up:
+            balance = svc.grant(firm_id, args.credits, note="dev top-up")
+            credit_note = f"top-up +{args.credits} → balance {balance}"
+        else:
+            seeded = svc.dev_seed_if_unseeded(firm_id, args.credits, note="dev seed")
+            balance = svc.read_balance(firm_id)
+            credit_note = (
+                f"seeded {args.credits} (first time)"
+                if seeded
+                else f"already seeded — balance {balance} (use --top-up to add more)"
+            )
+    else:
+        credit_note = f"balance {balance} (no grant requested)"
 
     ns = os.getenv("LEDGR_FIRESTORE_NAMESPACE", "").strip()
     prefix = f"{ns}_" if ns else ""
@@ -92,7 +108,7 @@ def main() -> int:
     print(f"  client_id:   {client_id}")
     print(f"  firm_id:     {firm_id}")
     print(f"  collections: {prefix}clients, {prefix}channels")
-    print(f"  credits:     LEDGR_DEV_CREDIT_GRANTS includes {entry}")
+    print(f"  credits:     {credit_note}")
     print("\nNext: invite the bot to the channel, then run  uv run python -m ledgr_slack")
     return 0
 

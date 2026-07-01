@@ -678,6 +678,61 @@ def main() -> None:
         )
     )
 
+    bank_reverse_lines = [
+        (50, 740, "Bank Statement"),
+        (50, 710, "CIMB Bank"),
+        (50, 690, "Account No: 8001234567"),
+        (50, 670, "Currency: SGD"),
+        (50, 650, "Period: 01 JAN 2025 - 31 JAN 2025"),
+        (50, 620, "Opening Balance: 1000.00"),
+        (50, 590, "Date        Description              Withdrawal  Deposit   Balance"),
+        (50, 570, "04 Jan 2025 Interest Credit                      12.50     1212.50"),
+        (50, 550, "03 Jan 2025 ATM Withdrawal            100.00              1200.00"),
+        (50, 530, "02 Jan 2025 GIRO Payment              200.00              1300.00"),
+        (50, 510, "01 Jan 2025 Transfer In                          500.00    1500.00"),
+        (50, 480, "Closing Balance: 1212.50"),
+    ]
+    bank_reverse_path = _save_pdf("bank_reverse_chron.pdf", bank_reverse_lines)
+    agents_cli_cases.append(_case("bank_reverse_chron", bank_reverse_path))
+    evalset_cases.append(
+        _evalset_case(
+            "bank_reverse_chron",
+            bank_reverse_path,
+            expected_file_kind="bank_statement",
+        )
+    )
+
+    multi_receipt_pages: list[list[tuple[float, float, str]]] = []
+    for page_idx in range(1, 9):
+        base_y = 740
+        page_lines: list[tuple[float, float, str]] = [
+            (50, base_y, f"RECEIPT BUNDLE — Page {page_idx}"),
+            (50, base_y - 30, "From: Fictional Retail Pte Ltd"),
+        ]
+        for receipt_idx in range(1, 7):
+            y = base_y - 60 - (receipt_idx * 90)
+            rid = (page_idx - 1) * 6 + receipt_idx
+            page_lines.extend(
+                [
+                    (50, y, f"Receipt No: RCP-{rid:04d}"),
+                    (50, y - 18, f"Date: 2026-06-{min(rid, 28):02d}"),
+                    (50, y - 36, f"Item purchase #{rid}    {10 + rid}.50"),
+                    (50, y - 54, f"Total: {10 + rid}.50"),
+                ]
+            )
+        multi_receipt_pages.append(page_lines)
+    multi_receipt_path = _save_pdf("multi_receipt_large.pdf", pages=multi_receipt_pages)
+    agents_cli_cases.append(_case("multi_receipt_large", multi_receipt_path))
+    evalset_cases.append(
+        _evalset_case(
+            "multi_receipt_large",
+            multi_receipt_path,
+            expected_file_kind="commercial_documents",
+            expected_document_kind="receipt",
+            expected_document_count=48,
+        )
+    )
+
     starhub_dir = os.environ.get("LEDGR_TEST_DOC_DIR")
     if starhub_dir:
         starhub_path = pathlib.Path(starhub_dir) / "BV-0002830 Starhub 8.20057598B bill 122025.pdf"

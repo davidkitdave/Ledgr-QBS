@@ -94,11 +94,25 @@ class _SlackLedgerStoreMutateMixin:
         """
         return sheet_name not in _INVOICE_SHEETS
 
+    def _workbook_kind_for_mutation(self, client_id: str, fy: str, sheet: str) -> str:
+        """Pick ledger vs bank pointer; unknown non-invoice names default to ledger."""
+        if sheet in _INVOICE_SHEETS:
+            return "invoice"
+        if self._is_bank_sheet(sheet) and self.get_pointer(client_id, fy, kind="bank"):
+            return "bank"
+        return "invoice"
+
     def _download_current_workbook(
-        self, slack_client: Any, client_id: str, fy: str
+        self,
+        slack_client: Any,
+        client_id: str,
+        fy: str,
+        *,
+        sheet: str | None = None,
     ) -> tuple[dict, bytes]:
         """Return (pointer, workbook_bytes) or raise ValueError if pointer is absent."""
-        pointer = self.get_pointer(client_id, fy)
+        kind = self._workbook_kind_for_mutation(client_id, fy, sheet or "")
+        pointer = self.get_pointer(client_id, fy, kind=kind)
         if not pointer or not pointer.get("slack_file_id"):
             raise ValueError(
                 f"no ledger pointer for client={client_id!r} fy={fy!r}; "
@@ -161,8 +175,8 @@ class _SlackLedgerStoreMutateMixin:
                 fy,
                 new_file_id,
                 seen_doc_keys=persisted_keys,
-                channel_id=channel_id,
                 kind=kind,
+                channel_id=channel_id,
             )
 
         if prev_file_id and new_file_id and prev_file_id != new_file_id:
@@ -250,7 +264,9 @@ class _SlackLedgerStoreMutateMixin:
         with lock:  # fast same-process serialize
             token = self._lease.acquire(client_id, fy)  # cross-instance serialize
             try:
-                pointer, data = self._download_current_workbook(slack_client, client_id, fy)
+                pointer, data = self._download_current_workbook(
+                    slack_client, client_id, fy, sheet=sheet
+                )
                 wb = self._load_workbook(data)
 
                 # Sheet-existence check before bank guard: gives a clear "not found"
@@ -329,7 +345,9 @@ class _SlackLedgerStoreMutateMixin:
         with lock:  # fast same-process serialize
             token = self._lease.acquire(client_id, fy)  # cross-instance serialize
             try:
-                pointer, data = self._download_current_workbook(slack_client, client_id, fy)
+                pointer, data = self._download_current_workbook(
+                    slack_client, client_id, fy, sheet=sheet
+                )
                 wb = self._load_workbook(data)
 
                 # Sheet-existence check before bank guard (same ordering as amend_row).

@@ -7,7 +7,7 @@ class _PointerStore:
     def __init__(self, seen_doc_keys: list[str] | None = None) -> None:
         self._seen = seen_doc_keys or []
 
-    def get_pointer(self, client_id: str, fy: str) -> dict:
+    def get_pointer(self, client_id: str, fy: str, kind: str = "invoice") -> dict:
         return {"seen_doc_keys": list(self._seen)}
 
 

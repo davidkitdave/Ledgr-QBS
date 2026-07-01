@@ -138,3 +138,56 @@ def test_build_sheets_bank_from_state() -> None:
     assert out["status"] == "success"
     assert out["sheet_count"] == 2
     assert ctx.state["workbook"]["sheet_count"] == 2
+
+
+def test_normalize_bank_reverse_chronological() -> None:
+    """Newest-first PDF rows should reconcile after normalize flips and recomputes."""
+    from ledgr_agent.internal.normalize import normalize_bank_statement
+
+    payload = {
+        "accounts": [
+            {
+                "bank_name": "CIMB",
+                "account_number": "8001234567",
+                "currency": "SGD",
+                "opening_balance": 1000.0,
+                "closing_balance": 1212.5,
+                "transactions": [
+                    {
+                        "date": "2025-01-04",
+                        "description": "Interest",
+                        "withdrawal": None,
+                        "deposit": 12.5,
+                        "balance": 1212.5,
+                    },
+                    {
+                        "date": "2025-01-03",
+                        "description": "ATM",
+                        "withdrawal": 100.0,
+                        "deposit": None,
+                        "balance": 1200.0,
+                    },
+                    {
+                        "date": "2025-01-02",
+                        "description": "GIRO",
+                        "withdrawal": 200.0,
+                        "deposit": None,
+                        "balance": 1300.0,
+                    },
+                    {
+                        "date": "2025-01-01",
+                        "description": "Transfer In",
+                        "withdrawal": None,
+                        "deposit": 500.0,
+                        "balance": 1500.0,
+                    },
+                ],
+            }
+        ]
+    }
+    normalized = normalize_bank_statement(payload, extract_mode="vision")
+    assert len(normalized) == 1
+    assert normalized[0]["reconciled"] is True
+    txns = normalized[0]["transactions"]
+    assert txns[0]["date"] in ("01/01/2025", "2025-01-01")
+    assert txns[-1]["balance"] == 1212.5

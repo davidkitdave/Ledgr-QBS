@@ -71,6 +71,37 @@ def test_build_sheets_charges_one_credit_for_bill() -> None:
     assert billing.get_shared_credit_service().read_balance("T_TEST") == 9
 
 
+def test_build_sheets_estimates_when_slack_will_charge() -> None:
+    ctx = SimpleNamespace(
+        state={
+            "firm_id": "T_TEST",
+            "client_id": "c1",
+            "channel_id": "C1",
+            "file_id": "F1",
+            "charge_at_slack_delivery": True,
+            READ_DOC_STATE_KEY: {
+                "file_kind": "commercial_documents",
+                "source_path": "/tmp/invoice.pdf",
+                "credit_units": 1,
+                "documents": [
+                    {
+                        "vendor_name": "Acme",
+                        "invoice_number": "INV-1",
+                        "invoice_date": "2026-01-01",
+                        "currency": "SGD",
+                        "lines": [{"description": "Widget", "net_amount": 100.0}],
+                    }
+                ],
+            },
+        }
+    )
+    out = build_sheets(ctx)
+    assert out["status"] == "success"
+    assert out["credits"]["credit_status"] == "estimated"
+    assert out["credits"]["credits_used"] == 0
+    assert billing.get_shared_credit_service().read_balance("T_TEST") == 10
+
+
 def test_build_sheets_idempotent_on_same_file() -> None:
     ctx = SimpleNamespace(
         state={

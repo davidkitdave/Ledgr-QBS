@@ -41,6 +41,8 @@ from ledgr_slack.ledger_store import SlackLedgerStore
 
 logger = logging.getLogger(__name__)
 
+_MAX_DELIVERY_PREVIEW_BATCHES = 8
+
 DOC_TYPE_KEY = "doc_type"
 EXTRACTION_PATH_KEY = "extraction_path"
 
@@ -325,15 +327,22 @@ def _post_delivery_card(
         fy_int = 0
     software = str(payload.get("software") or "qbs_ledger")
     preview_blocks: list[dict] = []
+    preview_batches = [b for b in batches if b.get("rows")][: _MAX_DELIVERY_PREVIEW_BATCHES]
+    extra_docs = sum(1 for b in batches if b.get("rows")) - len(preview_batches)
     try:
         preview_exporter = get_exporter(software)
     except Exception:  # noqa: BLE001 — preview decoration is cosmetic
         preview_exporter = None
-    for batch in batches:
+    for batch in preview_batches:
         batch_rows = batch.get("rows") or []
         if not batch_rows:
             continue
         sheet = str(batch.get("sheet") or "Purchase")
+        batch_fy = batch.get("fy") or fy_str
+        try:
+            batch_fy_int = int(batch_fy)
+        except (TypeError, ValueError):
+            batch_fy_int = fy_int
         row_doc_type = "sales" if sheet == "Sales" else "purchase"
         preview_rows = batch_rows
         if preview_exporter is not None:
@@ -350,7 +359,7 @@ def _post_delivery_card(
                 ledger_preview_data_table(
                     rows=preview_rows,
                     workbook_name=workbook_name,
-                    fy=fy_int,
+                    fy=batch_fy_int,
                     sheet=sheet,
                     software=software,
                     channel_id=channel_id,
@@ -366,6 +375,14 @@ def _post_delivery_card(
         else [{"type": "section", "text": {"type": "mrkdwn", "text": summary}}]
     )
     blocks.extend(_extraction_doc_count_blocks(payload))
+    if extra_docs > 0:
+        blocks.append(
+            confident_note_block(
+                f"Preview shows {len(preview_batches)} of "
+                f"{len(preview_batches) + extra_docs} documents — "
+                "open the workbook(s) above for the full list."
+            )
+        )
     # WS-3.4 — surface low-confidence COA picks on QBS/Xero deliveries.
     try:
         if normalize_software_key(software) not in ("autocount", "sql_account"):
@@ -378,7 +395,9 @@ def _post_delivery_card(
         logger.warning("account-flagged delivery note failed (non-fatal)", exc_info=True)
     credits_used = append_result.get("credits_used")
     credits_remaining = append_result.get("credits_remaining")
-    if isinstance(credits_used, int) and isinstance(credits_remaining, int):
+    if append_result.get("all_deduped") and not (isinstance(credits_used, int) and credits_used > 0):
+        blocks.append(dedup_credit_footer_block())
+    elif isinstance(credits_used, int) and isinstance(credits_remaining, int):
         blocks.append(
             credit_footer_block(
                 credits_used=credits_used,
