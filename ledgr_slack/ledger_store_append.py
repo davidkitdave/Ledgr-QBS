@@ -156,10 +156,14 @@ class _SlackLedgerStoreAppendMixin:
         deduped = 0
         batch_replace_counts: list[dict] = []
 
+        any_batch_replace = False
         for batch in batches:
             sheet_name = batch["sheet"]
             doc_key = str(batch["doc_key"])
             rows = batch.get("rows") or []
+            batch_replace = bool(batch.get("effective_replace", replace))
+            if batch_replace:
+                any_batch_replace = True
 
             # ------------------------------------------------------------------ #
             # replace=True path (INVOICE sheets only).
@@ -169,7 +173,7 @@ class _SlackLedgerStoreAppendMixin:
             # Bank batches are skipped — they use the merge path below regardless.
             # ------------------------------------------------------------------ #
             replaced_count = 0
-            if replace and kind == "invoice" and sheet_name in _INVOICE_SHEETS:
+            if batch_replace and kind == "invoice" and sheet_name in _INVOICE_SHEETS:
                 if not rows:
                     deduped += 1
                     batch_replace_counts.append(
@@ -218,7 +222,7 @@ class _SlackLedgerStoreAppendMixin:
             logger.debug("append_rows: doc_key=%r match=%s", doc_key, doc_key in seen_doc_keys)
             if doc_key in seen_doc_keys:
                 deduped += 1
-                if replace:
+                if batch_replace:
                     batch_replace_counts.append(
                         {"sheet": sheet_name, "doc_key": doc_key,
                          "replaced": 0, "appended": 0}
@@ -237,7 +241,7 @@ class _SlackLedgerStoreAppendMixin:
 
             if n == 0:
                 deduped += 1
-                if replace:
+                if batch_replace:
                     batch_replace_counts.append(
                         {"sheet": sheet_name, "doc_key": doc_key,
                          "replaced": replaced_count, "appended": 0}
@@ -245,7 +249,7 @@ class _SlackLedgerStoreAppendMixin:
             else:
                 appended += n
                 seen_doc_keys.add(doc_key)
-                if replace:
+                if batch_replace:
                     batch_replace_counts.append(
                         {"sheet": sheet_name, "doc_key": doc_key,
                          "replaced": replaced_count, "appended": n}
@@ -262,7 +266,7 @@ class _SlackLedgerStoreAppendMixin:
                 "deduped": deduped,
                 "filename": filename,
             }
-            if replace:
+            if any_batch_replace:
                 result["batch_replace_counts"] = batch_replace_counts
             if deduped > 0 and self._workbook_has_transaction_data(wb):
                 new_file_id, _ = self._upload_workbook_bytes(
@@ -303,7 +307,7 @@ class _SlackLedgerStoreAppendMixin:
             "deduped": deduped,
             "filename": filename,
         }
-        if replace:
+        if any_batch_replace:
             result["batch_replace_counts"] = batch_replace_counts
         return result
 
