@@ -211,6 +211,7 @@ def test_process_file_event_defer_slack_delivery_writes_processing_log():
     assert entry["filename"] == "25-D15-Company-A.pdf"
     assert entry["fy"] == "2026"
     assert entry["row_count"] == 1
+    assert "appended" not in entry
     assert "delivery_message_ts" not in entry
 
 
@@ -262,6 +263,109 @@ def test_process_file_event_completion_writes_processing_log_with_delivery_ts():
     assert len(written) == 1
     assert written[0]["delivery_message_ts"] == "1716000000.000200"
     assert written[0]["channel_id"] == "C1"
+
+
+def test_record_processing_log_includes_credit_audit_fields():
+    from ledgr_slack.ux import _record_processing_log
+
+    written: list[dict] = []
+
+    class _Store:
+        def append_processing_log(self, *, client_id, file_id, entry):
+            written.append(entry)
+
+    _record_processing_log(
+        state={
+            "file_id": "F1",
+            "source_filename": "bill.pdf",
+            "input_page_count": 4,
+        },
+        payload={
+            "client_id": "c1",
+            "kind": "bank",
+            "fy": "2026",
+            "extracted_doc_count": 2,
+        },
+        batches=[{"rows": [{}, {}]}],
+        append_result={
+            "appended": 2,
+            "deduped": 0,
+            "credits_used": 4,
+            "credits_remaining": 59300,
+        },
+        client_store=_Store(),
+        channel_id="C1",
+    )
+
+    assert len(written) == 1
+    entry = written[0]
+    assert entry["input_page_count"] == 4
+    assert entry["extracted_doc_count"] == 2
+    assert entry["credits_used"] == 4
+    assert entry["credits_remaining"] == 59300
+    assert entry["appended"] == 2
+
+
+def test_record_processing_log_uses_workbook_credits_when_in_tool_charged():
+    from ledgr_agent.tools.build_sheets import WORKBOOK_STATE_KEY
+    from ledgr_slack.ux import _record_processing_log
+
+    written: list[dict] = []
+
+    class _Store:
+        def append_processing_log(self, *, client_id, file_id, entry):
+            written.append(entry)
+
+    _record_processing_log(
+        state={
+            "file_id": "F2",
+            "source_filename": "inv.pdf",
+            WORKBOOK_STATE_KEY: {
+                "status": "success",
+                "credits": {
+                    "credits_used": 3,
+                    "credits_remaining": 97,
+                    "credit_status": "charged",
+                },
+            },
+        },
+        payload={"client_id": "c1", "fy": "2026"},
+        batches=[{"rows": [{}]}],
+        append_result={"appended": 1, "deduped": 0},
+        client_store=_Store(),
+    )
+
+    entry = written[0]
+    assert entry["credits_used"] == 3
+    assert entry["credits_remaining"] == 97
+    assert entry["appended"] == 1
+
+
+def test_record_processing_log_omits_appended_for_deferred_delivery():
+    from ledgr_slack.ux import _record_processing_log
+
+    written: list[dict] = []
+
+    class _Store:
+        def append_processing_log(self, *, client_id, file_id, entry):
+            written.append(entry)
+
+    _record_processing_log(
+        state={"file_id": "F-batch", "source_filename": "batch.pdf"},
+        payload={"client_id": "c1", "fy": "2026"},
+        batches=[{"rows": [{}]}],
+        append_result={
+            "appended": 0,
+            "deferred_ledger": {"batches": []},
+            "deferred_delivery": {"summary": ""},
+        },
+        client_store=_Store(),
+    )
+
+    entry = written[0]
+    assert entry["row_count"] == 1
+    assert "appended" not in entry
+    assert "deduped" not in entry
 
 
 def test_process_file_event_rejects_empty_bytes():

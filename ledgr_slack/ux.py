@@ -29,6 +29,7 @@ from ledgr_slack.export.exporters import (
 )
 
 from ledgr_agent.billing import _charge_disabled
+from ledgr_agent.tools.build_sheets import WORKBOOK_STATE_KEY
 from ledgr_slack.config import _env_prefix
 from ledgr_slack.credit_adapter import (
     batch_credit_footer_block,
@@ -265,6 +266,38 @@ def _record_processing_log(
         "row_count": row_count,
         "fy": str(payload.get("fy") or append_result.get("fy") or ""),
     }
+    page_count = state.get("input_page_count")
+    if page_count is None:
+        page_count = payload.get("input_page_count")
+    if page_count is not None:
+        try:
+            entry["input_page_count"] = int(page_count)
+        except (TypeError, ValueError):
+            pass
+    doc_count = payload.get("extracted_doc_count")
+    if doc_count is not None:
+        try:
+            entry["extracted_doc_count"] = int(doc_count)
+        except (TypeError, ValueError):
+            pass
+    is_deferred = bool(
+        append_result.get("deferred_ledger") or append_result.get("deferred_delivery")
+    )
+    audit_keys = ["credits_used", "credits_remaining"]
+    if not is_deferred:
+        audit_keys.extend(["appended", "deduped"])
+    credits_block: dict = {}
+    workbook = state.get(WORKBOOK_STATE_KEY)
+    if isinstance(workbook, dict):
+        wb_credits = workbook.get("credits")
+        if isinstance(wb_credits, dict):
+            credits_block = wb_credits
+    for key in audit_keys:
+        val = append_result.get(key)
+        if val is None and key in ("credits_used", "credits_remaining"):
+            val = credits_block.get(key)
+        if val is not None:
+            entry[key] = val
     # Phase 2: thread-context linkage. Optional keys only — older entries (pre-fix)
     # simply lack them and the resolver skips.
     if delivery_message_ts:
