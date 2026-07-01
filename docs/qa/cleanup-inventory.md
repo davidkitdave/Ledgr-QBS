@@ -53,7 +53,10 @@ Optional delete (one-off artifact, not a runbook):
 
 | Path | Why kept |
 |------|----------|
-| `tests/test_tax_classifier.py` (~65 tests) | YAML tax reference rules; not on live Slack hot path (printed tax from `read_doc`) |
+| `tests/test_tax_classifier.py` (~65 tests) | YAML tax reference rules; not on live Slack hot path |
+| `tests/test_erp_exporters.py` (~22 tests) | NormalizedInvoice multi-ERP exporter shapes |
+| `tests/test_axis_resolvers.py` (2 classes) | TaxClassifier reference loading |
+| `tests/test_ledger_doc_identity.py` (3 tests) | Exporter-based doc-key fallback for AutoCount sales |
 
 Run explicitly: `uv run pytest -m legacy`
 
