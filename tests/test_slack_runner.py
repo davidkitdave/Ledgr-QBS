@@ -264,6 +264,47 @@ def test_process_file_event_completion_writes_processing_log_with_delivery_ts():
     assert written[0]["channel_id"] == "C1"
 
 
+def test_record_processing_log_includes_credit_audit_fields():
+    from ledgr_slack.ux import _record_processing_log
+
+    written: list[dict] = []
+
+    class _Store:
+        def append_processing_log(self, *, client_id, file_id, entry):
+            written.append(entry)
+
+    _record_processing_log(
+        state={
+            "file_id": "F1",
+            "source_filename": "bill.pdf",
+            "input_page_count": 4,
+        },
+        payload={
+            "client_id": "c1",
+            "kind": "bank",
+            "fy": "2026",
+            "extracted_doc_count": 2,
+        },
+        batches=[{"rows": [{}, {}]}],
+        append_result={
+            "appended": 2,
+            "deduped": 0,
+            "credits_used": 4,
+            "credits_remaining": 59300,
+        },
+        client_store=_Store(),
+        channel_id="C1",
+    )
+
+    assert len(written) == 1
+    entry = written[0]
+    assert entry["input_page_count"] == 4
+    assert entry["extracted_doc_count"] == 2
+    assert entry["credits_used"] == 4
+    assert entry["credits_remaining"] == 59300
+    assert entry["appended"] == 2
+
+
 def test_process_file_event_rejects_empty_bytes():
     slack = FakeSlackClient()
     db = FakeFirestore()

@@ -265,6 +265,24 @@ def _record_processing_log(
         "row_count": row_count,
         "fy": str(payload.get("fy") or append_result.get("fy") or ""),
     }
+    page_count = state.get("input_page_count")
+    if page_count is None:
+        page_count = payload.get("input_page_count")
+    if page_count is not None:
+        try:
+            entry["input_page_count"] = int(page_count)
+        except (TypeError, ValueError):
+            pass
+    doc_count = payload.get("extracted_doc_count")
+    if doc_count is not None:
+        try:
+            entry["extracted_doc_count"] = int(doc_count)
+        except (TypeError, ValueError):
+            pass
+    for key in ("credits_used", "credits_remaining", "appended", "deduped"):
+        val = append_result.get(key)
+        if val is not None:
+            entry[key] = val
     # Phase 2: thread-context linkage. Optional keys only — older entries (pre-fix)
     # simply lack them and the resolver skips.
     if delivery_message_ts:
