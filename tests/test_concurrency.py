@@ -1056,6 +1056,92 @@ def test_flush_deferred_charges_slack_owned_billing(monkeypatch):
     assert svc.read_balance("T-flush") == 4
 
 
+def test_flush_deferred_multi_file_charges_by_row_count_not_file_count(monkeypatch):
+    """Multi-file batch must bill each file by row count, not 1 credit per file."""
+    from unittest.mock import MagicMock
+
+    from ledgr_agent.billing import CreditService, InMemoryCreditStore, configure_shared_credit_service
+
+    monkeypatch.setenv("LEDGR_DISABLE_IN_TOOL_CHARGE", "1")
+    svc = CreditService(InMemoryCreditStore())
+    svc.ensure_firm("T-multi")
+    svc.grant("T-multi", 10, note="trial")
+    configure_shared_credit_service(svc)
+
+    multi = _invoice_deferred(
+        doc_key="F-a:Purchase:INV-A",
+        date="2026-01-10",
+        invoice_number="INV-A",
+    )
+    multi["file_id"] = "F-a"
+    multi["credits"] = {"credit_status": "estimated"}
+    multi["input_page_count"] = 1
+    multi["batches"][0]["rows"] = [
+        {"Date": "2026-01-10", "Invoice Number": "INV-A1", "Contact": "V", "Total": 10.0},
+        {"Date": "2026-01-10", "Invoice Number": "INV-A2", "Contact": "V", "Total": 20.0},
+        {"Date": "2026-01-10", "Invoice Number": "INV-A3", "Contact": "V", "Total": 30.0},
+    ]
+    single = _invoice_deferred(
+        doc_key="F-b:Purchase:INV-B",
+        date="2026-01-11",
+        invoice_number="INV-B",
+    )
+    single["file_id"] = "F-b"
+    single["credits"] = {"credit_status": "estimated"}
+    single["input_page_count"] = 1
+
+    class _RowCountStore:
+        def append_rows(self, **kwargs):  # noqa: ANN003
+            batches = kwargs.get("batches") or []
+            n = sum(len(b.get("rows") or []) for b in batches)
+            return {"appended": n, "deduped": 0, "filename": "book.xlsx"}
+
+    asyncio.run(
+        _flush_deferred_ledger_writes(
+            ledger_store=_RowCountStore(),
+            slack_client=MagicMock(),
+            channel_id="C-multi",
+            batch_deferred=[multi, single],
+            firm_id="T-multi",
+        )
+    )
+
+    assert svc.read_balance("T-multi") == 6
+
+
+def test_flush_deferred_stamps_per_batch_effective_replace():
+    """Re-upload replace must not bleed to new files in the same batch flush."""
+    from unittest.mock import MagicMock
+
+    store = _RecordingLedgerStore()
+    reupload = _invoice_deferred(
+        doc_key="F-re:Purchase:INV-OLD",
+        date="2026-01-10",
+        invoice_number="INV-OLD",
+    )
+    reupload["effective_replace"] = True
+    newdoc = _invoice_deferred(
+        doc_key="F-new:Purchase:INV-NEW",
+        date="2026-01-11",
+        invoice_number="INV-NEW",
+    )
+    newdoc["effective_replace"] = False
+
+    asyncio.run(
+        _flush_deferred_ledger_writes(
+            ledger_store=store,
+            slack_client=MagicMock(),
+            channel_id="C-replace",
+            batch_deferred=[reupload, newdoc],
+        )
+    )
+
+    assert len(store.calls) == 1
+    stamped = store.calls[0]["batches"]
+    assert stamped[0].get("effective_replace") is True
+    assert stamped[1].get("effective_replace") is False
+
+
 def test_flush_deferred_records_failure_when_append_raises():
     """append_rows exceptions must surface as flush_failed, not silent empty results."""
     from unittest.mock import MagicMock
