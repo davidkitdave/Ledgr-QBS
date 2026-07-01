@@ -52,24 +52,24 @@ packages = ["app", "ledgr_agent", "ledgr_slack"]
 [dependency-groups]
 dev = [
     "ruff>=0.15.9",
-    "agent-starter-pack>=0.14.1",
     "pytest>=9.0.3",
+    "pytest-xdist>=3.6.1",
+]
+eval = [
     "google-adk[eval]>=2.0.0,<3.0.0",
-    "xlrd>=2.0.1",  # read legacy .xls ERP import templates in golden-format tests
 ]
 
 [tool.pytest.ini_options]
 # Only collect the test suite — keep pytest out of scripts/ and sample dirs.
 testpaths = ["tests"]
-# The agents-cli scaffold dropped integration/e2e + eval stubs under tests/.
-# They make live LLM calls and boot a FastAPI server (creds + deploy wiring
-# required), so they are kept OUT of the default fast unit loop. Run them
-# deliberately: `uv run pytest tests/integration` (with creds + server) or
-# `agents-cli eval` for tests/eval.
-addopts = "--ignore=tests/integration --ignore=tests/eval --ignore=ledgr_agent/eval"
+# Live Gemini eval under ledgr_agent/eval/ is opt-in. Default CI skips slow bank
+# formula tests and legacy NormalizedInvoice/TaxClassifier suites.
+addopts = "-m 'not slow and not legacy' --ignore=ledgr_agent/eval"
 markers = [
     "unit: fast hermetic tests — default CI gate",
-    "integration: live service / creds required",
+    "integration: hermetic integration tests under tests/integration/",
+    "slow: bank ledger formula edge cases — run with `pytest -m slow`",
+    "legacy: NormalizedInvoice/TaxClassifier path not on live Slack hot path",
     "eval: gated live eval — require Gemini creds; run with `pytest ledgr_agent/eval/ -m eval`",
 ]
 
@@ -95,4 +95,3 @@ default = true
 "eval/*.py" = ["E402"]
 # tracked: test module imports a symbol that is only registered after a prior import block
 "tests/test_app_blocks.py" = ["E402"]
-"tests/test_assistant_agent.py" = ["E402"]

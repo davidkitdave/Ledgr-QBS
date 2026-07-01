@@ -1,19 +1,18 @@
-"""Unit tests for ledgr_slack/export/tax_classifier.py.
+"""Unit tests for ledgr_slack/export/tax_classifier.py (legacy NormalizedInvoice path).
 
-Covers:
-- Chubb regression: clean SG tax invoice with explicit 9% GST → SR, no flag.
-- Explicit standard-rated wording in description → SR, no flag (purchases + sales).
-- Genuinely-ambiguous cases still flag (no GST, no reg no., unknown overseas).
-- Existing happy-path rules (ZR, ES, NT, OS) remain unaffected.
-- tax_keyword short-circuit paths still work.
+Not on the live Slack hot path (light path uses printed tax from read_doc).
+Kept for YAML reference rules and exporter preview edge cases.
 """
 
 from __future__ import annotations
 
+import pytest
 from datetime import date
 
 from ledgr_slack.export.models import InvoiceLine, NormalizedInvoice, PartyInfo
 from ledgr_slack.export.tax_classifier import TaxClassifier, classify_invoice, get_tax_classifier
+
+pytestmark = pytest.mark.legacy
 
 
 # ---------------------------------------------------------------------------

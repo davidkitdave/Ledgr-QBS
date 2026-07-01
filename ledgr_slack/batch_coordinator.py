@@ -131,8 +131,7 @@ async def handle_message_file_upload(
         # Single-file drops now use the same main-channel UX as multi-file:
         # processing "thinking" stages render on the top-level job summary
         # (batch_processing_plan_blocks), and the delivery preview tables
-        # merge into the same top-level final edit. HITL review cards
-        # continue to thread under summary_ts (ADR-0007).
+        # merge into the same top-level final edit (batch coordinator).
         batch_defer = True
         batch_deferred: list[dict] = []
         batch_file_ids: list[str] = []

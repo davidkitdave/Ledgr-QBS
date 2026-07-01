@@ -20,12 +20,8 @@ Python project managed with `uv` (Python 3.12 in the VM; `requires-python >=3.10
 The update script runs `uv sync`, so deps (incl. the `dev` group: ruff, pytest) are
 already installed at session start. Standard commands:
 
-- Lint: `uv run ruff check .` — the repo currently has pre-existing lint errors
-  (mostly in `tests/`); a non-zero exit is the baseline, not an environment break.
-- Tests: `uv run pytest` runs the fast unit suite (~1114 tests, all green). The
-  `tests/integration` and `tests/eval` suites are excluded by default (see
-  `addopts` in `pyproject.toml`) because they make live Gemini calls and boot a
-  server; run them deliberately only with real creds.
+- Lint: `uv run ruff check app ledgr_agent ledgr_slack tests`
+- Tests: `uv run pytest` runs the fast hermetic suite (**785** tests; **868** collected with slow/legacy excluded). Live Gemini eval: `ledgr_agent/eval/` (opt-in). Integration: `tests/integration/`.
 - Run app (dev): `uv run uvicorn app.main:app --host 0.0.0.0 --port 8080 --reload`.
 - Socket Mode (dev): `uv run python -m ledgr_slack` (needs `SLACK_BOT_TOKEN` + `SLACK_APP_TOKEN`).
 
@@ -49,10 +45,9 @@ A full human→bot→Slack roundtrip is reproducible locally:
    `cloud-firestore-emulator-*.jar` and `java -jar … --host=127.0.0.1 --port=8090`,
    then `export FIRESTORE_EMULATOR_HOST=127.0.0.1:8090` so `firestore.Client()`
    uses it without GCP credentials.
-2. Seed a per-channel client profile + COA into the emulator via
-   `FirestoreClientStore.save_profile/set_channel` (the modal-driven
-   `/ledgr settings` onboarding can't be automated). Set `status="active"` and use
-   `app/data/standard_sg_sme_coa.json` for the COA.
+2. Seed a per-channel client profile into the emulator via
+   `FirestoreClientStore.save_profile/set_channel` (or use `/ledgr settings` in Slack).
+   Set `status="active"` with accounting software and FYE month — no COA upload required.
 3. Start Socket Mode: `uv run python -m ledgr_slack` (needs
    `SLACK_BOT_TOKEN` + `SLACK_APP_TOKEN`). It prints "⚡️ Bolt app is running!".
 4. The dev Slack app (`ledgr-dev` in workspace `QBS-AI`) is in **Socket Mode**, so

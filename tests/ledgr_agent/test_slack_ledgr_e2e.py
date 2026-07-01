@@ -18,6 +18,13 @@ from tests._fake_firestore import FakeFirestore
 from tests.test_ledger_store import FakeSlackClient
 from app.native_blocks_compat import _reset_for_tests
 
+ERP_SOFTWARE_CASES = [
+    ("QBS Ledger", "Vendor Name"),
+    ("Xero", "*ContactName"),
+    ("AutoCount", "DocNo"),
+    ("SQL Account", "DOCNO(20)"),
+]
+
 
 @pytest.fixture(autouse=True)
 def _credit_setup() -> None:
@@ -65,24 +72,31 @@ class _LedgrRunner:
         self.session_service = _StatefulSessionService()
 
 
-def _seeded_store_with_firm(db: FakeFirestore, firm_id: str = "T_TEST"):
+def _seeded_store_with_firm(
+    db: FakeFirestore,
+    firm_id: str = "T_TEST",
+    *,
+    accounting_software: str = "QBS Ledger",
+):
     from ledgr_slack.client_context import FirestoreClientStore
 
     profile = {
         "client_id": "c1",
         "client_name": "Test Client",
         "fye_month": 12,
-        "accounting_software": "QBS Ledger",
+        "accounting_software": accounting_software,
         "gst_registered": True,
         "region": "SINGAPORE",
         "base_currency": "SGD",
         "status": "active",
         "firm_id": firm_id,
         "slack_team_id": firm_id,
+        "category_mapping": {},
     }
-    db.collection("clients").document("c1").set(profile)
-    db.collection("channels").document("C1").set({"client_id": "c1"})
-    return FirestoreClientStore(client=db)
+    store = FirestoreClientStore(client=db)
+    store.save_profile(profile)
+    store.set_channel("C1", "c1")
+    return store
 
 
 def _mock_read_payload() -> dict:
@@ -142,6 +156,50 @@ def test_process_file_event_ledgr_agent_delivers(monkeypatch) -> None:
     assert result["status"] == "delivered"
     assert len(slack.uploads) == 1
     assert slack._posts, "expected delivery summary message"
+
+
+@pytest.mark.parametrize("accounting_software,expected_column", ERP_SOFTWARE_CASES)
+def test_process_file_event_delivers_per_erp_software(
+    accounting_software: str,
+    expected_column: str,
+) -> None:
+    """Each client ERP profile emits that system's column headers in the workbook."""
+    slack = FakeSlackClient()
+    db = FakeFirestore()
+    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+    runner = _LedgrRunner()
+
+    def _fake_read(tool_context, paths=None):
+        tool_context.state[READ_DOC_STATE_KEY] = _mock_read_payload()
+        return {"status": "success", "file_kind": "commercial_documents"}
+
+    with patch("ledgr_slack.slack_shell.read_doc", side_effect=_fake_read):
+        result = asyncio.run(
+            process_file_event(
+                runner=runner,
+                ledger_store=store,
+                db=db,
+                slack_client=slack,
+                channel_id="C1",
+                file_id=f"F-erp-{accounting_software.replace(' ', '-')}",
+                app_name="ledgr_agent",
+                download_fn=lambda c, f: b"%PDF-1.4 fake",
+                source_filename="invoice.pdf",
+                client_store=_seeded_store_with_firm(
+                    db, accounting_software=accounting_software
+                ),
+                thread_ts="1716000000.000300",
+            )
+        )
+
+    assert result["status"] == "delivered"
+    delivery = result.get("delivery") or {}
+    payload = delivery.get("payload") or {}
+    batches = payload.get("batches") or []
+    assert batches, "expected ledger batches"
+    row = batches[0]["rows"][0]
+    assert expected_column in row, f"missing {expected_column!r} for {accounting_software}"
+    assert payload.get("fy") == "2026"
 
 
 def test_hierarchy_bill_delivers_summary_line_count_not_detail_rows(monkeypatch) -> None:

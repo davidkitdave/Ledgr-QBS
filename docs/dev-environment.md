@@ -4,7 +4,7 @@ How to run the local socket-mode bot against your LEDGR-DEV workspace without af
 
 ## Architecture
 
-Two completely separate Slack apps share one codebase but have different tokens, different Firestore namespaces, and the same model env vars (`LEDGR_MODEL_*` in `.env` — resolved by `invoice_processing/shared_libraries/model_config.py`):
+Two completely separate Slack apps share one codebase but have different tokens, different Firestore namespaces, and the same model env vars (`LEDGR_MODEL_*` in `.env` — resolved by `ledgr_slack` model config):
 
 - **Ledgr (dev)** — local socket-mode process, `LEDGR_ENV=dev`, AI Studio key, `gemini-2.5-flash-lite` for invoices. Installed in LEDGR-DEV workspace only for testing.
 - **Ledgr (prod)** — Cloud Run HTTP mode, `LEDGR_ENV=prod`, Vertex AI (asia-southeast1), `gemini-2.5-flash-lite` for invoices/digital bank PDFs and `gemini-2.5-flash` for scanned bank statements. Installed in customer workspaces via OAuth.

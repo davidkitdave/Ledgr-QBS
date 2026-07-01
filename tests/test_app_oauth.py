@@ -1,11 +1,9 @@
 """Tests for multi-workspace OAuth manifest validation.
 
-build_app / fastapi_app / build_oauth_settings were removed from app/slack_app
-in the ADK-consolidation refactor (Tasks 3+4). The production HTTP entry point
-is now build_fastapi_app() in accounting_agents/slack_runner.py — tested in
-test_slack_runner.py.
+The production HTTP entry point is ``build_fastapi_app()`` in ``ledgr_slack.app``
+— tested in ``test_slack_runner.py`` and ``test_fastapi_routes.py``.
 
-This file retains the manifest-validation tests only.
+This file retains manifest-validation tests only.
 """
 
 from __future__ import annotations

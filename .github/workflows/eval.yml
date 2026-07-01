@@ -27,7 +27,7 @@ jobs:
         run: uv python install 3.12
 
       - name: Sync dependencies
-        run: uv sync --frozen
+        run: uv sync --frozen --group eval
 
       - name: Install agents-cli
         run: uv tool install "google-agents-cli==0.4.0"

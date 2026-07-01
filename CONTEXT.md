@@ -26,19 +26,15 @@ being a silent file-processor and start answering and acting on messages. The
 Teammate *talks and routes*; it does **not** itself extract data.
 
 ## Accountant agent (the "clean agent")
-The rebuilt, lean `ledgr_agent` ADK `LlmAgent`. The phrase "clean agent" names
-**two surfaces**, and they must not be conflated:
-- the **accountant LlmAgent** — the conversational / `adk web` / agents-cli / eval
-  surface, where the agent itself orchestrates; and
-- the **document spine + tool** — the production document-processing path, a
-  deterministic spine that calls the agent's `process_document_batch` tool
-  directly. **In production the LlmAgent does not orchestrate.**
+The lean `ledgr_agent` package. Production Slack uses a **deterministic spine** that
+calls `read_doc` then `build_sheets` directly — the root `LlmAgent` does **not**
+orchestrate per upload (ADR-0032). The LlmAgent surface remains for `adk web`,
+agents-cli, and eval.
 
-So "is the clean agent in prod?" is answered at the *tool/spine* level, not the
-LlmAgent level. Governing principle (ADR-0026): the **LLM reads** (extraction via
-the tool) and **deterministic Python applies** tax treatment and COA codes — the
-LLM never decides tax codes. Production Slack uses `ledgr_slack` +
-`ledgr_agent` only (ADR-0032).
+Governing principle (ADR-0026): the **LLM reads** once; **deterministic Python**
+projects ERP rows from skill YAMLs. Tax codes come from **printed** labels on the
+document on the light path. Account codes are blank until agent COA wiring lands
+(ADR-0036).
 
 ## Engine (processing pipeline)
 The live document path: **read** (one Gemini call) → **project** (deterministic
@@ -48,58 +44,28 @@ The retired multi-step factory (classify → chunk → extract → categorize �
 was removed in 2026-07; historical ADRs before ADR-0030 describe that path.
 
 ## Light path
-The **experimental minimum spine** for replacing the heavy extraction factory
-(ADR-0031). Two related shapes live in `ledgr_agent` today — do not conflate them.
+The live document spine (ADR-0030/0031/0032). Two tools on the production Slack path:
 
-### Commercial bill → ERP (shipped eval gate, 2026-06-27)
+### Commercial bill → ERP (shipped)
 
-For **one** invoice / tax invoice / receipt / credit note when the user wants
-**ERP import rows** (QBS, Xero, AutoCount, SQL Account):
+For invoice / tax invoice / receipt / credit note:
 
-1. **Read** — `read_document` `FunctionTool`: one Gemini call with the real PDF
-   bytes and structured `ReadDocument` schema (`ledgr_agent/agents/document_reader.py`).
-2. **Project** — `project_to_erp`: deterministic YAML-driven row mapping
-   (`ledgr_agent/export/erp_projection.py`); **no second LLM call**.
+1. **Read** — `read_doc`: one Gemini call (`ledgr_agent/tools/read_doc.py`).
+2. **Project** — `build_sheets` → `project()` in `ledgr_agent/internal/export.py`
+   (YAML skill profiles); **no second LLM call**.
 
-**Not** this path: bank statements, SOA / multi-invoice PDFs, multi-file batches,
-COA/tax engine — see bank path below or `process_document_batch`.
+Eval: `ledgr_agent/eval/` — 16 synthetic PDF cases; run `./scripts/ledgr_eval_light.sh`.
 
-Eval: `tests/eval/datasets/light-read-erp-smoke.json` +
-`tests/eval/eval_config_light_read.yaml` (Auditair ISO golden: purchase, QBS
-Sub Total 2800, Tax 252, Total 3052).
+### Bank statement → workbook (shipped)
 
-### Bank statement → workbook (shipped eval gate, 2026-06-27)
+1. **Read** — `read_doc` classifies `file_kind=bank_statement`.
+2. **Normalize** — `ledgr_agent/internal/normalize.py`.
+3. **Project** — `build_bank_workbook()` in export layer.
 
-For **one** bank / account statement PDF when the user wants **workbook tabs**:
+### Policy ladder (R1–R4, experimental — not production)
 
-1. **Read** — `read_bank_statement`: hybrid pdfplumber digital + vision fallback;
-   structured `ReadBankStatement` (`ledgr_agent/models/bank_statement.py`).
-2. **Normalize** — running-balance reconcile + deterministic tab titles
-   (`ledgr_agent/normalize/bank_statement.py`).
-3. **Project** — `project_bank_workbook`: QBS bank column rows per account+currency;
-   **no second LLM call** (`ledgr_agent/export/bank_workbook.py`).
-
-Eval: `tests/eval/datasets/light-read-bank-smoke.json` +
-`tests/eval/eval_config_light_read_bank.yaml`.
-
-**Not** this path: commercial bills → `read_document`; SOA / FY merge → factory.
-
-### Policy ladder (R1–R4, still experimental)
-
-One direct Gemini read (`LedgerRowBundle`) then a **policy ladder**
-added only when A/B evidence requires it:
-
-1. **Read** — LLM fills vendor, reference, `tax_lines[]`, summary charge rows;
-   **no account codes** in this step.
-2. **Tax** — deterministic `classify_invoice` after bridging printed tax onto
-   lines; LLM does not decide tax codes (ADR-0026).
-3. **COA** — `categorize_invoice`: entity memory / corrections first, then **one
-   LLM call against the client's own COA list** for unresolved lines.
-4. **Deliver** — deterministic FY route + exporter projection.
-
-Implemented in `ledgr_agent/tools/light_ledger.py`; measured by
-`scripts/spike_light_vs_factory.py`. Production still uses
-`process_document_batch` until eval gates the winning round per doc type.
+Optional future steps (COA categorizer, separate tax pass) documented in ADR-0031.
+Production Slack auto-posts without HITL pause (ADR-0032).
 
 ## Document truth (QA)
 Independent checks that exported rows cover what the **source PDF text** shows
@@ -135,6 +101,10 @@ rather than one message per document. "The job" is how a human refers to a drop
 and its outcome.
 
 ## Review (HITL)
+> **Production (ADR-0032):** the live Slack light path **auto-posts** without a
+> HITL pause. This term describes the archived `accounting_agents` workflow and
+> future policy-ladder work — not current Slack behaviour.
+
 Human-in-the-loop check triggered by **material ambiguity** — a document that
 won't reconcile, is missing a required field, comes from a brand-new vendor with
 no known mapping, or is illegible. Review is **not** triggered merely because a

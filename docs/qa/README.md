@@ -7,6 +7,10 @@ Historical QA runbooks, session notes, and architecture maps for the **removed**
 
 | What | How |
 |------|-----|
+| Testing process | [testing-process.md](testing-process.md) |
+| Cleanup inventory (removed vs live tests) | [cleanup-inventory.md](cleanup-inventory.md) |
+| Live smoke checklist | [light-path-live-smoke.md](light-path-live-smoke.md) |
+| ERP import matrix (manual) | [erp-import-matrix.md](erp-import-matrix.md) |
 | Unit suite | `uv run pytest` |
 | Agent eval (live Gemini) | `scripts/ledgr_eval_light.sh` |
 | Slack Socket Mode (dev) | `uv run python -m ledgr_slack` |

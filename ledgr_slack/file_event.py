@@ -100,26 +100,19 @@ async def process_file_event(
     status_callback: Optional[Callable[[dict], None]] = None,
     profile_delta: Optional[dict] = None,
 ) -> dict:
-    """Download the dropped PDF, run the workflow, and persist OR pause for HITL.
+    """Download the dropped file, run read_doc → build_sheets, and deliver.
 
     Steps:
-    1. ``download_fn(slack_client, file_id) -> bytes`` (the parked SSRF-hardened
-       downloader, adapted to return bytes).
-    2. ``save_artifact("inbox/{file_id}.pdf")`` into the runner's artifact service.
-    3. ``runner.run_async(user_id=channel_id, session_id="{channel_id}:{file_id}", ...)``
-       with ``state_delta`` seeding ``channel_id`` / ``file_id`` / ``source_filename``
-       / the artifact name.
-    4. Stream events: if a HITL interrupt appears → ``write_interrupt`` + post the
-       Approve/Edit/Reject card and STOP (workflow paused). Otherwise on normal
-       completion → :func:`persist_and_deliver`.
+    1. ``download_fn(slack_client, file_id) -> bytes``
+    2. Save artifact and seed session state (channel, file, profile).
+    3. Call ``read_doc`` then ``build_sheets`` directly (no LLM orchestration).
+    4. Append rows to the FY ledger and post the delivery card.
 
-    Returns a small status dict: ``{"status": "paused"|"delivered", ...}``.
+    Returns a small status dict: ``{"status": "delivered"|"blocked"|"error", ...}``.
 
-    Concurrency: each dropped document gets a UNIQUE per-doc session id
-    (``f"{channel_id}:{file_id}"``) while ``user_id`` stays the ``channel_id`` so
-    the client-profile ``before_agent_callback`` (which resolves by channel/user)
-    is unchanged. The body runs under a module-level semaphore so simultaneous
-    drops queue rather than stampede.
+    Concurrency: each dropped document gets a unique per-doc session id
+    (``f"{channel_id}:{file_id}"``) while ``user_id`` stays the ``channel_id``.
+    The body runs under a module-level semaphore so simultaneous drops queue.
     """
     # Per-document session id so concurrent drops never share a session; user_id
     # stays channel_id (the before_agent_callback resolves the client by channel).
