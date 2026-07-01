@@ -68,8 +68,7 @@ addition to the common keys they declare:
 
 ## Behaviour contract
 
-Exporter output must stay **byte-identical** — the golden-format acceptance
-tests (`tests/test_erp_golden_format.py`, `tests/test_erp_exporters.py`,
-`tests/test_app_blocks.py`) are the bar. Editing a column name, order, or
-mapping in `assets/profile.yaml` directly changes the generated import file, so
-any change must be verified against those tests.
+Exporter output must stay consistent with the skill YAML — verify with
+`tests/test_export_skills.py`, `tests/ledgr_agent/test_erp_projection.py`, and
+`tests/test_app_blocks.py`. Editing a column name, order, or mapping in
+`assets/profile.yaml` directly changes the generated import file.

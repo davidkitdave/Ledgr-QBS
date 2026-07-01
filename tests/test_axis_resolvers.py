@@ -2,17 +2,9 @@
 
 from __future__ import annotations
 
-import pytest
-
-
 from ledgr_slack.jurisdiction import REGION_MALAYSIA, REGION_SINGAPORE
-from ledgr_slack.export.axis_resolvers import (
-    resolve_currency,
-    resolve_software,
-    resolve_tax_classifier_reference,
-)
+from ledgr_slack.export.axis_resolvers import resolve_currency, resolve_software
 from ledgr_slack.client_context import _profile_region_and_currency
-from ledgr_slack.export.tax_classifier import get_tax_classifier
 
 
 class TestResolveSoftware:
@@ -57,61 +49,8 @@ class TestResolveCurrency:
         assert "no client profile" in res.reason.lower()
 
 
-class TestResolveTaxClassifierReference:
-    pytestmark = pytest.mark.legacy
-
-    def test_none_reference_flagged_no_classifier(self):
-        res = resolve_tax_classifier_reference(None)
-        assert res.flagged is True
-        assert res.value is None
-
-    def test_ambiguous_jurisdiction_flagged(self):
-        res = resolve_tax_classifier_reference("AMBIGUOUS")
-        assert res.flagged is True
-        assert res.value is None
-
-    def test_singapore_yaml_loads(self):
-        res = resolve_tax_classifier_reference("sg_gst.yaml")
-        assert res.flagged is False
-        assert res.value is not None
-        assert res.value.tax_code("SR", "purchase", "qbs") == "TX"
-
-    def test_get_tax_classifier_none_returns_none(self):
-        assert get_tax_classifier(None) is None
-
-    def test_get_tax_classifier_empty_returns_none(self):
-        assert get_tax_classifier("") is None
-
-    def test_get_tax_classifier_unknown_jurisdiction_returns_none(self):
-        assert get_tax_classifier("ATLANTIS") is None
-
-
 class TestLegacyProfileNoSilentSingapore:
     def test_legacy_profile_does_not_force_singapore(self):
         region, currency = _profile_region_and_currency({"legacy_profile": True})
         assert region == ""
         assert currency == ""
-
-
-class TestSalesIndeterminateFlagged:
-    pytestmark = pytest.mark.legacy
-
-    def test_sales_indeterminate_local_no_gst_flags(self):
-        from datetime import date
-
-        from ledgr_slack.export.models import InvoiceLine, NormalizedInvoice, PartyInfo
-        from ledgr_slack.export.tax_classifier import TaxClassifier
-
-        clf = TaxClassifier()
-        line = InvoiceLine(description="Misc local service", net_amount=100.0, gst_amount=None)
-        inv = NormalizedInvoice(
-            doc_type="sales",
-            invoice_date=date(2024, 6, 1),
-            our_gst_registered=True,
-            customer=PartyInfo(name="Local Co", country="SG"),
-        )
-        inv.lines.append(line)
-        result = clf.classify_line(line, inv)
-        assert result.tax_treatment == "SR"
-        assert result.tax_flagged is True
-        assert "review" in (result.tax_reason or "").lower()

@@ -63,13 +63,12 @@ eval = [
 # Only collect the test suite — keep pytest out of scripts/ and sample dirs.
 testpaths = ["tests"]
 # Live Gemini eval under ledgr_agent/eval/ is opt-in. Default CI skips slow bank
-# formula tests and legacy NormalizedInvoice/TaxClassifier suites.
-addopts = "-m 'not slow and not legacy' --ignore=ledgr_agent/eval"
+# formula tests in test_ledger_store.
+addopts = "-m 'not slow' --ignore=ledgr_agent/eval"
 markers = [
     "unit: fast hermetic tests — default CI gate",
     "integration: hermetic integration tests under tests/integration/",
     "slow: bank ledger formula edge cases — run with `pytest -m slow`",
-    "legacy: NormalizedInvoice/TaxClassifier path not on live Slack hot path",
     "eval: gated live eval — require Gemini creds; run with `pytest ledgr_agent/eval/ -m eval`",
 ]
 
