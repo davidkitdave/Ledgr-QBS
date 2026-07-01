@@ -167,7 +167,7 @@ def build_sheets(
         else:
             target_systems = list(DEFAULT_SYSTEMS)
         sheets = []
-        fye_month = fye_month_from_state(dict(state))
+        fye_month = fye_month_from_state(state_plain)
         for document in documents:
             doc = dict(document)
             doc.setdefault("source_path", source_path)

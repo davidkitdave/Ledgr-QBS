@@ -50,7 +50,7 @@ agents-cli eval generate \
 RESULTS="$OUT_DIR/results_$(date +%Y%m%d_%H%M%S).json"
 agents-cli eval grade \
   --traces "$TRACES" \
-  --config "$CONFIG" \
+  --config ledgr_agent/eval/eval_config_ledgr_light.json \
   --output "$RESULTS"
 
 echo "Wrote $RESULTS (full metric set — see script header for pytest parity gate)"

@@ -55,6 +55,14 @@ def _case(case_id: str, pdf_path: pathlib.Path) -> dict:
     }
 
 
+_EVAL_SESSION_STATE = {
+    "fye_month": 12,
+    "software": "QBS Ledger",
+    "firm_id": "T_EVAL",
+    "client_id": "eval_client",
+}
+
+
 def _evalset_case(
     case_id: str,
     pdf_path: pathlib.Path,
@@ -76,7 +84,7 @@ def _evalset_case(
         "session_input": {
             "app_name": "ledgr_agent",
             "user_id": "eval_user",
-            "state": {},
+            "state": dict(_EVAL_SESSION_STATE),
         },
         "conversation": [
             {
