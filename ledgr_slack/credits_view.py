@@ -90,7 +90,7 @@ def credits_ephemeral_blocks(
             "elements": [
                 {
                     "type": "mrkdwn",
-                    "text": f"Check balance anytime with `/ledgr credits` or open *Ledgr* → *Home*.",
+                    "text": "Check balance anytime with `/ledgr credits` or open *Ledgr* → *Home*.",
                 }
             ],
         },
