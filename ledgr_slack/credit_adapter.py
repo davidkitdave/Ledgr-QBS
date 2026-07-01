@@ -18,6 +18,11 @@ from ledgr_agent.billing import (
     delivery_idempotency_key as billing_delivery_idempotency_key,
     get_shared_credit_service,
 )
+from ledgr_slack.credits_view import (
+    credit_footer_block as _coin_credit_footer_block,
+    format_coin_footer,
+    format_dedup_credit_line,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -113,8 +118,8 @@ def credit_block_message(decision: dict[str, Any]) -> str:
             f"Balance: {remaining if remaining is not None else 'unknown'}."
         )
     return (
-        "You're out of credits — add more before dropping documents. "
-        "Open the Ledgr app home tab to check your balance."
+        "🪙 You're out of credits — add more before dropping documents. "
+        "Open *Ledgr* in the sidebar → *Home*, or run `/ledgr credits` to check your balance."
     )
 
 
@@ -152,22 +157,38 @@ def delivery_charge_units(
 
 
 def format_credit_footer(*, credits_used: int, credits_remaining: int) -> str:
-    unit = "credit" if credits_used == 1 else "credits"
-    return f"Used {credits_used} {unit} · {credits_remaining} remaining"
+    return format_coin_footer(
+        credits_used=credits_used, credits_remaining=credits_remaining
+    )
 
 
 def credit_footer_block(*, credits_used: int, credits_remaining: int) -> dict:
+    return _coin_credit_footer_block(
+        credits_used=credits_used, credits_remaining=credits_remaining
+    )
+
+
+def batch_credit_footer_block(*, credits_used: int, credits_remaining: int) -> dict:
+    from ledgr_slack.credits_view import format_batch_credit_summary
+
     return {
         "type": "context",
         "elements": [
             {
                 "type": "mrkdwn",
-                "text": format_credit_footer(
+                "text": format_batch_credit_summary(
                     credits_used=credits_used,
                     credits_remaining=credits_remaining,
                 ),
             }
         ],
+    }
+
+
+def dedup_credit_footer_block() -> dict:
+    return {
+        "type": "context",
+        "elements": [{"type": "mrkdwn", "text": format_dedup_credit_line()}],
     }
 
 
@@ -203,6 +224,7 @@ def charge_delivery_credits(
             amount=units,
             reason="delivery",
             idempotency_key=idem,
+            channel_id=channel_id,
         )
         return {"credits_used": units, "credits_remaining": int(remaining)}
     except Exception:  # noqa: BLE001 — billing must not undo a successful delivery

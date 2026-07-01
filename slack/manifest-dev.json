@@ -5,6 +5,10 @@
     "background_color": "#1a1a2e"
   },
   "features": {
+    "app_home": {
+      "home_tab_enabled": true,
+      "messages_tab_enabled": false
+    },
     "bot_user": {
       "display_name": "Ledgr-dev",
       "always_online": true
@@ -13,7 +17,7 @@
       {
         "command": "/ledgr-dev",
         "description": "Ledgr dev settings & export",
-        "usage_hint": "settings | export",
+        "usage_hint": "settings | export | credits",
         "should_escape": false
       }
     ]
@@ -39,6 +43,7 @@
   "settings": {
     "event_subscriptions": {
       "bot_events": [
+        "app_home_opened",
         "member_joined_channel",
         "message.channels",
         "message.groups",

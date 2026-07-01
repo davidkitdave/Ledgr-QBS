@@ -1,7 +1,9 @@
 # Deployment Guide
 
 Production runs on **Google Cloud Run** (`asia-southeast1`), serving the FastAPI app
-built by `accounting_agents.slack_runner.build_fastapi_app` behind `app.main:app`.
+built by `ledgr_slack.build_fastapi_app` behind `app.main:app`. Runtime packages are
+**`ledgr_agent`** (agent + billing), **`ledgr_slack`** (Slack I/O), and **`app/`**
+(Block Kit UI only). Legacy `accounting_agents` / `invoice_processing` are not deployed.
 
 **CI/CD decision record:** [`docs/adr/0018-cicd-github-actions-artifact-registry-cloud-run.md`](../docs/adr/0018-cicd-github-actions-artifact-registry-cloud-run.md)
 

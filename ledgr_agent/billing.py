@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Protocol, Set, Tuple
 
 from ledgr_agent.internal.schemas import CreditSummary
@@ -25,7 +26,8 @@ class CreditStore(Protocol):
     def read_balance(self, firm_id: str) -> int: ...
     def apply_grant(self, firm_id: str, amount: int, note: str) -> int: ...
     def apply_deduct(
-        self, firm_id: str, amount: int, reason: str, idempotency_key: str
+        self, firm_id: str, amount: int, reason: str, idempotency_key: str,
+        *, channel_id: str | None = None,
     ) -> int: ...
 
 
@@ -49,7 +51,8 @@ class InMemoryCreditStore:
         return self._balances[firm_id]
 
     def apply_deduct(
-        self, firm_id: str, amount: int, reason: str, idempotency_key: str
+        self, firm_id: str, amount: int, reason: str, idempotency_key: str,
+        *, channel_id: str | None = None,
     ) -> int:
         key = (firm_id, idempotency_key)
         if key in self._seen_deducts:
@@ -154,7 +157,8 @@ class FirestoreCreditStore:
         return int(_txn(self._db().transaction()))
 
     def apply_deduct(
-        self, firm_id: str, amount: int, reason: str, idempotency_key: str
+        self, firm_id: str, amount: int, reason: str, idempotency_key: str,
+        *, channel_id: str | None = None,
     ) -> int:
         ns = self._ns_module()
         firm_ref = self._firm_ref(firm_id)
@@ -171,7 +175,14 @@ class FirestoreCreditStore:
                 return current
             new_balance = current - delta
             txn.set(firm_ref, {"balance": new_balance}, merge=True)
-            txn.set(marker_ref, {"amount": delta, "reason": reason_str})
+            marker: dict[str, Any] = {
+                "amount": delta,
+                "reason": reason_str,
+                "at": datetime.now(timezone.utc).isoformat(),
+            }
+            if channel_id:
+                marker["channel_id"] = str(channel_id)
+            txn.set(marker_ref, marker)
             return new_balance
 
         return int(_txn(self._db().transaction()))
@@ -189,8 +200,13 @@ class CreditService:
     def grant(self, firm_id: str, amount: int, note: str = "") -> int:
         return self._store.apply_grant(firm_id, amount, note)
 
-    def deduct(self, firm_id: str, amount: int, reason: str, idempotency_key: str) -> int:
-        return self._store.apply_deduct(firm_id, amount, reason, idempotency_key)
+    def deduct(
+        self, firm_id: str, amount: int, reason: str, idempotency_key: str,
+        *, channel_id: str | None = None,
+    ) -> int:
+        return self._store.apply_deduct(
+            firm_id, amount, reason, idempotency_key, channel_id=channel_id
+        )
 
     def read_balance(self, firm_id: str) -> int:
         return self._store.read_balance(firm_id)
@@ -398,11 +414,14 @@ def charge(
             credit_status="estimated",
         )
     try:
+        state = getattr(tool_context, "state", None)
+        channel_id = state.get("channel_id") if isinstance(state, dict) else None
         remaining = get_shared_credit_service().deduct(
             firm_id,
             amount=units,
             reason=f"delivery:{kind}",
             idempotency_key=file_id,
+            channel_id=str(channel_id) if channel_id else None,
         )
         return CreditSummary(
             credits_estimated=units,

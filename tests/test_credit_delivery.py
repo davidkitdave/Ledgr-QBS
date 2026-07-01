@@ -301,3 +301,89 @@ def test_process_file_event_ledgr_charges_on_build_sheets(
 
 def test_delivery_idempotency_key_format() -> None:
     assert delivery_idempotency_key(channel_id="C1", file_id="F1") == "C1:F1:deliver"
+
+
+def test_process_file_event_multi_receipt_charges_three_credits(
+    monkeypatch, credit_svc: CreditService
+) -> None:
+    """One PDF page with 3 extracted receipts → 3 credits at delivery."""
+    from types import SimpleNamespace
+
+    from ledgr_agent.tools.read_doc import READ_DOC_STATE_KEY
+
+    slack = FakeSlackClient()
+    db = FakeFirestore()
+    store = SlackLedgerStore(FakeFirestore(), opener=slack.opener())
+
+    class _StatefulSessionService:
+        def __init__(self) -> None:
+            self.state: dict = {}
+            self.created = False
+
+        async def get_session(self, *, app_name, user_id, session_id):
+            if not self.created:
+                return None
+            return SimpleNamespace(state=dict(self.state))
+
+        async def create_session(self, *, app_name, user_id, session_id, state=None):
+            self.created = True
+            self.state = dict(state or {})
+            return SimpleNamespace(state=dict(self.state))
+
+        async def append_event(self, session, event):
+            delta = getattr(getattr(event, "actions", None), "state_delta", None) or {}
+            self.state.update(delta)
+
+    class _Runner:
+        def __init__(self) -> None:
+            self.artifact_service = SimpleNamespace(save_artifact=lambda *a, **k: None)
+            self.session_service = _StatefulSessionService()
+
+    credit_svc.ensure_firm("TQA")
+    credit_svc.grant("TQA", 10, note="trial")
+
+    docs = [
+        {
+            "doc_type": "purchase",
+            "invoice_number": f"INV-{i}",
+            "invoice_date": "2026-01-10",
+            "lines": [{"description": "Item", "net_amount": 10.0 * i}],
+        }
+        for i in range(1, 4)
+    ]
+
+    def _fake_read(tool_context, paths=None):
+        tool_context.state[READ_DOC_STATE_KEY] = {
+            "file_kind": "commercial_documents",
+            "source_path": "/tmp/multi.pdf",
+            "page_count": 1,
+            "document_count": 3,
+            "credit_units": 3,
+            "documents": docs,
+        }
+        return {
+            "status": "success",
+            "file_kind": "commercial_documents",
+            "document_count": 3,
+            "credit_units": 3,
+        }
+
+    with patch("ledgr_slack.slack_shell.read_doc", side_effect=_fake_read):
+        result = asyncio.run(
+            process_file_event(
+                runner=_Runner(),
+                ledger_store=store,
+                db=db,
+                slack_client=slack,
+                channel_id="C1",
+                file_id="F-multi",
+                app_name="ledgr_agent",
+                download_fn=lambda c, f: b"%PDF-1.4 fake",
+                source_filename="multi-receipt.pdf",
+                client_store=_seeded_store_with_firm(db, "TQA"),
+            )
+        )
+
+    assert result["status"] == "delivered"
+    # 10 granted − 3 charged = 7 remaining
+    assert credit_svc.read_balance("TQA") == 7

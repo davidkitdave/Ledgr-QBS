@@ -9,7 +9,7 @@ from typing import Optional
 
 @dataclass
 class LedgrCommand:
-    subcommand: str          # "settings" | "export" | "help"
+    subcommand: str          # "settings" | "export" | "help" | "profile" | "credits"
     args: list[str] = field(default_factory=list)
 
 
@@ -48,7 +48,7 @@ def parse_ledgr_command(text: str | None) -> LedgrCommand:
     sub = tokens[0]
     args = tokens[1:]
 
-    if sub in ("settings", "export", "help", "profile"):
+    if sub in ("settings", "export", "help", "profile", "credits"):
         return LedgrCommand(subcommand=sub, args=args)
 
     # unknown subcommand -> help
