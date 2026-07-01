@@ -676,13 +676,12 @@ async def _flush_deferred_ledger_writes(
                     "kind": kind,
                     "client_name": payload.get("client_name") or "",
                     "batches": [],
-                    "effective_replace": False,
                     "items": [],
                 },
             )
-            grp["batches"].append(batch)
-            if item.get("effective_replace"):
-                grp["effective_replace"] = True
+            grp["batches"].append(
+                {**batch, "effective_replace": bool(item.get("effective_replace"))}
+            )
         item_group_keys[item_index] = item_keys
 
     if not groups:
@@ -710,7 +709,7 @@ async def _flush_deferred_ledger_writes(
                 software=grp["software"],
                 kind=grp["kind"],
                 client_name=grp["client_name"],
-                replace=grp["effective_replace"],
+                replace=False,
             )
         except Exception:  # noqa: BLE001 — non-fatal; delivery card still posts
             logger.exception(
@@ -802,8 +801,9 @@ def _charge_deferred_batch_items(
             item_append = append_result
             remaining_units = 0
         else:
-            item_append = {"appended": 1, "all_deduped": False}
-            remaining_units -= 1
+            allocated = min(row_count, remaining_units)
+            item_append = {"appended": allocated, "all_deduped": allocated <= 0}
+            remaining_units -= allocated
 
         units = delivery_charge_units(
             kind=str(payload.get("kind") or "invoice"),
